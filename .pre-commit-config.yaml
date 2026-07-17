@@ -1,0 +1,29 @@
+fail_fast: false
+
+repos:
+  - repo: local
+    hooks:
+      - id: detect-secrets
+        name: Detect secrets
+        entry: env UV_CACHE_DIR=.cache/uv uv run detect-secrets-hook --baseline .secrets.baseline
+        language: system
+        types: [text]
+        exclude: ^(\.secrets\.baseline|uv\.lock)$
+
+      - id: repository-artifacts
+        name: Reject county source artifacts
+        entry: env UV_CACHE_DIR=.cache/uv uv run python scripts/check_repository_artifacts.py
+        language: system
+        pass_filenames: true
+
+      - id: ruff-check
+        name: Ruff check
+        entry: env UV_CACHE_DIR=.cache/uv uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: Ruff format
+        entry: env UV_CACHE_DIR=.cache/uv uv run ruff format
+        language: system
+        types_or: [python, pyi]

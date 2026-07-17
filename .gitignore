@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Local tooling and runtime state
+.cache/
+.coverage
+coverage.xml
+htmlcov/
+logs/
+tmp/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+
+# County source artifacts
+data/
+data/bronze/
+data/extracted/
+data/quarantine/
+*.zip
+*.7z
+*.mdb
+*.accdb
+*.ods
+*.xlsx
+*.xls
+*.gdb/
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.sqlite
+*.sqlite3
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store

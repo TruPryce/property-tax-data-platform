@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+set -eu
+
+if command -v gh >/dev/null 2>&1; then
+  exec gh "$@"
+fi
+
+gh_bin=$(
+  find "${HOME}/.cache" -maxdepth 2 -type f \
+    -path '*/copilot-desktop-gh-*/gh' -perm -111 -print 2>/dev/null \
+    | sort -V \
+    | tail -n 1
+)
+
+if [ -z "${gh_bin}" ]; then
+  echo "GitHub CLI not found in PATH or ~/.cache/copilot-desktop-gh-*" >&2
+  exit 127
+fi
+
+exec "${gh_bin}" "$@"

@@ -1,0 +1,62 @@
+name: County source onboarding
+description: Profile or add an official county appraisal or tax source.
+title: "source: "
+body:
+  - type: dropdown
+    id: county
+    attributes:
+      label: County
+      options:
+        - Dallas, TX
+        - Collin, TX
+        - Tarrant, TX
+        - Denton, TX
+        - Rockwall, TX
+        - Ellis, TX
+        - Another jurisdiction
+    validations:
+      required: true
+  - type: input
+    id: official_source
+    attributes:
+      label: Official source URL
+      description: Link to the authoritative publisher, not an aggregator.
+    validations:
+      required: true
+  - type: textarea
+    id: releases
+    attributes:
+      label: Release contract
+      description: Describe release kinds, years, cadence, as-of semantics, formats, layouts, and expected counts.
+    validations:
+      required: true
+  - type: textarea
+    id: access
+    attributes:
+      label: Access and redistribution
+      description: Document authentication, rate limits, terms, and fixture redistribution constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable contract, normalization, provenance, drift, and idempotency outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: sensitivity
+    attributes:
+      label: Data sensitivity
+      description: Identify protected, suppressed, or sensitive fields and required handling.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have not included credentials, secrets, or protected record samples.
+          required: true
+        - label: I understand accepted work requires an OpenSpec change before implementation.
+          required: true

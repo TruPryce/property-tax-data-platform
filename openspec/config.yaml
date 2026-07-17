@@ -1,0 +1,27 @@
+schema: spec-driven
+
+context: |
+  Project: Property Tax Data Platform
+  Repository: property-tax-data-platform
+  Runtime: Python 3.12 with a uv workspace and src-layout packages
+  Orchestration: Apache Airflow TaskFlow DAGs; DAG files remain thin inbound adapters
+  Architecture: Hexagonal architecture with dependency direction adapters -> application -> domain
+  Storage: Immutable source releases in S3-compatible object storage, normalized PostgreSQL Silver tables, curated Gold views
+  Initial sources: Dallas, Collin, Tarrant, Denton, Rockwall, and Ellis appraisal districts in Texas
+  Scope distinction: Appraisal values and exemptions are not authoritative tax bills, payments, or delinquency records
+  Delivery workflow: GitHub Issues are the intake system; accepted work is specified through OpenSpec before implementation
+  Engineering conventions: typed Python, Protocol-based ports, pytest, Ruff, mypy, no source-specific logic in DAGs or domain code
+
+rules:
+  proposal:
+    - Keep proposals concise and identify explicit non-goals.
+    - Name every new capability that requires a delta spec.
+  specs:
+    - Use SHALL for normative requirements and include observable scenarios.
+    - State data grain, provenance, idempotency, and failure behavior where applicable.
+  design:
+    - Record decisions, rejected alternatives, risks, migrations, and unresolved source questions.
+    - Preserve the distinction between appraisal data and authoritative tax collection data.
+  tasks:
+    - Organize tasks in dependency order and include tests, documentation, and operational validation.
+    - Keep all six initial counties visible as explicit work items.

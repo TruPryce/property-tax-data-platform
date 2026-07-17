@@ -1,0 +1,55 @@
+name: Feature
+description: Request a user-visible or operational platform capability.
+title: "feature: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the customer or operational problem without prescribing implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Source acquisition
+        - Normalization
+        - Data quality
+        - Publication
+        - Orchestration
+        - Consumer integration
+        - Developer experience
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and who benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Provide verifiable scenarios or measurable outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and exclusions
+      description: Identify affected counties, releases, consumers, and explicit non-goals.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have not included secrets or protected source records.
+          required: true
+        - label: I understand accepted non-trivial work requires an OpenSpec change.
+          required: true

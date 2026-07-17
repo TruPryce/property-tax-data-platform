@@ -1,0 +1,39 @@
+name: Architecture decision
+description: Request a decision where viable options have material trade-offs.
+title: "decision: "
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and decision deadline
+      description: Explain what changed, who is affected, and when a decision is needed.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Viable options
+      description: List options with evidence, costs, risks, and reversibility.
+    validations:
+      required: true
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Recommendation
+      description: State the recommended option and why it best satisfies the constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences and validation
+      description: Describe migration, rollback, and how the decision will be validated.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I understand the accepted decision must be reflected in OpenSpec before implementation.
+          required: true

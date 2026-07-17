@@ -1,0 +1,59 @@
+[project]
+name = "property-tax-data-platform"
+version = "0.1.0"
+description = "Spec-driven ingestion and publication of county appraisal and property-tax data."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5.0",
+    "mypy>=1.15,<2",
+    "pre-commit>=4.6.0",
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "libs/*",
+    "services/*",
+]
+
+[tool.uv.sources]
+property-tax-domain = { workspace = true }
+property-tax-application = { workspace = true }
+property-tax-adapters = { workspace = true }
+property-tax-ingestion-worker = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "N", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+pretty = true
+packages = [
+    "property_tax_domain",
+    "property_tax_application",
+    "property_tax_adapters",
+    "property_tax_ingestion",
+]
