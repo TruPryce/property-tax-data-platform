@@ -9,6 +9,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [Decisions](decisions/README.md) | Stable architecture decision records |
 | [Operations](operations/README.md) | Runtime, release, recovery, and backfill guidance |
 | [Contributing](../CONTRIBUTING.md) | Local setup and delivery workflow |
+| [Data licensing](../DATA_LICENSE.md) | Synthetic fixture and third-party source-data terms |
 
 ## Related
 

@@ -2,6 +2,7 @@
 name = "property-tax-application"
 version = "0.1.0"
 description = "Application ports and use cases for the Property Tax Data Platform."
+license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = ["property-tax-domain"]
 

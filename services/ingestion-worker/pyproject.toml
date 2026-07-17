@@ -2,6 +2,7 @@
 name = "property-tax-ingestion-worker"
 version = "0.1.0"
 description = "Inbound CLI and runtime composition for property-tax ingestion."
+license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "property-tax-adapters",

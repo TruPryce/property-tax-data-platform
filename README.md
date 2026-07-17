@@ -38,3 +38,11 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 ## Development
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). The active foundation change is [bootstrap-six-county-appraisal-platform](openspec/changes/bootstrap-six-county-appraisal-platform/README.md).
+
+## Licensing
+
+Project software and documentation are licensed under the [Apache License 2.0](LICENSE); see
+[NOTICE](NOTICE) for attribution. Synthetic fixtures and generated demo datasets are released
+under CC0 1.0 Universal. Third-party county data retains its publisher's terms and is not granted
+under the project software license. See [Data Licensing](DATA_LICENSE.md) for the complete data
+boundary.
