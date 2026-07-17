@@ -1,0 +1,234 @@
+{
+  "description": "Structured output for the property-tax Codex pre-PR review. Kept within the JSON Schema subset accepted by Codex structured outputs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "blockers",
+    "must_fix",
+    "nice_to_fix",
+    "questions",
+    "recommended_next_action"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "block",
+        "pass_with_notes",
+        "pass"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "file",
+          "line",
+          "description",
+          "why_it_matters",
+          "minimum_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "BLOCKER"
+            ],
+            "description": "Finding severity; must be BLOCKER in this array."
+          },
+          "title": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Repository-relative file path when known; null for repo-wide findings."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based line number when known; null otherwise."
+          },
+          "description": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          },
+          "minimum_fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "must_fix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "file",
+          "line",
+          "description",
+          "why_it_matters",
+          "minimum_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "MUST_FIX"
+            ],
+            "description": "Finding severity; must be MUST_FIX in this array."
+          },
+          "title": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Repository-relative file path when known; null for repo-wide findings."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based line number when known; null otherwise."
+          },
+          "description": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          },
+          "minimum_fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "nice_to_fix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "file",
+          "line",
+          "description",
+          "why_it_matters",
+          "minimum_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "NICE_TO_FIX"
+            ],
+            "description": "Finding severity; must be NICE_TO_FIX in this array."
+          },
+          "title": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Repository-relative file path when known; null for repo-wide findings."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based line number when known; null otherwise."
+          },
+          "description": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          },
+          "minimum_fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "file",
+          "line",
+          "description",
+          "why_it_matters",
+          "minimum_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "QUESTION"
+            ],
+            "description": "Finding severity; must be QUESTION in this array."
+          },
+          "title": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Repository-relative file path when known; null for repo-wide findings."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "1-based line number when known; null otherwise."
+          },
+          "description": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          },
+          "minimum_fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "recommended_next_action": {
+      "type": "string"
+    }
+  }
+}
