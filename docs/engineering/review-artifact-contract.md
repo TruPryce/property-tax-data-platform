@@ -22,6 +22,18 @@ overwritten.
 The runner removes `.claim/` during finalization. A stale marker means a process was interrupted;
 operators must verify that no run is active before removing the affected run directory.
 
+## Output Boundary
+
+`REVIEWS_ROOT`, `OUT_DIR`, and `COMPAT_DIR` must resolve beneath the repository's ignored
+`.ai/reviews/` directory by default. Resolution follows existing symlinks before applying the
+boundary, so a symlink below `.ai/reviews/` cannot redirect generated evidence into tracked source
+or outside the repository. The standard `.ai/reviews/` root itself may not be redirected by a
+symlink without the same explicit opt-in.
+
+Tests and operators may set `ALLOW_NONSTANDARD_REVIEW_DIR=1` for an intentional nonstandard
+location. This is an explicit trust-boundary opt-in: the caller is responsible for choosing an
+untracked destination and protecting any evidence written there.
+
 ## Version 1 Artifacts
 
 | Artifact | Contract |
@@ -49,6 +61,10 @@ claimed do not create a summary.
 `.ai/reviews/review-packet.md`, and passes the private packet to the runner. The runner immediately
 copies those bytes into the claimed run directory. All packet sizing, hashing, secret scanning, and
 model stdin use that staged copy.
+
+The packet builder redacts high-confidence literal credential values while preserving dynamic
+source expressions. It rejects secret-looking paths outright. The live provider-key scan remains
+a separate runner gate and is not replaced by packet redaction.
 
 `packet.provenance.json` records the staged packet's SHA-256 and byte count. Packets larger than
 `MAX_PACKET_BYTES` fail before the provider call so the reviewer never silently reviews a truncated

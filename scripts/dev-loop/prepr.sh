@@ -4,7 +4,7 @@ IFS=$'\n\t'
 
 BASE="${BASE:-origin/main}"
 REVIEWS_ROOT="${REVIEWS_ROOT:-.ai/reviews}"
-ALLOW_EXTERNAL_OUT_DIR="${ALLOW_EXTERNAL_OUT_DIR:-0}"
+ALLOW_NONSTANDARD_REVIEW_DIR="${ALLOW_NONSTANDARD_REVIEW_DIR:-0}"
 RUN_CHECKS="${RUN_CHECKS:-1}"
 if [[ -n "${CI:-}" ]]; then
   RUN_CODEX_REVIEW="${RUN_CODEX_REVIEW:-0}"
@@ -23,30 +23,8 @@ cd "$REPO_ROOT"
 REPO_ROOT="$(pwd -P)"
 
 resolve_reviews_root() {
-  python3 - "$REPO_ROOT" "$1" "$ALLOW_EXTERNAL_OUT_DIR" <<'PY'
-import os
-import sys
-
-root = os.path.realpath(sys.argv[1])
-requested = sys.argv[2]
-allow_external = sys.argv[3] == "1"
-candidate = requested if os.path.isabs(requested) else os.path.join(root, requested)
-path = os.path.realpath(candidate)
-
-try:
-    inside_repo = os.path.commonpath([root, path]) == root
-except ValueError:
-    inside_repo = False
-
-if not inside_repo and not allow_external:
-    sys.stderr.write(
-        f"REVIEWS_ROOT resolves outside repo root: {requested} -> {path}\n"
-        "Use a repo-contained path, or set ALLOW_EXTERNAL_OUT_DIR=1 intentionally.\n"
-    )
-    sys.exit(2)
-
-print(path)
-PY
+  python3 "$REPO_ROOT/scripts/dev-loop/resolve-review-path.py" \
+    "$REPO_ROOT" "$1" "$ALLOW_NONSTANDARD_REVIEW_DIR" REVIEWS_ROOT
 }
 
 REVIEWS_ROOT="$(resolve_reviews_root "$REVIEWS_ROOT")"
@@ -93,7 +71,7 @@ OUT_DIR="$RUN_DIR" \
 RUN_ID="$RUN_ID" \
 COMPAT_DIR="$REVIEWS_ROOT" \
 REVIEW_BASE="$BASE" \
-ALLOW_EXTERNAL_OUT_DIR="$ALLOW_EXTERNAL_OUT_DIR" \
+ALLOW_NONSTANDARD_REVIEW_DIR="$ALLOW_NONSTANDARD_REVIEW_DIR" \
   .ai/codex/02-run-prepr-review-docker.sh
 
 if [[ ! -s "$FINAL_REVIEW" ]]; then

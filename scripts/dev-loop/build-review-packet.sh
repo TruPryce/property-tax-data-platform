@@ -6,6 +6,8 @@ DEFAULT_BASE="origin/main"
 REQUESTED_BASE="${1:-${BASE:-$DEFAULT_BASE}}"
 MAX_DIFF_BYTES="${MAX_DIFF_BYTES:-600000}"
 MAX_DOC_BYTES="${MAX_DOC_BYTES:-160000}"
+MAX_CONTEXT_BYTES="${MAX_CONTEXT_BYTES:-400000}"
+MAX_CONTEXT_FILE_BYTES="${MAX_CONTEXT_FILE_BYTES:-160000}"
 MAX_UNTRACKED_FILE_BYTES="${MAX_UNTRACKED_FILE_BYTES:-100000}"
 INCLUDE_UNTRACKED_CONTENT="${INCLUDE_UNTRACKED_CONTENT:-1}"
 REDACT_REVIEW_PACKET="${REDACT_REVIEW_PACKET:-1}"
@@ -18,6 +20,17 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 2
 }
 cd "$REPO_ROOT"
+
+for limit_name in MAX_CONTEXT_BYTES MAX_CONTEXT_FILE_BYTES; do
+  limit_value="${!limit_name}"
+  if [[ ! "$limit_value" =~ ^[1-9][0-9]*$ ]]; then
+    err "$limit_name must be a positive integer"
+    exit 2
+  fi
+done
+
+declare -A CHANGED_PATHS=()
+declare -A CONTEXT_FILES=()
 
 have_ref() { git rev-parse --verify "$1" >/dev/null 2>&1; }
 
@@ -56,14 +69,74 @@ redact_stream() {
     return 0
   fi
   python3 -c '
-import re, sys
-patterns = [
-    (re.compile(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+"), r"\1\2 [REDACTED]"),
-    (re.compile(r"(?i)((?:token|secret|password|passwd|api[_-]?key|client[_-]?secret|private[_-]?key|signing[_-]?key)\s*[=:]\s*)([^\s\"\x27,}]+)"), r"\1[REDACTED]"),
-]
+import re
+import sys
+
+authorization = re.compile(
+    r"(?i)(authorization:\s*(?:bearer|basic)\s+)([^\s,;]+)"
+)
+assignment = re.compile(
+    r"""(?P<prefix>
+        (?P<key_quote>[\"\x27]?)
+        (?P<key>[A-Za-z_][A-Za-z0-9_-]*)
+        (?P=key_quote)
+        \s*(?:=(?!=)|:(?![-+?=]))\s*
+    )
+    (?P<value>
+        \"(?:\\.|[^\"\\])*\"
+        | \x27(?:\\.|[^\x27\\])*\x27
+        | [^\s,}\]]+
+    )""",
+    re.VERBOSE,
+)
+
+non_secret_keys = {"canary_token", "verification_token"}
+sensitive_suffixes = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "client_secret",
+    "private_key",
+    "signing_key",
+)
+dynamic_markers = ("$", "{{", "{%", "<%", "process.env", "os.environ", "getenv(")
+
+
+def is_dynamic(value):
+    inner = value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"\x27" else value
+    return any(marker in inner for marker in dynamic_markers)
+
+
+def redact_authorization(match):
+    value = match.group(2)
+    if is_dynamic(value):
+        return match.group(0)
+    return match.group(1) + "[REDACTED]"
+
+
+def redact_assignment(match):
+    key = match.group("key").lower().replace("-", "_")
+    if key in non_secret_keys or not any(
+        key == suffix or key.endswith("_" + suffix) for suffix in sensitive_suffixes
+    ):
+        return match.group(0)
+
+    value = match.group("value")
+    if is_dynamic(value):
+        return match.group(0)
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"\x27":
+        replacement = value[0] + "[REDACTED]" + value[-1]
+    else:
+        replacement = "[REDACTED]"
+    return match.group("prefix") + replacement
+
+
 for line in sys.stdin:
-    for pat, repl in patterns:
-        line = pat.sub(repl, line)
+    line = authorization.sub(redact_authorization, line)
+    line = assignment.sub(redact_assignment, line)
     sys.stdout.write(line)
 '
 }
@@ -141,6 +214,102 @@ is_sensitive_path() {
     .env | .env.* | *credential* | *secret* | *token* | *.pem | *.key | *.p12 | *.pfx | *.license | *.lic) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+add_context_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || return 0
+  case "$path" in
+    /* | ../* | */../*) return 0 ;;
+  esac
+  CONTEXT_FILES["$path"]=1
+}
+
+collect_changed_paths() {
+  local path
+  while IFS= read -r -d '' path; do
+    CHANGED_PATHS["$path"]=1
+  done < <(
+    {
+      git diff --name-only -z "$MERGE_BASE"...HEAD
+      git diff --cached --name-only -z
+      git diff --name-only -z
+      git ls-files --others --exclude-standard -z
+    }
+  )
+}
+
+collect_repository_context() {
+  local path directory candidate
+  add_context_file "AGENTS.md"
+
+  collect_changed_paths
+  for path in "${!CHANGED_PATHS[@]}"; do
+    directory="$(dirname "$path")"
+    while true; do
+      if [[ "$directory" == "." ]]; then
+        candidate="AGENTS.md"
+      else
+        candidate="$directory/AGENTS.md"
+      fi
+      add_context_file "$candidate"
+      [[ "$directory" == "." ]] && break
+      directory="$(dirname "$directory")"
+    done
+  done
+
+  # Accepted specs and decisions apply to every review. Active OpenSpec changes
+  # are included because the packet deliberately performs no network lookup for
+  # issue or PR context; applicable intake must be represented in the repository.
+  add_context_file "openspec/AGENTS.md"
+  while IFS= read -r -d '' path; do
+    add_context_file "$path"
+  done < <(find openspec/specs -type f -name '*.md' -print0 2>/dev/null)
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      openspec/changes/archive/*) ;;
+      */proposal.md | */design.md | */tasks.md | */specs/*.md) add_context_file "$path" ;;
+    esac
+  done < <(find openspec/changes -type f -name '*.md' -print0 2>/dev/null)
+  while IFS= read -r -d '' path; do
+    add_context_file "$path"
+  done < <(find docs/decisions -type f -name '*.md' -print0 2>/dev/null)
+}
+
+emit_repository_context() {
+  local path bytes limit emitted remaining
+  local sorted_paths=()
+
+  collect_repository_context
+  while IFS= read -r -d '' path; do
+    sorted_paths+=("$path")
+  done < <(printf '%s\0' "${!CONTEXT_FILES[@]}" | LC_ALL=C sort -z)
+
+  echo
+  echo "## Deterministic Repository Context"
+  echo
+  echo "Path-scoped agent guides, active OpenSpec artifacts, accepted specs, and ADRs are selected from the frozen checkout in byte-sorted path order."
+  echo
+  echo "Total context limit: $MAX_CONTEXT_BYTES bytes. Per-file limit: $MAX_CONTEXT_FILE_BYTES bytes."
+
+  remaining="$MAX_CONTEXT_BYTES"
+  for path in "${sorted_paths[@]}"; do
+    if (( remaining == 0 )); then
+      echo
+      echo "### \`$path\`"
+      echo
+      echo "_Omitted: total repository-context byte limit reached._"
+      continue
+    fi
+
+    bytes="$(wc -c < "$path" | tr -d ' ')"
+    limit="$MAX_CONTEXT_FILE_BYTES"
+    (( limit > remaining )) && limit="$remaining"
+    emit_truncated_file "$path" "$limit"
+    emitted="$bytes"
+    (( emitted > limit )) && emitted="$limit"
+    remaining=$((remaining - emitted))
+  done
 }
 
 emit_truncated_diff() {
@@ -279,6 +448,8 @@ if [[ -f ".ai/prompts/codex-prepr-review.md" ]]; then
   echo "## Codex Review Prompt"
   emit_truncated_file ".ai/prompts/codex-prepr-review.md" "$MAX_DOC_BYTES"
 fi
+
+emit_repository_context
 
 emit_truncated_command "Git Status" "text" 80000 git status --short --branch
 emit_truncated_command "Changed Files: Branch Diff" "text" 120000 git diff --name-status "$MERGE_BASE"...HEAD

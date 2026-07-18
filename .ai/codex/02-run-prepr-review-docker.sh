@@ -42,40 +42,18 @@ HEAD_SHORT="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 # compatibility MIRROR only (see COMPAT_DIR), never the source of truth.
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/.ai/reviews/codex-prepr/$SAFE_BRANCH/$RUN_ID}"
 
-# Keep generated review artifacts (review, logs, provenance) inside the repo
-# unless a human intentionally opts out, matching the AGENTS.md contract and the
-# native scripts/dev-loop/prepr.sh guard. An inherited OUT_DIR=/tmp/... from a
-# shell or CI job would otherwise silently write outside .ai/reviews/.
-ALLOW_EXTERNAL_OUT_DIR="${ALLOW_EXTERNAL_OUT_DIR:-0}"
+# Keep generated evidence under the one ignored artifact root by default. Tests
+# or operators may opt into another location explicitly, but an arbitrary path
+# inside the repository is not safer than an external path: it may be tracked.
+ALLOW_NONSTANDARD_REVIEW_DIR="${ALLOW_NONSTANDARD_REVIEW_DIR:-0}"
+REVIEW_PATH_RESOLVER="$REPO_ROOT/scripts/dev-loop/resolve-review-path.py"
 resolve_out_dir() {
-  local requested="$1"
-  python3 - "$REPO_ROOT" "$requested" "$ALLOW_EXTERNAL_OUT_DIR" <<'PYINNER'
-import os
-import sys
-
-root = os.path.realpath(sys.argv[1])
-requested = sys.argv[2]
-allow_external = sys.argv[3] == "1"
-
-candidate = requested if os.path.isabs(requested) else os.path.join(root, requested)
-path = os.path.realpath(candidate)
-
-try:
-    inside_repo = os.path.commonpath([root, path]) == root
-except ValueError:
-    inside_repo = False
-
-if not inside_repo and not allow_external:
-    sys.stderr.write(
-        f"OUT_DIR resolves outside repo root: {requested} -> {path}\n"
-        "Use a repo-contained OUT_DIR, or set ALLOW_EXTERNAL_OUT_DIR=1 intentionally.\n"
-    )
-    sys.exit(2)
-
-print(path)
-PYINNER
+  local label="$1"
+  local requested="$2"
+  python3 "$REVIEW_PATH_RESOLVER" \
+    "$REPO_ROOT" "$requested" "$ALLOW_NONSTANDARD_REVIEW_DIR" "$label"
 }
-OUT_DIR="$(resolve_out_dir "$OUT_DIR")" || exit $?
+OUT_DIR="$(resolve_out_dir OUT_DIR "$OUT_DIR")" || exit $?
 RUN_DIR="$OUT_DIR"
 BRANCH_DIR="$(dirname "$RUN_DIR")"
 
@@ -94,7 +72,7 @@ esac
 # working for existing tooling. It is a copy target, not the source of truth.
 COMPAT_DIR="${COMPAT_DIR:-}"
 if [ -n "$COMPAT_DIR" ]; then
-  COMPAT_DIR="$(resolve_out_dir "$COMPAT_DIR")" || exit $?
+  COMPAT_DIR="$(resolve_out_dir COMPAT_DIR "$COMPAT_DIR")" || exit $?
 fi
 
 STDOUT_LOG="$RUN_DIR/codex-prepr-review.stdout"

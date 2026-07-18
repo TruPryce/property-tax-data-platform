@@ -7,8 +7,11 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 
 RUNNER_SHELL_SCRIPTS := \
 	scripts/dev-loop/build-review-packet.sh \
+	scripts/dev-loop/check-runner-identity.sh \
 	scripts/dev-loop/prepr.sh \
 	scripts/dev-loop/test-build-review-packet.sh \
+	scripts/dev-loop/test-review-output-paths.sh \
+	scripts/dev-loop/test-runner-identity.sh \
 	.ai/codex/01-build-codex-image.sh \
 	.ai/codex/02-run-prepr-review-docker.sh \
 	.ai/codex/03-smoke-test.sh \
@@ -97,8 +100,7 @@ runner-contract-tests:
 	python3 -m json.tool .ai/schemas/codex-prepr-review.schema.json >/dev/null
 	python3 -m json.tool .ai/schemas/codex-runner-event.schema.json >/dev/null
 	./scripts/dev-loop/test-build-review-packet.sh
+	./scripts/dev-loop/test-review-output-paths.sh
+	./scripts/dev-loop/test-runner-identity.sh
 	./.ai/codex/05-test-observability-export-fixtures.sh
-	@if rg -n 'platform[-]edge|pulse[-]ops[-]ai|forproperty[-]tax|dev[.]platform[-]edge' .ai; then \
-		echo "error: inherited runner identity remains in the runtime contract" >&2; \
-		exit 1; \
-	fi
+	./scripts/dev-loop/check-runner-identity.sh .ai

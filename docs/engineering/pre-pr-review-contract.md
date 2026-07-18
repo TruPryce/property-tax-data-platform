@@ -7,7 +7,7 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 ## Review Pipeline
 
 1. Deterministic gates run first and must pass: `make check` (lint, typecheck, test, docs, spec, secrets, artifacts).
-2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, repository status, and the branch diff against the base ref.
+2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff against the base ref.
 3. `make prepr` performs the complete loop: it reruns the deterministic gates, freezes one private packet, and invokes the dockerized Codex runner (`.ai/codex/02-run-prepr-review-docker.sh`).
 4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<branch>/<run-id>/`.
 5. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
@@ -15,6 +15,27 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 `BASE=<ref>` overrides the default `origin/main` comparison for both packet generation and the
 complete loop. `make prepr-no-ai` runs the deterministic gates and packet builder without a paid
 model call.
+
+## Packet Context and Redaction
+
+The packet builder selects context from the frozen checkout without querying GitHub or another
+network service. It includes:
+
+- the root `AGENTS.md` and ancestor `AGENTS.md` files for changed or untracked paths;
+- `openspec/AGENTS.md`, every active non-archived change's proposal, design, tasks, and delta specs;
+- accepted specs under `openspec/specs/`; and
+- accepted decision records under `docs/decisions/`.
+
+Paths are emitted in byte-sorted order. `MAX_CONTEXT_BYTES` defaults to 400,000 bytes for the
+whole context section and `MAX_CONTEXT_FILE_BYTES` defaults to 160,000 bytes per file. Truncation
+is explicit in the packet. An applicable issue reference must be present in the repository's
+active OpenSpec artifacts for non-bootstrap work; this read-only profile does not fetch issue or
+PR text.
+
+High-confidence literal credential assignments and literal Basic/Bearer authorization values are
+redacted before packet content is emitted. Source expressions remain intact, including shell
+parameter expansions such as `${VAR:-default}` and `${VAR:=default}`, so the review evidence does
+not become syntactically misleading. Secret-looking paths remain excluded rather than redacted.
 
 ## Runner Profile Boundary
 
@@ -30,7 +51,7 @@ outside this profile.
 
 - Review the current branch against the base ref named in the review packet, normally `origin/main`.
 - Include staged, unstaged, and untracked files only when they are part of the branch work.
-- Review nearby docs, configuration, and OpenSpec artifacts only when needed to understand the changed behavior.
+- Review the repository context embedded in the packet only when needed to understand the changed behavior.
 - Do **not** request unrelated cleanup or implementation outside the stated issue/OpenSpec scope.
 - Do **not** suggest broad rewrites when a targeted fix would address the risk.
 

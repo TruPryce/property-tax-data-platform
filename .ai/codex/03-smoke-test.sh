@@ -112,7 +112,8 @@ echo "    canary:  $CANARY"
 echo "    packet:  $PACKET ($(wc -c < "$PACKET") bytes)"
 
 set +e
-PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" ALLOW_EXTERNAL_OUT_DIR=1 "$RUNNER"
+PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" \
+  ALLOW_NONSTANDARD_REVIEW_DIR=1 "$RUNNER"
 RUN_STATUS=$?
 set -e
 
