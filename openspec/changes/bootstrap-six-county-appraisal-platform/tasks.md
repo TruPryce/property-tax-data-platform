@@ -7,6 +7,7 @@
 - [x] 1.5 Add continuous integration that runs the documented validation commands from a clean uv environment
 - [x] 1.6 Add uv-managed pre-commit hooks and CI-enforced secret scanning with a reviewed baseline
 - [x] 1.7 Add pre-commit and CI checks that reject tracked county source artifacts and unknown large binaries using path, size, content, and extension rules with a reviewed safe-fixture allowlist
+- [x] 1.8 Add the strict packet-only pre-PR reviewer profile with deterministic packet generation, read-only container boundaries, versioned evidence and observability contracts, no-cost CI contract tests, and an explicitly opt-in paid-provider smoke test
 
 ## 2. Domain and Application Core
 
