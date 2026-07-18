@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_NAME="${CODEX_IMAGE_NAME:-platform-edge-codex-agent}"
+IMAGE_NAME="${CODEX_IMAGE_NAME:-property-tax-codex-reviewer}"
 IMAGE_TAG="${CODEX_IMAGE_TAG:-local}"
 IMAGE="${CODEX_IMAGE:-${IMAGE_NAME}:${IMAGE_TAG}}"
 
@@ -74,8 +74,8 @@ echo "==> Building Codex Docker image: $IMAGE (default model: Sakana Fugu)"
 
 docker build \
   --pull \
-  --label "org.opencontainers.image.title=platform-edge-codex-agent" \
-  --label "org.opencontainers.image.description=Ephemeral Codex CLI runner (Sakana Fugu default) forproperty-tax review packets" \
+  --label "org.opencontainers.image.title=property-tax-codex-reviewer" \
+  --label "org.opencontainers.image.description=Ephemeral Codex CLI runner (Sakana Fugu default) for property-tax review packets" \
   -t "$IMAGE" \
   -f - "$BUILD_CTX" <<'DOCKERFILE'
 FROM node:22-bookworm-slim
@@ -100,7 +100,7 @@ RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 
 # Bake the pinned CLI version into an image label so the review runner can
 # record it in container.provenance.json without launching an extra container.
-LABEL dev.platform-edge.codex-cli-version="${CODEX_VERSION}"
+LABEL dev.trupryce.property-tax-data-platform.codex-cli-version="${CODEX_VERSION}"
 
 COPY fugu.json /opt/fugu/fugu.json
 COPY config.toml /opt/fugu/config.toml

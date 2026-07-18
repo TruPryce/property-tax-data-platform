@@ -7,9 +7,24 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 ## Review Pipeline
 
 1. Deterministic gates run first and must pass: `make check` (lint, typecheck, test, docs, spec, secrets, artifacts).
-2. A review packet is generated at `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, and the branch diff against the base ref.
-3. The dockerized Codex runner (`.ai/codex/02-run-prepr-review-docker.sh`) reviews the packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<branch>/<run-id>/`.
-4. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
+2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, repository status, and the branch diff against the base ref.
+3. `make prepr` performs the complete loop: it reruns the deterministic gates, freezes one private packet, and invokes the dockerized Codex runner (`.ai/codex/02-run-prepr-review-docker.sh`).
+4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<branch>/<run-id>/`.
+5. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
+
+`BASE=<ref>` overrides the default `origin/main` comparison for both packet generation and the
+complete loop. `make prepr-no-ai` runs the deterministic gates and packet builder without a paid
+model call.
+
+## Runner Profile Boundary
+
+This runner is the strict read-only review profile. The model receives one self-contained packet
+on stdin and has no model-invokable shell, browser, app, image-generation, or web-search tool. The
+container mounts only the output schema read-only and the claimed run directory read-write; its
+root filesystem is read-only and it runs without Linux capabilities or privilege escalation.
+
+Repository mutation, code writing, GitHub publishing, issue dispatch, and command execution are
+outside this profile.
 
 ## Review Scope
 
@@ -96,6 +111,8 @@ Reviews must match `.ai/schemas/codex-prepr-review.schema.json` and include:
 
 - [Documentation hub](../README.md)
 - [Contribution workflow](../../CONTRIBUTING.md)
+- [Review artifact contract](review-artifact-contract.md)
+- [Runner observability](codex-runner-observability.md)
 - [Agent guide](../../AGENTS.md)
 - [Reviewer prompt](../../.ai/prompts/codex-prepr-review.md)
 - [Fix prompt](../../.ai/prompts/claude-fix-from-review.md)

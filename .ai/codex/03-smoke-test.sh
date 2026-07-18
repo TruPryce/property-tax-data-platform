@@ -26,9 +26,15 @@ set -euo pipefail
 # This makes a real (paid) API call via the same Bitwarden-sourced key path as
 # the normal runner.
 
+if [ "${RUN_LIVE_PROVIDER_SMOKE:-0}" != "1" ]; then
+  echo "error: this smoke test makes a paid live-provider call." >&2
+  echo "Re-run with RUN_LIVE_PROVIDER_SMOKE=1 to opt in explicitly." >&2
+  exit 2
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 RUNNER="$REPO_ROOT/.ai/codex/02-run-prepr-review-docker.sh"
-IMAGE="${CODEX_IMAGE:-platform-edge-codex-agent:local}"
+IMAGE="${CODEX_IMAGE:-property-tax-codex-reviewer:local}"
 SCHEMA_DIR="$REPO_ROOT/.ai/schemas"
 
 CANARY="CANARY-$(date -u +%Y%m%d%H%M%S)-$RANDOM$RANDOM"
@@ -143,7 +149,7 @@ if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
   set +e
   { printf 'Reply with a schema-valid review, verdict pass, summary "ok".\n\n# packet\ntrivial\n'; } \
     | docker run --rm -i \
-      --name "platform-edge-codex-effort-probe-$$" \
+      --name "property-tax-codex-effort-probe-$$" \
       --user "$(id -u):$(id -g)" \
       --cap-drop ALL \
       --security-opt no-new-privileges:true \

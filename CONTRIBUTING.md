@@ -32,8 +32,9 @@ The artifact hook rejects county archives, databases, spatial files, tabular sou
 3. Create or update an OpenSpec change that references the issue.
 4. Validate the change with `openspec validate <change-name>`.
 5. Implement tasks in dependency order and update their checkboxes as they complete.
-6. Open a pull request that references the issue and OpenSpec change.
-7. Archive the OpenSpec change only after implementation and checks are complete.
+6. Run `make prepr` and address `BLOCKER` and `MUST_FIX` findings.
+7. Open a pull request that references the issue and OpenSpec change.
+8. Archive the OpenSpec change only after implementation and checks are complete.
 
 The repository bootstrap change predates the GitHub remote and is the only issue-reference exception.
 
@@ -50,6 +51,19 @@ make secrets      # all non-ignored files against the reviewed baseline
 make artifacts    # source-artifact, content-signature, path, and size policy
 make precommit    # every pre-commit hook against tracked files
 make check        # all checks
+make review-packet               # deterministic packet only; no model call
+make prepr-no-ai                 # checks plus packet; no model call
+make prepr                       # complete packet-only Docker review loop
+make runner-contract-tests       # free packet and observability fixtures
+make codex-observability-qa      # free fixture/latest-run export validation
+```
+
+The live adversarial smoke test makes a paid provider call and is never part of CI. Run it only
+after building the image and opting in explicitly:
+
+```bash
+make codex-image
+RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke
 ```
 
 ## Pull Requests
@@ -65,3 +79,4 @@ make check        # all checks
 - [Repository overview](README.md)
 - [Documentation hub](docs/README.md)
 - [OpenSpec workflow](openspec/README.md)
+- [Pre-PR review contract](docs/engineering/pre-pr-review-contract.md)

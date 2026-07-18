@@ -27,7 +27,7 @@ event = {
     "schema_version": 1,
     "artifact_contract_version": 1,
     "event_type": "codex_prepr_review_run",
-    "repo": "platform-edge",
+    "repo": "property-tax-data-platform",
     "run_id": "fixture-001",
     "branch": "feat/fixture",
     "safe_branch": "feat__fixture",
@@ -48,7 +48,7 @@ event = {
     "head_sha": "c" * 40,
     "head_short_sha": "ccccccc",
     "review_base": "origin/main",
-    "image": "platform-edge-codex-agent:local",
+    "image": "property-tax-codex-reviewer:local",
     "image_id": "sha256:" + "d" * 64,
     "codex_cli_version": "0.142.2",
     "model": "fugu-ultra",
@@ -193,13 +193,13 @@ if mode != "metric_missing":  # drop a required contract metric -> must fail
 metric("codex_runner_secret_leak_detected", leak)
 metric("codex_runner_schema_valid", 1 if event["verdict"] is not None else 0)
 metric("codex_runner_artifact_contract_version_info", 1,
-       '{repo="platform-edge",artifact_contract_version="1",event_schema_version="1"}')
+       '{repo="property-tax-data-platform",artifact_contract_version="1",event_schema_version="1"}')
 # Label-parsing violations: the whole label block must parse, so unquoted
 # values, trailing garbage, and duplicate label names must all be rejected.
 if mode == "label_unquoted":
     metric("codex_runner_run_info", 1, '{run_id=r}')
 elif mode == "label_trailing_garbage":
-    metric("codex_runner_run_info", 1, '{repo="platform-edge",bad}')
+    metric("codex_runner_run_info", 1, '{repo="property-tax-data-platform",bad}')
 elif mode == "label_duplicate":
     metric("codex_runner_run_info", 1, '{repo="a",repo="b"}')
 else:

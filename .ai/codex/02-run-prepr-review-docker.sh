@@ -12,7 +12,7 @@ EVENT_SCHEMA_VERSION="1"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # Low-cardinality repo identifier for the observability event/metrics labels.
 REPO="$(basename "$REPO_ROOT")"
-IMAGE="${CODEX_IMAGE:-platform-edge-codex-agent:local}"
+IMAGE="${CODEX_IMAGE:-property-tax-codex-reviewer:local}"
 
 # Redact the live provider key from any text streamed to the terminal. Failure
 # paths below tail captured stdout/stderr for debugging; this guarantees the
@@ -117,7 +117,7 @@ LATEST_METRICS="$BRANCH_DIR/latest-codex-runner-metrics.prom"
 SCHEMA_DIR="$(dirname "$SCHEMA_PATH")"
 SCHEMA_FILE="$(basename "$SCHEMA_PATH")"
 CONTAINER_SCHEMA_PATH="/workspace/.ai/schemas/$SCHEMA_FILE"
-CONTAINER_NAME="platform-edge-codex-prepr-${SAFE_BRANCH}-${RUN_ID}"
+CONTAINER_NAME="property-tax-codex-prepr-${SAFE_BRANCH}-${RUN_ID}"
 USER_SPEC="$(id -u):$(id -g)"
 
 # Single source of truth for the writable tmpfs specs: used verbatim both in the
@@ -606,7 +606,7 @@ error: review packet not found:
 
   $PACKET_PATH
 
-Run your existing review-packet builder first.
+Run make review-packet first, or use make prepr for the complete loop.
 EOF
 fi
 RUN_PACKET="$RUN_DIR/review-packet.md"
@@ -754,7 +754,7 @@ fi
 PACKET_SHA256="$(sha256sum "$PACKET_PATH" | cut -d' ' -f1)"
 SCHEMA_SHA256="$(sha256sum "$SCHEMA_PATH" | cut -d' ' -f1)"
 IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || echo unknown)"
-CODEX_CLI_VERSION="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.platform-edge.codex-cli-version" }}' 2>/dev/null || true)"
+CODEX_CLI_VERSION="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.codex-cli-version" }}' 2>/dev/null || true)"
 [ -n "$CODEX_CLI_VERSION" ] || CODEX_CLI_VERSION="unknown"
 # Tie recorded model provenance to how the model is actually selected. When
 # CODEX_MODEL is set we pass it via --model (see CODEX_ARGS) and record it as an
