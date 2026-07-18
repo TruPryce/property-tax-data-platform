@@ -22,6 +22,9 @@ overwritten.
 The runner removes `.claim/` during finalization. A stale marker means a process was interrupted;
 operators must verify that no run is active before removing the affected run directory.
 
+The free runner contract suite exercises both collision paths: an existing `.claim/` marker and a
+non-empty run directory must return exit code 2 without modifying prior evidence.
+
 ## Output Boundary
 
 `REVIEWS_ROOT`, `OUT_DIR`, and `COMPAT_DIR` must resolve beneath the repository's ignored

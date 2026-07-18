@@ -44,6 +44,14 @@ cat > "$TEST_REPO/notes.txt" <<'EOF'
 api_key=packet-test-secret
 client_secret: "quoted-packet-secret" # pragma: allowlist secret
 Authorization: Bearer header-packet-secret
+AWS_ACCESS_KEY_ID=cloud-access-literal
+AWS_SECRET_ACCESS_KEY="cloud-secret-literal" # pragma: allowlist secret
+access_key=short-access-literal
+secret_access_key: "short-secret-access-literal" # pragma: allowlist secret
+headers={"Authorization": "Bearer json-header-secret"}
+call(api_key=paren-packet-secret)
+authorization_assert='Authorization: Bearer [REDACTED]'
+assignment_assert='api_key=[REDACTED]'
 shell_default=${SAKANA_API_KEY:-}
 shell_assign=${SAKANA_API_KEY:=fallback}
 SAKANA_API_KEY="${SAKANA_API_KEY:-}"
@@ -75,6 +83,22 @@ grep -Fq 'client_secret: "[REDACTED]"' "$OUT_ONE" \
   || fail "packet did not preserve quotes around a redacted assignment"
 grep -Fq 'Authorization: Bearer [REDACTED]' "$OUT_ONE" \
   || fail "packet did not redact a literal authorization header"
+grep -Fq 'AWS_ACCESS_KEY_ID=[REDACTED]' "$OUT_ONE" \
+  || fail "packet did not redact an AWS access-key identifier"
+grep -Fq 'AWS_SECRET_ACCESS_KEY="[REDACTED]"' "$OUT_ONE" \
+  || fail "packet did not redact an AWS secret access key"
+grep -Fq 'access_key=[REDACTED]' "$OUT_ONE" \
+  || fail "packet did not redact a generic access key"
+grep -Fq 'secret_access_key: "[REDACTED]"' "$OUT_ONE" \
+  || fail "packet did not redact a generic secret access key"
+grep -Fq 'headers={"Authorization": "Bearer [REDACTED]"}' "$OUT_ONE" \
+  || fail "packet did not preserve JSON authorization delimiters"
+grep -Fq 'call(api_key=[REDACTED])' "$OUT_ONE" \
+  || fail "packet did not preserve an assignment closing parenthesis"
+grep -Fq "authorization_assert='Authorization: Bearer [REDACTED]'" "$OUT_ONE" \
+  || fail "packet corrupted an already-redacted authorization assertion"
+grep -Fq "assignment_assert='api_key=[REDACTED]'" "$OUT_ONE" \
+  || fail "packet corrupted an already-redacted assignment assertion"
 grep -Fq 'shell_default=${SAKANA_API_KEY:-}' "$OUT_ONE" \
   || fail "packet corrupted a shell default expansion"
 grep -Fq 'shell_assign=${SAKANA_API_KEY:=fallback}' "$OUT_ONE" \
@@ -85,7 +109,7 @@ grep -Fq 'Authorization: Bearer ${SAKANA_API_KEY:-}' "$OUT_ONE" \
   || fail "packet corrupted a dynamic authorization header"
 grep -Fq 'VERIFICATION_TOKEN: CANARY-DO-NOT-REDACT' "$OUT_ONE" \
   || fail "packet redacted the non-secret verification canary"
-if grep -Eq 'packet-test-secret|quoted-packet-secret|header-packet-secret' "$OUT_ONE"; then
+if grep -Eq 'packet-test-secret|quoted-packet-secret|header-packet-secret|cloud-access-literal|cloud-secret-literal|short-access-literal|short-secret-access-literal|json-header-secret|paren-packet-secret' "$OUT_ONE"; then
   fail "packet retained a redacted secret value"
 fi
 

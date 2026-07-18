@@ -9,7 +9,7 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 1. Deterministic gates run first and must pass: `make check` (lint, typecheck, test, docs, spec, secrets, artifacts).
 2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff against the base ref.
 3. `make prepr` performs the complete loop: it reruns the deterministic gates, freezes one private packet, and invokes the dockerized Codex runner (`.ai/codex/02-run-prepr-review-docker.sh`).
-4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<branch>/<run-id>/`.
+4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<safe-branch>/<run-id>/`.
 5. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
 
 `BASE=<ref>` overrides the default `origin/main` comparison for both packet generation and the
@@ -41,11 +41,16 @@ not become syntactically misleading. Secret-looking paths remain excluded rather
 
 This runner is the strict read-only review profile. The model receives one self-contained packet
 on stdin and has no model-invokable shell, browser, app, image-generation, or web-search tool. The
-container mounts only the output schema read-only and the claimed run directory read-write; its
-root filesystem is read-only and it runs without Linux capabilities or privilege escalation.
+container mounts only the repository's `.ai/schemas/` contract directory read-only and the claimed
+run directory read-write; its root filesystem is read-only and it runs without Linux capabilities
+or privilege escalation. The mounted schema directory contains only the review-output schema and
+runner-event schema.
 
 Repository mutation, code writing, GitHub publishing, issue dispatch, and command execution are
 outside this profile.
+
+The runner replaces every branch-name character outside `[A-Za-z0-9._-]` with `__` when deriving
+`<safe-branch>`. For example, `feature/ai-runner` becomes `feature__ai-runner`.
 
 ## Review Scope
 
@@ -126,7 +131,7 @@ Reviews must match `.ai/schemas/codex-prepr-review.schema.json` and include:
 
 - `block` — one or more `BLOCKER` findings exists.
 - `pass_with_notes` — no blockers, but at least one `MUST_FIX`, `NICE_TO_FIX`, or `QUESTION` exists.
-- `pass` — no blockers, no must-fix items, and no unresolved questions.
+- `pass` — `blockers`, `must_fix`, `nice_to_fix`, and `questions` are all empty.
 
 ## Related
 

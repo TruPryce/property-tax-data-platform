@@ -11,6 +11,7 @@ RUNNER_SHELL_SCRIPTS := \
 	scripts/dev-loop/prepr.sh \
 	scripts/dev-loop/test-build-review-packet.sh \
 	scripts/dev-loop/test-review-output-paths.sh \
+	scripts/dev-loop/test-run-directory-guard.sh \
 	scripts/dev-loop/test-runner-identity.sh \
 	.ai/codex/01-build-codex-image.sh \
 	.ai/codex/02-run-prepr-review-docker.sh \
@@ -101,6 +102,7 @@ runner-contract-tests:
 	python3 -m json.tool .ai/schemas/codex-runner-event.schema.json >/dev/null
 	./scripts/dev-loop/test-build-review-packet.sh
 	./scripts/dev-loop/test-review-output-paths.sh
+	./scripts/dev-loop/test-run-directory-guard.sh
 	./scripts/dev-loop/test-runner-identity.sh
 	./.ai/codex/05-test-observability-export-fixtures.sh
 	./scripts/dev-loop/check-runner-identity.sh .ai

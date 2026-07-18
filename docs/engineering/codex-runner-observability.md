@@ -19,6 +19,22 @@ error text, environment dumps, tokens, or API-key values.
 `EVENT_SCHEMA_VERSION` in `.ai/codex/02-run-prepr-review-docker.sh` is the implemented event
 version. Change it together with the JSON Schema, fixtures, validator, and this document.
 
+The fields used as lifecycle, posture, or metric-label dimensions are closed values:
+
+| Field | Allowed values |
+|---|---|
+| `review_mode` | `docker` |
+| `status` | `succeeded`, `failed` |
+| `stage` | `preflight`, `docker_run`, `review_missing`, `secret_leak_scan`, `observability_export`, `completed` |
+| `verdict` | `pass`, `pass_with_notes`, `block`, or `null` |
+| `model_source`, `reasoning_effort_source` | `override`, `image-default`, or `null` |
+| `reasoning_effort` | `high`, `xhigh`, or `null` |
+| `sandbox` | `danger-full-access` |
+| `web_search` | `false` |
+
+The schema and free fixtures reject values outside this set so posture and metric cardinality
+cannot drift silently.
+
 ## Metrics Contract
 
 `codex-runner-metrics.prom` uses Prometheus textfile syntax. Every metric has one `HELP` directive,

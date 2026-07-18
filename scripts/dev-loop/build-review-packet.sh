@@ -73,7 +73,16 @@ import re
 import sys
 
 authorization = re.compile(
-    r"(?i)(authorization:\s*(?:bearer|basic)\s+)([^\s,;]+)"
+    r"""(?P<prefix>
+        authorization[\"\x27]?\s*:\s*[\"\x27]?(?:bearer|basic)\s+
+    )
+    (?P<value>
+        \"(?:\\.|[^\"\\])*\"
+        | \x27(?:\\.|[^\x27\\])*\x27
+        | \[(?:REDACTED|redacted)\]
+        | [^\s,;&|\"\x27`()\[\]{}]+
+    )""",
+    re.IGNORECASE | re.VERBOSE,
 )
 assignment = re.compile(
     r"""(?P<prefix>
@@ -85,7 +94,8 @@ assignment = re.compile(
     (?P<value>
         \"(?:\\.|[^\"\\])*\"
         | \x27(?:\\.|[^\x27\\])*\x27
-        | [^\s,}\]]+
+        | \[(?:REDACTED|redacted)\]
+        | [^\s,;&|\"\x27`()\[\]{}]+
     )""",
     re.VERBOSE,
 )
@@ -100,8 +110,21 @@ sensitive_suffixes = (
     "client_secret",
     "private_key",
     "signing_key",
+    "secret_key",
+    "access_key",
+    "access_key_id",
+    "secret_access_key",
 )
-dynamic_markers = ("$", "{{", "{%", "<%", "process.env", "os.environ", "getenv(")
+dynamic_markers = (
+    "$",
+    "{{",
+    "{%",
+    "<%",
+    "process.env",
+    "os.environ",
+    "getenv(",
+    "[REDACTED]",
+)
 
 
 def is_dynamic(value):
@@ -110,10 +133,16 @@ def is_dynamic(value):
 
 
 def redact_authorization(match):
-    value = match.group(2)
+    value = match.group("value")
     if is_dynamic(value):
         return match.group(0)
-    return match.group(1) + "[REDACTED]"
+    return match.group("prefix") + redact_literal(value)
+
+
+def redact_literal(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"\x27":
+        return value[0] + "[REDACTED]" + value[-1]
+    return "[REDACTED]"
 
 
 def redact_assignment(match):
@@ -127,11 +156,7 @@ def redact_assignment(match):
     if is_dynamic(value):
         return match.group(0)
 
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"\x27":
-        replacement = value[0] + "[REDACTED]" + value[-1]
-    else:
-        replacement = "[REDACTED]"
-    return match.group("prefix") + replacement
+    return match.group("prefix") + redact_literal(value)
 
 
 for line in sys.stdin:

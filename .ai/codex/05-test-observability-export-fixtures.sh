@@ -97,6 +97,24 @@ if mode == "duration_negative":
 if mode == "disabled_tools_nonstring":
     event["disabled_tools"] = ["shell_tool", 42]   # array items must be strings
 
+# Closed-value violations — every documented posture/cardinality field must be
+# rejected before metrics/provenance agreement could normalize it as arbitrary
+# data.
+closed_value_mutations = {
+    "status_invalid": ("status", "degraded"),
+    "stage_invalid": ("stage", "uploading"),
+    "verdict_invalid": ("verdict", "approved"),
+    "review_mode_invalid": ("review_mode", "host"),
+    "model_source_invalid": ("model_source", "runtime-config"),
+    "reasoning_effort_invalid": ("reasoning_effort", "ultra"),
+    "reasoning_source_invalid": ("reasoning_effort_source", "runtime-config"),
+    "sandbox_invalid": ("sandbox", "workspace-write"),
+    "web_search_true": ("web_search", True),
+}
+if mode in closed_value_mutations:
+    key, value = closed_value_mutations[mode]
+    event[key] = value
+
 summary = {
     "artifact_contract_version": 1,
     "run_id": event["run_id"],
@@ -272,6 +290,16 @@ run_case event_type_wrong 1 "event field 'event_type' must be"
 run_case web_search_string 1 "event field 'web_search' has wrong type"
 run_case duration_negative 1 "event field 'duration_seconds' is below minimum"
 run_case disabled_tools_nonstring 1 "wrong item type"
+# Closed enum/const values (posture and metric-cardinality contract).
+run_case status_invalid 1 "event field 'status' must be one of"
+run_case stage_invalid 1 "event field 'stage' must be one of"
+run_case verdict_invalid 1 "event field 'verdict' must be one of"
+run_case review_mode_invalid 1 "event field 'review_mode' must be 'docker'"
+run_case model_source_invalid 1 "event field 'model_source' must be one of"
+run_case reasoning_effort_invalid 1 "event field 'reasoning_effort' must be one of"
+run_case reasoning_source_invalid 1 "event field 'reasoning_effort_source' must be one of"
+run_case sandbox_invalid 1 "event field 'sandbox' must be 'danger-full-access'"
+run_case web_search_true 1 "event field 'web_search' must be False"
 # Label-parsing negatives (the whole label block must parse).
 run_case label_unquoted 1 "does not fully parse"
 run_case label_trailing_garbage 1 "does not fully parse"

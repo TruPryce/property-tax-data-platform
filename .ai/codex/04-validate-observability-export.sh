@@ -79,9 +79,9 @@ if not isinstance(event, dict):
 # --- event validates against the schema ------------------------------------
 # A built-in subset validator runs ALWAYS, so the QA gate is deterministic with
 # no extra setup: required fields, additionalProperties=false, type checks
-# (including ["type","null"] unions), const, integer minimum, and array item
-# types. python3-jsonschema, when installed, additionally runs afterwards for
-# full JSON Schema coverage.
+# (including ["type","null"] unions), enum/const, integer minimum, and array
+# item types. python3-jsonschema, when installed, additionally runs afterwards
+# for full JSON Schema coverage.
 schema = load_json(schema_path, "event schema")
 
 
@@ -125,6 +125,8 @@ for key, spec in props.items():
                  % (key, "|".join(allowed), type(val).__name__))
     if "const" in spec and val != spec["const"]:
         fail("event field '%s' must be %r (got %r)" % (key, spec["const"], val))
+    if "enum" in spec and val not in spec["enum"]:
+        fail("event field '%s' must be one of %r (got %r)" % (key, spec["enum"], val))
     if ("minimum" in spec and isinstance(val, (int, float))
             and not isinstance(val, bool) and val < spec["minimum"]):
         fail("event field '%s' is below minimum %s (got %r)"

@@ -79,4 +79,4 @@ Use `block` when any `BLOCKER` finding exists.
 
 Use `pass_with_notes` when there are no blockers, but there are `MUST_FIX`, `NICE_TO_FIX`, or `QUESTION` items.
 
-Use `pass` only when there are no blockers, no must-fix items, and no unresolved questions.
+Use `pass` only when `blockers`, `must_fix`, `nice_to_fix`, and `questions` are all empty.
