@@ -690,6 +690,26 @@ CODEX_CLI_VERSION="$(docker image inspect "$IMAGE" --format '{{ index .Config.La
 IMAGE_PROVIDER="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.provider" }}' 2>/dev/null || true)"
 IMAGE_PROFILE_ID="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.profile-id" }}' 2>/dev/null || true)"
 IMAGE_PROFILE_SHA="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.profile-sha256" }}' 2>/dev/null || true)"
+PROFILE_PATH="$REPO_ROOT/.ai/profiles/review.packet-only.v1.json"
+if [ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ]; then
+  EXPECTED_PROFILE_SHA="$COUNTYFORGE_PROFILE_SHA256"
+elif [ -f "$PROFILE_PATH" ]; then
+  EXPECTED_PROFILE_SHA="$(python3 - "$PROFILE_PATH" <<'PY'
+import hashlib, json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    profile = json.load(handle)
+canonical = json.dumps(
+    profile, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+).encode()
+print(hashlib.sha256(canonical).hexdigest())
+PY
+)"
+else
+  fail preflight 2 <<EOF
+error: executable review profile is unavailable: $PROFILE_PATH
+EOF
+fi
 MIN_CODEX_CLI_VERSION="${MIN_CODEX_CLI_VERSION:-0.144.0}"
 if [ -z "$CODEX_CLI_VERSION" ] || ! python3 - "$CODEX_CLI_VERSION" "$MIN_CODEX_CLI_VERSION" <<'PY'
 import sys
@@ -714,7 +734,7 @@ if [ "$IMAGE_PROVIDER" != "$PROVIDER" ] || [ "$IMAGE_PROFILE_ID" != "review.pack
 error: image provider/profile labels do not match the resolved review profile.
 EOF
 fi
-if [ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ] && [ "$IMAGE_PROFILE_SHA" != "$COUNTYFORGE_PROFILE_SHA256" ]; then
+if [ -z "$EXPECTED_PROFILE_SHA" ] || [ "$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA" ]; then
   fail preflight 2 <<EOF
 error: image capability profile hash does not match the resolved profile.
 EOF

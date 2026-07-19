@@ -15,6 +15,13 @@ from countyforge_runner.errors import KernelError
 from countyforge_runner.evidence import EvidenceWriter
 from countyforge_runner.resolver import Kernel, ResolvedRun
 
+MODEL_OUTPUT_ARTIFACTS = (
+    "codex-prepr-review.md",
+    "codex-events.ndjson",
+    "codex-prepr-review.stdout",
+    "codex-prepr-review.stderr",
+)
+
 
 def _iso_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -23,7 +30,9 @@ def _iso_now() -> str:
 def _safe_branch(resolved: ResolvedRun) -> str:
     display = resolved.request.get("display_metadata", {})
     branch = str(display.get("branch", "detached"))
-    return "".join(char if char.isalnum() or char in "._-" else "__" for char in branch)
+    return "".join(
+        char if char.isascii() and (char.isalnum() or char in "._-") else "__" for char in branch
+    )
 
 
 def _input_bytes(resolved: ResolvedRun, repo_root: Path) -> int:
@@ -40,12 +49,24 @@ def _input_bytes(resolved: ResolvedRun, repo_root: Path) -> int:
 
 
 def _output_bytes(run_dir: Path) -> int:
-    excluded = {"review-packet.md"}
     return sum(
-        path.stat().st_size
-        for path in run_dir.iterdir()
-        if path.is_file() and path.name not in excluded
+        path.stat().st_size for name in MODEL_OUTPUT_ARTIFACTS if (path := run_dir / name).is_file()
     )
+
+
+def _redacted_tail(text: str, environment: dict[str, str], limit: int = 4000) -> str:
+    secret_names = {
+        "OPENAI_API_KEY",
+        "SAKANA_API_KEY",
+        "BITWARDEN_TOKEN",
+        "BWS_ACCESS_TOKEN",
+    }
+    redacted = text
+    for name in secret_names:
+        value = environment.get(name, "")
+        if value:
+            redacted = redacted.replace(value, "***REDACTED-CREDENTIAL***")
+    return redacted[-limit:]
 
 
 class Runner:
@@ -192,18 +213,22 @@ class Runner:
             start_new_session=True,
         )
         timed_out = False
+        adapter_stderr = ""
         try:
-            process.communicate(timeout=float(resolved.effective_budgets["wall_clock_seconds"]))
+            _, adapter_stderr = process.communicate(
+                timeout=float(resolved.effective_budgets["wall_clock_seconds"])
+            )
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.communicate(timeout=10)
+                _, adapter_stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                _, adapter_stderr = process.communicate()
         duration = max(time.monotonic() - started, 0.0)
-        adapter_code = int(process.returncode or 0)
+        raw_adapter_code = int(process.returncode or 0)
+        adapter_code = 128 + abs(raw_adapter_code) if raw_adapter_code < 0 else raw_adapter_code
         disposition = (
             "timed_out" if timed_out else ("completed" if adapter_code == 0 else "adapter_failed")
         )
@@ -264,6 +289,8 @@ class Runner:
             "run_dir": str(run_dir),
             "summary": summary,
         }
+        if exit_code != 0 and adapter_stderr:
+            result["adapter_stderr_tail"] = _redacted_tail(adapter_stderr, environment)
         final_review = run_dir / "codex-prepr-review.md"
         if final_review.is_file():
             try:

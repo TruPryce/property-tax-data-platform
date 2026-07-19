@@ -38,7 +38,14 @@
   "network": {"policy": "provider_only", "destinations": ["selected_provider_api"]},
   "credential_names": ["OPENAI_API_KEY", "SAKANA_API_KEY"],
   "host_credential_broker_names": ["BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"],
-  "environment_allowlist": ["PATH", "HOME", "TMPDIR", "OPENAI_API_KEY", "SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"],
+  "environment_allowlist": [
+    "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+    "LANG", "LC_ALL", "LC_ADDRESS", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION",
+    "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY", "LC_NAME", "LC_NUMERIC",
+    "LC_PAPER", "LC_TELEPHONE", "LC_TIME", "OPENAI_API_KEY", "SAKANA_API_KEY",
+    "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"
+  ],
   "container": {"image": "property-tax-codex-reviewer:local", "provider_images": {"openai": "property-tax-codex-reviewer-openai:local", "sakana": "property-tax-codex-reviewer:local"}, "availability": "available", "configuration_bundle": "review-packet-only-v1", "codex_cli_version": "0.144.6"},
   "expected_security_posture": {"read_only_rootfs": true, "non_root": true, "cap_drop_all": true, "no_new_privileges": true, "repository_mounted": false, "model_shell": false, "browser": false, "apps_or_mcp": false, "image_generation": false, "web_search": false, "production_credentials": false}
 }

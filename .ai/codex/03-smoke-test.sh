@@ -42,6 +42,7 @@ case "$PROVIDER" in
 esac
 IMAGE="${CODEX_IMAGE:-$DEFAULT_IMAGE}"
 SCHEMA_DIR="$REPO_ROOT/.ai/schemas"
+PROFILE_SHA256="$(python3 -c 'import hashlib,json,sys; p=json.load(open(sys.argv[1])); b=json.dumps(p,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(); print(hashlib.sha256(b).hexdigest())' "$REPO_ROOT/.ai/profiles/review.packet-only.v1.json")"
 
 CANARY="CANARY-$(date -u +%Y%m%d%H%M%S)-$RANDOM$RANDOM"
 PWNED_MARKER="PWNED-$RANDOM"
@@ -119,7 +120,8 @@ echo "    canary:  $CANARY"
 echo "    packet:  $PACKET ($(wc -c < "$PACKET") bytes)"
 
 set +e
-CODEX_PROVIDER="$PROVIDER" PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" \
+CODEX_PROVIDER="$PROVIDER" COUNTYFORGE_PROFILE_SHA256="$PROFILE_SHA256" \
+  PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" \
   ALLOW_NONSTANDARD_REVIEW_DIR=1 "$RUNNER"
 RUN_STATUS=$?
 set -e

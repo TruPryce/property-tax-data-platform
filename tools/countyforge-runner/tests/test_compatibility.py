@@ -65,6 +65,11 @@ def test_image_compatibility_gate_precedes_provider_credential_resolution() -> N
         "profile-sha256",
     ):
         assert runner.index(label, gate) < credential_resolution
+    assert 'if [ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ]' in runner
+    assert '[ "$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA" ]' in runner
+    assert '[ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ] &&' not in runner
+    smoke = Path(".ai/codex/03-smoke-test.sh").read_text(encoding="utf-8")
+    assert 'COUNTYFORGE_PROFILE_SHA256="$PROFILE_SHA256"' in smoke
 
 
 def test_legacy_prepr_routes_through_kernel() -> None:

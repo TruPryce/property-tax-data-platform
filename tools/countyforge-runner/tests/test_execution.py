@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from countyforge_runner.contracts import JsonObject
 from countyforge_runner.errors import KernelError
-from countyforge_runner.executor import Runner
+from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
 from countyforge_runner.resolver import Kernel
 
 
@@ -150,6 +150,41 @@ def test_review_profile_declares_no_repository_mount() -> None:
     assert '-v "$REPO_ROOT' not in runner
 
 
+def test_kernel_preserves_declared_host_docker_environment_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "ssh://docker.example.test")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/fixture")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-must-not-be-selected")
+    monkeypatch.setenv("SAKANA_API_KEY", "sakana-selected-fixture")
+    kernel = Kernel()
+    resolved = kernel.resolve(request_factory("review"))
+    environment = Runner(kernel)._scoped_environment(resolved, tmp_path / "run")
+    assert environment["DOCKER_HOST"] == "ssh://docker.example.test"
+    assert environment["XDG_RUNTIME_DIR"] == "/run/user/fixture"
+    assert environment["SAKANA_API_KEY"] == "sakana-selected-fixture"  # pragma: allowlist secret
+    assert "OPENAI_API_KEY" not in environment
+
+
+def test_output_budget_counts_only_model_provider_artifacts(tmp_path: Path) -> None:
+    (tmp_path / "codex-prepr-review.md").write_bytes(b"r" * 100)
+    (tmp_path / "codex-prepr-review.stderr").write_bytes(b"e" * 20)
+    (tmp_path / "container.provenance.json").write_bytes(b"p" * 5000)
+    (tmp_path / "countyforge-run-event.ndjson").write_bytes(b"o" * 5000)
+    assert _output_bytes(tmp_path) == 120
+
+
+def test_safe_branch_uses_documented_ascii_character_class(
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("review")
+    request["display_metadata"]["branch"] = "feature/café"
+    resolved = Kernel().resolve(request)
+    assert _safe_branch(resolved) == "feature__caf__"
+
+
 def test_review_wall_clock_timeout_never_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -198,3 +233,31 @@ def test_review_output_budget_never_succeeds(
     assert exit_code == 5
     assert document["disposition"] == "budget_exceeded"
     assert document["summary"]["outcome"] == "failed"
+
+
+def test_signal_failure_is_normalized_and_diagnostic_is_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    secret = "sakana-signal-fixture-secret"  # pragma: allowlist secret
+    monkeypatch.setenv("SAKANA_API_KEY", secret)
+    adapter = tmp_path / "signal-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'mkdir -p "$OUT_DIR"\n'
+        "printf 'adapter failed near %s\\n' \"$SAKANA_API_KEY\" >&2\n"
+        "kill -TERM $$\n",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    request = request_factory("review")
+    request["run_id"] = "review-signal"
+    kernel = Kernel()
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", review_adapter=adapter
+    ).run(kernel.resolve(request))
+    assert exit_code == 143
+    assert document["disposition"] == "adapter_failed"
+    assert secret not in document["adapter_stderr_tail"]
+    assert "***REDACTED-CREDENTIAL***" in document["adapter_stderr_tail"]

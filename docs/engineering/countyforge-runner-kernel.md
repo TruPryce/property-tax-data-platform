@@ -90,7 +90,7 @@ OpenAI uses `OPENAI_API_KEY`; Sakana uses `SAKANA_API_KEY`. The selected provide
 
 Profiles declare defaults and ceilings for wall time, attempts, input bytes, output bytes, token use, and provider cost. An untrusted request can only keep or tighten the effective default; it cannot select a larger value even when a separate hard ceiling is higher. The ceiling remains a defense-in-depth bound for later trusted policy layers and future profile defaults. Reasoning effort is a closed allowlist.
 
-The review kernel enforces one attempt, input size before dispatch, wall-clock timeout around the adapter, and output bytes before success. Token and cost usage remain `{state: "unavailable", value: null}` when the provider does not report them; the kernel never estimates or fabricates usage.
+The review kernel enforces one attempt, input size before dispatch, wall-clock timeout around the adapter, and model/provider output bytes before success. Output accounting covers the final review, event stream, and captured provider stdout/stderr; deterministic provenance, event, metric, and summary files do not consume the model-output budget. Token and cost usage remain `{state: "unavailable", value: null}` when the provider does not report them; the kernel never estimates or fabricates usage.
 
 ## Evidence and Compatibility
 
@@ -121,6 +121,8 @@ Historical PR #1 run directories do not need generic artifacts and remain valid.
 ## Review Trust Boundary
 
 `review.packet-only.v1` retains no repository mount, no workspace mutation, no model shell or unified execution, no browser, no apps/MCP, no image generation, and no web search. Its only mounts are `.ai/schemas/` read-only and the claimed run directory read-write. Docker uses a read-only root filesystem, a non-root user, dropped capabilities, no privilege escalation, and bounded tmpfs paths. Only the selected model-provider request path is available.
+
+The kernel preserves declared host-only Docker client, rootless-session, SSH transport, temporary-directory, and locale variables when it launches the adapter. These values support local/remote Docker connectivity but are not forwarded by `docker run`; the container receives only its fixed home variables and the one selected provider credential.
 
 OpenAI and Sakana use separately built provider-specific configuration bundles. Runtime request fields cannot switch an image's provider label, profile hash, tools, or mounts.
 

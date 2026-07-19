@@ -63,10 +63,7 @@ if [[ "$RUN_CODEX_REVIEW" != "1" ]]; then
 fi
 
 BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
-SAFE_BRANCH="$(printf '%s' "$BRANCH" | sed 's#[^A-Za-z0-9._-]#__#g')"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
-RUN_DIR="$REVIEWS_ROOT/codex-prepr/$SAFE_BRANCH/$RUN_ID"
-FINAL_REVIEW="$RUN_DIR/codex-prepr-review.md"
 
 BASE_SHA="$(git -C "$REPO_ROOT" rev-parse "$BASE^{commit}")"
 HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -116,6 +113,13 @@ if [[ "$RUNNER_STATUS" -ne 0 ]]; then
   cat "$RUN_RESULT" >&2
   exit "$RUNNER_STATUS"
 fi
+
+RUN_DIR_VALUE="$(jq -er '.run_dir | strings | select(length > 0)' "$RUN_RESULT")" || {
+  err "runner exited successfully without a run_dir in its JSON result"
+  exit 2
+}
+RUN_DIR="$(resolve_reviews_root "$RUN_DIR_VALUE")"
+FINAL_REVIEW="$RUN_DIR/codex-prepr-review.md"
 
 if [[ ! -s "$FINAL_REVIEW" ]]; then
   err "runner exited successfully without the canonical review: $FINAL_REVIEW"
