@@ -10,6 +10,7 @@ Issue [#4](https://github.com/TruPryce/property-tax-data-platform/issues/4) requ
 - Preserve the existing read-only review adapter and artifact contract behind the kernel, emitting generic CountyForge evidence alongside the legacy review event and summary during migration.
 - Define OpenAI and Sakana provider/model compatibility independently from capability policy, deliberately upgrade the Codex CLI pin, and enforce version and credential gates.
 - Add hard profile budgets, fail-closed compatibility checks, no-cost contract fixtures, Make and CI targets, operator documentation, and an accepted ADR.
+- Constrain executable inputs to profile-approved repository roots and bind review requests to the actual repository identity, checkout commits, packet bytes, and packet provenance before credentials are selected.
 - Leave `plan`, `implement`, `fix`, and `validate` execution disabled with the structured `profile_not_implemented` disposition.
 - Explicitly exclude the GitHub command/control plane, planning and code-writing workflows, repository publication, production runtime integration, and any weakening of the review container.
 

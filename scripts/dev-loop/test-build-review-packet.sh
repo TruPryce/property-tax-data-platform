@@ -71,6 +71,12 @@ OUT_LIMITED="$WORK/packet-limited.md"
 )
 
 cmp -s "$OUT_ONE" "$OUT_TWO" || fail "unchanged repository produced different packets"
+EXPECTED_HEAD="$(git -C "$TEST_REPO" rev-parse HEAD)"
+EXPECTED_BASE="$(git -C "$TEST_REPO" merge-base main HEAD)"
+grep -Fq "\"base_sha\":\"$EXPECTED_BASE\"" "$OUT_ONE" \
+  || fail "packet metadata omitted the immutable merge-base SHA"
+grep -Fq "\"head_sha\":\"$EXPECTED_HEAD\"" "$OUT_ONE" \
+  || fail "packet metadata omitted the immutable head SHA"
 grep -Fq '| Branch | `feature/packet-contract` |' "$OUT_ONE" \
   || fail "packet metadata omitted the branch"
 grep -Fq '## Raw Diff: Unstaged Changes' "$OUT_ONE" \

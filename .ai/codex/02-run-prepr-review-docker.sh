@@ -613,6 +613,19 @@ if [ "$PACKET_PATH" != "$RUN_PACKET" ]; then
   cp -f "$PACKET_PATH" "$RUN_PACKET"
 fi
 PACKET_PATH="$RUN_PACKET"
+# A kernel-dispatched review binds the request to exact packet bytes. Recheck
+# the frozen copy before model/image or credential work so a path rewrite or
+# concurrent packet change cannot alter what is submitted. Direct operator-only
+# smoke calls intentionally omit this value and remain outside the ordinary
+# CountyForge request boundary.
+if [ -n "${EXPECTED_PACKET_SHA256:-}" ]; then
+  FROZEN_PACKET_SHA256="$(sha256sum "$PACKET_PATH" | cut -d' ' -f1)"
+  if [ "$FROZEN_PACKET_SHA256" != "$EXPECTED_PACKET_SHA256" ]; then
+    fail preflight 2 <<EOF
+error: frozen review packet hash does not match the resolved CountyForge request.
+EOF
+  fi
+fi
 # Re-export PV_PACKET_PATH now (the provenance block re-exports it too, later) so
 # any failure BETWEEN staging and provenance — bad effort, missing key/schema/
 # image, oversized packet, pre-model leak — writes run.summary.json pointing at

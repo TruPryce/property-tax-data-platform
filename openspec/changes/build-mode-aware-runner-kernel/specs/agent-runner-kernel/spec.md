@@ -56,6 +56,21 @@ The `review.packet-only.v1` profile SHALL execute through the existing `.ai/code
 - **WHEN** a review exceeds its resolved wall-clock or output-byte limit
 - **THEN** the kernel terminates or rejects the run, records the budget disposition, and never reports success
 
+### Requirement: Executable input and repository binding
+Every profile SHALL declare repository-relative approved input roots and repository identity/base policy. Before an executable review is eligible, the kernel MUST resolve symlinks, require packet and packet-provenance inputs to be regular files under a profile-approved root, verify the configured repository identity, require current `HEAD` to equal the request head SHA, require the request base SHA to exist as a commit and be an ancestor of that head, verify request-declared packet and provenance hashes, and require the strict packet-provenance document to agree with the request repository, base, head, packet hash, and packet byte count. The same binding MUST be revalidated immediately before provider credential selection. Ordinary run requests MUST NOT override approved input roots or repository policy.
+
+#### Scenario: Accept a bound canonical review packet
+- **WHEN** a review packet and strict provenance sidecar are regular files beneath `.ai/reviews/`, their hashes and byte count agree, the packet's embedded metadata and sidecar match the request repository/base/head facts, origin identifies the declared repository, current `HEAD` equals the request head, and base is an ancestor commit
+- **THEN** the review becomes execution-eligible without loading a provider credential during validation
+
+#### Scenario: Reject an input-root escape
+- **WHEN** a review request names an absolute outside-root file, a `..` escape, a symlink resolving outside an approved root, a directory, device, or other non-regular input
+- **THEN** resolution fails with a sanitized structured error before provider credential selection
+
+#### Scenario: Reject repository or packet provenance drift
+- **WHEN** repository identity is wrong, current `HEAD` is stale, the base commit does not exist or is not an ancestor, either input hash differs, or the embedded packet metadata or sidecar disagrees with the request repository/base/head/hash/byte facts
+- **THEN** resolution fails closed and the review adapter is not invoked
+
 ### Requirement: Fail-closed future profile execution
 The plan, implement, fix, and validate profiles SHALL be fully validatable but SHALL have `not_implemented` execution state in this change. Attempted execution MUST validate and resolve first, emit sanitized request and profile provenance, return a structured `profile_not_implemented` disposition with a non-zero exit status, and stop before loading provider credentials, creating mounts, running containers, or starting deterministic commands.
 
@@ -153,7 +168,7 @@ The package SHALL expose `countyforge-runner run`, `validate-request`, `resolve-
 - **THEN** it returns non-zero with a stable disposition and sanitized JSON error document
 
 ### Requirement: Deterministic acceptance suite
-The repository SHALL provide free deterministic Make and CI checks for request/profile/catalog schemas, all five mode resolutions, review adapter dispatch and posture, unimplemented-mode failure, budget and capability expansion rejection, version gates, profile hashing, secret non-disclosure, low-cardinality metrics, legacy compatibility, and unknown JSON property rejection. Paid Sakana and OpenAI provider probes MUST remain explicitly opt-in and outside ordinary CI.
+The repository SHALL provide free deterministic Make and CI checks for request/profile/catalog schemas, all five mode resolutions, review adapter dispatch and posture, unimplemented-mode failure, budget and capability expansion rejection, version gates, profile hashing, secret non-disclosure, approved input roots, repository/commit/packet-provenance binding, low-cardinality metrics, legacy compatibility, and unknown JSON property rejection. Paid Sakana and OpenAI provider probes MUST remain explicitly opt-in and outside ordinary CI.
 
 #### Scenario: Validate the kernel in CI
 - **WHEN** pull-request CI runs the runner contract suite

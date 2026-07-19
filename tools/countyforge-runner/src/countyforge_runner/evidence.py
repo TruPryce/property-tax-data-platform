@@ -41,12 +41,8 @@ def _write_json(path: Path, document: JsonObject, secret_values: tuple[str, ...]
     temporary.replace(path)
 
 
-def _input_fact(raw_path: object, repo_root: Path) -> JsonObject | None:
-    if raw_path is None:
-        return None
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = repo_root / path
+def _input_fact(path_value: str) -> JsonObject:
+    path = Path(path_value)
     return {
         "name": path.name,
         "bytes": path.stat().st_size,
@@ -54,15 +50,19 @@ def _input_fact(raw_path: object, repo_root: Path) -> JsonObject | None:
     }
 
 
-def sanitized_request(resolved: ResolvedRun, repo_root: Path) -> JsonObject:
+def sanitized_request(resolved: ResolvedRun) -> JsonObject:
     """Return immutable request facts without host-local input paths."""
 
     request = resolved.request
     input_facts: JsonObject = {}
-    for key in ("packet_path", "context_manifest_path"):
-        if key in request["input"]:
-            input_facts[key.removesuffix("_path")] = _input_fact(request["input"][key], repo_root)
-    for key in ("selected_finding_ids", "expected_head_sha"):
+    for key, path_value in resolved.canonical_input_paths.items():
+        input_facts[key.removesuffix("_path")] = _input_fact(path_value)
+    for key in (
+        "packet_sha256",
+        "packet_provenance_sha256",
+        "selected_finding_ids",
+        "expected_head_sha",
+    ):
         if key in request["input"]:
             input_facts[key] = request["input"][key]
     return {
@@ -228,7 +228,7 @@ class EvidenceWriter:
         event_schema = self.kernel._load_schema("countyforge-run-event.schema.json")
         validate_document(event, event_schema, kind="generic run event")
 
-        request_provenance = sanitized_request(self.resolved, self.kernel.repo_root)
+        request_provenance = sanitized_request(self.resolved)
         profile_snapshot: JsonObject = {
             "profile_sha256": self.resolved.profile_sha256,
             "profile": self.resolved.profile,

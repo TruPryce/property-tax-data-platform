@@ -169,6 +169,27 @@ def test_kernel_preserves_declared_host_docker_environment_only(
     assert "OPENAI_API_KEY" not in environment
 
 
+def test_packet_binding_is_revalidated_before_credential_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("review")
+    kernel = Kernel()
+    resolved = kernel.resolve(request)
+    packet = Path(str(request["input"]["packet_path"]))
+    packet.write_text("changed after resolution\n", encoding="utf-8")
+    runner = Runner(kernel, evidence_root=tmp_path / "evidence")
+
+    def fail_if_credentials_are_selected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("provider credentials were selected before packet revalidation")
+
+    monkeypatch.setattr(runner, "_scoped_environment", fail_if_credentials_are_selected)
+    with pytest.raises(KernelError) as raised:
+        runner.run(resolved)
+    assert raised.value.code == "packet_hash_mismatch"
+
+
 def test_output_budget_counts_only_model_provider_artifacts(tmp_path: Path) -> None:
     (tmp_path / "codex-prepr-review.md").write_bytes(b"r" * 100)
     (tmp_path / "codex-prepr-review.stderr").write_bytes(b"e" * 20)

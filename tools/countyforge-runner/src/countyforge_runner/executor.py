@@ -35,17 +35,8 @@ def _safe_branch(resolved: ResolvedRun) -> str:
     )
 
 
-def _input_bytes(resolved: ResolvedRun, repo_root: Path) -> int:
-    total = 0
-    for key in ("packet_path", "context_manifest_path"):
-        raw_path = resolved.request["input"].get(key)
-        if raw_path is None:
-            continue
-        path = Path(str(raw_path))
-        if not path.is_absolute():
-            path = repo_root / path
-        total += path.stat().st_size
-    return total
+def _input_bytes(resolved: ResolvedRun) -> int:
+    return sum(Path(path).stat().st_size for path in resolved.canonical_input_paths.values())
 
 
 def _output_bytes(run_dir: Path) -> int:
@@ -127,7 +118,7 @@ class Runner:
                 disposition="profile_not_implemented",
                 exit_code=4,
                 attempts=0,
-                input_bytes=_input_bytes(resolved, self.kernel.repo_root),
+                input_bytes=_input_bytes(resolved),
                 output_bytes=0,
                 error_code="profile_not_implemented",
             )
@@ -161,9 +152,7 @@ class Runner:
             for broker in resolved.profile["host_credential_broker_names"]:
                 if broker in os.environ:
                     environment[str(broker)] = os.environ[str(broker)]
-        packet = Path(str(resolved.request["input"]["packet_path"]))
-        if not packet.is_absolute():
-            packet = self.kernel.repo_root / packet
+        packet = Path(resolved.canonical_input_paths["packet_path"])
         model = resolved.model
         if resolved.provider is None or model is None:
             raise KernelError(
@@ -187,6 +176,7 @@ class Runner:
                 "CODEX_REASONING_EFFORT": str(resolved.request["reasoning_effort"]),
                 "MAX_PACKET_BYTES": str(resolved.effective_budgets["max_input_bytes"]),
                 "MAX_OUTPUT_BYTES": str(resolved.effective_budgets["max_output_bytes"]),
+                "EXPECTED_PACKET_SHA256": str(resolved.request["input"]["packet_sha256"]),
                 "COUNTYFORGE_PROFILE_SHA256": resolved.profile_sha256,
                 "MIN_CODEX_CLI_VERSION": str(resolved.profile["minimum_codex_cli_version"]),
             }
@@ -202,6 +192,7 @@ class Runner:
             )
         started_at = _iso_now()
         started = time.monotonic()
+        self.kernel.revalidate_execution_context(resolved)
         environment = self._scoped_environment(resolved, run_dir)
         process = subprocess.Popen(  # noqa: S603 - fixed repository adapter path
             [str(self.review_adapter)],
@@ -269,7 +260,7 @@ class Runner:
                 disposition=disposition,
                 exit_code=exit_code,
                 attempts=1,
-                input_bytes=_input_bytes(resolved, self.kernel.repo_root),
+                input_bytes=_input_bytes(resolved),
                 output_bytes=output_bytes,
                 error_code=None if exit_code == 0 else disposition,
                 legacy_provenance=legacy_provenance,

@@ -42,31 +42,39 @@ for contract in .ai/schemas/*.json .ai/profiles/*.json .ai/providers/*.json; do
   python3 -m json.tool "$contract" >/dev/null
 done
 
-PACKET_SOURCE="$(mktemp "${TMPDIR:-/tmp}/property-tax-prepr-packet.XXXXXX")"
-SHARED_PACKET_TMP="$(mktemp "$REVIEWS_ROOT/.review-packet.XXXXXX")"
+PACKET_TMP="$(mktemp "$REVIEWS_ROOT/.review-packet.XXXXXX")"
+PACKET_PROVENANCE_TMP="$(mktemp "$REVIEWS_ROOT/.review-packet-provenance.XXXXXX")"
 REQUEST_PATH="$(mktemp "${TMPDIR:-/tmp}/countyforge-review-request.XXXXXX")"
 RUN_RESULT="$(mktemp "${TMPDIR:-/tmp}/countyforge-review-result.XXXXXX")"
 cleanup() {
-  rm -f "$PACKET_SOURCE" "$SHARED_PACKET_TMP" "$REQUEST_PATH" "$RUN_RESULT"
+  rm -f "$PACKET_TMP" "$PACKET_PROVENANCE_TMP" "$REQUEST_PATH" "$RUN_RESULT"
 }
 trap cleanup EXIT
 
 info "Building deterministic review packet"
-scripts/dev-loop/build-review-packet.sh "$BASE" > "$PACKET_SOURCE"
-cp "$PACKET_SOURCE" "$SHARED_PACKET_TMP"
-mv "$SHARED_PACKET_TMP" "$REVIEWS_ROOT/review-packet.md"
+scripts/dev-loop/build-review-packet.sh "$BASE" > "$PACKET_TMP"
+python3 scripts/dev-loop/build-review-packet-provenance.py \
+  --repo-root "$REPO_ROOT" \
+  --packet "$PACKET_TMP" \
+  --repository "TruPryce/property-tax-data-platform" \
+  > "$PACKET_PROVENANCE_TMP"
+PACKET_PATH="$REVIEWS_ROOT/review-packet.md"
+PACKET_PROVENANCE_PATH="$REVIEWS_ROOT/review-packet.provenance.json"
+mv "$PACKET_TMP" "$PACKET_PATH"
+mv "$PACKET_PROVENANCE_TMP" "$PACKET_PROVENANCE_PATH"
 
 if [[ "$RUN_CODEX_REVIEW" != "1" ]]; then
   info "RUN_CODEX_REVIEW=$RUN_CODEX_REVIEW: skipping paid Codex review"
   info "Review packet: $REVIEWS_ROOT/review-packet.md"
+  info "Packet provenance: $REVIEWS_ROOT/review-packet.provenance.json"
   exit 0
 fi
 
 BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 
-BASE_SHA="$(git -C "$REPO_ROOT" rev-parse "$BASE^{commit}")"
-HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+BASE_SHA="$(jq -r '.base_sha' "$PACKET_PROVENANCE_PATH")"
+HEAD_SHA="$(jq -r '.head_sha' "$PACKET_PROVENANCE_PATH")"
 ACTOR="$(id -un 2>/dev/null || printf 'local-operator')"
 COUNTYFORGE_PROVIDER="${COUNTYFORGE_PROVIDER:-${CODEX_PROVIDER:-sakana}}"
 COUNTYFORGE_REASONING_EFFORT="${COUNTYFORGE_REASONING_EFFORT:-${CODEX_REASONING_EFFORT:-xhigh}}"
@@ -84,7 +92,8 @@ fi
 
 REQUEST_ARGS=(
   --repo-root "$REPO_ROOT"
-  --packet "$PACKET_SOURCE"
+  --packet "$PACKET_PATH"
+  --packet-provenance "$PACKET_PROVENANCE_PATH"
   --run-id "$RUN_ID"
   --base-sha "$BASE_SHA"
   --head-sha "$HEAD_SHA"

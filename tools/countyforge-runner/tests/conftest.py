@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
+import hashlib
+import json
+import shutil
+import subprocess
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -53,26 +57,83 @@ MODE_FACTS: dict[str, dict[str, Any]] = {
 }
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @pytest.fixture
-def request_factory(tmp_path: Path) -> Callable[[str], JsonObject]:
-    packet = tmp_path / "packet.md"
-    packet.write_text("# deterministic packet\n", encoding="utf-8")
+def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
+    repo_root = Path.cwd().resolve(strict=True)
+    fixture_root = repo_root / ".ai" / "reviews" / "test-fixtures" / tmp_path.name
+    fixture_root.mkdir(parents=True)
+    packet = fixture_root / "packet.md"
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    packet.write_text(
+        "<!-- countyforge-review-packet-metadata-v1 "
+        + json.dumps(
+            {
+                "base_sha": head_sha,
+                "builder_id": "repository-review-packet",
+                "builder_version": 1,
+                "contract_version": 1,
+                "head_sha": head_sha,
+                "repository_full_name": "TruPryce/property-tax-data-platform",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + " -->\n# deterministic packet\n",
+        encoding="utf-8",
+    )
+    provenance = fixture_root / "packet.provenance.json"
+    provenance.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "builder_id": "repository-review-packet",
+                "builder_version": 1,
+                "repository_full_name": "TruPryce/property-tax-data-platform",
+                "base_sha": head_sha,
+                "head_sha": head_sha,
+                "packet_sha256": _sha256(packet),
+                "packet_bytes": packet.stat().st_size,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     def build(mode: str = "review") -> JsonObject:
         facts = MODE_FACTS[mode]
         input_facts: JsonObject = {}
         if mode == "review":
-            input_facts["packet_path"] = str(packet)
+            input_facts = {
+                "packet_path": str(packet),
+                "packet_sha256": _sha256(packet),
+                "packet_provenance_path": str(provenance),
+                "packet_provenance_sha256": _sha256(provenance),
+            }
         if mode == "fix":
-            input_facts = {"selected_finding_ids": ["finding-1"], "expected_head_sha": "b" * 40}
+            input_facts = {
+                "selected_finding_ids": ["finding-1"],
+                "expected_head_sha": head_sha,
+            }
         return {
             "contract_version": 1,
             "run_id": f"fixture-{mode}",
             "trigger": {"type": "manual", "actor": {"id": "fixture-actor"}},
             "repository": {
                 "full_name": "TruPryce/property-tax-data-platform",
-                "base_sha": "a" * 40,
-                "head_sha": "b" * 40,
+                "base_sha": head_sha,
+                "head_sha": head_sha,
             },
             "display_metadata": {"branch": "feature/kernel"},
             "openspec_change": "build-mode-aware-runner-kernel",
@@ -87,4 +148,5 @@ def request_factory(tmp_path: Path) -> Callable[[str], JsonObject]:
             "requested_artifacts": ["countyforge-run-summary.json"],
         }
 
-    return build
+    yield build
+    shutil.rmtree(fixture_root)

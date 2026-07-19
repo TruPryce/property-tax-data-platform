@@ -15,6 +15,8 @@
   "prompt": {"id": "countyforge-implement", "version": 1, "path": ".ai/prompts/countyforge-implement.v1.md"},
   "output_schema": "countyforge-implementation-result.schema.json",
   "allowed_artifacts": ["countyforge-implementation-result.json", "countyforge-request.provenance.json", "countyforge-profile.snapshot.json", "countyforge-run-event.ndjson", "countyforge-run-summary.json", "countyforge-run-metrics.prom"],
+  "input_policy": {"approved_roots": [".ai/contexts"], "resolve_symlinks": true, "require_regular_files": true, "packet_provenance_schema": null},
+  "repository_policy": {"expected_full_name": "TruPryce/property-tax-data-platform", "remote_name": "origin", "verify_head": true, "base_policy": "ancestor_of_head"},
   "budgets": {"defaults": {"wall_clock_seconds": 3600, "attempts": 1, "max_output_bytes": 1048576, "max_input_bytes": 10000000, "max_tokens": null, "max_cost_usd": null}, "ceilings": {"wall_clock_seconds": 7200, "attempts": 2, "max_output_bytes": 4194304, "max_input_bytes": 20000000, "max_tokens": 2000000, "max_cost_usd": 200.0}},
   "filesystem_mounts": [{"source": "repository", "target": "/workspace", "access": "read_write"}, {"source": "claimed_output_directory", "target": "/out", "access": "read_write"}],
   "repository_access": "workspace_write",

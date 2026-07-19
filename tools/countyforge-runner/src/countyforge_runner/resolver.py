@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from countyforge_runner.contracts import (
     JsonObject,
@@ -16,6 +21,9 @@ from countyforge_runner.contracts import (
 )
 from countyforge_runner.errors import KernelError
 from countyforge_runner.paths import find_repo_root
+
+PACKET_METADATA_PREFIX = "<!-- countyforge-review-packet-metadata-v1 "
+PACKET_METADATA_SUFFIX = " -->"
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
@@ -28,6 +36,88 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     return parts
 
 
+def _git_environment() -> dict[str, str]:
+    """Return only non-secret host values needed by read-only Git checks."""
+
+    allowed = (
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "SYSTEMROOT",
+    )
+    environment = {name: os.environ[name] for name in allowed if name in os.environ}
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    return environment
+
+
+def _github_repository_name(remote_url: str) -> str | None:
+    """Normalize one GitHub SSH/HTTPS origin without exposing its raw value."""
+
+    host: str | None
+    path: str
+    if remote_url.startswith("git@github.com:"):
+        host = "github.com"
+        path = remote_url.removeprefix("git@github.com:")
+    else:
+        parsed = urlparse(remote_url)
+        host = parsed.hostname
+        path = parsed.path
+    if host is None or host.casefold() != "github.com":
+        return None
+    normalized = path.strip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    if len(normalized.split("/")) != 2:
+        return None
+    return normalized
+
+
+def _packet_metadata(path: Path) -> JsonObject:
+    """Load the fixed machine-readable binding from the first packet line."""
+
+    try:
+        with path.open(encoding="utf-8") as handle:
+            first_line = handle.readline().rstrip("\n")
+    except (OSError, UnicodeError):
+        raise KernelError(
+            "packet_provenance_mismatch",
+            "Review packet provenance is unavailable.",
+        ) from None
+    if not first_line.startswith(PACKET_METADATA_PREFIX) or not first_line.endswith(
+        PACKET_METADATA_SUFFIX
+    ):
+        raise KernelError(
+            "packet_provenance_mismatch",
+            "Review packet provenance does not agree with the immutable request.",
+        )
+    encoded = first_line[len(PACKET_METADATA_PREFIX) : -len(PACKET_METADATA_SUFFIX)]
+    try:
+        document: Any = json.loads(encoded)
+    except json.JSONDecodeError:
+        raise KernelError(
+            "packet_provenance_mismatch",
+            "Review packet provenance does not agree with the immutable request.",
+        ) from None
+    expected_keys = {
+        "contract_version",
+        "builder_id",
+        "builder_version",
+        "repository_full_name",
+        "base_sha",
+        "head_sha",
+    }
+    if not isinstance(document, dict) or set(document) != expected_keys:
+        raise KernelError(
+            "packet_provenance_mismatch",
+            "Review packet provenance does not agree with the immutable request.",
+        )
+    return document
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedRun:
     """An immutable, fully validated execution resolution."""
@@ -37,6 +127,7 @@ class ResolvedRun:
     provider: JsonObject | None
     model: JsonObject | None
     effective_budgets: JsonObject
+    canonical_input_paths: dict[str, str]
     run_id: str
     profile_sha256: str
     prompt_sha256: str
@@ -53,6 +144,8 @@ class ResolvedRun:
             "model_tools": self.profile["model_tools"],
             "deterministic_commands": self.profile["deterministic_commands"],
             "network": self.profile["network"],
+            "input_policy": self.profile["input_policy"],
+            "repository_policy": self.profile["repository_policy"],
             "credential_names": self.profile["credential_names"],
             "environment_allowlist": self.profile["environment_allowlist"],
             "container": self.profile["container"],
@@ -199,6 +292,20 @@ class Kernel:
                         "invalid_profile_image",
                         "An executable profile lacks a provider-specific image.",
                     )
+            provenance_schema = profile["input_policy"]["packet_provenance_schema"]
+            if (
+                provenance_schema is not None
+                and not (self.schema_root / str(provenance_schema)).is_file()
+            ):
+                raise KernelError(
+                    "contract_file_missing",
+                    "A profile packet-provenance contract is unavailable.",
+                )
+            if profile["mode"] == "review" and provenance_schema is None:
+                raise KernelError(
+                    "invalid_profile_input_policy",
+                    "The review profile lacks packet provenance policy.",
+                )
 
     def list_profiles(self) -> list[JsonObject]:
         """Return stable profile summaries ordered by mode and identity."""
@@ -266,10 +373,13 @@ class Kernel:
                 "artifact_not_declared", "A requested artifact is not declared by the profile."
             )
 
+        canonical_inputs = self._resolve_inputs(request, profile)
+        self._validate_repository_binding(request, profile)
+        self._validate_packet_binding(request, profile, canonical_inputs)
         provider, model = self._resolve_provider(request, profile)
         effective_budgets = self._resolve_budgets(request, profile)
         self._validate_mode_facts(request)
-        self._validate_input_budget(request, effective_budgets)
+        self._validate_input_budget(canonical_inputs, effective_budgets)
 
         if "run_id" in request:
             run_id = str(request["run_id"])
@@ -284,6 +394,7 @@ class Kernel:
             provider=provider,
             model=model,
             effective_budgets=effective_budgets,
+            canonical_input_paths={key: str(path) for key, path in canonical_inputs.items()},
             run_id=run_id,
             profile_sha256=document_sha256(profile),
             prompt_sha256=file_sha256(prompt_path),
@@ -369,24 +480,190 @@ class Kernel:
                 "Fix expected head SHA does not match the immutable request head.",
             )
 
-    def _validate_input_budget(self, request: JsonObject, budgets: JsonObject) -> None:
-        candidates = [
-            request["input"].get("packet_path"),
-            request["input"].get("context_manifest_path"),
-        ]
-        total = 0
-        for raw_path in candidates:
-            if raw_path is None:
-                continue
-            path = Path(str(raw_path))
-            if not path.is_absolute():
-                path = self.repo_root / path
+    def _resolve_inputs(self, request: JsonObject, profile: JsonObject) -> dict[str, Path]:
+        path_keys = ("packet_path", "packet_provenance_path", "context_manifest_path")
+        requested = {key: request["input"][key] for key in path_keys if key in request["input"]}
+        if not requested:
+            return {}
+
+        try:
+            repository_root = self.repo_root.resolve(strict=True)
+        except OSError:
+            raise KernelError(
+                "repository_unavailable", "The repository root is unavailable."
+            ) from None
+        approved_roots: list[Path] = []
+        for declared_root in profile["input_policy"]["approved_roots"]:
             try:
-                total += path.stat().st_size
+                root = (repository_root / str(declared_root)).resolve(strict=True)
             except OSError:
+                raise KernelError(
+                    "approved_input_root_unavailable",
+                    "A profile-approved input root is unavailable.",
+                ) from None
+            if not root.is_dir() or not root.is_relative_to(repository_root):
+                raise KernelError(
+                    "invalid_profile_input_root",
+                    "A profile-approved input root is invalid.",
+                )
+            approved_roots.append(root)
+
+        canonical: dict[str, Path] = {}
+        for key, raw_value in requested.items():
+            raw_path = Path(str(raw_value))
+            if ".." in raw_path.parts:
+                raise KernelError(
+                    "input_path_not_approved",
+                    "A declared input path is outside the profile-approved boundary.",
+                )
+            candidate = raw_path if raw_path.is_absolute() else repository_root / raw_path
+            try:
+                path = candidate.resolve(strict=True)
+                mode = path.stat().st_mode
+            except (OSError, RuntimeError):
                 raise KernelError(
                     "input_not_found", "A declared input file is unavailable."
                 ) from None
+            if not any(path.is_relative_to(root) for root in approved_roots):
+                raise KernelError(
+                    "input_path_not_approved",
+                    "A declared input path is outside the profile-approved boundary.",
+                )
+            if not stat.S_ISREG(mode):
+                raise KernelError("input_not_regular", "A declared input must be a regular file.")
+            canonical[key] = path
+        return canonical
+
+    def _run_git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - fixed git executable and validated SHA arguments
+            ["git", *arguments],
+            cwd=self.repo_root,
+            env=_git_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _validate_repository_binding(self, request: JsonObject, profile: JsonObject) -> None:
+        policy = profile["repository_policy"]
+        requested_repository = str(request["repository"]["full_name"])
+        expected_repository = str(policy["expected_full_name"])
+        if requested_repository.casefold() != expected_repository.casefold():
+            raise KernelError(
+                "repository_identity_mismatch",
+                "Requested repository identity does not match the profile policy.",
+            )
+
+        remote = self._run_git("remote", "get-url", str(policy["remote_name"]))
+        actual_repository = (
+            _github_repository_name(remote.stdout.strip()) if remote.returncode == 0 else None
+        )
+        if (
+            actual_repository is None
+            or actual_repository.casefold() != expected_repository.casefold()
+        ):
+            raise KernelError(
+                "repository_identity_mismatch",
+                "Configured repository identity does not match the profile policy.",
+            )
+
+        head = self._run_git("rev-parse", "--verify", "HEAD^{commit}")
+        actual_head = head.stdout.strip() if head.returncode == 0 else ""
+        requested_head = str(request["repository"]["head_sha"])
+        if actual_head != requested_head:
+            raise KernelError(
+                "repository_head_mismatch",
+                "Requested head SHA does not match the checked-out HEAD.",
+            )
+
+        requested_base = str(request["repository"]["base_sha"])
+        base = self._run_git("cat-file", "-e", f"{requested_base}^{{commit}}")
+        if base.returncode != 0:
+            raise KernelError(
+                "repository_base_not_found",
+                "Requested base SHA is not an available commit.",
+            )
+        ancestor = self._run_git("merge-base", "--is-ancestor", requested_base, requested_head)
+        if ancestor.returncode != 0:
+            raise KernelError(
+                "repository_base_not_ancestor",
+                "Requested base SHA is not an ancestor of the checked-out head.",
+            )
+
+    def _validate_packet_binding(
+        self,
+        request: JsonObject,
+        profile: JsonObject,
+        canonical_inputs: dict[str, Path],
+    ) -> None:
+        if request["mode"] != "review":
+            return
+        packet = canonical_inputs["packet_path"]
+        provenance_path = canonical_inputs["packet_provenance_path"]
+        if file_sha256(packet) != request["input"]["packet_sha256"]:
+            raise KernelError(
+                "packet_hash_mismatch", "Review packet hash does not match the request."
+            )
+        if file_sha256(provenance_path) != request["input"]["packet_provenance_sha256"]:
+            raise KernelError(
+                "packet_provenance_hash_mismatch",
+                "Packet provenance hash does not match the request.",
+            )
+        provenance = load_json_object(provenance_path, kind="review packet provenance")
+        schema_name = profile["input_policy"]["packet_provenance_schema"]
+        if schema_name is None:
+            raise KernelError(
+                "invalid_profile_input_policy",
+                "The review profile lacks packet provenance policy.",
+            )
+        validate_document(
+            provenance,
+            self._load_schema(str(schema_name)),
+            kind="review packet provenance",
+        )
+        repository_binding = {
+            "repository_full_name": request["repository"]["full_name"],
+            "base_sha": request["repository"]["base_sha"],
+            "head_sha": request["repository"]["head_sha"],
+        }
+        packet_metadata = _packet_metadata(packet)
+        if packet_metadata != {
+            "contract_version": 1,
+            "builder_id": "repository-review-packet",
+            "builder_version": 1,
+            **repository_binding,
+        }:
+            raise KernelError(
+                "packet_provenance_mismatch",
+                "Packet provenance does not agree with the immutable request.",
+            )
+        expected = {
+            **repository_binding,
+            "packet_sha256": request["input"]["packet_sha256"],
+            "packet_bytes": packet.stat().st_size,
+        }
+        if any(provenance[field] != value for field, value in expected.items()):
+            raise KernelError(
+                "packet_provenance_mismatch",
+                "Packet provenance does not agree with the immutable request.",
+            )
+
+    def revalidate_execution_context(self, resolved: ResolvedRun) -> None:
+        """Recheck mutable host facts immediately before credential selection."""
+
+        canonical_inputs = self._resolve_inputs(resolved.request, resolved.profile)
+        current = {key: str(path) for key, path in canonical_inputs.items()}
+        if current != resolved.canonical_input_paths:
+            raise KernelError(
+                "input_binding_changed",
+                "A declared input binding changed after request resolution.",
+            )
+        self._validate_repository_binding(resolved.request, resolved.profile)
+        self._validate_packet_binding(resolved.request, resolved.profile, canonical_inputs)
+
+    @staticmethod
+    def _validate_input_budget(inputs: dict[str, Path], budgets: JsonObject) -> None:
+        total = sum(path.stat().st_size for path in inputs.values())
         if total > int(budgets["max_input_bytes"]):
             raise KernelError(
                 "input_budget_exceeded", "Input context exceeds the effective byte budget."

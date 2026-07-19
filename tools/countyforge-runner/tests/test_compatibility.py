@@ -82,11 +82,39 @@ def test_legacy_prepr_routes_through_kernel() -> None:
     assert ".ai/codex/02-run-prepr-review-docker.sh" not in script
 
 
+def test_packet_provenance_builder_binds_packet_to_checkout(
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    fixture_request = request_factory("review")
+    packet = Path(str(fixture_request["input"]["packet_path"]))
+    result = subprocess.run(
+        [
+            "python3",
+            "scripts/dev-loop/build-review-packet-provenance.py",
+            "--repo-root",
+            str(Path.cwd()),
+            "--packet",
+            str(packet),
+            "--repository",
+            "TruPryce/property-tax-data-platform",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    provenance = json.loads(result.stdout)
+    assert provenance["base_sha"] == fixture_request["repository"]["base_sha"]
+    assert provenance["head_sha"] == fixture_request["repository"]["head_sha"]
+    assert provenance["packet_sha256"] == fixture_request["input"]["packet_sha256"]
+
+
 def test_request_builder_produces_resolvable_review(
     tmp_path: Path,
     request_factory: Callable[[str], JsonObject],
 ) -> None:
-    packet = Path(str(request_factory("review")["input"]["packet_path"]))
+    fixture_request = request_factory("review")
+    packet = Path(str(fixture_request["input"]["packet_path"]))
+    packet_provenance = Path(str(fixture_request["input"]["packet_provenance_path"]))
     result = subprocess.run(
         [
             "python3",
@@ -95,12 +123,14 @@ def test_request_builder_produces_resolvable_review(
             str(Path.cwd()),
             "--packet",
             str(packet),
+            "--packet-provenance",
+            str(packet_provenance),
             "--run-id",
             "builder-fixture",
             "--base-sha",
-            "a" * 40,
+            str(fixture_request["repository"]["base_sha"]),
             "--head-sha",
-            "b" * 40,
+            str(fixture_request["repository"]["head_sha"]),
             "--branch",
             "feature/kernel",
             "--actor",

@@ -59,9 +59,9 @@ resolve_base() {
 BASE="$(resolve_base "$REQUESTED_BASE")"
 MERGE_BASE="$(git merge-base "$BASE" HEAD)"
 BRANCH="$(git branch --show-current 2>/dev/null || echo 'unknown')"
-HEAD_SHA="$(git rev-parse --short HEAD)"
-BASE_SHA="$(git rev-parse --short "$BASE")"
-MERGE_BASE_SHA="$(git rev-parse --short "$MERGE_BASE")"
+HEAD_SHA="$(git rev-parse HEAD)"
+BASE_SHA="$(git rev-parse "$BASE^{commit}")"
+MERGE_BASE_SHA="$(git rev-parse "$MERGE_BASE^{commit}")"
 
 redact_stream() {
   if [[ "$REDACT_REVIEW_PACKET" == "0" ]]; then
@@ -442,6 +442,7 @@ emit_untracked_files() {
 }
 
 cat <<EOF
+<!-- countyforge-review-packet-metadata-v1 {"base_sha":"$MERGE_BASE_SHA","builder_id":"repository-review-packet","builder_version":1,"contract_version":1,"head_sha":"$HEAD_SHA","repository_full_name":"TruPryce/property-tax-data-platform"} -->
 # Pre-PR Review Packet
 
 ## Metadata

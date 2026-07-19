@@ -23,6 +23,8 @@
     "countyforge-run-event.ndjson", "countyforge-run-summary.json",
     "countyforge-run-metrics.prom"
   ],
+  "input_policy": {"approved_roots": [".ai/reviews"], "resolve_symlinks": true, "require_regular_files": true, "packet_provenance_schema": "countyforge-review-packet-provenance.schema.json"},
+  "repository_policy": {"expected_full_name": "TruPryce/property-tax-data-platform", "remote_name": "origin", "verify_head": true, "base_policy": "ancestor_of_head"},
   "budgets": {
     "defaults": {"wall_clock_seconds": 1800, "attempts": 1, "max_output_bytes": 262144, "max_input_bytes": 3000000, "max_tokens": null, "max_cost_usd": null},
     "ceilings": {"wall_clock_seconds": 3600, "attempts": 1, "max_output_bytes": 1048576, "max_input_bytes": 3000000, "max_tokens": 1000000, "max_cost_usd": 100.0}

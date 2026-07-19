@@ -37,7 +37,7 @@ countyforge-runner list-profiles --json
 countyforge-runner explain --request <path> --json
 ```
 
-`validate-request`, `resolve-profile`, and `explain` validate schema, profile identity/version, mode, prompt, provider/model, Codex version, reasoning effort, budgets, input bytes, output schema, and requested artifacts. They never read provider credentials.
+`validate-request`, `resolve-profile`, and `explain` validate schema, profile identity/version, mode, prompt, provider/model, Codex version, reasoning effort, budgets, canonical input files, repository identity and commits, packet provenance, output schema, and requested artifacts. They never read provider credentials.
 
 ## Versioned Contracts
 
@@ -46,6 +46,7 @@ countyforge-runner explain --request <path> --json
 | Run request | [countyforge-run-request.schema.json](../../.ai/schemas/countyforge-run-request.schema.json) |
 | Capability profile | [countyforge-profile.schema.json](../../.ai/schemas/countyforge-profile.schema.json) |
 | Provider/model catalog | [countyforge-provider-catalog.schema.json](../../.ai/schemas/countyforge-provider-catalog.schema.json) |
+| Review packet provenance | [countyforge-review-packet-provenance.schema.json](../../.ai/schemas/countyforge-review-packet-provenance.schema.json) |
 | Generic event | [countyforge-run-event.schema.json](../../.ai/schemas/countyforge-run-event.schema.json) |
 | Generic summary | [countyforge-run-summary.schema.json](../../.ai/schemas/countyforge-run-summary.schema.json) |
 | Review result | [codex-prepr-review.schema.json](../../.ai/schemas/codex-prepr-review.schema.json) |
@@ -55,6 +56,8 @@ countyforge-runner explain --request <path> --json
 | Validation result | [countyforge-validation-result.schema.json](../../.ai/schemas/countyforge-validation-result.schema.json) |
 
 Request contract version 1 separates immutable trigger/repository facts from optional display metadata. Base and head refs are full lowercase 40-character Git SHAs. Unknown properties fail. A request cannot carry tools, mounts, network destinations, credentials, writable paths, or implementation state.
+
+Review requests bind both `.ai/reviews/review-packet.md` and `.ai/reviews/review-packet.provenance.json` by SHA-256. A machine-readable first line binds the packet itself to the repository, merge-base, HEAD, and builder version; the sidecar records the same facts plus the exact packet hash and size.
 
 Fix requests require selected finding IDs and an expected head SHA matching the immutable repository head. Validate requests require no provider and reasoning effort `none`.
 
@@ -121,6 +124,8 @@ Historical PR #1 run directories do not need generic artifacts and remain valid.
 ## Review Trust Boundary
 
 `review.packet-only.v1` retains no repository mount, no workspace mutation, no model shell or unified execution, no browser, no apps/MCP, no image generation, and no web search. Its only mounts are `.ai/schemas/` read-only and the claimed run directory read-write. Docker uses a read-only root filesystem, a non-root user, dropped capabilities, no privilege escalation, and bounded tmpfs paths. Only the selected model-provider request path is available.
+
+Ordinary review inputs must be regular files whose canonical paths remain beneath the profile-declared `.ai/reviews/` root. The kernel resolves symlinks, rejects `..` and outside-root paths, verifies the configured GitHub origin, requires current `HEAD` to match the request, verifies that the merge-base exists and is an ancestor, and cross-checks the packet's embedded metadata, request hashes, and strict sidecar. It repeats these checks immediately before selected provider or broker values are read. The legacy direct smoke path is the only explicit operator-only nonstandard-input path and is not reachable through a run request.
 
 The kernel preserves declared host-only Docker client, rootless-session, SSH transport, temporary-directory, and locale variables when it launches the adapter. These values support local/remote Docker connectivity but are not forwarded by `docker run`; the container receives only its fixed home variables and the one selected provider credential.
 

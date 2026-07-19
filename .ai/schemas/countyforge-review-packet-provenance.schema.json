@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-review-packet-provenance.schema.json",
+  "title": "CountyForge Review Packet Provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "builder_id", "builder_version", "repository_full_name",
+    "base_sha", "head_sha", "packet_sha256", "packet_bytes"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "builder_id": {"const": "repository-review-packet"},
+    "builder_version": {"const": 1},
+    "repository_full_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "packet_bytes": {"type": "integer", "minimum": 1}
+  }
+}

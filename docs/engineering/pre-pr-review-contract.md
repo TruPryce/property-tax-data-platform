@@ -7,8 +7,8 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 ## Review Pipeline
 
 1. Deterministic gates run first and must pass: `make check` (lint, typecheck, test, docs, spec, secrets, artifacts).
-2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff against the base ref.
-3. `make prepr` performs the complete loop: it reruns the deterministic gates, freezes one private packet, builds a versioned CountyForge request, and invokes `review.packet-only.v1` through the `countyforge-runner` kernel.
+2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md` plus `.ai/reviews/review-packet.provenance.json`, embedding machine-readable repository/merge-base/HEAD metadata before this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff while binding the exact packet bytes to those immutable facts.
+3. `make prepr` performs the complete loop: it reruns the deterministic gates, atomically refreshes the canonical packet and strict provenance sidecar, builds a versioned CountyForge request containing both hashes, and invokes `review.packet-only.v1` through the `countyforge-runner` kernel.
 4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<safe-branch>/<run-id>/`.
 5. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
 

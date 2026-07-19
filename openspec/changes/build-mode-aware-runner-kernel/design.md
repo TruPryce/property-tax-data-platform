@@ -32,7 +32,7 @@ Putting the package under `libs/` was rejected because it would imply reusable p
 
 ### 2. Validate and resolve in a fixed fail-closed order
 
-The kernel performs: JSON parsing, request-schema validation, contract-version gate, profile lookup/version match, mode/profile match, profile-schema validation, enabled/implementation-state check, provider/model lookup, provider/profile compatibility, Codex-version gate, effort compatibility, output/artifact allowlists, and budget-ceiling checks. Only an eligible implemented profile reaches an executor.
+The kernel performs: JSON parsing, request-schema validation, contract-version gate, profile lookup/version match, mode/profile match, profile-schema validation, enabled/implementation-state check, provider/model lookup, provider/profile compatibility, Codex-version gate, effort compatibility, output/artifact allowlists, budget-ceiling checks, canonical input-root enforcement, repository identity/commit verification, and packet-provenance agreement. Only an eligible implemented profile reaches an executor.
 
 Unknown request fields are invalid. A request has no fields for arbitrary tools, mounts, network destinations, or credentials, so attempts to add them fail schema validation. No rejection path loads provider credential values. Unimplemented profiles write sanitized generic provenance and return `profile_not_implemented` before provider credential selection, mounts, Docker, or deterministic commands.
 
@@ -94,6 +94,14 @@ Sakana and OpenAI live-provider smoke tests remain separately and explicitly opt
 
 For the executable review profile, contract tests compare the profile declaration, build-script configuration, runner flags, mounts, credential injection, tool-disable list, schema, and image label. A CLI/image change that adds an undeclared tool or mount fails validation. Future write-capable profiles require their own image/configuration bundle and executor in later issues.
 
+### 13. Bind executable inputs to an approved repository and packet snapshot
+
+Profiles declare repository-relative approved input roots and repository identity/base policies. The executable review profile accepts its packet and packet-provenance sidecar only beneath `.ai/reviews/`. The kernel resolves each path and every symlink before checking containment, requires regular files, and records only canonical file facts rather than accepting a caller-selected host path. Ordinary run requests have no override for this boundary; the direct adversarial adapter smoke remains the explicit host/operator-only nonstandard-input path.
+
+Review packet provenance consists of a machine-readable metadata line embedded in the packet plus a strict sidecar containing the repository full name, exact merge-base SHA, exact checked-out HEAD SHA, packet byte count, packet SHA-256, and deterministic builder identity. The request includes the packet and sidecar hashes. Before an executable review becomes eligible—and again immediately before credential selection—the kernel verifies the configured origin repository, current HEAD, existence and ancestry of the base commit, approved-root containment, regular-file posture, packet/sidecar hashes, and cross-agreement among the request, embedded metadata, and sidecar. This preserves dirty-worktree pre-PR review: HEAD identifies the checkout commit while the packet hash identifies the exact frozen review bytes.
+
+Trusting request SHA syntax alone was rejected because it allows provenance claims unrelated to the checkout. Trusting an arbitrary sidecar alone was rejected because the request would not bind the sidecar or packet bytes. Requiring a clean worktree was rejected because the repository-native pre-PR loop intentionally reviews uncommitted changes.
+
 ## Risks / Trade-offs
 
 - [Generic and legacy evidence can drift] -> Derive generic review evidence from the resolved request/profile and legacy result, then test cross-artifact identity and outcome agreement.
@@ -102,6 +110,7 @@ For the executable review profile, contract tests compare the profile declaratio
 - [Timeout termination can leave Docker cleanup work] -> Keep the adapter's `--rm` container behavior and unique name; report timeout distinctly and never claim success.
 - [Credential broker compatibility broadens host environment handling] -> Keep broker resolution inside the existing adapter, declare broker token names explicitly, prohibit them from the container, and test output artifacts against sentinel values.
 - [Adding generic artifacts changes the contents of a review run directory] -> Document them as additive migration artifacts and update the adversarial allowlist without changing or removing v1 filenames.
+- [A request can name unrelated host bytes or repository facts] -> Resolve profile-approved inputs, bind packet and sidecar hashes in the request, verify origin/HEAD/base ancestry and provenance agreement twice before credential selection, and cover every mismatch with no-cost tests.
 
 ## Migration Plan
 

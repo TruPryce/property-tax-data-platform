@@ -70,9 +70,16 @@ codex-image-openai:
 review-packet:
 	@mkdir -p .ai/reviews
 	@packet_tmp="$$(mktemp .ai/reviews/.review-packet.XXXXXX)"; \
-		trap 'rm -f "$$packet_tmp"' EXIT; \
+		provenance_tmp="$$(mktemp .ai/reviews/.review-packet-provenance.XXXXXX)"; \
+		trap 'rm -f "$$packet_tmp" "$$provenance_tmp"' EXIT; \
 		./scripts/dev-loop/build-review-packet.sh "$${BASE:-origin/main}" > "$$packet_tmp"; \
+		python3 scripts/dev-loop/build-review-packet-provenance.py \
+			--repo-root "$$PWD" \
+			--packet "$$packet_tmp" \
+			--repository TruPryce/property-tax-data-platform \
+			> "$$provenance_tmp"; \
 		mv "$$packet_tmp" .ai/reviews/review-packet.md; \
+		mv "$$provenance_tmp" .ai/reviews/review-packet.provenance.json; \
 		trap - EXIT
 
 prepr:
@@ -115,8 +122,8 @@ countyforge-profile-tests:
 		tools/countyforge-runner/tests/test_compatibility.py -q
 
 countyforge-runner-check:
-	$(UV) run ruff format --check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py
-	$(UV) run ruff check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py
+	$(UV) run ruff format --check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
+	$(UV) run ruff check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
 	$(UV) run mypy -p countyforge_runner
 	$(UV) run pytest tools/countyforge-runner/tests -q
 	$(UV) run --package countyforge-runner countyforge-runner list-profiles --json >/dev/null

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--packet", type=Path, required=True)
+    parser.add_argument("--packet-provenance", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--head-sha", required=True)
@@ -43,6 +45,16 @@ def main() -> int:
     )
     if model is None:
         raise SystemExit("selected provider/model reference is not in the CountyForge catalog")
+    packet = args.packet.resolve(strict=True)
+    packet_provenance = args.packet_provenance.resolve(strict=True)
+
+    def sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
     request = {
         "contract_version": 1,
         "run_id": args.run_id,
@@ -64,7 +76,12 @@ def main() -> int:
         },
         "reasoning_effort": args.reasoning_effort,
         "budget_overrides": {},
-        "input": {"packet_path": str(args.packet.resolve())},
+        "input": {
+            "packet_path": str(packet),
+            "packet_sha256": sha256(packet),
+            "packet_provenance_path": str(packet_provenance),
+            "packet_provenance_sha256": sha256(packet_provenance),
+        },
         "expected_output_schema": profile["output_schema"],
         "requested_artifacts": [
             "codex-prepr-review.md",

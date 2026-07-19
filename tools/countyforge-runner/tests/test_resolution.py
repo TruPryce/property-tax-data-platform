@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from countyforge_runner.contracts import JsonObject, document_sha256
@@ -17,6 +21,10 @@ def assert_error(kernel: Kernel, request: JsonObject, code: str) -> None:
     assert raised.value.code == code
 
 
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_valid_review_resolves(
     kernel: Kernel, request_factory: Callable[[str], JsonObject]
 ) -> None:
@@ -25,6 +33,149 @@ def test_valid_review_resolves(
     assert resolved.profile["repository_access"] == "none"
     assert resolved.model is not None
     assert resolved.model["configured_model_id"] == "fugu-ultra"
+
+
+def test_review_packet_outside_approved_root_fails(
+    tmp_path: Path,
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    outside_packet = tmp_path / "outside-packet.md"
+    outside_packet.write_text("outside approved input root\n", encoding="utf-8")
+    request = request_factory("review")
+    request["input"]["packet_path"] = str(outside_packet)
+    assert_error(kernel, request, "input_path_not_approved")
+
+
+def test_review_packet_parent_traversal_fails(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    request["input"]["packet_path"] = ".ai/reviews/../profiles/review.packet-only.v1.json"
+    assert_error(kernel, request, "input_path_not_approved")
+
+
+def test_review_packet_symlink_escape_fails(
+    tmp_path: Path,
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("review")
+    packet = Path(str(request["input"]["packet_path"]))
+    outside_packet = tmp_path / "symlink-target.md"
+    outside_packet.write_text("outside through symlink\n", encoding="utf-8")
+    escaped_packet = packet.parent / "escaped-packet.md"
+    escaped_packet.symlink_to(outside_packet)
+    request["input"]["packet_path"] = str(escaped_packet)
+    assert_error(kernel, request, "input_path_not_approved")
+
+
+def test_review_packet_must_be_regular_file(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    packet = Path(str(request["input"]["packet_path"]))
+    request["input"]["packet_path"] = str(packet.parent)
+    assert_error(kernel, request, "input_not_regular")
+
+
+def test_stale_head_sha_fails(kernel: Kernel, request_factory: Callable[[str], JsonObject]) -> None:
+    request = request_factory("review")
+    request["repository"]["head_sha"] = "0" * 40
+    assert_error(kernel, request, "repository_head_mismatch")
+
+
+def test_nonexistent_base_sha_fails(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    request["repository"]["base_sha"] = "0" * 40
+    assert_error(kernel, request, "repository_base_not_found")
+
+
+def test_wrong_requested_repository_identity_fails(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    request["repository"]["full_name"] = "example/other-repository"
+    assert_error(kernel, request, "repository_identity_mismatch")
+
+
+def test_wrong_origin_repository_identity_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("review")
+    original_run_git = kernel._run_git
+
+    def run_git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        if arguments == ("remote", "get-url", "origin"):
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                stdout="git@github.com:example/other-repository.git\n",
+                stderr="",
+            )
+        return original_run_git(*arguments)
+
+    monkeypatch.setattr(kernel, "_run_git", run_git)
+    assert_error(kernel, request, "repository_identity_mismatch")
+
+
+def test_packet_content_hash_mismatch_fails(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    packet = Path(str(request["input"]["packet_path"]))
+    packet.write_text("changed after request creation\n", encoding="utf-8")
+    assert_error(kernel, request, "packet_hash_mismatch")
+
+
+def test_packet_provenance_must_agree_with_request(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    provenance_path = Path(str(request["input"]["packet_provenance_path"]))
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["repository_full_name"] = "example/other-repository"
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    request["input"]["packet_provenance_sha256"] = file_sha256(provenance_path)
+    assert_error(kernel, request, "packet_provenance_mismatch")
+
+
+def test_embedded_packet_provenance_must_agree_with_request(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    request = request_factory("review")
+    packet = Path(str(request["input"]["packet_path"]))
+    lines = packet.read_text(encoding="utf-8").splitlines()
+    metadata = {
+        "base_sha": request["repository"]["base_sha"],
+        "builder_id": "repository-review-packet",
+        "builder_version": 1,
+        "contract_version": 1,
+        "head_sha": request["repository"]["head_sha"],
+        "repository_full_name": "example/other-repository",
+    }
+    lines[0] = (
+        "<!-- countyforge-review-packet-metadata-v1 "
+        + json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+        + " -->"
+    )
+    packet.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    request["input"]["packet_sha256"] = file_sha256(packet)
+    provenance_path = Path(str(request["input"]["packet_provenance_path"]))
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["packet_sha256"] = request["input"]["packet_sha256"]
+    provenance["packet_bytes"] = packet.stat().st_size
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    request["input"]["packet_provenance_sha256"] = file_sha256(provenance_path)
+    assert_error(kernel, request, "packet_provenance_mismatch")
 
 
 @pytest.mark.parametrize(

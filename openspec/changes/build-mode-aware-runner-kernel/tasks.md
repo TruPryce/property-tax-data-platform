@@ -59,3 +59,10 @@
 - [x] 8.2 Run the existing review profile through the new kernel without posture change and record whether paid provider smoke tests were run or intentionally skipped
 - [x] 8.3 Inspect tracked/untracked content for source records, owner PII, credentials, and generated run artifacts and address all BLOCKER/MUST_FIX review findings
 - [x] 8.4 Commit and push the scoped branch and open a draft PR referencing Issue #4, parent program #2, and OpenSpec change `build-mode-aware-runner-kernel`
+
+## 9. PR Review Trust-Boundary Remediation
+
+- [x] 9.1 Add strict profile input-root/repository policies plus packet-provenance and request hash contracts
+- [x] 9.2 Enforce canonical regular inputs, repository identity, actual HEAD, valid ancestor base, and packet/request/provenance agreement before credentials
+- [x] 9.3 Generate canonical packet provenance in `make prepr`, document the binding, and preserve the direct operator-only smoke path
+- [ ] 9.4 Add negative path/SHA/repository/provenance tests, rerun all deterministic gates, push, and resolve the two addressed PR threads

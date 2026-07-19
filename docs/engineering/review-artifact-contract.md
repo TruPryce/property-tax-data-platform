@@ -67,9 +67,12 @@ claimed do not create a summary.
 
 ## Packet Integrity
 
-`make prepr` generates one private packet, atomically refreshes
-`.ai/reviews/review-packet.md`, and passes the private packet to the runner. The runner immediately
-copies those bytes into the claimed run directory. All packet sizing, hashing, secret scanning, and
+`make prepr` generates one packet, atomically refreshes `.ai/reviews/review-packet.md` and its strict
+`review-packet.provenance.json` sidecar, and passes the canonical packet to the runner. The packet
+begins with machine-readable repository, merge-base, HEAD, and builder metadata. The request binds
+both file hashes; the kernel verifies approved-root containment, repository/commit identity, and
+agreement among that embedded metadata, the request, and the sidecar before execution. The runner immediately copies those bytes into the claimed
+run directory and rechecks the frozen hash. All packet sizing, hashing, secret scanning, and
 model stdin use that staged copy.
 
 The packet builder redacts high-confidence literal credential values while preserving dynamic
