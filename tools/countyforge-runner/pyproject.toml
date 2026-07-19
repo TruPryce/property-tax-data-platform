@@ -1,0 +1,19 @@
+[project]
+name = "countyforge-runner"
+version = "0.1.0"
+description = "Mode-aware execution kernel for CountyForge developer agents."
+license = "Apache-2.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "jsonschema>=4.23,<5",
+]
+
+[project.scripts]
+countyforge-runner = "countyforge_runner.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/countyforge_runner"]

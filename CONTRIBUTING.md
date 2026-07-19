@@ -55,6 +55,9 @@ make review-packet               # deterministic packet only; no model call
 make prepr-no-ai                 # checks plus packet; no model call
 make prepr                       # complete packet-only Docker review loop
 make runner-contract-tests       # free packet and observability fixtures
+make countyforge-runner-check    # free kernel, profile, provider, and compatibility suite
+make countyforge-profile-tests   # immutable profile and execution-boundary fixtures
+make countyforge-request-fixtures # request, budget, provider, and version fixtures
 make codex-observability-qa      # free fixture/latest-run export validation
 ```
 
@@ -64,7 +67,14 @@ after building the image and opting in explicitly:
 ```bash
 make codex-image
 RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke
+
+make codex-image-openai
+RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke-openai
 ```
+
+`make prepr` builds a versioned request and enters through `countyforge-runner`; the kernel then
+dispatches the unchanged packet-only Docker adapter. Select `COUNTYFORGE_PROVIDER=openai` only
+after building the OpenAI-specific review image. Both live smoke paths are paid and opt-in.
 
 ## Pull Requests
 
@@ -80,3 +90,4 @@ RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke
 - [Documentation hub](docs/README.md)
 - [OpenSpec workflow](openspec/README.md)
 - [Pre-PR review contract](docs/engineering/pre-pr-review-contract.md)
+- [CountyForge runner guide](docs/engineering/countyforge-runner-kernel.md)

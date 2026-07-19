@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-profile.schema.json",
+  "title": "CountyForge Immutable Capability Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "profile_id", "profile_version", "mode", "enabled",
+    "implementation_state", "executor", "permitted_providers", "permitted_model_refs",
+    "reasoning_efforts", "default_reasoning_effort", "maximum_reasoning_effort",
+    "minimum_codex_cli_version", "prompt", "output_schema", "allowed_artifacts",
+    "budgets", "filesystem_mounts", "repository_access", "writable_paths", "model_tools",
+    "deterministic_commands", "network", "credential_names", "host_credential_broker_names",
+    "environment_allowlist", "container", "expected_security_posture"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+\\.v[0-9]+$"},
+    "profile_version": {"type": "integer", "minimum": 1},
+    "mode": {"enum": ["review", "plan", "implement", "fix", "validate"]},
+    "enabled": {"type": "boolean"},
+    "implementation_state": {"enum": ["implemented", "not_implemented"]},
+    "executor": {"type": ["string", "null"], "maxLength": 256},
+    "permitted_providers": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["openai", "sakana"]}
+    },
+    "permitted_model_refs": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"}
+    },
+    "reasoning_efforts": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["none", "low", "medium", "high", "xhigh"]}
+    },
+    "default_reasoning_effort": {"enum": ["none", "low", "medium", "high", "xhigh"]},
+    "maximum_reasoning_effort": {"enum": ["none", "low", "medium", "high", "xhigh"]},
+    "minimum_codex_cli_version": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "prompt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "path"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+        "version": {"type": "integer", "minimum": 1},
+        "path": {"type": "string", "pattern": "^\\.ai/prompts/[A-Za-z0-9._-]+\\.md$"}
+      }
+    },
+    "output_schema": {"type": "string", "pattern": "^[A-Za-z0-9._-]+\\.schema\\.json$"},
+    "allowed_artifacts": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+    },
+    "budgets": {"$ref": "#/$defs/budgetPolicy"},
+    "filesystem_mounts": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source", "target", "access"],
+        "properties": {
+          "source": {"enum": ["schema_directory", "claimed_output_directory", "repository"]},
+          "target": {"type": "string", "pattern": "^/"},
+          "access": {"enum": ["read_only", "read_write"]}
+        }
+      }
+    },
+    "repository_access": {"enum": ["none", "read_only", "workspace_write", "targeted_write"]},
+    "writable_paths": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^/"}
+    },
+    "model_tools": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["shell_tool", "unified_exec"]}
+    },
+    "deterministic_commands": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "network": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy", "destinations"],
+      "properties": {
+        "policy": {"enum": ["disabled", "provider_only"]},
+        "destinations": {
+          "type": "array", "uniqueItems": true,
+          "items": {"const": "selected_provider_api"}
+        }
+      }
+    },
+    "credential_names": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["OPENAI_API_KEY", "SAKANA_API_KEY"]}
+    },
+    "host_credential_broker_names": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"]}
+    },
+    "environment_allowlist": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}
+    },
+    "container": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "availability", "configuration_bundle", "codex_cli_version"],
+      "properties": {
+        "image": {"type": ["string", "null"]},
+        "provider_images": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "openai": {"type": "string", "minLength": 1},
+            "sakana": {"type": "string", "minLength": 1}
+          }
+        },
+        "availability": {"enum": ["available", "not_built", "not_required"]},
+        "configuration_bundle": {"type": "string", "minLength": 1},
+        "codex_cli_version": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "expected_security_posture": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "read_only_rootfs", "non_root", "cap_drop_all", "no_new_privileges",
+        "repository_mounted", "model_shell", "browser", "apps_or_mcp",
+        "image_generation", "web_search", "production_credentials"
+      ],
+      "properties": {
+        "read_only_rootfs": {"type": "boolean"},
+        "non_root": {"type": "boolean"},
+        "cap_drop_all": {"type": "boolean"},
+        "no_new_privileges": {"type": "boolean"},
+        "repository_mounted": {"type": "boolean"},
+        "model_shell": {"type": "boolean"},
+        "browser": {"const": false},
+        "apps_or_mcp": {"const": false},
+        "image_generation": {"const": false},
+        "web_search": {"const": false},
+        "production_credentials": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "budgetValues": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "wall_clock_seconds", "attempts", "max_output_bytes", "max_input_bytes",
+        "max_tokens", "max_cost_usd"
+      ],
+      "properties": {
+        "wall_clock_seconds": {"type": "integer", "minimum": 1},
+        "attempts": {"type": "integer", "minimum": 1},
+        "max_output_bytes": {"type": "integer", "minimum": 1},
+        "max_input_bytes": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "max_cost_usd": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "budgetPolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["defaults", "ceilings"],
+      "properties": {
+        "defaults": {"$ref": "#/$defs/budgetValues"},
+        "ceilings": {"$ref": "#/$defs/budgetValues"}
+      }
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "contract_version": 1,
+  "providers": [
+    {
+      "id": "openai",
+      "credential_name": "OPENAI_API_KEY",
+      "request_path": "openai_responses"
+    },
+    {
+      "id": "sakana",
+      "credential_name": "SAKANA_API_KEY",
+      "request_path": "sakana_responses_compatible"
+    }
+  ],
+  "models": [
+    {
+      "logical_ref": "openai.gpt-5.6",
+      "provider": "openai",
+      "configured_model_id": "gpt-5.6",
+      "model_family": "gpt-5.6",
+      "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "minimum_codex_cli_version": "0.144.0",
+      "structured_output": true,
+      "expected_tool_capabilities": ["responses", "structured_output"],
+      "availability": "available",
+      "live_validation": "not_run"
+    },
+    {
+      "logical_ref": "sakana.fugu",
+      "provider": "sakana",
+      "configured_model_id": "fugu",
+      "model_family": "fugu",
+      "supported_reasoning_efforts": ["high", "xhigh"],
+      "minimum_codex_cli_version": "0.144.0",
+      "structured_output": true,
+      "expected_tool_capabilities": ["responses", "structured_output"],
+      "availability": "optional",
+      "live_validation": "validated"
+    },
+    {
+      "logical_ref": "sakana.fugu-ultra",
+      "provider": "sakana",
+      "configured_model_id": "fugu-ultra",
+      "model_family": "fugu",
+      "supported_reasoning_efforts": ["high", "xhigh"],
+      "minimum_codex_cli_version": "0.144.0",
+      "structured_output": true,
+      "expected_tool_capabilities": ["responses", "structured_output"],
+      "availability": "optional",
+      "live_validation": "validated"
+    }
+  ]
+}

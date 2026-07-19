@@ -25,6 +25,22 @@ Domain identities and semantics
 
 The active [technical design](../../openspec/changes/bootstrap-six-county-appraisal-platform/design.md) is authoritative while the foundation is being implemented.
 
+CountyForge is a separate repository developer-platform boundary, not part of the appraisal data
+flow:
+
+```text
+GitHub / local trigger facts
+          |
+          v
+CountyForge kernel ---> immutable profile + provider catalog
+          |
+          +-- review --> isolated packet-only adapter
+          |
+          +-- future modes --> fail closed until their owning epics
+```
+
+The kernel lives under `tools/` and does not alter the hexagonal dependency direction above.
+
 The first deployment is an independent Akamai Cloud runtime. Tailscale carries administrative access; consumers use the read-only `appraisal-api` or versioned S3 exports. The VPS and attached volume are replaceable: immutable source artifacts and PostgreSQL point-in-time recovery material live in Amazon S3, while Bitwarden holds the off-host recovery copy of environment secrets.
 
 ## Related
@@ -37,3 +53,5 @@ The first deployment is an independent Akamai Cloud runtime. Tailscale carries a
 - [S3 recovery decision](../decisions/0002-s3-durable-recovery-boundary.md)
 - [Bitwarden secret recovery decision](../decisions/0003-bitwarden-environment-secret-recovery.md)
 - [Appraisal API decision](../decisions/0004-consumer-neutral-appraisal-api.md)
+- [Mode-aware runner decision](../decisions/0005-mode-aware-runner-kernel.md)
+- [CountyForge runner guide](../engineering/countyforge-runner-kernel.md)

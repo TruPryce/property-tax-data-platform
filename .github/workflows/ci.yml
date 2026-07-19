@@ -52,5 +52,5 @@ jobs:
       - name: Validate OpenSpec
         run: npx --yes @fission-ai/openspec@1.6.0 validate --all --strict --no-interactive
 
-      - name: Validate read-only runner contracts
+      - name: Validate legacy and CountyForge runner contracts
         run: make runner-contract-tests

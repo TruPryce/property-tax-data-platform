@@ -38,7 +38,8 @@ echo "==> Validating observability export: $run_dir"
 
 # All structural/agreement/secret checks run in Python (clean JSON handling). The
 # live provider key is passed via env for the secret scan and is NEVER printed.
-SAKANA_API_KEY="${SAKANA_API_KEY:-}" python3 - "$run_dir" "$SCHEMA" <<'PY'
+SAKANA_API_KEY="${SAKANA_API_KEY:-}" OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+  python3 - "$run_dir" "$SCHEMA" <<'PY'
 import json, os, re, sys
 
 run_dir, schema_path = sys.argv[1], sys.argv[2]
@@ -342,7 +343,14 @@ if os.path.isfile(pprov_path):
 
 # --- secret posture: no token names, no live key value ---------------------
 TOKEN_NAMES = ["SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN", "OPENAI_API_KEY"]
-live_key = os.environ.get("SAKANA_API_KEY", "")
+live_keys = [
+    value
+    for value in (
+        os.environ.get("SAKANA_API_KEY", ""),
+        os.environ.get("OPENAI_API_KEY", ""),
+    )
+    if value
+]
 for fn in ["codex-runner-event.ndjson", "codex-runner-metrics.prom"]:
     fp = os.path.join(run_dir, fn)
     if not os.path.isfile(fp):
@@ -351,9 +359,9 @@ for fn in ["codex-runner-event.ndjson", "codex-runner-metrics.prom"]:
     for name in TOKEN_NAMES:
         if name in text:
             fail("%s contains the secret token name '%s' (possible env dump)" % (fn, name))
-    if live_key and live_key in text:
-        # Never print the key value.
-        fail("%s contains the live provider key value" % fn)
+    if any(live_key in text for live_key in live_keys):
+        # Never print a key value.
+        fail("%s contains a live provider key value" % fn)
 
 print("==> OK: observability export is structurally valid and shipping-safe")
 PY

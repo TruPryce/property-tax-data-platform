@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-fix-result.schema.json",
+  "title": "CountyForge Targeted Fix Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "targeted_finding_ids", "expected_head_sha", "applied_findings", "unresolved_findings", "changed_paths", "validations", "stale_review_disposition"],
+  "properties": {
+    "status": {"enum": ["completed", "partial", "blocked", "stale", "profile_not_implemented"]},
+    "targeted_finding_ids": {"$ref": "#/$defs/strings"},
+    "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "applied_findings": {"$ref": "#/$defs/strings"},
+    "unresolved_findings": {"$ref": "#/$defs/strings"},
+    "changed_paths": {"$ref": "#/$defs/strings"},
+    "validations": {"$ref": "#/$defs/strings"},
+    "stale_review_disposition": {"enum": ["current", "stale", "not_evaluated"]}
+  },
+  "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}
+}

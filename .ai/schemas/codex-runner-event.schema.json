@@ -58,7 +58,7 @@
     "duration_seconds": { "type": ["integer", "null"], "minimum": 0 },
     "status": { "type": "string", "enum": ["succeeded", "failed"] },
     "exit_code": { "type": ["integer", "null"] },
-    "stage": { "type": "string", "enum": ["preflight", "docker_run", "review_missing", "secret_leak_scan", "observability_export", "completed"] },
+    "stage": { "type": "string", "enum": ["preflight", "docker_run", "review_missing", "secret_leak_scan", "output_budget", "observability_export", "completed"] },
     "verdict": { "type": ["string", "null"], "enum": ["pass", "pass_with_notes", "block", null] },
     "secret_leak_detected": { "type": "boolean" },
     "packet_bytes": { "type": ["integer", "null"], "minimum": 0 },
