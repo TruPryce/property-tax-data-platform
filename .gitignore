@@ -49,6 +49,10 @@ data/quarantine/
 *.sqlite
 *.sqlite3
 
+# Generated AI review artifacts (keep only the directory placeholder)
+.ai/reviews/*
+!.ai/reviews/.gitkeep
+
 # Editors and operating systems
 .idea/
 .vscode/
