@@ -65,4 +65,4 @@
 - [x] 9.1 Add strict profile input-root/repository policies plus packet-provenance and request hash contracts
 - [x] 9.2 Enforce canonical regular inputs, repository identity, actual HEAD, valid ancestor base, and packet/request/provenance agreement before credentials
 - [x] 9.3 Generate canonical packet provenance in `make prepr`, document the binding, and preserve the direct operator-only smoke path
-- [ ] 9.4 Add negative path/SHA/repository/provenance tests, rerun all deterministic gates, push, and resolve the two addressed PR threads
+- [x] 9.4 Add negative path/SHA/repository/provenance tests, rerun all deterministic gates, push, and resolve the two addressed PR threads
