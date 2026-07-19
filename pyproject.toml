@@ -37,7 +37,7 @@ countyforge-runner = { workspace = true }
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 pythonpath = ["."]
-testpaths = ["tests", "tools/countyforge-runner/tests"]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from countyforge_runner.cli import main
 from countyforge_runner.contracts import JsonObject
 from countyforge_runner.errors import KernelError
 from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
@@ -261,3 +262,22 @@ def test_signal_failure_is_normalized_and_diagnostic_is_redacted(
     assert document["disposition"] == "adapter_failed"
     assert secret not in document["adapter_stderr_tail"]
     assert "***REDACTED-CREDENTIAL***" in document["adapter_stderr_tail"]
+
+
+def test_unexpected_cli_failure_is_sanitized_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request_factory("validate")), encoding="utf-8")
+
+    def fail_unexpectedly(*_args: object, **_kwargs: object) -> None:
+        raise OSError("/private/host/path")
+
+    monkeypatch.setattr("countyforge_runner.cli.Runner.run", fail_unexpectedly)
+    assert main(["run", "--request", str(request_path), "--json"]) == 5
+    result = json.loads(capsys.readouterr().out)
+    assert result["disposition"] == "internal_error"
+    assert "/private/host/path" not in json.dumps(result)

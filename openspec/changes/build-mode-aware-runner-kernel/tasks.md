@@ -56,6 +56,6 @@
 ## 8. Final Validation and Delivery
 
 - [x] 8.1 Validate the OpenSpec change strictly and run `make check`, `make runner-contract-tests`, `make countyforge-runner-check`, and `make prepr-no-ai`
-- [ ] 8.2 Run the existing review profile through the new kernel without posture change and record whether paid provider smoke tests were run or intentionally skipped
-- [ ] 8.3 Inspect tracked/untracked content for source records, owner PII, credentials, and generated run artifacts and address all BLOCKER/MUST_FIX review findings
+- [x] 8.2 Run the existing review profile through the new kernel without posture change and record whether paid provider smoke tests were run or intentionally skipped
+- [x] 8.3 Inspect tracked/untracked content for source records, owner PII, credentials, and generated run artifacts and address all BLOCKER/MUST_FIX review findings
 - [ ] 8.4 Commit and push the scoped branch and open a draft PR referencing Issue #4, parent program #2, and OpenSpec change `build-mode-aware-runner-kernel`

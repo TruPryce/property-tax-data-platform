@@ -63,6 +63,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except KernelError as error:
         _emit(error.as_document())
         return error.exit_code
+    except Exception:  # noqa: BLE001 - CLI boundary must stay machine-readable and sanitized
+        unexpected_error = KernelError(
+            "internal_error",
+            "CountyForge runner failed unexpectedly; inspect sanitized run evidence if present.",
+            exit_code=5,
+        )
+        _emit(unexpected_error.as_document())
+        return unexpected_error.exit_code
 
 
 if __name__ == "__main__":

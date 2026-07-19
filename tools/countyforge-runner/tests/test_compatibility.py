@@ -70,6 +70,8 @@ def test_image_compatibility_gate_precedes_provider_credential_resolution() -> N
     assert '[ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ] &&' not in runner
     smoke = Path(".ai/codex/03-smoke-test.sh").read_text(encoding="utf-8")
     assert 'COUNTYFORGE_PROFILE_SHA256="$PROFILE_SHA256"' in smoke
+    assert 'PROVIDER_SECRET_NAME="${SAKANA_SECRET_NAME:-SAKANA_API_KEY}"' in smoke
+    assert 'PROVIDER_SECRET_NAME="${OPENAI_SECRET_NAME:-OPENAI_API_KEY}"' in smoke
 
 
 def test_legacy_prepr_routes_through_kernel() -> None:

@@ -149,6 +149,8 @@ RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke-openai
 
 Run a live probe before relying on a rebuilt image, changed Codex/provider integration, or changed remote model identifier in another environment.
 
+For Issue #4 acceptance on 2026-07-19, the Sakana `fugu-ultra` review path ran successfully through the new kernel at both `xhigh` and `high` effort. The dedicated paid adversarial Sakana smoke and paid OpenAI smoke were intentionally skipped; `openai.gpt-5.6` therefore remains `live_validation: not_run` in the catalog until an operator explicitly opts in.
+
 ## Deferred Work
 
 Issue #5 owns the GitHub command, authorization, dispatch, and run-control plane. Issues #6 and #7 own executable planning and isolated implementation workflows. Issue #8 owns PR review, targeted fixes, and convergence. Issues #9 and #10 own durable operational evidence and specialist routing. None of those capabilities are implemented by the kernel foundation.

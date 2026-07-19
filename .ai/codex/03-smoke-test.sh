@@ -36,8 +36,16 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 RUNNER="$REPO_ROOT/.ai/codex/02-run-prepr-review-docker.sh"
 PROVIDER="${CODEX_PROVIDER:-sakana}"
 case "$PROVIDER" in
-  sakana) PROVIDER_CREDENTIAL="SAKANA_API_KEY"; DEFAULT_IMAGE="property-tax-codex-reviewer:local" ;;
-  openai) PROVIDER_CREDENTIAL="OPENAI_API_KEY"; DEFAULT_IMAGE="property-tax-codex-reviewer-openai:local" ;;
+  sakana)
+    PROVIDER_CREDENTIAL="SAKANA_API_KEY"
+    PROVIDER_SECRET_NAME="${SAKANA_SECRET_NAME:-SAKANA_API_KEY}"
+    DEFAULT_IMAGE="property-tax-codex-reviewer:local"
+    ;;
+  openai)
+    PROVIDER_CREDENTIAL="OPENAI_API_KEY"
+    PROVIDER_SECRET_NAME="${OPENAI_SECRET_NAME:-OPENAI_API_KEY}"
+    DEFAULT_IMAGE="property-tax-codex-reviewer-openai:local"
+    ;;
   *) echo "error: CODEX_PROVIDER must be 'openai' or 'sakana'" >&2; exit 2 ;;
 esac
 IMAGE="${CODEX_IMAGE:-$DEFAULT_IMAGE}"
@@ -79,7 +87,7 @@ resolve_provider_key() {
   [ -z "$bws_bin" ] && [ -x "$HOME/.local/bin/bws" ] && bws_bin="$HOME/.local/bin/bws"
   if [ -n "$token" ] && [ -n "$bws_bin" ]; then
     BWS_ACCESS_TOKEN="$token" "$bws_bin" secret list -o json 2>/dev/null \
-      | jq -r --arg k "$PROVIDER_CREDENTIAL" '.[] | select(.key==$k) | .value' \
+      | jq -r --arg k "$PROVIDER_SECRET_NAME" '.[] | select(.key==$k) | .value' \
       | head -n1
   fi
 }
