@@ -12,15 +12,33 @@ EVENT_SCHEMA_VERSION="1"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # Low-cardinality repo identifier for the observability event/metrics labels.
 REPO="$(basename "$REPO_ROOT")"
-IMAGE="${CODEX_IMAGE:-property-tax-codex-reviewer:local}"
+PROVIDER="${CODEX_PROVIDER:-sakana}"
+case "$PROVIDER" in
+  sakana)
+    PROVIDER_CREDENTIAL="SAKANA_API_KEY"
+    DEFAULT_MODEL="fugu-ultra"
+    DEFAULT_IMAGE="property-tax-codex-reviewer:local"
+    ;;
+  openai)
+    PROVIDER_CREDENTIAL="OPENAI_API_KEY"
+    DEFAULT_MODEL="gpt-5.6"
+    DEFAULT_IMAGE="property-tax-codex-reviewer-openai:local"
+    ;;
+  *)
+    echo "error: CODEX_PROVIDER must be 'openai' or 'sakana'" >&2
+    exit 2
+    ;;
+esac
+IMAGE="${CODEX_IMAGE:-$DEFAULT_IMAGE}"
 
 # Redact the live provider key from any text streamed to the terminal. Failure
 # paths below tail captured stdout/stderr for debugging; this guarantees the
-# SAKANA_API_KEY value is never echoed even if the model or CLI ever surfaced
+# selected provider key is never echoed even if the model or CLI ever surfaced
 # it. Literal (not regex) replacement so key characters can't break the match.
 redact_secret() {
-  if [ -n "${SAKANA_API_KEY:-}" ]; then
-    SAKANA_API_KEY="$SAKANA_API_KEY" python3 -c 'import os,sys; k=os.environ["SAKANA_API_KEY"]; sys.stdout.write(sys.stdin.read().replace(k, "***REDACTED-SAKANA_API_KEY***") if k else sys.stdin.read())'
+  local provider_secret="${!PROVIDER_CREDENTIAL:-}"
+  if [ -n "$provider_secret" ]; then
+    PROVIDER_SECRET="$provider_secret" python3 -c 'import os,sys; k=os.environ["PROVIDER_SECRET"]; data=sys.stdin.read(); sys.stdout.write(data.replace(k, "***REDACTED-PROVIDER-KEY***") if k else data)'
   else
     cat
   fi
@@ -95,7 +113,7 @@ LATEST_METRICS="$BRANCH_DIR/latest-codex-runner-metrics.prom"
 SCHEMA_DIR="$(dirname "$SCHEMA_PATH")"
 SCHEMA_FILE="$(basename "$SCHEMA_PATH")"
 CONTAINER_SCHEMA_PATH="/workspace/.ai/schemas/$SCHEMA_FILE"
-CONTAINER_NAME="property-tax-codex-prepr-${SAFE_BRANCH}-${RUN_ID}"
+CONTAINER_NAME="countyforge-review-${PROVIDER}-${SAFE_BRANCH}-${RUN_ID}"
 USER_SPEC="$(id -u):$(id -g)"
 
 # Single source of truth for the writable tmpfs specs: used verbatim both in the
@@ -255,7 +273,7 @@ mirror_to_compat() {
 finalize() {
   local code=$?
   set +e
-  local finish_iso finish_ts duration status verdict schema_valid obs_ok obs_rc obs_failed obs_f
+  local finish_iso finish_ts duration status verdict schema_valid obs_ok obs_rc obs_failed obs_f provider_secret
   finish_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   finish_ts="$(date -u +%s)"
   duration=$(( finish_ts - START_TS ))
@@ -409,7 +427,8 @@ PY
   # leak — delete them and flag it.
   for obs_f in "$RUNNER_EVENT" "$RUNNER_METRICS"; do
     [ -f "$obs_f" ] || continue
-    if [ -n "${SAKANA_API_KEY:-}" ] && grep -Fq -- "$SAKANA_API_KEY" "$obs_f"; then
+    provider_secret="${!PROVIDER_CREDENTIAL:-}"
+    if [ -n "$provider_secret" ] && grep -Fq -- "$provider_secret" "$obs_f"; then
       LEAK_FOUND="true"
       obs_ok=0
       rm -f "$RUNNER_EVENT" "$RUNNER_METRICS" 2>/dev/null || true
@@ -549,11 +568,12 @@ fail() {
 # patterns) is caught and never sent to the model — and AFTER it on the model
 # outputs plus the packet.
 scan_artifacts_for_key() {
-  [ -n "${SAKANA_API_KEY:-}" ] || return 0
+  local provider_secret="${!PROVIDER_CREDENTIAL:-}"
+  [ -n "$provider_secret" ] || return 0
   local f
   for f in "$@"; do
     [ -f "$f" ] || continue
-    if grep -Fq -- "$SAKANA_API_KEY" "$f"; then
+    if grep -Fq -- "$provider_secret" "$f"; then
       LEAK_FOUND="true"
       STAGE="secret_leak_scan"
       ERROR_MSG="provider key leaked into generated review artifacts"
@@ -593,6 +613,19 @@ if [ "$PACKET_PATH" != "$RUN_PACKET" ]; then
   cp -f "$PACKET_PATH" "$RUN_PACKET"
 fi
 PACKET_PATH="$RUN_PACKET"
+# A kernel-dispatched review binds the request to exact packet bytes. Recheck
+# the frozen copy before model/image or credential work so a path rewrite or
+# concurrent packet change cannot alter what is submitted. Direct operator-only
+# smoke calls intentionally omit this value and remain outside the ordinary
+# CountyForge request boundary.
+if [ -n "${EXPECTED_PACKET_SHA256:-}" ]; then
+  FROZEN_PACKET_SHA256="$(sha256sum "$PACKET_PATH" | cut -d' ' -f1)"
+  if [ "$FROZEN_PACKET_SHA256" != "$EXPECTED_PACKET_SHA256" ]; then
+    fail preflight 2 <<EOF
+error: frozen review packet hash does not match the resolved CountyForge request.
+EOF
+  fi
+fi
 # Re-export PV_PACKET_PATH now (the provenance block re-exports it too, later) so
 # any failure BETWEEN staging and provenance — bad effort, missing key/schema/
 # image, oversized packet, pre-model leak — writes run.summary.json pointing at
@@ -605,8 +638,8 @@ export PV_PACKET_PATH="$PACKET_PATH"
 # The image's baked config.toml defaults model_reasoning_effort to "xhigh", and
 # we deliberately keep that default for review quality. Set
 # CODEX_REASONING_EFFORT=high for a faster, lower-effort run without rebuilding
-# the image. Fugu and fugu-ultra accept only `high` and `xhigh` (`max` is an
-# alias of xhigh); any other value is rejected by the API, so fail fast here
+# the image. The executable review profile permits only `high` and `xhigh`
+# (`max` is a compatibility alias of xhigh), so fail fast here
 # before doing secret work or a paid call.
 # EFFECTIVE_EFFORT is the normalized value actually applied and recorded: `max`
 # is an alias of `xhigh`, so we collapse it here and record/pass the canonical
@@ -623,19 +656,113 @@ if [ -n "$REASONING_EFFORT" ]; then
       fail preflight 2 <<EOF
 error: CODEX_REASONING_EFFORT='$REASONING_EFFORT' is not supported.
 
-Fugu and fugu-ultra accept only: high, xhigh (max is accepted as an alias of xhigh).
+The review profile accepts only: high, xhigh (max is an alias of xhigh).
 EOF
       ;;
   esac
   REASONING_EFFORT_SOURCE="override"
 fi
 
-# --- Resolve SAKANA_API_KEY from Bitwarden Secrets Manager (optional) -------
-# If SAKANA_API_KEY is not already exported, fetch it with `bws` using a
-# Secrets Manager access token, sourced from BWS_ACCESS_TOKEN, BITWARDEN_TOKEN,
-# or the BITWARDEN_TOKEN line in .env. The secret value is never printed.
-SAKANA_SECRET_NAME="${SAKANA_SECRET_NAME:-SAKANA_API_KEY}"
-if [ -z "${SAKANA_API_KEY:-}" ]; then
+# --- Image/model compatibility before credential resolution ----------------
+# Do not trust a request's claimed CLI version. Inspect the immutable image
+# labels and fail before reading provider or Bitwarden credentials when the
+# image, provider, profile, model, or CLI floor does not match the resolved
+# review capability bundle.
+REQUESTED_MODEL="${CODEX_MODEL:-$DEFAULT_MODEL}"
+case "$PROVIDER:$REQUESTED_MODEL" in
+  sakana:fugu | sakana:fugu-ultra | openai:gpt-5.6) ;;
+  *)
+    fail preflight 2 <<EOF
+error: model '$REQUESTED_MODEL' is not declared for provider '$PROVIDER'.
+EOF
+    ;;
+esac
+
+if [ ! -f "$SCHEMA_PATH" ]; then
+  fail preflight 2 <<EOF
+error: output schema not found:
+
+  $SCHEMA_PATH
+EOF
+fi
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  fail preflight 2 <<EOF
+error: Codex image does not exist:
+
+  $IMAGE
+
+Build the selected provider image first:
+
+  CODEX_PROVIDER=$PROVIDER ./.ai/codex/01-build-codex-image.sh
+EOF
+fi
+
+IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || echo unknown)"
+CODEX_CLI_VERSION="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.codex-cli-version" }}' 2>/dev/null || true)"
+IMAGE_PROVIDER="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.provider" }}' 2>/dev/null || true)"
+IMAGE_PROFILE_ID="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.profile-id" }}' 2>/dev/null || true)"
+IMAGE_PROFILE_SHA="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.profile-sha256" }}' 2>/dev/null || true)"
+PROFILE_PATH="$REPO_ROOT/.ai/profiles/review.packet-only.v1.json"
+if [ -n "${COUNTYFORGE_PROFILE_SHA256:-}" ]; then
+  EXPECTED_PROFILE_SHA="$COUNTYFORGE_PROFILE_SHA256"
+elif [ -f "$PROFILE_PATH" ]; then
+  EXPECTED_PROFILE_SHA="$(python3 - "$PROFILE_PATH" <<'PY'
+import hashlib, json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    profile = json.load(handle)
+canonical = json.dumps(
+    profile, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+).encode()
+print(hashlib.sha256(canonical).hexdigest())
+PY
+)"
+else
+  fail preflight 2 <<EOF
+error: executable review profile is unavailable: $PROFILE_PATH
+EOF
+fi
+MIN_CODEX_CLI_VERSION="${MIN_CODEX_CLI_VERSION:-0.144.0}"
+if [ -z "$CODEX_CLI_VERSION" ] || ! python3 - "$CODEX_CLI_VERSION" "$MIN_CODEX_CLI_VERSION" <<'PY'
+import sys
+
+def version(value):
+    try:
+        parts = tuple(int(part) for part in value.split("."))
+    except ValueError:
+        return ()
+    return parts if len(parts) == 3 else ()
+
+actual, minimum = map(version, sys.argv[1:])
+raise SystemExit(0 if actual and minimum and actual >= minimum else 1)
+PY
+then
+  fail preflight 2 <<EOF
+error: image Codex CLI version does not satisfy the review profile minimum ($MIN_CODEX_CLI_VERSION).
+EOF
+fi
+if [ "$IMAGE_PROVIDER" != "$PROVIDER" ] || [ "$IMAGE_PROFILE_ID" != "review.packet-only.v1" ]; then
+  fail preflight 2 <<EOF
+error: image provider/profile labels do not match the resolved review profile.
+EOF
+fi
+if [ -z "$EXPECTED_PROFILE_SHA" ] || [ "$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA" ]; then
+  fail preflight 2 <<EOF
+error: image capability profile hash does not match the resolved profile.
+EOF
+fi
+
+# --- Resolve the selected provider key from Bitwarden (optional) ------------
+# The provider/model catalog selects exactly one credential name. If that key
+# is not exported, fetch the same named secret with `bws`. Broker tokens remain
+# host-only and are never passed into the review container.
+if [ "$PROVIDER" = "sakana" ]; then
+  PROVIDER_SECRET_NAME="${SAKANA_SECRET_NAME:-SAKANA_API_KEY}"
+else
+  PROVIDER_SECRET_NAME="${OPENAI_SECRET_NAME:-OPENAI_API_KEY}"
+fi
+if [ -z "${!PROVIDER_CREDENTIAL:-}" ]; then
   bws_token="${BWS_ACCESS_TOKEN:-${BITWARDEN_TOKEN:-}}"
   if [ -z "$bws_token" ] && [ -f "$REPO_ROOT/.env" ]; then
     # Only read the access token from .env if .env is guaranteed git-ignored,
@@ -653,23 +780,25 @@ EOF
   BWS_BIN="$(command -v bws || true)"
   [ -z "$BWS_BIN" ] && [ -x "$HOME/.local/bin/bws" ] && BWS_BIN="$HOME/.local/bin/bws"
   if [ -n "$bws_token" ] && [ -n "$BWS_BIN" ]; then
-    echo "==> Fetching $SAKANA_SECRET_NAME from Bitwarden Secrets Manager"
-    SAKANA_API_KEY="$(BWS_ACCESS_TOKEN="$bws_token" "$BWS_BIN" secret list -o json 2>/dev/null \
-      | jq -r --arg k "$SAKANA_SECRET_NAME" '.[] | select(.key==$k) | .value' \
+    echo "==> Fetching selected provider credential from Bitwarden Secrets Manager"
+    fetched_provider_key="$(BWS_ACCESS_TOKEN="$bws_token" "$BWS_BIN" secret list -o json 2>/dev/null \
+      | jq -r --arg k "$PROVIDER_SECRET_NAME" '.[] | select(.key==$k) | .value' \
       | head -n1)"
-    export SAKANA_API_KEY
+    printf -v "$PROVIDER_CREDENTIAL" '%s' "$fetched_provider_key"
+    export "$PROVIDER_CREDENTIAL"
+    unset fetched_provider_key
   fi
   unset bws_token
 fi
 
-if [ -z "${SAKANA_API_KEY:-}" ]; then
-  fail preflight 2 <<'EOF'
-error: SAKANA_API_KEY is not set and could not be fetched from Bitwarden.
+if [ -z "${!PROVIDER_CREDENTIAL:-}" ]; then
+  fail preflight 2 <<EOF
+error: $PROVIDER_CREDENTIAL is not set and could not be fetched from Bitwarden.
 
-Provide the Sakana Fugu key one of these ways:
+Provide the selected provider key one of these ways:
 
   # A) Export it directly for this invocation
-  SAKANA_API_KEY=... ./.ai/codex/02-run-prepr-review-docker.sh
+  $PROVIDER_CREDENTIAL=... CODEX_PROVIDER=$PROVIDER ./.ai/codex/02-run-prepr-review-docker.sh
 
   # B) Let the script pull it from Bitwarden Secrets Manager
   #    (requires `bws` on PATH or ~/.local/bin, plus jq, and a token in
@@ -701,26 +830,6 @@ only after confirming the model context can hold the full packet.
 EOF
 fi
 
-if [ ! -f "$SCHEMA_PATH" ]; then
-  fail preflight 2 <<EOF
-error: output schema not found:
-
-  $SCHEMA_PATH
-EOF
-fi
-
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  fail preflight 2 <<EOF
-error: Codex image does not exist:
-
-  $IMAGE
-
-Build it first:
-
-  ./.ai/codex/01-build-codex-image.sh
-EOF
-fi
-
 # --- Provenance ------------------------------------------------------------
 # Deterministic input/config provenance: record the exact bytes and SHA-256 of
 # the packet that is piped to the model, the schema, and the container/runtime
@@ -731,19 +840,17 @@ fi
 # output; that validates the harness, it is not a per-run check on this packet.
 PACKET_SHA256="$(sha256sum "$PACKET_PATH" | cut -d' ' -f1)"
 SCHEMA_SHA256="$(sha256sum "$SCHEMA_PATH" | cut -d' ' -f1)"
-IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null || echo unknown)"
-CODEX_CLI_VERSION="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.codex-cli-version" }}' 2>/dev/null || true)"
 [ -n "$CODEX_CLI_VERSION" ] || CODEX_CLI_VERSION="unknown"
 # Tie recorded model provenance to how the model is actually selected. When
 # CODEX_MODEL is set we pass it via --model (see CODEX_ARGS) and record it as an
 # override; otherwise the container uses the image config.toml default
-# (model = "fugu-ultra"), which we record as such rather than implying a
+# provider-specific default model, which we record as such rather than implying a
 # CLI-passed value.
 if [ -n "${CODEX_MODEL:-}" ]; then
-  MODEL="$CODEX_MODEL"
+  MODEL="$REQUESTED_MODEL"
   MODEL_SOURCE="override"
 else
-  MODEL="fugu-ultra"
+  MODEL="$DEFAULT_MODEL"
   MODEL_SOURCE="image-default"
 fi
 
@@ -767,7 +874,7 @@ export PV_IMAGE_ID="$IMAGE_ID"
 export PV_CODEX_VER="$CODEX_CLI_VERSION"
 export PV_MODEL="$MODEL"
 export PV_MODEL_SOURCE="$MODEL_SOURCE"
-export PV_PROVIDER="sakana"
+export PV_PROVIDER="$PROVIDER"
 export PV_MODE="docker"
 # Effective reasoning effort actually applied (normalized; see EFFECTIVE_EFFORT)
 # plus whether it was an override or the image default, so the artifact says
@@ -992,7 +1099,7 @@ set +e
   --tmpfs "$TMPFS_CODEX_HOME_SPEC" \
   -e HOME=/tmp/codex-home \
   -e CODEX_HOME=/tmp/codex-home \
-  -e SAKANA_API_KEY \
+  -e "$PROVIDER_CREDENTIAL" \
   -v "$SCHEMA_DIR:/workspace/.ai/schemas:ro" \
   -v "$RUN_DIR:/out:rw" \
   "$IMAGE" \
@@ -1020,7 +1127,7 @@ if [ "$STATUS" -ne 0 ]; then
   ERROR_MSG="dockerized Codex review failed with status $STATUS"
   echo "error: $ERROR_MSG" >&2
   echo >&2
-  echo "==> stderr tail (SAKANA_API_KEY redacted)" >&2
+  echo "==> stderr tail (provider key redacted)" >&2
   redact_secret < "$STDERR_LOG" | tail -120 >&2 || true
   echo >&2
   echo "Logs:" >&2
@@ -1036,9 +1143,27 @@ if [ ! -s "$FINAL_REVIEW" ]; then
   echo "error: Codex completed but final review was not written:" >&2
   echo "  $FINAL_REVIEW" >&2
   echo >&2
-  echo "==> stderr tail (SAKANA_API_KEY redacted)" >&2
+  echo "==> stderr tail (provider key redacted)" >&2
   redact_secret < "$STDERR_LOG" | tail -120 >&2 || true
   exit 2
+fi
+
+# Enforce the profile's output-byte budget before reporting success. The packet
+# is input evidence and is excluded; model result and captured streams are the
+# bounded provider outputs. The kernel passes the resolved profile budget.
+MAX_OUTPUT_BYTES="${MAX_OUTPUT_BYTES:-1048576}"
+output_bytes=0
+for output_file in "$FINAL_REVIEW" "$EVENTS_LOG" "$STDOUT_LOG" "$STDERR_LOG"; do
+  if [ -f "$output_file" ]; then
+    output_bytes=$((output_bytes + $(wc -c < "$output_file")))
+  fi
+done
+if [ "$output_bytes" -gt "$MAX_OUTPUT_BYTES" ]; then
+  fail output_budget 5 <<EOF
+error: review output is ${output_bytes} bytes, exceeding MAX_OUTPUT_BYTES=${MAX_OUTPUT_BYTES}.
+
+The review profile never reports success when its resolved output budget is exceeded.
+EOF
 fi
 
 STAGE="completed"

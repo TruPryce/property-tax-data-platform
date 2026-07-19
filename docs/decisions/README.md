@@ -10,6 +10,7 @@ An ADR records context, decision, alternatives, consequences, status, date, and 
 | [ADR-0002](0002-s3-durable-recovery-boundary.md) | Accepted | Treat the VPS as replaceable and restore PostgreSQL, Bronze, exports, and logs from Amazon S3. |
 | [ADR-0003](0003-bitwarden-environment-secret-recovery.md) | Accepted | Keep environment-secret recovery material in the hosted Bitwarden vault and out of Git and S3. |
 | [ADR-0004](0004-consumer-neutral-appraisal-api.md) | Accepted | Serve Gold appraisal facts through a lightweight Python API owned by this platform. |
+| [ADR-0005](0005-mode-aware-runner-kernel.md) | Accepted | Use a developer-tool kernel with immutable mode profiles while preserving the isolated packet reviewer. |
 
 ## Related
 

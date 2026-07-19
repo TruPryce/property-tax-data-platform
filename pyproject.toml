@@ -14,6 +14,7 @@ dev = [
     "pre-commit>=4.6.0",
     "pytest>=8.3,<9",
     "ruff>=0.11,<1",
+    "types-jsonschema>=4.23,<5",
 ]
 
 [tool.uv]
@@ -23,6 +24,7 @@ package = false
 members = [
     "libs/*",
     "services/*",
+    "tools/*",
 ]
 
 [tool.uv.sources]
@@ -30,6 +32,7 @@ property-tax-domain = { workspace = true }
 property-tax-application = { workspace = true }
 property-tax-adapters = { workspace = true }
 property-tax-ingestion-worker = { workspace = true }
+countyforge-runner = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
@@ -57,4 +60,5 @@ packages = [
     "property_tax_application",
     "property_tax_adapters",
     "property_tax_ingestion",
+    "countyforge_runner",
 ]

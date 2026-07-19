@@ -25,7 +25,7 @@ The fields used as lifecycle, posture, or metric-label dimensions are closed val
 |---|---|
 | `review_mode` | `docker` |
 | `status` | `succeeded`, `failed` |
-| `stage` | `preflight`, `docker_run`, `review_missing`, `secret_leak_scan`, `observability_export`, `completed` |
+| `stage` | `preflight`, `docker_run`, `review_missing`, `secret_leak_scan`, `output_budget`, `observability_export`, `completed` |
 | `verdict` | `pass`, `pass_with_notes`, `block`, or `null` |
 | `model_source`, `reasoning_effort_source` | `override`, `image-default`, or `null` |
 | `reasoning_effort` | `high`, `xhigh`, or `null` |
@@ -74,6 +74,11 @@ Per-run event and metrics files are authoritative. The branch-level
 `latest-codex-runner-metrics.prom` file is a best-effort mirror and cannot change a completed run's
 outcome.
 
+This version-1 contract remains review-specific for compatibility. Kernel-routed reviews also emit
+provider-neutral `countyforge-run-event.ndjson`, `countyforge-run-summary.json`, and
+`countyforge-run-metrics.prom` according to the CountyForge runner guide. Historical review runs
+do not require those generic artifacts.
+
 ## Validation
 
 Run fixture-only validation, which makes no provider or Docker call:
@@ -100,3 +105,4 @@ make codex-observability-qa
 - [Pre-PR review contract](pre-pr-review-contract.md) - End-to-end review loop
 - [Review artifact contract](review-artifact-contract.md) - Per-run directory and evidence rules
 - [Runner event schema](../../.ai/schemas/codex-runner-event.schema.json) - Normalized event shape
+- [CountyForge runner kernel](countyforge-runner-kernel.md) - Generic event/summary and migration

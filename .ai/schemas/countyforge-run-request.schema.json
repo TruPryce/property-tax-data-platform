@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-run-request.schema.json",
+  "title": "CountyForge Run Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "trigger",
+    "repository",
+    "mode",
+    "profile",
+    "prompt",
+    "provider",
+    "reasoning_effort",
+    "budget_overrides",
+    "input",
+    "expected_output_schema",
+    "requested_artifacts"
+  ],
+  "oneOf": [
+    {"required": ["run_id"], "not": {"required": ["idempotency_seed"]}},
+    {"required": ["idempotency_seed"], "not": {"required": ["run_id"]}}
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotency_seed": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "actor"],
+      "properties": {
+        "type": {"enum": ["manual", "github_issue", "pull_request", "ci"]},
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        },
+        "issue_number": {"type": "integer", "minimum": 1},
+        "pull_request_number": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "github_issue"}}, "required": ["type"]},
+          "then": {"required": ["issue_number"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "pull_request"}}, "required": ["type"]},
+          "then": {"required": ["pull_request_number"]}
+        }
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full_name", "base_sha", "head_sha"],
+      "properties": {
+        "full_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "display_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "branch": {"type": "string", "maxLength": 256},
+        "title": {"type": "string", "maxLength": 512}
+      }
+    },
+    "openspec_change": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "mode": {"enum": ["review", "plan", "implement", "fix", "validate"]},
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "provider": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "model_ref", "codex_cli_version"],
+          "properties": {
+            "id": {"enum": ["openai", "sakana"]},
+            "model_ref": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+            "codex_cli_version": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            }
+          }
+        }
+      ]
+    },
+    "reasoning_effort": {"enum": ["none", "low", "medium", "high", "xhigh"]},
+    "budget_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_clock_seconds": {"type": "integer", "minimum": 1},
+        "attempts": {"type": "integer", "minimum": 1},
+        "max_output_bytes": {"type": "integer", "minimum": 1},
+        "max_input_bytes": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "max_cost_usd": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "packet_path": {"type": "string", "minLength": 1},
+        "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "packet_provenance_path": {"type": "string", "minLength": 1},
+        "packet_provenance_sha256": {
+          "type": "string", "pattern": "^[0-9a-f]{64}$"
+        },
+        "context_manifest_path": {"type": "string", "minLength": 1},
+        "selected_finding_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "expected_output_schema": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+\\.schema\\.json$"
+    },
+    "requested_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "review"}}, "required": ["mode"]},
+      "then": {
+        "properties": {
+          "input": {
+            "required": [
+              "packet_path", "packet_sha256", "packet_provenance_path",
+              "packet_provenance_sha256"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"mode": {"const": "fix"}}, "required": ["mode"]},
+      "then": {
+        "properties": {
+          "input": {"required": ["selected_finding_ids", "expected_head_sha"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"mode": {"const": "validate"}}, "required": ["mode"]},
+      "then": {
+        "properties": {
+          "provider": {"type": "null"},
+          "reasoning_effort": {"const": "none"}
+        }
+      },
+      "else": {"properties": {"provider": {"type": "object"}}}
+    }
+  ]
+}

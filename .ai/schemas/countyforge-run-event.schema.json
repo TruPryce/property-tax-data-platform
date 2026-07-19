@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-run-event.schema.json",
+  "title": "CountyForge Generic Run Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_contract_version", "request_contract_version", "event_type", "run_id", "mode",
+    "profile_id", "profile_version", "profile_sha256", "provider", "model_ref",
+    "configured_model_id", "execution_state", "lifecycle_stage", "outcome", "disposition",
+    "started_at", "finished_at", "duration_seconds", "budget_usage", "base_sha", "head_sha",
+    "output_schema_sha256", "prompt_sha256", "capability_snapshot_sha256", "image",
+    "image_digest", "codex_cli_version", "enabled_tools", "disabled_tools", "mounts",
+    "network_policy", "credential_names", "secret_leak_detected", "artifact_export_status"
+  ],
+  "properties": {
+    "event_contract_version": {"const": 1},
+    "request_contract_version": {"const": 1},
+    "event_type": {"const": "countyforge_run"},
+    "run_id": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["review", "plan", "implement", "fix", "validate"]},
+    "profile_id": {"type": "string"},
+    "profile_version": {"type": "integer", "minimum": 1},
+    "profile_sha256": {"$ref": "#/$defs/sha256"},
+    "provider": {"type": ["string", "null"]},
+    "model_ref": {"type": ["string", "null"]},
+    "configured_model_id": {"type": ["string", "null"]},
+    "execution_state": {"enum": ["not_started", "running", "finished"]},
+    "lifecycle_stage": {"enum": ["validated", "resolved", "dispatch", "completed", "failed"]},
+    "outcome": {"enum": ["succeeded", "failed", "not_executed"]},
+    "disposition": {"enum": ["completed", "adapter_failed", "timed_out", "budget_exceeded", "profile_not_implemented", "validation_failed"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "budget_usage": {"$ref": "#/$defs/budgetUsage"},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "output_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "prompt_sha256": {"$ref": "#/$defs/sha256"},
+    "capability_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "image": {"type": ["string", "null"]},
+    "image_digest": {"type": ["string", "null"]},
+    "codex_cli_version": {"type": ["string", "null"]},
+    "enabled_tools": {"type": "array", "items": {"type": "string"}},
+    "disabled_tools": {"type": "array", "items": {"type": "string"}},
+    "mounts": {"type": "array", "items": {"type": "string"}},
+    "network_policy": {"enum": ["disabled", "provider_only"]},
+    "credential_names": {"type": "array", "items": {"type": "string"}},
+    "secret_leak_detected": {"type": "boolean"},
+    "artifact_export_status": {"enum": ["complete", "partial", "failed"]}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "usageValue": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "value"], "properties": {"state": {"const": "reported"}, "value": {"type": "number", "minimum": 0}}},
+        {"type": "object", "additionalProperties": false, "required": ["state", "value"], "properties": {"state": {"const": "unavailable"}, "value": {"type": "null"}}}
+      ]
+    },
+    "budgetUsage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_clock_seconds", "attempts", "input_bytes", "output_bytes", "tokens", "cost_usd"],
+      "properties": {
+        "wall_clock_seconds": {"type": "number", "minimum": 0},
+        "attempts": {"type": "integer", "minimum": 0},
+        "input_bytes": {"type": "integer", "minimum": 0},
+        "output_bytes": {"type": "integer", "minimum": 0},
+        "tokens": {"$ref": "#/$defs/usageValue"},
+        "cost_usd": {"$ref": "#/$defs/usageValue"}
+      }
+    }
+  }
+}

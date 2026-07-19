@@ -17,6 +17,7 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 |---|---|
 | GitHub Issue intake and OpenSpec planning | Scaffolded |
 | Pre-commit and CI secret and source-artifact scanning | Scaffolded |
+| CountyForge mode-aware runner kernel | Review executable; plan/implement/fix/validate fail closed |
 | Dallas, Collin, Tarrant, Denton, Rockwall, and Ellis source registry | Scaffolded |
 | Hexagonal Python package boundaries | Scaffolded |
 | Immutable Bronze acquisition | Specified, not implemented |
@@ -32,6 +33,7 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 | [`dags/`](dags/README.md) | Thin Airflow inbound adapters |
 | [`libs/`](libs/README.md) | Reusable domain, application, and outbound-adapter packages |
 | [`services/`](services/README.md) | Runtime composition and deployable process entry points |
+| [`tools/`](tools/README.md) | Repository developer-platform packages, including CountyForge |
 | [`docs/`](docs/README.md) | Architecture, source, decision, and operations reference |
 | [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/config.yml) | Structured work intake |
 

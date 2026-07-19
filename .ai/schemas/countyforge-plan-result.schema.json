@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-plan-result.schema.json",
+  "title": "CountyForge Plan Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "assumptions", "unresolved_decisions", "affected_capabilities", "proposed_files", "task_slices", "acceptance_criteria", "risks", "non_goals"],
+  "properties": {
+    "status": {"enum": ["planned", "blocked", "profile_not_implemented"]},
+    "assumptions": {"$ref": "#/$defs/strings"},
+    "unresolved_decisions": {"$ref": "#/$defs/strings"},
+    "affected_capabilities": {"$ref": "#/$defs/strings"},
+    "proposed_files": {"$ref": "#/$defs/strings"},
+    "task_slices": {"$ref": "#/$defs/strings"},
+    "acceptance_criteria": {"$ref": "#/$defs/strings"},
+    "risks": {"$ref": "#/$defs/strings"},
+    "non_goals": {"$ref": "#/$defs/strings"}
+  },
+  "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}
+}

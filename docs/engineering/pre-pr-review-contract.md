@@ -7,8 +7,8 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 ## Review Pipeline
 
 1. Deterministic gates run first and must pass: `make check` (lint, typecheck, test, docs, spec, secrets, artifacts).
-2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md`, embedding this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff against the base ref.
-3. `make prepr` performs the complete loop: it reruns the deterministic gates, freezes one private packet, and invokes the dockerized Codex runner (`.ai/codex/02-run-prepr-review-docker.sh`).
+2. `make review-packet` deterministically generates `.ai/reviews/review-packet.md` plus `.ai/reviews/review-packet.provenance.json`, embedding machine-readable repository/merge-base/HEAD metadata before this contract, the reviewer prompt, applicable repository context, repository status, and the branch diff while binding the exact packet bytes to those immutable facts.
+3. `make prepr` performs the complete loop: it reruns the deterministic gates, atomically refreshes the canonical packet and strict provenance sidecar, builds a versioned CountyForge request containing both hashes, and invokes `review.packet-only.v1` through the `countyforge-runner` kernel.
 4. The runner reviews only that packet against `.ai/schemas/codex-prepr-review.schema.json` and writes self-contained run evidence under `.ai/reviews/codex-prepr/<safe-branch>/<run-id>/`.
 5. `BLOCKER` and `MUST_FIX` findings are applied with `.ai/prompts/claude-fix-from-review.md`, then the loop repeats until the verdict is `pass`, or `pass_with_notes` with accepted notes.
 
@@ -43,8 +43,9 @@ This runner is the strict read-only review profile. The model receives one self-
 on stdin and has no model-invokable shell, browser, app, image-generation, or web-search tool. The
 container mounts only the repository's `.ai/schemas/` contract directory read-only and the claimed
 run directory read-write; its root filesystem is read-only and it runs without Linux capabilities
-or privilege escalation. The mounted schema directory contains only the review-output schema and
-runner-event schema.
+or privilege escalation. The mounted schema directory contains version-controlled runner contracts;
+the model is constrained to the profile-declared review-output schema and has no filesystem tool
+with which to inspect other schemas.
 
 Repository mutation, code writing, GitHub publishing, issue dispatch, and command execution are
 outside this profile.
@@ -139,6 +140,7 @@ Reviews must match `.ai/schemas/codex-prepr-review.schema.json` and include:
 - [Contribution workflow](../../CONTRIBUTING.md)
 - [Review artifact contract](review-artifact-contract.md)
 - [Runner observability](codex-runner-observability.md)
+- [CountyForge runner kernel](countyforge-runner-kernel.md)
 - [Agent guide](../../AGENTS.md)
 - [Reviewer prompt](../../.ai/prompts/codex-prepr-review.md)
 - [Fix prompt](../../.ai/prompts/claude-fix-from-review.md)

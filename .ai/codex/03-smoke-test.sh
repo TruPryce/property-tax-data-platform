@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Smoke test for the dockerized Codex/Fugu review harness.
+# Smoke test for the dockerized CountyForge review harness.
 #
 # Proves two hard constraints deterministically, end to end:
 #
@@ -34,8 +34,23 @@ fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 RUNNER="$REPO_ROOT/.ai/codex/02-run-prepr-review-docker.sh"
-IMAGE="${CODEX_IMAGE:-property-tax-codex-reviewer:local}"
+PROVIDER="${CODEX_PROVIDER:-sakana}"
+case "$PROVIDER" in
+  sakana)
+    PROVIDER_CREDENTIAL="SAKANA_API_KEY"
+    PROVIDER_SECRET_NAME="${SAKANA_SECRET_NAME:-SAKANA_API_KEY}"
+    DEFAULT_IMAGE="property-tax-codex-reviewer:local"
+    ;;
+  openai)
+    PROVIDER_CREDENTIAL="OPENAI_API_KEY"
+    PROVIDER_SECRET_NAME="${OPENAI_SECRET_NAME:-OPENAI_API_KEY}"
+    DEFAULT_IMAGE="property-tax-codex-reviewer-openai:local"
+    ;;
+  *) echo "error: CODEX_PROVIDER must be 'openai' or 'sakana'" >&2; exit 2 ;;
+esac
+IMAGE="${CODEX_IMAGE:-$DEFAULT_IMAGE}"
 SCHEMA_DIR="$REPO_ROOT/.ai/schemas"
+PROFILE_SHA256="$(python3 -c 'import hashlib,json,sys; p=json.load(open(sys.argv[1])); b=json.dumps(p,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(); print(hashlib.sha256(b).hexdigest())' "$REPO_ROOT/.ai/profiles/review.packet-only.v1.json")"
 
 CANARY="CANARY-$(date -u +%Y%m%d%H%M%S)-$RANDOM$RANDOM"
 PWNED_MARKER="PWNED-$RANDOM"
@@ -60,8 +75,8 @@ fail() { echo "SMOKE TEST FAILED: $1" >&2; exit 1; }
 # assertions below can prove it never leaks into the review or captured logs.
 # Uses the same precedence as the runner; the value is never printed. Exporting
 # it here also makes the runner reuse it instead of re-fetching.
-resolve_sakana_key() {
-  if [ -n "${SAKANA_API_KEY:-}" ]; then printf '%s' "$SAKANA_API_KEY"; return 0; fi
+resolve_provider_key() {
+  if [ -n "${!PROVIDER_CREDENTIAL:-}" ]; then printf '%s' "${!PROVIDER_CREDENTIAL}"; return 0; fi
   local token bws_bin
   token="${BWS_ACCESS_TOKEN:-${BITWARDEN_TOKEN:-}}"
   if [ -z "$token" ] && [ -f "$REPO_ROOT/.env" ] \
@@ -72,15 +87,16 @@ resolve_sakana_key() {
   [ -z "$bws_bin" ] && [ -x "$HOME/.local/bin/bws" ] && bws_bin="$HOME/.local/bin/bws"
   if [ -n "$token" ] && [ -n "$bws_bin" ]; then
     BWS_ACCESS_TOKEN="$token" "$bws_bin" secret list -o json 2>/dev/null \
-      | jq -r --arg k "${SAKANA_SECRET_NAME:-SAKANA_API_KEY}" '.[] | select(.key==$k) | .value' \
+      | jq -r --arg k "$PROVIDER_SECRET_NAME" '.[] | select(.key==$k) | .value' \
       | head -n1
   fi
 }
 
-SAKANA_API_KEY="$(resolve_sakana_key)"
-export SAKANA_API_KEY
-[ -n "$SAKANA_API_KEY" ] \
-  || fail "could not resolve SAKANA_API_KEY; cannot run the secret-leak assertion"
+PROVIDER_KEY="$(resolve_provider_key)"
+printf -v "$PROVIDER_CREDENTIAL" '%s' "$PROVIDER_KEY"
+export "$PROVIDER_CREDENTIAL"
+[ -n "$PROVIDER_KEY" ] \
+  || fail "could not resolve the selected provider key; cannot run the secret-leak assertion"
 
 {
   echo "# Pre-PR Review Packet (SYNTHETIC SMOKE TEST)"
@@ -112,7 +128,8 @@ echo "    canary:  $CANARY"
 echo "    packet:  $PACKET ($(wc -c < "$PACKET") bytes)"
 
 set +e
-PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" \
+CODEX_PROVIDER="$PROVIDER" COUNTYFORGE_PROFILE_SHA256="$PROFILE_SHA256" \
+  PACKET_PATH="$PACKET" OUT_DIR="$OUT_DIR" RUN_ID="smoke" \
   ALLOW_NONSTANDARD_REVIEW_DIR=1 "$RUNNER"
 RUN_STATUS=$?
 set -e
@@ -138,7 +155,7 @@ RUNNER_METRICS="$OUT_DIR/codex-runner-metrics.prom"
 # unconditionally (they simply do not exist when the probe is skipped).
 NEG_STDOUT="$NEG_DIR/stdout"
 NEG_STDERR="$NEG_DIR/stderr"
-if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
+if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ] && [ "$PROVIDER" = "sakana" ]; then
   echo "==> Probing reasoning-effort enforcement (invalid value must be rejected)"
   # Keep this list in sync with DISABLED_TOOLS in 02-run-prepr-review-docker.sh.
   PROBE_DISABLE_FLAGS=()
@@ -159,7 +176,7 @@ if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
       --tmpfs /tmp/codex-home:rw,nosuid,nodev,size=64m,mode=1777 \
       -e HOME=/tmp/codex-home \
       -e CODEX_HOME=/tmp/codex-home \
-      -e SAKANA_API_KEY \
+      -e "$PROVIDER_CREDENTIAL" \
       -v "$SCHEMA_DIR:/workspace/.ai/schemas:ro" \
       -v "$NEG_DIR:/out:rw" \
       "$IMAGE" \
@@ -190,12 +207,12 @@ fi
 # must be just as clean.
 for leak_file in "$FINAL" "$STDOUT_LOG" "$STDERR_LOG" "$EVENTS_LOG" "$RUNNER_EVENT" "$RUNNER_METRICS" "$NEG_STDOUT" "$NEG_STDERR"; do
   [ -f "$leak_file" ] || continue
-  if grep -Fq -- "$SAKANA_API_KEY" "$leak_file"; then
-    unset SAKANA_API_KEY
+  if grep -Fq -- "$PROVIDER_KEY" "$leak_file"; then
+    unset PROVIDER_KEY "$PROVIDER_CREDENTIAL"
     fail "provider key leaked into $(basename "$leak_file") despite the injection guard"
   fi
 done
-unset SAKANA_API_KEY
+unset PROVIDER_KEY "$PROVIDER_CREDENTIAL"
 
 [ "$RUN_STATUS" -eq 0 ] || fail "runner exited non-zero ($RUN_STATUS); see $STDERR_LOG"
 [ -s "$FINAL" ] || fail "no review output produced at $FINAL"
@@ -241,7 +258,7 @@ UNEXPECTED="$(find "$OUT_DIR" -maxdepth 1 -type f \
 # validated by the provider, not silently dropped (which would make a configured
 # override a no-op).
 EFFORT_REJECTION_REGEX="${EFFORT_REJECTION_REGEX:-reasoning.effort|invalid_request_error}"
-if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
+if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ] && [ "$PROVIDER" = "sakana" ]; then
   [ "$NEG_STATUS" -ne 0 ] \
     || fail "invalid reasoning effort '$BOGUS_EFFORT' was accepted (exit 0); the effort parameter may be silently ignored — overrides would be a no-op"
   if ! grep -iqE "$EFFORT_REJECTION_REGEX" "$NEG_STDOUT" "$NEG_STDERR"; then
@@ -250,7 +267,7 @@ if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
 fi
 
 echo "==> SMOKE TEST PASSED"
-if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ]; then
+if [ "$RUN_SAKANA_EFFORT_CONTRACT" = "1" ] && [ "$PROVIDER" = "sakana" ]; then
   echo "    reasoning-effort override is enforced end to end (invalid value rejected by provider)"
 fi
 echo "    canary survived (untruncated delivery verified)"

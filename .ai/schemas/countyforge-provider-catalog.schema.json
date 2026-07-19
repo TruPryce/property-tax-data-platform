@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-provider-catalog.schema.json",
+  "title": "CountyForge Provider and Model Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "providers", "models"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "providers": {
+      "type": "array", "minItems": 2,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "credential_name", "request_path"],
+        "properties": {
+          "id": {"enum": ["openai", "sakana"]},
+          "credential_name": {"enum": ["OPENAI_API_KEY", "SAKANA_API_KEY"]},
+          "request_path": {"enum": ["openai_responses", "sakana_responses_compatible"]}
+        }
+      }
+    },
+    "models": {
+      "type": "array", "minItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "logical_ref", "provider", "configured_model_id", "model_family",
+          "supported_reasoning_efforts", "minimum_codex_cli_version",
+          "structured_output", "expected_tool_capabilities", "availability",
+          "live_validation"
+        ],
+        "properties": {
+          "logical_ref": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+          "provider": {"enum": ["openai", "sakana"]},
+          "configured_model_id": {"type": "string", "minLength": 1},
+          "model_family": {"type": "string", "minLength": 1},
+          "supported_reasoning_efforts": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"enum": ["low", "medium", "high", "xhigh"]}
+          },
+          "minimum_codex_cli_version": {
+            "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+          },
+          "structured_output": {"const": true},
+          "expected_tool_capabilities": {
+            "type": "array", "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "availability": {"enum": ["available", "optional", "unavailable"]},
+          "live_validation": {"enum": ["validated", "not_run", "failed"]}
+        }
+      }
+    }
+  }
+}

@@ -53,6 +53,13 @@ untracked destination and protecting any evidence written there.
 | `codex-runner-event.ndjson` | One normalized observability event defined by the observability contract. |
 | `codex-runner-metrics.prom` | Low-cardinality Prometheus textfile metrics defined by the observability contract. |
 
+When the review is entered through CountyForge, five additive migration artifacts sit beside this
+version-1 set: `countyforge-request.provenance.json`, `countyforge-profile.snapshot.json`,
+`countyforge-run-event.ndjson`, `countyforge-run-summary.json`, and
+`countyforge-run-metrics.prom`. Their absence does not invalidate historical PR #1 evidence, and
+their presence does not change `ARTIFACT_CONTRACT_VERSION=1`; the legacy files above remain
+readable and authoritative for this contract.
+
 `run.summary.json` is written on every path after a run directory is successfully claimed. Early
 preflight failures can legitimately omit execution and provenance artifacts; consumers must use
 the summary's `artifacts` map instead of assuming every file exists. Failures before a directory is
@@ -60,9 +67,12 @@ claimed do not create a summary.
 
 ## Packet Integrity
 
-`make prepr` generates one private packet, atomically refreshes
-`.ai/reviews/review-packet.md`, and passes the private packet to the runner. The runner immediately
-copies those bytes into the claimed run directory. All packet sizing, hashing, secret scanning, and
+`make prepr` generates one packet, atomically refreshes `.ai/reviews/review-packet.md` and its strict
+`review-packet.provenance.json` sidecar, and passes the canonical packet to the runner. The packet
+begins with machine-readable repository, merge-base, HEAD, and builder metadata. The request binds
+both file hashes; the kernel verifies approved-root containment, repository/commit identity, and
+agreement among that embedded metadata, the request, and the sidecar before execution. The runner immediately copies those bytes into the claimed
+run directory and rechecks the frozen hash. All packet sizing, hashing, secret scanning, and
 model stdin use that staged copy.
 
 The packet builder redacts high-confidence literal credential values while preserving dynamic
@@ -76,7 +86,7 @@ diff.
 ## Failure and Secret Handling
 
 The runner records one lifecycle stage in `run.summary.json`: `preflight`, `docker_run`,
-`review_missing`, `secret_leak_scan`, `observability_export`, or `completed`.
+`review_missing`, `secret_leak_scan`, `output_budget`, `observability_export`, or `completed`.
 
 The live provider key is scanned before and after the model call without printing the value. If it
 appears in the packet or generated output, the runner deletes the staged packet and model-output
@@ -113,6 +123,8 @@ Run the paid end-to-end adversarial probe only with explicit consent:
 
 ```bash
 RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke
+
+RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke-openai
 ```
 
 ## Related
@@ -120,4 +132,5 @@ RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke
 - [Documentation hub](../README.md) - Repository documentation navigation
 - [Pre-PR review contract](pre-pr-review-contract.md) - Review scope, severity, and verdict rules
 - [Runner observability](codex-runner-observability.md) - Event and metrics export contract
+- [CountyForge runner kernel](countyforge-runner-kernel.md) - Generic evidence and compatibility
 - [Review output schema](../../.ai/schemas/codex-prepr-review.schema.json) - Final review JSON shape

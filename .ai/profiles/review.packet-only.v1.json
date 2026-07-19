@@ -1,0 +1,53 @@
+{
+  "contract_version": 1,
+  "profile_id": "review.packet-only.v1",
+  "profile_version": 1,
+  "mode": "review",
+  "enabled": true,
+  "implementation_state": "implemented",
+  "executor": ".ai/codex/02-run-prepr-review-docker.sh",
+  "permitted_providers": ["openai", "sakana"],
+  "permitted_model_refs": ["openai.gpt-5.6", "sakana.fugu", "sakana.fugu-ultra"],
+  "reasoning_efforts": ["high", "xhigh"],
+  "default_reasoning_effort": "xhigh",
+  "maximum_reasoning_effort": "xhigh",
+  "minimum_codex_cli_version": "0.144.0",
+  "prompt": {"id": "codex-prepr-review", "version": 1, "path": ".ai/prompts/codex-prepr-review.md"},
+  "output_schema": "codex-prepr-review.schema.json",
+  "allowed_artifacts": [
+    "review-packet.md", "codex-prepr-review.md", "codex-prepr-review.stdout",
+    "codex-prepr-review.stderr", "codex-events.ndjson", "packet.provenance.json",
+    "container.provenance.json", "run.provenance.json", "run.summary.json",
+    "codex-runner-event.ndjson", "codex-runner-metrics.prom",
+    "countyforge-request.provenance.json", "countyforge-profile.snapshot.json",
+    "countyforge-run-event.ndjson", "countyforge-run-summary.json",
+    "countyforge-run-metrics.prom"
+  ],
+  "input_policy": {"approved_roots": [".ai/reviews"], "resolve_symlinks": true, "require_regular_files": true, "packet_provenance_schema": "countyforge-review-packet-provenance.schema.json"},
+  "repository_policy": {"expected_full_name": "TruPryce/property-tax-data-platform", "remote_name": "origin", "verify_head": true, "base_policy": "ancestor_of_head"},
+  "budgets": {
+    "defaults": {"wall_clock_seconds": 1800, "attempts": 1, "max_output_bytes": 262144, "max_input_bytes": 3000000, "max_tokens": null, "max_cost_usd": null},
+    "ceilings": {"wall_clock_seconds": 3600, "attempts": 1, "max_output_bytes": 1048576, "max_input_bytes": 3000000, "max_tokens": 1000000, "max_cost_usd": 100.0}
+  },
+  "filesystem_mounts": [
+    {"source": "schema_directory", "target": "/workspace/.ai/schemas", "access": "read_only"},
+    {"source": "claimed_output_directory", "target": "/out", "access": "read_write"}
+  ],
+  "repository_access": "none",
+  "writable_paths": ["/out"],
+  "model_tools": [],
+  "deterministic_commands": [],
+  "network": {"policy": "provider_only", "destinations": ["selected_provider_api"]},
+  "credential_names": ["OPENAI_API_KEY", "SAKANA_API_KEY"],
+  "host_credential_broker_names": ["BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"],
+  "environment_allowlist": [
+    "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+    "LANG", "LC_ALL", "LC_ADDRESS", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION",
+    "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY", "LC_NAME", "LC_NUMERIC",
+    "LC_PAPER", "LC_TELEPHONE", "LC_TIME", "OPENAI_API_KEY", "SAKANA_API_KEY",
+    "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"
+  ],
+  "container": {"image": "property-tax-codex-reviewer:local", "provider_images": {"openai": "property-tax-codex-reviewer-openai:local", "sakana": "property-tax-codex-reviewer:local"}, "availability": "available", "configuration_bundle": "review-packet-only-v1", "codex_cli_version": "0.144.6"},
+  "expected_security_posture": {"read_only_rootfs": true, "non_root": true, "cap_drop_all": true, "no_new_privileges": true, "repository_mounted": false, "model_shell": false, "browser": false, "apps_or_mcp": false, "image_generation": false, "web_search": false, "production_credentials": false}
+}

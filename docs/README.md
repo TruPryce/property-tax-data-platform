@@ -10,6 +10,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [Engineering review](engineering/pre-pr-review-contract.md) | Pre-PR review loop, severity, and verdict contract |
 | [Review artifacts](engineering/review-artifact-contract.md) | Immutable per-run evidence and pointer rules |
 | [Runner observability](engineering/codex-runner-observability.md) | Local event, metrics, and validation contract |
+| [CountyForge runner kernel](engineering/countyforge-runner-kernel.md) | Requests, immutable profiles, providers, budgets, generic evidence, and compatibility |
 | [Operations](operations/README.md) | Runtime, release, recovery, and backfill guidance |
 | [Contributing](../CONTRIBUTING.md) | Local setup and delivery workflow |
 | [Data licensing](../DATA_LICENSE.md) | Synthetic fixture and third-party source-data terms |

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-validation-result.schema.json",
+  "title": "CountyForge Deterministic Validation Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "commands", "checks", "failures", "warnings", "artifact_references", "merge_eligibility"],
+  "properties": {
+    "status": {"enum": ["passed", "failed", "blocked", "profile_not_implemented"]},
+    "commands": {"$ref": "#/$defs/strings"},
+    "checks": {"$ref": "#/$defs/strings"},
+    "failures": {"$ref": "#/$defs/strings"},
+    "warnings": {"$ref": "#/$defs/strings"},
+    "artifact_references": {"$ref": "#/$defs/strings"},
+    "merge_eligibility": {"enum": ["eligible", "ineligible", "not_evaluated"]}
+  },
+  "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}
+}
