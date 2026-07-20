@@ -75,7 +75,6 @@ class FakeGitHub:
             "id": 100 + len(self.comments),
             "body": body,
             "user": {"id": BOT_ID, "type": "Bot", "login": "github-actions[bot]"},
-            "etag": f'"comment-{100 + len(self.comments)}-1"',
         }
         self.comments.append(comment)
         return copy.deepcopy(comment)
@@ -86,17 +85,7 @@ class FakeGitHub:
             raise ControlPlaneError("github_api_error", "GitHub API request failed.")
         comment = next(item for item in self.comments if item["id"] == comment_id)
         comment["body"] = body
-        version = int(str(comment["etag"]).rsplit("-", 1)[1].rstrip('"')) + 1
-        comment["etag"] = f'"comment-{comment_id}-{version}"'
         return copy.deepcopy(comment)
-
-    def update_comment_if_match(
-        self, repository: str, comment_id: int, body: str, etag: str
-    ) -> JsonObject:
-        comment = next(item for item in self.comments if item["id"] == comment_id)
-        if comment["etag"] != etag:
-            raise ControlPlaneError("state_write_conflict", "concurrent comment update")
-        return self.update_comment(repository, comment_id, body)
 
     def workflow_run(self, repository: str, run_id: int) -> JsonObject:
         return copy.deepcopy(self.workflow)
@@ -523,9 +512,13 @@ def test_claim_and_terminal_publication_keep_one_status_comment(
     assert state["run_id"] == published["run_id"]
 
 
-def test_matching_owner_can_publish_terminal_result_after_lease_expiry(
+def test_owner_cannot_publish_terminal_result_after_lease_expiry(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
+    # An expired lease means the owner is no longer the sole writer: an out-of-lane
+    # maintenance reclaim may already have marked the run stale, and a plain
+    # reread/compare/PATCH cannot atomically settle that race. Publication must therefore
+    # fail closed once the lease has expired, leaving stale reclamation as the only recovery.
     github = FakeGitHub(head_sha)
     result = _intake(github, event_factory("/countyforge review"), head_sha)
     comment_id, _ = _canonical(github)
@@ -544,22 +537,25 @@ def test_matching_owner_can_publish_terminal_result_after_lease_expiry(
     claimed["lifecycle_state"] = "running"
     claimed["lease"]["expires_at"] = "2026-07-19T12:02:00Z"
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(claimed))
-    published = advance_run(
-        github,
-        repository="TruPryce/property-tax-data-platform",
-        status_comment_id=comment_id,
-        trusted_bot_id=BOT_ID,
-        idempotency_key=result["idempotency_key"],
-        run_id=result["run_id"],
-        workflow_run_id=800,
-        nonce="expired-owner-nonce",
-        target_state="succeeded",
-        at="2026-07-19T12:03:00Z",
-        disposition="completed",
-        evidence_url="https://github.com/TruPryce/property-tax-data-platform/actions/runs/800",
-    )
-    assert published["lifecycle_state"] == "succeeded"
-    assert published["lease"] is None
+    with pytest.raises(ControlPlaneError) as raised:
+        advance_run(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            status_comment_id=comment_id,
+            trusted_bot_id=BOT_ID,
+            idempotency_key=result["idempotency_key"],
+            run_id=result["run_id"],
+            workflow_run_id=800,
+            nonce="expired-owner-nonce",
+            target_state="succeeded",
+            at="2026-07-19T12:03:00Z",
+            disposition="completed",
+            evidence_url="https://github.com/TruPryce/property-tax-data-platform/actions/runs/800",
+        )
+    assert raised.value.code == "lease_expired"
+    # The canonical run remains recoverable as running; nothing was overwritten.
+    _, current = _canonical(github)
+    assert current["lifecycle_state"] == "running"
 
 
 def test_preclaim_failure_becomes_retryable_terminal_state(
@@ -769,6 +765,70 @@ def test_maintenance_cannot_overwrite_concurrent_late_publish(
     assert result["marked_stale"] == 0
     assert result["write_conflicts"] == 1
     assert _canonical(github)[1]["lifecycle_state"] == "succeeded"
+
+
+def test_maintenance_stale_reclaim_blocks_late_owner_terminal_publish(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    # The mirror of the previous race: maintenance (repository-wide lane) reads the same
+    # expired running predecessor and marks the run stale first. The owner's late terminal
+    # publish must then fail closed on the expired lease instead of overwriting the reclaimed
+    # evidence, so a completed reclaim is never silently replaced.
+    github = FakeGitHub(head_sha)
+    result = _intake(github, event_factory("/countyforge review"), head_sha)
+    comment_id, queued = _canonical(github)
+    running = acquire_lease(
+        queued,
+        owner_workflow_run_id=800,
+        owner_run_attempt=1,
+        at="2026-07-19T12:00:00Z",
+        ttl_seconds=60,
+        nonce="stale-then-publish-race",
+    )
+    running = transition_state(
+        running,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "running",
+            "at": "2026-07-19T12:00:01Z",
+            "reason_code": "workflow_running",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(running))
+
+    # Maintenance reclaims the expired lease first.
+    reclaimed = reconcile_expired_leases(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        trusted_bot_id=BOT_ID,
+        at="2026-07-19T12:02:00Z",
+    )
+    assert reclaimed["marked_stale"] == 1
+    assert _canonical(github)[1]["lifecycle_state"] == "stale"
+
+    # The owner's late terminal publish fails closed on the expired lease.
+    with pytest.raises(ControlPlaneError) as raised:
+        advance_run(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            status_comment_id=comment_id,
+            trusted_bot_id=BOT_ID,
+            idempotency_key=result["idempotency_key"],
+            run_id=result["run_id"],
+            workflow_run_id=800,
+            nonce="stale-then-publish-race",
+            target_state="succeeded",
+            at="2026-07-19T12:03:00Z",
+            disposition="completed",
+            evidence_url="https://github.com/TruPryce/property-tax-data-platform/actions/runs/800",
+        )
+    assert raised.value.code in {
+        "lease_expired",
+        "lease_ownership_mismatch",
+        "workflow_state_mismatch",
+    }
+    assert _canonical(github)[1]["lifecycle_state"] == "stale"
 
 
 def test_maintenance_recovers_dispatch_that_never_claimed_a_lease(

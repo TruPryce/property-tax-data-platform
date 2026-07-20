@@ -18,6 +18,16 @@ jobs:
     name: Parse, authorize, and dispatch
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Shared per-target state lane: every canonical-state mutation across the command,
+    # run, and maintenance workflows serializes here so a reread-compare-then-PATCH is
+    # effectively atomic without depending on unsupported GitHub comment If-Match/412.
+    # The target-type token uses the underscore form to match countyforge-run.yml.
+    concurrency:
+      group: >-
+        countyforge-state-${{ github.event.repository.id }}-${{
+        github.event.issue.pull_request && 'pull_request' || 'issue' }}-${{
+        github.event.issue.number }}
+      cancel-in-progress: false
     permissions:
       actions: write
       checks: write

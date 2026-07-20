@@ -81,6 +81,35 @@ def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
     assert execution["cancel-in-progress"] == "false"
 
 
+def test_canonical_state_mutations_share_one_serialized_lane() -> None:
+    # GitHub does not honor If-Match/412 on issue-comment updates, so canonical-state
+    # mutations rely on a shared per-target job concurrency lane for serialization instead
+    # of an unsupported atomic CAS. The command intake job and every run-workflow state
+    # transaction must join the byte-identical countyforge-state-* group, while preparation,
+    # provider execution, and upload stay outside it so cancel/status remain responsive.
+    command_jobs = _jobs("countyforge-command.yml")
+    run_jobs = _jobs("countyforge-run.yml")
+
+    command_group = command_jobs["intake"]["concurrency"]["group"]
+    assert "countyforge-state-" in command_group
+    assert "pull_request" in command_group
+    assert command_jobs["intake"]["concurrency"]["cancel-in-progress"] == "false"
+
+    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish")
+    run_group = run_jobs["claim"]["concurrency"]["group"]
+    assert run_group == (
+        "countyforge-state-${{ github.repository_id }}-"
+        "${{ inputs.target_type }}-${{ inputs.target_number }}"
+    )
+    for name in state_jobs:
+        concurrency = run_jobs[name]["concurrency"]
+        assert concurrency["group"] == run_group
+        assert concurrency["cancel-in-progress"] == "false"
+
+    for name in ("prepare", "future-mode", "review-sakana", "review-openai"):
+        assert "concurrency" not in run_jobs[name]
+
+
 def test_only_preparation_checks_out_untrusted_target() -> None:
     jobs = _jobs("countyforge-run.yml")
     prepare_text = str(jobs["prepare"])

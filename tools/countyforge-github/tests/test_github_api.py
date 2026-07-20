@@ -46,9 +46,9 @@ def test_comment_lookup_fails_closed_at_bounded_limit() -> None:
 
 
 class _Response:
-    def __init__(self, body: bytes, headers: dict[str, str]) -> None:
+    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
         self._body = body
-        self.headers = headers
+        self.headers = headers or {}
 
     def __enter__(self) -> _Response:
         return self
@@ -60,61 +60,49 @@ class _Response:
         return self._body
 
 
-def test_comment_get_captures_etag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        github_api,
-        "urlopen",
-        lambda *_args, **_kwargs: _Response(
-            b'{"id": 7, "body": "status"}', {"ETag": '"comment-7-4"'}
-        ),
-    )
-    result = GitHubRestClient("synthetic-token").get_comment("owner/repo", 7)
-    assert result["etag"] == '"comment-7-4"'
-
-
-def test_conditional_patch_sends_exact_if_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, str | None] = {}
+def test_comment_update_sends_plain_patch_without_if_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GitHub does not honor If-Match/412 on the issue-comment update endpoint, so the
+    # adapter must never send a conditional header. Serialization is provided by the
+    # shared countyforge-state-* workflow lane instead.
+    captured: dict[str, object] = {}
 
     def fake_urlopen(request: object, **_kwargs: object) -> _Response:
         assert hasattr(request, "get_header")
-        captured["etag"] = request.get_header("If-match")  # type: ignore[attr-defined]
-        return _Response(b'{"id": 7, "body": "updated"}', {"ETag": '"comment-7-5"'})
+        captured["if_match"] = request.get_header("If-match")  # type: ignore[attr-defined]
+        captured["method"] = request.get_method()  # type: ignore[attr-defined]
+        return _Response(b'{"id": 7, "body": "updated"}')
 
     monkeypatch.setattr(github_api, "urlopen", fake_urlopen)
-    result = GitHubRestClient("synthetic-token").update_comment_if_match(
-        "owner/repo", 7, "updated", 'W/"comment-7-4"'
-    )
-    assert captured["etag"] == 'W/"comment-7-4"'
+    result = GitHubRestClient("synthetic-token").update_comment("owner/repo", 7, "updated")
+    assert captured["if_match"] is None
+    assert captured["method"] == "PATCH"
     assert result["body"] == "updated"
 
 
-def test_conditional_patch_412_is_state_conflict_without_token(
+def test_comment_get_returns_body_without_requiring_an_etag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_urlopen(*_args: object, **_kwargs: object) -> None:
-        from urllib.error import HTTPError
-
-        raise HTTPError("https://api.github.com", 412, "precondition", {}, io.BytesIO())
-
-    monkeypatch.setattr(github_api, "urlopen", fake_urlopen)
-    with pytest.raises(ControlPlaneError) as raised:
-        GitHubRestClient("secret-token").update_comment_if_match(
-            "owner/repo", 7, "updated", '"comment-7-4"'
-        )
-    assert raised.value.code == "state_write_conflict"
-    assert "secret-token" not in str(raised.value)
-
-
-@pytest.mark.parametrize("etag", [None, "comment-7-4", '"bad\nvalue"'])
-def test_comment_get_missing_or_malformed_etag_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, etag: str | None
-) -> None:
-    headers = {} if etag is None else {"ETag": etag}
     monkeypatch.setattr(
         github_api,
         "urlopen",
-        lambda *_args, **_kwargs: _Response(b'{"id": 7, "body": "status"}', headers),
+        lambda *_args, **_kwargs: _Response(b'{"id": 7, "body": "status"}'),
     )
+    result = GitHubRestClient("synthetic-token").get_comment("owner/repo", 7)
+    assert result == {"id": 7, "body": "status"}
+    assert "etag" not in result
+
+
+def test_comment_update_error_never_leaks_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(*_args: object, **_kwargs: object) -> None:
+        from urllib.error import HTTPError
+
+        raise HTTPError("https://api.github.com", 422, "unprocessable", {}, io.BytesIO())
+
+    monkeypatch.setattr(github_api, "urlopen", fake_urlopen)
     with pytest.raises(ControlPlaneError) as raised:
-        GitHubRestClient("synthetic-token").get_comment("owner/repo", 7)
-    assert raised.value.code in {"github_etag_missing", "github_etag_malformed"}
+        GitHubRestClient("secret-token").update_comment("owner/repo", 7, "updated")
+    assert raised.value.code == "github_api_error"
+    assert "secret-token" not in str(raised.value)
+    assert "secret-token" not in repr(raised.value.details)

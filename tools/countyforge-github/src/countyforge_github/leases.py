@@ -84,16 +84,23 @@ def heartbeat_lease(
     nonce: str,
     at: str,
     ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
-    allow_expired_owner: bool = False,
 ) -> JsonObject:
-    """Renew a lease only for its exact owner and nonce."""
+    """Renew a lease only for its exact owner and nonce.
+
+    An expired lease always fails closed, even for the exact owner. Post-expiry publication
+    is forbidden so an expired lease truly means no owner writer remains; recovery of an
+    expired run is the exclusive responsibility of the ``stale`` reclamation path (a new
+    authorized command or maintenance). Without an atomic comment primitive this is what
+    keeps a late owner publish from racing an out-of-lane maintenance reclaim and
+    overwriting completed or reclaimed evidence.
+    """
 
     lease = state["lease"]
     if not isinstance(lease, dict):
         raise ControlPlaneError("lease_missing", "No active CountyForge lease exists.")
     if lease["owner_workflow_run_id"] != owner_workflow_run_id or lease["nonce"] != nonce:
         raise ControlPlaneError("lease_ownership_mismatch", "Lease ownership does not match.")
-    if lease_expired(lease, at) and not allow_expired_owner:
+    if lease_expired(lease, at):
         raise ControlPlaneError("lease_expired", "The CountyForge lease has expired.")
     updated = copy.deepcopy(state)
     updated_lease: JsonObject = updated["lease"]

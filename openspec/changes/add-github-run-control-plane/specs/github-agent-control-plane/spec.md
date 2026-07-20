@@ -72,7 +72,7 @@ Execution commands SHALL derive a deterministic SHA-256 idempotency key from can
 - **THEN** the new semantic key differs and the command may become eligible subject to authorization and lease policy
 
 ### Requirement: Canonical bot-owned GitHub state
-The control plane SHALL maintain at most one canonical CountyForge status comment per issue or pull request. Its bounded hidden marker MUST contain canonical, schema-valid, sanitized state and MUST be trusted only when the immutable comment author identity matches the configured trusted bot. State MUST include current run ID, semantic key, command/profile, target SHA, workflow run/attempt, monotonic revision, lifecycle, timestamps, lease, disposition, sanitized evidence link, and check-run ID when present. A new state starts at revision 1; every successful state mutation increments revision exactly once, and every transition MUST supply the expected revision and produce expected revision + 1. Updates MUST edit the canonical comment rather than create status spam, and terminal evidence MUST remain immutable.
+The control plane SHALL maintain at most one canonical CountyForge status comment per issue or pull request. Its bounded hidden marker MUST contain canonical, schema-valid, sanitized state and MUST be trusted only when the immutable comment author identity matches the configured trusted bot. State MUST include current run ID, semantic key, command/profile, target SHA, workflow run/attempt, monotonic revision, lifecycle, timestamps, lease, disposition, sanitized evidence link, and check-run ID when present. A new state starts at revision 1; every successful state mutation increments revision exactly once, and every transition MUST supply the expected revision and produce expected revision + 1. The revision is application-level stale-state detection, not an atomic API guarantee. Updates MUST edit the canonical comment rather than create status spam, and terminal evidence MUST remain immutable.
 
 #### Scenario: Update existing canonical status
 - **WHEN** a bot-owned schema-valid canonical comment exists for the target
@@ -94,13 +94,13 @@ The control plane SHALL maintain at most one canonical CountyForge status commen
 - **WHEN** a writer attempts a transition with a missing, repeated, skipped, or older expected revision
 - **THEN** the transition fails closed and the newer canonical state remains unchanged
 
-#### Scenario: Conditionally update the canonical comment
-- **WHEN** a writer reads a canonical comment and obtains its valid ETag
-- **THEN** the writer sends the next state with `If-Match` and updates the check only after the conditional comment update succeeds
+#### Scenario: Serialize canonical comment updates without conditional writes
+- **WHEN** a writer mutates canonical state
+- **THEN** it rereads the canonical comment inside the shared per-target state concurrency lane, requires its persisted state to equal the expected predecessor, sends a plain comment update without depending on `If-Match`/`412`, and updates the check only after the comment update succeeds
 
-#### Scenario: Reconcile one conditional-write conflict
-- **WHEN** another writer changes the canonical comment after the first writer reads it and GitHub returns `412 Precondition Failed`
-- **THEN** the loser rereads once, preserves a newer terminal/retry/cancellation state or recomputes one legal transition, and fails closed on a second conflict
+#### Scenario: Fail closed when a serialized predecessor is stale
+- **WHEN** another writer commits a newer canonical state before this writer's reread completes
+- **THEN** the reread no longer equals the expected predecessor, the writer fails closed with `state_write_conflict`, and the newer state is never overwritten
 
 ### Requirement: Explicit lifecycle state machine
 The adapter SHALL enforce versioned legal transitions among `received`, `authorized`, `deduplicated`, `queued`, `preparing`, `running`, `succeeded`, `failed`, `cancel_requested`, `cancelled`, `timed_out`, `stale`, and `not_implemented`. It MUST reject illegal transitions, MUST NOT report success for a failed or unavailable executor, and MUST treat a completed run as immutable except for display reconciliation.
@@ -114,7 +114,9 @@ The adapter SHALL enforce versioned legal transitions among `received`, `authori
 - **THEN** the transition fails and prior evidence remains unchanged
 
 ### Requirement: Target concurrency and renewable leases
-The workflows SHALL serialize short control decisions and target execution separately using repository/target-keyed concurrency groups with ordinary automatic cancellation disabled. Canonical state writes SHALL use GitHub comment ETags plus monotonic revisions as an optimistic-concurrency protocol; a transport conflict MUST NOT be treated as permission to overwrite newer state. State SHALL include a lease with owner workflow run/attempt, semantic key, command, target SHA, acquisition/heartbeat/expiry timestamps, and ownership nonce. Stage transitions SHALL refresh the heartbeat. Only one contender may acquire or reclaim a lease, an unexpired lease MUST block another execution, and expiry recovery MUST mark abandoned work stale without overwriting completed evidence. A queued state that has neither a workflow owner nor a lease MUST have a bounded preclaim deadline and become a retryable terminal failure when that deadline passes.
+The workflows SHALL serialize short control decisions and target execution separately using repository/target-keyed concurrency groups with ordinary automatic cancellation disabled. Because GitHub does not honor conditional (`If-Match`/`412`) writes on the issue-comment update endpoint, canonical state mutations SHALL be serialized by a shared per-target `countyforge-state-<repository-id>-<target-type>-<target-number>` job concurrency lane that contains only the state transaction; target preparation, image build, provider execution, and artifact upload MUST run outside that lane so cancellation and status stay responsive. A monotonic revision advanced exactly once per successful mutation SHALL provide application-level stale-state detection, and a reread whose predecessor no longer matches MUST fail closed rather than overwrite newer state. State SHALL include a lease with owner workflow run/attempt, semantic key, command, target SHA, acquisition/heartbeat/expiry timestamps, and ownership nonce. Stage transitions SHALL refresh the heartbeat. Only one contender may acquire or reclaim a lease, an unexpired lease MUST block another execution, and expiry recovery MUST mark abandoned work stale without overwriting completed evidence. A queued state that has neither a workflow owner nor a lease MUST have a bounded preclaim deadline and become a retryable terminal failure when that deadline passes.
+
+Any canonical publication, including a terminal one, SHALL require a live lease: once the lease has expired the owning workflow MUST fail closed rather than publish. An expired lease therefore means no owner writer remains, and recovery of an expired run is the exclusive responsibility of the `stale` reclamation path. This preserves the completed-evidence invariant even though maintenance runs in a repository-wide lane outside the per-target state lane and canonical writes use plain reread/compare/PATCH without an atomic comment primitive.
 
 #### Scenario: Elect one lease winner
 - **WHEN** two authorized execution commands race for the same repository target
@@ -123,6 +125,10 @@ The workflows SHALL serialize short control decisions and target execution separ
 #### Scenario: Reclaim expired work
 - **WHEN** an active run's lease is expired and no terminal state exists
 - **THEN** an authorized command or maintenance reconciliation may atomically mark it stale and acquire a new lease while preserving all prior evidence
+
+#### Scenario: Refuse a post-expiry owner publication
+- **WHEN** an owning execution workflow attempts to publish a stage or terminal result after its lease has expired
+- **THEN** the publication fails closed on the expired lease and cannot overwrite a concurrent maintenance `stale` reclamation or any completed evidence
 
 #### Scenario: Recover failure before lease claim
 - **WHEN** the dispatched execution workflow fails before it can acquire the queued run's lease

@@ -46,3 +46,10 @@
 - [x] 7.3 Verify all six initial counties remain explicit, generated state/evidence stays ignored, no source/owner PII or credential is committed, and no target code executes in provider-secret fixtures.
 - [x] 7.4 Run the repo-native pre-PR review when a provider credential is available, resolve all BLOCKER/MUST_FIX findings, and record any intentionally skipped paid smoke.
 - [x] 7.5 Commit and push the implementation, open a draft PR referencing Issue #5, parent program #2, and `add-github-run-control-plane`, then verify CI and review threads.
+
+## 8. Concurrency-model correction (post-review)
+
+- [x] 8.1 Replace the unsupported GitHub comment `If-Match`/`412` CAS with a shared per-target `countyforge-state-*` job concurrency lane plus plain reread/compare/PATCH, and keep the monotonic revision as application-level stale detection.
+- [x] 8.2 Close the maintenance-versus-late-owner-publish race by requiring a live lease for every publication (an expired lease fails closed), and add interleaving tests for both race directions.
+- [x] 8.3 Update ADR-0006, design, spec, engineering, and operations docs to describe the lane model and fail-closed post-expiry publication.
+- [ ] 8.4 Rerun `make check`, `make runner-contract-tests`, `make countyforge-runner-check`, `make countyforge-github-check`, `make countyforge-command-fixtures`, `make countyforge-workflow-policy-tests`, and `make prepr-no-ai` against the final committed tree, then commit, push, and open the draft PR from that tree. (Supersedes the earlier 7.2/7.5 runs, which validated the pre-correction HEAD.)

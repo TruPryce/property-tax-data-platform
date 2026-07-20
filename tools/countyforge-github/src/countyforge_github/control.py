@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
-from countyforge_github.github_api import GitHubPort, validate_etag
+from countyforge_github.github_api import GitHubPort
 from countyforge_github.state import (
     ACTIVE_STATES,
-    LEGAL_TRANSITIONS,
-    TERMINAL_STATES,
     check_status,
     decode_marker,
     render_status,
@@ -68,7 +66,16 @@ def upsert_canonical_status(
     state: JsonObject,
     expected_state: JsonObject | None,
 ) -> JsonObject:
-    """Create or conditionally update canonical state with bounded CAS reconciliation."""
+    """Create once, or reread/compare canonical state immediately before one PATCH.
+
+    GitHub does not honor ``If-Match``/``412`` on the issue-comment update endpoint, so
+    atomic compare-and-swap at the API is impossible. Serialization is instead provided by
+    the shared ``countyforge-state-*`` job concurrency lane in the workflows; only one state
+    transaction for a target runs at a time. This function performs the transaction body:
+    it rereads the canonical comment, requires the persisted marker (lifecycle and monotonic
+    revision included) to equal the writer's expected predecessor, and only then PATCHes the
+    next state. The revision is application-level stale-state detection, not an atomic CAS.
+    """
 
     body = render_status(state)
     existing = find_canonical_state(
@@ -89,10 +96,6 @@ def upsert_canonical_status(
             "state_write_conflict", "Canonical CountyForge state changed before publication."
         )
     comment = github.get_comment(repository, existing[0])
-    etag = comment.get("etag")
-    if etag is None:
-        raise ControlPlaneError("github_etag_missing", "Canonical comment ETag is unavailable.")
-    validate_etag(etag)
     user = comment.get("user")
     if not isinstance(user, dict):
         raise ControlPlaneError(
@@ -110,89 +113,7 @@ def upsert_canonical_status(
         )
     if canonical_bytes(state) == canonical_bytes(expected_state):
         return comment
-    _validate_revision_step(expected_state, state)
-    try:
-        return github.update_comment_if_match(repository, existing[0], body, str(etag))
-    except ControlPlaneError as error:
-        if error.code != "state_write_conflict":
-            raise
-
-    # One bounded reread/rebase is enough to preserve a newer writer without
-    # turning a control-plane race into an unbounded retry loop.
-    latest_comment = github.get_comment(repository, existing[0])
-    latest_etag = latest_comment.get("etag")
-    if latest_etag is None:
-        raise ControlPlaneError("github_etag_missing", "Canonical comment ETag is unavailable.")
-    validate_etag(latest_etag)
-    latest = _decode_owned_comment(latest_comment, trusted_bot_id)
-    if latest is None:
-        raise ControlPlaneError("state_write_conflict", "Canonical state could not be reconciled.")
-    if canonical_bytes(latest) == canonical_bytes(state):
-        state.clear()
-        state.update(latest)
-        return latest_comment
-    rebased = _rebase_state(latest, state)
-    if rebased is None:
-        raise ControlPlaneError("state_write_conflict", "Canonical state could not be reconciled.")
-    _validate_revision_step(latest, rebased)
-    state.clear()
-    state.update(rebased)
-    return github.update_comment_if_match(
-        repository, existing[0], render_status(rebased), str(latest_etag)
-    )
-
-
-def _decode_owned_comment(comment: JsonObject, trusted_bot_id: int) -> JsonObject | None:
-    user = comment.get("user")
-    if not isinstance(user, dict):
-        return None
-    return decode_marker(
-        str(comment.get("body", "")),
-        author_id=int(user.get("id", 0)),
-        author_type=str(user.get("type", "")),
-        trusted_bot_id=trusted_bot_id,
-    )
-
-
-def _validate_revision_step(expected: JsonObject, state: JsonObject) -> None:
-    if int(state["revision"]) <= int(expected["revision"]):
-        raise ControlPlaneError(
-            "revision_conflict", "Canonical state revision must advance monotonically."
-        )
-
-
-def _rebase_state(current: JsonObject, desired: JsonObject) -> JsonObject | None:
-    """Recompute one legal desired edge from the state observed after a 412."""
-
-    if (
-        current["run_id"] != desired["run_id"]
-        or current["idempotency_key"] != desired["idempotency_key"]
-    ):
-        return None
-    if current["lifecycle_state"] in TERMINAL_STATES:
-        return current if current["lifecycle_state"] == desired["lifecycle_state"] else None
-    target = str(desired["lifecycle_state"])
-    if target == current["lifecycle_state"]:
-        return current
-    if target not in LEGAL_TRANSITIONS[str(current["lifecycle_state"])]:
-        return None
-    rebased = transition_state(
-        current,
-        {
-            "contract_version": 1,
-            "from": current["lifecycle_state"],
-            "to": target,
-            "at": desired["updated_at"],
-            "reason_code": str(desired["disposition"] or "state_reconciled"),
-            "expected_revision": current["revision"],
-        },
-    )
-    if target in TERMINAL_STATES:
-        rebased["evidence_url"] = desired["evidence_url"]
-    elif desired["disposition"] is not None:
-        rebased["disposition"] = desired["disposition"]
-    ControlContracts().validate("state", rebased)
-    return rebased
+    return github.update_comment(repository, existing[0], body)
 
 
 def update_check_for_state(github: GitHubPort, repository: str, state: JsonObject) -> None:

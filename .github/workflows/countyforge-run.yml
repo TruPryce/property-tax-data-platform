@@ -62,6 +62,14 @@ jobs:
     name: Claim canonical run state
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Shared per-target state lane. Only short canonical-state transactions join it, so a
+    # reread-compare-then-PATCH is effectively serialized without depending on unsupported
+    # GitHub comment If-Match/412. Preparation, image build, provider execution, and artifact
+    # upload deliberately stay outside this lane so /countyforge cancel and status stay
+    # responsive during a long review.
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
     permissions:
       actions: read
       checks: write
@@ -240,6 +248,9 @@ jobs:
     needs: claim
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
     permissions:
       actions: read
       checks: write
@@ -281,6 +292,9 @@ jobs:
     needs: [claim, prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
     permissions:
       actions: read
       checks: write
@@ -571,6 +585,9 @@ jobs:
     needs: [claim, prepare, mark-running, future-mode, review-sakana, review-openai]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
     permissions:
       actions: read
       checks: write

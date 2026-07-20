@@ -9,7 +9,7 @@ from countyforge_github.control import publish_canonical_state
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
 from countyforge_github.leases import acquire_lease, heartbeat_lease
-from countyforge_github.state import TERMINAL_STATES, decode_marker, transition_state
+from countyforge_github.state import decode_marker, transition_state
 
 
 def _load_owned_state(
@@ -171,12 +171,16 @@ def advance_run(
     if state["lifecycle_state"] == "cancel_requested" and target_state == "not_implemented":
         target_state = "cancelled"
         disposition = "cancelled"
+    # A publish (including a terminal one) requires a live lease. If the lease has expired,
+    # this owner is no longer the sole writer: an out-of-lane maintenance reclaim may already
+    # have marked the run stale, and a plain reread/compare/PATCH cannot atomically settle
+    # that race. Fail closed here so the stale-reclamation path is the only recovery of an
+    # expired run, and completed evidence is never overwritten.
     state = heartbeat_lease(
         state,
         owner_workflow_run_id=workflow_run_id,
         nonce=nonce,
         at=at,
-        allow_expired_owner=target_state in TERMINAL_STATES,
     )
     state = transition_state(
         state,

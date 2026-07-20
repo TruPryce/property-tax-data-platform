@@ -40,7 +40,7 @@ class FakeGitHub:
         self.comments: list[JsonObject] = []
         self.cancelled: list[int] = []
         self.workflow: JsonObject = {}
-        self.replace_on_conditional: JsonObject | None = None
+        self.replace_on_get: JsonObject | None = None
 
     def repository_permission(self, repository: str, actor: str) -> JsonObject:
         return {"permission": "write", "role_name": "write"}
@@ -53,35 +53,26 @@ class FakeGitHub:
             "id": len(self.comments) + 100,
             "body": body,
             "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
-            "etag": f'"comment-{len(self.comments) + 100}-1"',
         }
         self.comments.append(comment)
         return copy.deepcopy(comment)
 
     def get_comment(self, repository: str, comment_id: int) -> JsonObject:
-        return copy.deepcopy(next(item for item in self.comments if item["id"] == comment_id))
+        comment = next(item for item in self.comments if item["id"] == comment_id)
+        # Model a competing state-lane winner that committed just before this reread. The
+        # shared countyforge-state-* lane serializes writers, so a loser observes the newer
+        # persisted state at reread and its compare-before-write fails closed.
+        if self.replace_on_get is not None:
+            comment["body"] = render_status(self.replace_on_get)
+            self.replace_on_get = None
+        return copy.deepcopy(comment)
 
     def update_comment(self, repository: str, comment_id: int, body: str) -> JsonObject:
         for comment in self.comments:
             if comment["id"] == comment_id:
                 comment["body"] = body
-                version = int(str(comment["etag"]).split("-")[-1].rstrip('"')) + 1
-                comment["etag"] = f'"comment-{comment_id}-{version}"'
                 return copy.deepcopy(comment)
         raise AssertionError("comment not found")
-
-    def update_comment_if_match(
-        self, repository: str, comment_id: int, body: str, etag: str
-    ) -> JsonObject:
-        comment = next(item for item in self.comments if item["id"] == comment_id)
-        if self.replace_on_conditional is not None:
-            comment["body"] = render_status(self.replace_on_conditional)
-            version = int(str(comment["etag"]).split("-")[-1].rstrip('"')) + 1
-            comment["etag"] = f'"comment-{comment_id}-{version}"'
-            self.replace_on_conditional = None
-        if comment["etag"] != etag:
-            raise ControlPlaneError("state_write_conflict", "concurrent comment update")
-        return self.update_comment(repository, comment_id, body)
 
     def workflow_run(self, repository: str, run_id: int) -> JsonObject:
         return copy.deepcopy(self.workflow)
@@ -247,9 +238,12 @@ def test_status_comment_is_updated_without_spam(
     assert github.comments[0]["id"] == first["id"]
 
 
-def test_interleaved_writers_have_one_conditional_winner(
+def test_serialized_writers_have_one_state_lane_winner(
     queued_state_factory: Callable[[str], JsonObject],
 ) -> None:
+    # The shared countyforge-state-* lane runs writers one at a time. The first writer
+    # commits; the second rereads the newer persisted state, sees its expected predecessor
+    # no longer matches, and fails closed rather than overwriting the winner.
     github = FakeGitHub()
     predecessor = queued_state_factory("review")
     upsert_canonical_status(
@@ -291,9 +285,12 @@ def test_interleaved_writers_have_one_conditional_winner(
     assert current["revision"] == predecessor["revision"] + 1
 
 
-def test_one_bounded_rebase_after_412_preserves_newer_preparing_state(
+def test_stale_predecessor_after_concurrent_win_fails_closed(
     queued_state_factory: Callable[[str], JsonObject],
 ) -> None:
+    # A writer prepares a transition, but a competing state-lane winner commits a newer
+    # state before this writer's reread. Revision/marker stale-detection must refuse the
+    # obsolete write so a newer state is never overwritten.
     github = FakeGitHub()
     predecessor = queued_state_factory("review")
     upsert_canonical_status(
@@ -311,17 +308,26 @@ def test_one_bounded_rebase_after_412_preserves_newer_preparing_state(
         "cancellation_requested",
     )
     newer = _transition(predecessor, "preparing", "2026-07-19T12:01:01Z", "preparing")
-    github.replace_on_conditional = newer
-    upsert_canonical_status(
-        github,
-        repository="TruPryce/property-tax-data-platform",
-        target_number=11,
+    github.replace_on_get = newer
+    with pytest.raises(ControlPlaneError) as raised:
+        upsert_canonical_status(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            target_number=11,
+            trusted_bot_id=41898282,
+            state=desired,
+            expected_state=predecessor,
+        )
+    assert raised.value.code == "state_write_conflict"
+    current = decode_marker(
+        github.comments[0]["body"],
+        author_id=41898282,
+        author_type="Bot",
         trusted_bot_id=41898282,
-        state=desired,
-        expected_state=predecessor,
     )
-    assert desired["lifecycle_state"] == "cancel_requested"
-    assert desired["revision"] == newer["revision"] + 1
+    assert current is not None
+    assert current["lifecycle_state"] == "preparing"
+    assert current["revision"] == newer["revision"]
 
 
 def test_illegal_transition_and_terminal_mutation_fail(
