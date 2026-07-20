@@ -27,6 +27,8 @@ Authorization uses GitHub's resolved repository permission. `admin`, `maintain`,
 
 One bot-owned canonical comment is the GitHub-native state store. A bounded hidden marker contains strict sanitized state and is accepted only from the configured immutable bot ID. Pull-request executions also receive one `CountyForge / <command>` check. User-authored copies of the marker are ignored.
 
+Canonical comment mutation uses optimistic concurrency at the GitHub API boundary. Each state carries a monotonic revision beginning at 1; each legal transition or other successful mutation advances it exactly once. Reads capture the comment ETag, and updates send `If-Match`. A `412 Precondition Failed` is mapped to `state_write_conflict`; the writer rereads once, preserves a newer terminal/retry/cancellation state, or recomputes one legal transition from the newer predecessor. ETag is transport ordering; revision is application ordering. Checks are updated only after the canonical CAS succeeds.
+
 Semantic execution identity hashes repository ID, target type/number, normalized command/arguments, exact profile version, target head SHA, optional OpenSpec change, and control-plane contract version. Delivery/comment IDs are provenance only. A changed head gets a new identity; explicit retry derives a new identity from the original attempt and requires the head to remain unchanged.
 
 Short control operations and target execution use separate non-cancelling concurrency groups so `/countyforge status` and `/countyforge cancel` can run while work is active. The canonical lease supplies the durable single-winner fact, stage heartbeats, expiry, and stale recovery. Maintenance may mark expired work stale but never starts agent work or overwrites terminal evidence.

@@ -4,12 +4,13 @@
   "title": "CountyForge GitHub State Transition",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract_version", "from", "to", "at", "reason_code"],
+  "required": ["contract_version", "from", "to", "at", "reason_code", "expected_revision"],
   "properties": {
     "contract_version": {"const": 1},
     "from": {"enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]},
     "to": {"enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]},
     "at": {"type": "string", "format": "date-time"},
-    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "expected_revision": {"type": "integer", "minimum": 1}
   }
 }

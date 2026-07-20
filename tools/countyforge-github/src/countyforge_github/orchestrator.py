@@ -29,6 +29,7 @@ from countyforge_github.observability import (
 from countyforge_github.state import (
     ACTIVE_STATES,
     begin_new_state,
+    bump_revision,
     check_status,
     reconcile_workflow,
     retry_state,
@@ -663,6 +664,7 @@ def process_intake(
             )
             state = copy.deepcopy(state)
             state["check_run_id"] = check_id
+            state = bump_revision(state, at=timestamp)
             resolved.validate("state", state)
             publish_canonical_state(
                 github,

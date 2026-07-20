@@ -22,6 +22,7 @@ from countyforge_github.state import (
     MARKER_PREFIX,
     MARKER_SUFFIX,
     MAX_MARKER_BYTES,
+    bump_revision,
     check_status,
     decode_marker,
     encode_marker,
@@ -39,6 +40,7 @@ class FakeGitHub:
         self.comments: list[JsonObject] = []
         self.cancelled: list[int] = []
         self.workflow: JsonObject = {}
+        self.replace_on_conditional: JsonObject | None = None
 
     def repository_permission(self, repository: str, actor: str) -> JsonObject:
         return {"permission": "write", "role_name": "write"}
@@ -51,6 +53,7 @@ class FakeGitHub:
             "id": len(self.comments) + 100,
             "body": body,
             "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
+            "etag": f'"comment-{len(self.comments) + 100}-1"',
         }
         self.comments.append(comment)
         return copy.deepcopy(comment)
@@ -62,8 +65,23 @@ class FakeGitHub:
         for comment in self.comments:
             if comment["id"] == comment_id:
                 comment["body"] = body
+                version = int(str(comment["etag"]).split("-")[-1].rstrip('"')) + 1
+                comment["etag"] = f'"comment-{comment_id}-{version}"'
                 return copy.deepcopy(comment)
         raise AssertionError("comment not found")
+
+    def update_comment_if_match(
+        self, repository: str, comment_id: int, body: str, etag: str
+    ) -> JsonObject:
+        comment = next(item for item in self.comments if item["id"] == comment_id)
+        if self.replace_on_conditional is not None:
+            comment["body"] = render_status(self.replace_on_conditional)
+            version = int(str(comment["etag"]).split("-")[-1].rstrip('"')) + 1
+            comment["etag"] = f'"comment-{comment_id}-{version}"'
+            self.replace_on_conditional = None
+        if comment["etag"] != etag:
+            raise ControlPlaneError("state_write_conflict", "concurrent comment update")
+        return self.update_comment(repository, comment_id, body)
 
     def workflow_run(self, repository: str, run_id: int) -> JsonObject:
         return copy.deepcopy(self.workflow)
@@ -216,7 +234,7 @@ def test_status_comment_is_updated_without_spam(
         expected_state=None,
     )
     updated = copy.deepcopy(state)
-    updated["updated_at"] = "2026-07-19T12:00:03Z"
+    updated = bump_revision(updated, at="2026-07-19T12:00:03Z")
     upsert_canonical_status(
         github,
         repository="TruPryce/property-tax-data-platform",
@@ -229,6 +247,83 @@ def test_status_comment_is_updated_without_spam(
     assert github.comments[0]["id"] == first["id"]
 
 
+def test_interleaved_writers_have_one_conditional_winner(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    github = FakeGitHub()
+    predecessor = queued_state_factory("review")
+    upsert_canonical_status(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        target_number=11,
+        trusted_bot_id=41898282,
+        state=predecessor,
+        expected_state=None,
+    )
+    writer_a = _transition(predecessor, "running", "2026-07-19T12:01:00Z", "started")
+    writer_b = _transition(predecessor, "preparing", "2026-07-19T12:01:01Z", "preparing")
+    upsert_canonical_status(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        target_number=11,
+        trusted_bot_id=41898282,
+        state=writer_a,
+        expected_state=predecessor,
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        upsert_canonical_status(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            target_number=11,
+            trusted_bot_id=41898282,
+            state=writer_b,
+            expected_state=predecessor,
+        )
+    assert raised.value.code == "state_write_conflict"
+    current = decode_marker(
+        github.comments[0]["body"],
+        author_id=41898282,
+        author_type="Bot",
+        trusted_bot_id=41898282,
+    )
+    assert current is not None
+    assert current["lifecycle_state"] == "running"
+    assert current["revision"] == predecessor["revision"] + 1
+
+
+def test_one_bounded_rebase_after_412_preserves_newer_preparing_state(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    github = FakeGitHub()
+    predecessor = queued_state_factory("review")
+    upsert_canonical_status(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        target_number=11,
+        trusted_bot_id=41898282,
+        state=predecessor,
+        expected_state=None,
+    )
+    desired = _transition(
+        predecessor,
+        "cancel_requested",
+        "2026-07-19T12:01:00Z",
+        "cancellation_requested",
+    )
+    newer = _transition(predecessor, "preparing", "2026-07-19T12:01:01Z", "preparing")
+    github.replace_on_conditional = newer
+    upsert_canonical_status(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        target_number=11,
+        trusted_bot_id=41898282,
+        state=desired,
+        expected_state=predecessor,
+    )
+    assert desired["lifecycle_state"] == "cancel_requested"
+    assert desired["revision"] == newer["revision"] + 1
+
+
 def test_illegal_transition_and_terminal_mutation_fail(
     queued_state_factory: Callable[[str], JsonObject],
 ) -> None:
@@ -239,6 +334,25 @@ def test_illegal_transition_and_terminal_mutation_fail(
     succeeded = _transition(running, "succeeded", "2026-07-19T12:02:00Z", "workflow_success")
     with pytest.raises(ControlPlaneError, match="illegal"):
         _transition(succeeded, "running", "2026-07-19T12:03:00Z", "mutate_terminal")
+
+
+def test_revision_must_match_predecessor_and_advance_once(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = queued_state_factory("review")
+    transition = {
+        "contract_version": 1,
+        "from": "queued",
+        "to": "running",
+        "at": "2026-07-19T12:01:00Z",
+        "reason_code": "workflow_running",
+        "expected_revision": state["revision"] + 1,
+    }
+    with pytest.raises(ControlPlaneError, match="revision"):
+        transition_state(state, transition)
+    transition["expected_revision"] = state["revision"]
+    running = transition_state(state, transition)
+    assert running["revision"] == state["revision"] + 1
 
 
 def test_single_winner_lease_and_heartbeat(

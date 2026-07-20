@@ -72,7 +72,7 @@ Execution commands SHALL derive a deterministic SHA-256 idempotency key from can
 - **THEN** the new semantic key differs and the command may become eligible subject to authorization and lease policy
 
 ### Requirement: Canonical bot-owned GitHub state
-The control plane SHALL maintain at most one canonical CountyForge status comment per issue or pull request. Its bounded hidden marker MUST contain canonical, schema-valid, sanitized state and MUST be trusted only when the immutable comment author identity matches the configured trusted bot. State MUST include current run ID, semantic key, command/profile, target SHA, workflow run/attempt, lifecycle, timestamps, lease, disposition, sanitized evidence link, and check-run ID when present. Updates MUST edit the canonical comment rather than create status spam, and terminal evidence MUST remain immutable.
+The control plane SHALL maintain at most one canonical CountyForge status comment per issue or pull request. Its bounded hidden marker MUST contain canonical, schema-valid, sanitized state and MUST be trusted only when the immutable comment author identity matches the configured trusted bot. State MUST include current run ID, semantic key, command/profile, target SHA, workflow run/attempt, monotonic revision, lifecycle, timestamps, lease, disposition, sanitized evidence link, and check-run ID when present. A new state starts at revision 1; every successful state mutation increments revision exactly once, and every transition MUST supply the expected revision and produce expected revision + 1. Updates MUST edit the canonical comment rather than create status spam, and terminal evidence MUST remain immutable.
 
 #### Scenario: Update existing canonical status
 - **WHEN** a bot-owned schema-valid canonical comment exists for the target
@@ -90,6 +90,18 @@ The control plane SHALL maintain at most one canonical CountyForge status commen
 - **WHEN** otherwise valid bot-owned state embeds another repository ID, target type, or issue/pull-request number
 - **THEN** state loading fails closed and no duplicate, status, cancellation, retry, check, or dispatch decision uses that state
 
+#### Scenario: Reject a stale state revision
+- **WHEN** a writer attempts a transition with a missing, repeated, skipped, or older expected revision
+- **THEN** the transition fails closed and the newer canonical state remains unchanged
+
+#### Scenario: Conditionally update the canonical comment
+- **WHEN** a writer reads a canonical comment and obtains its valid ETag
+- **THEN** the writer sends the next state with `If-Match` and updates the check only after the conditional comment update succeeds
+
+#### Scenario: Reconcile one conditional-write conflict
+- **WHEN** another writer changes the canonical comment after the first writer reads it and GitHub returns `412 Precondition Failed`
+- **THEN** the loser rereads once, preserves a newer terminal/retry/cancellation state or recomputes one legal transition, and fails closed on a second conflict
+
 ### Requirement: Explicit lifecycle state machine
 The adapter SHALL enforce versioned legal transitions among `received`, `authorized`, `deduplicated`, `queued`, `preparing`, `running`, `succeeded`, `failed`, `cancel_requested`, `cancelled`, `timed_out`, `stale`, and `not_implemented`. It MUST reject illegal transitions, MUST NOT report success for a failed or unavailable executor, and MUST treat a completed run as immutable except for display reconciliation.
 
@@ -102,7 +114,7 @@ The adapter SHALL enforce versioned legal transitions among `received`, `authori
 - **THEN** the transition fails and prior evidence remains unchanged
 
 ### Requirement: Target concurrency and renewable leases
-The workflows SHALL serialize short control decisions and target execution separately using repository/target-keyed concurrency groups with ordinary automatic cancellation disabled. State SHALL include a lease with owner workflow run/attempt, semantic key, command, target SHA, acquisition/heartbeat/expiry timestamps, and ownership nonce. Stage transitions SHALL refresh the heartbeat. Only one contender may acquire or reclaim a lease, an unexpired lease MUST block another execution, and expiry recovery MUST mark abandoned work stale without overwriting completed evidence. A queued state that has neither a workflow owner nor a lease MUST have a bounded preclaim deadline and become a retryable terminal failure when that deadline passes.
+The workflows SHALL serialize short control decisions and target execution separately using repository/target-keyed concurrency groups with ordinary automatic cancellation disabled. Canonical state writes SHALL use GitHub comment ETags plus monotonic revisions as an optimistic-concurrency protocol; a transport conflict MUST NOT be treated as permission to overwrite newer state. State SHALL include a lease with owner workflow run/attempt, semantic key, command, target SHA, acquisition/heartbeat/expiry timestamps, and ownership nonce. Stage transitions SHALL refresh the heartbeat. Only one contender may acquire or reclaim a lease, an unexpired lease MUST block another execution, and expiry recovery MUST mark abandoned work stale without overwriting completed evidence. A queued state that has neither a workflow owner nor a lease MUST have a bounded preclaim deadline and become a retryable terminal failure when that deadline passes.
 
 #### Scenario: Elect one lease winner
 - **WHEN** two authorized execution commands race for the same repository target

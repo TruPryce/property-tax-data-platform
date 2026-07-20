@@ -7,7 +7,7 @@
   "required": [
     "contract_version", "repository_id", "target_type", "target_number", "command", "command_arguments",
     "profile_id", "profile_version", "target_head_sha", "run_id", "idempotency_key", "original_idempotency_key",
-    "attempt", "lifecycle_state", "workflow_run_id", "workflow_run_attempt", "check_run_id",
+    "attempt", "revision", "lifecycle_state", "workflow_run_id", "workflow_run_attempt", "check_run_id",
     "lease", "disposition", "evidence_url", "original_comment_id", "original_delivery_id",
     "original_actor_id", "trusted_tool_sha", "created_at", "updated_at", "history"
   ],
@@ -31,6 +31,7 @@
     "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "original_idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "attempt": {"type": "integer", "minimum": 1},
+    "revision": {"type": "integer", "minimum": 1},
     "lifecycle_state": {
       "enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]
     },
@@ -73,11 +74,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["run_id", "idempotency_key", "attempt", "lifecycle_state", "disposition", "evidence_url", "finished_at"],
+        "required": ["run_id", "idempotency_key", "attempt", "revision", "lifecycle_state", "disposition", "evidence_url", "finished_at"],
         "properties": {
           "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
           "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "attempt": {"type": "integer", "minimum": 1},
+          "revision": {"type": "integer", "minimum": 1},
           "lifecycle_state": {"enum": ["succeeded", "failed", "cancelled", "timed_out", "stale", "not_implemented"]},
           "disposition": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$"},
           "evidence_url": {"type": ["string", "null"], "pattern": "^https://github\\.com/", "maxLength": 1024},

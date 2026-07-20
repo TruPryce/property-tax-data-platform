@@ -100,6 +100,7 @@ def initial_state(
         "idempotency_key": idempotency_key,
         "original_idempotency_key": idempotency_key,
         "attempt": 1,
+        "revision": 1,
         "lifecycle_state": "received",
         "workflow_run_id": None,
         "workflow_run_attempt": 1,
@@ -139,6 +140,7 @@ def begin_new_state(
             "run_id": previous["run_id"],
             "idempotency_key": previous["idempotency_key"],
             "attempt": previous["attempt"],
+            "revision": previous["revision"],
             "lifecycle_state": previous["lifecycle_state"],
             "disposition": previous["disposition"],
             "evidence_url": previous["evidence_url"],
@@ -146,6 +148,7 @@ def begin_new_state(
         }
     )
     state["history"] = history[-20:]
+    state["revision"] = int(previous["revision"]) + 1
     return state
 
 
@@ -158,9 +161,16 @@ def transition_state(
     """Apply one declared legal edge without mutating the input document."""
 
     resolved = contracts or ControlContracts()
+    if "expected_revision" not in transition:
+        transition = {**transition, "expected_revision": state.get("revision", 1)}
     resolved.validate("state", state)
     resolved.validate("transition", transition)
     current = str(state["lifecycle_state"])
+    expected_revision = int(transition["expected_revision"])
+    if expected_revision != int(state["revision"]):
+        raise ControlPlaneError(
+            "revision_conflict", "State revision changed before this transition."
+        )
     if transition["from"] != current:
         raise ControlPlaneError("transition_conflict", "State changed before this transition.")
     target = str(transition["to"])
@@ -170,11 +180,22 @@ def transition_state(
         )
     updated = copy.deepcopy(state)
     updated["lifecycle_state"] = target
+    updated["revision"] = expected_revision + 1
     updated["updated_at"] = transition["at"]
     if target in TERMINAL_STATES:
         updated["lease"] = None
         updated["disposition"] = str(transition["reason_code"])
     resolved.validate("state", updated)
+    return updated
+
+
+def bump_revision(state: JsonObject, *, at: str) -> JsonObject:
+    """Record one non-lifecycle canonical mutation with the next revision."""
+
+    updated = copy.deepcopy(state)
+    updated["revision"] = int(state["revision"]) + 1
+    updated["updated_at"] = at
+    (ControlContracts()).validate("state", updated)
     return updated
 
 
@@ -356,6 +377,7 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
             "run_id": state["run_id"],
             "idempotency_key": state["idempotency_key"],
             "attempt": state["attempt"],
+            "revision": state["revision"],
             "lifecycle_state": state["lifecycle_state"],
             "disposition": state["disposition"],
             "evidence_url": state["evidence_url"],
@@ -377,6 +399,7 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
             "created_at": at,
             "updated_at": at,
             "history": history[-20:],
+            "revision": int(state["revision"]) + 1,
         }
     )
     ControlContracts().validate("state", updated)

@@ -41,13 +41,14 @@ The pure authorization function accepts externally resolved team slugs, but live
 
 After merge to the default branch:
 
-1. Create or choose a synthetic, non-sensitive pull request owned by a maintainer.
-2. Confirm an actor with `read` or `triage` receives one reused refusal comment and starts no `CountyForge run` workflow or check.
-3. As a `write`, `maintain`, or `admin` actor, comment `/countyforge validate`; confirm the canonical comment and neutral `profile_not_implemented` check.
-4. Repeat the same command on the unchanged head; confirm it deduplicates and creates no second execution.
-5. Exercise `/countyforge status`, `/countyforge cancel` on an active synthetic run, and `/countyforge retry` on a failed unchanged-head run.
-6. Run `/countyforge review` only on a pull request, when a paid call is intended and the selected provider secret/image path is ready.
-7. Confirm the provider job contains no target checkout and the preparation job contains no provider secret in the Actions job view.
+1. Enable `countyforge-command.yml` in repository Actions settings for the controlled rollout.
+2. Create or choose a synthetic, non-sensitive pull request owned by a maintainer.
+3. Confirm an actor with `read` or `triage` receives one reused refusal comment and starts no `CountyForge run` workflow or check.
+4. As a `write`, `maintain`, or `admin` actor, comment `/countyforge validate`; confirm authorization, dispatch, lease lifecycle, no-secret preparation, canonical comment, sanitized artifacts, and neutral `profile_not_implemented` check.
+5. Repeat the same command on the unchanged head; confirm it deduplicates and creates no second execution.
+6. Exercise `/countyforge status`, `/countyforge cancel` on an active synthetic run, `/countyforge retry` on a failed unchanged-head run, and scheduled/manual maintenance reconciliation.
+7. Configure only the selected provider secret and run `/countyforge review` on the controlled pull request.
+8. Confirm the provider job contains no target checkout, the preparation job contains no provider secret, packet/provenance binding passes, and only the selected provider credential is present in the Actions job view.
 
 The feature-branch test suite is the acceptance path before merge; this controlled default-branch run is the operational activation check.
 
@@ -67,7 +68,7 @@ Use:
 /countyforge status
 ```
 
-Status requires authorization and performs no model call. It verifies canonical bot ownership plus the exact workflow repository, ID, event, path, and CountyForge run display identity; reconciles the workflow/check; and edits the existing comment. The workflow `name` field is display-oriented and advisory because the workflow configures a dynamic `run-name`. The guarded publisher refuses a stale expected predecessor and updates the existing PR check whenever reconciliation reaches a terminal state. A queued run that has no workflow owner or lease after 30 minutes becomes retryable `failed` state. If no state exists, status returns a bounded no-run message.
+Status requires authorization and performs no model call. It verifies canonical bot ownership plus the exact workflow repository, ID, event, path, and CountyForge run display identity; reconciles the workflow/check; and edits the existing comment. The workflow `name` field is display-oriented and advisory because the workflow configures a dynamic `run-name`. Canonical writes use the comment ETag with `If-Match` plus the monotonic state revision; a `412` triggers one bounded reread/rebase and never blindly retries stale state. The guarded publisher updates the existing PR check only after canonical publication succeeds. A queued run that has no workflow owner or lease after 30 minutes becomes retryable `failed` state. If no state exists, status returns a bounded no-run message.
 
 The maintenance workflow runs twice per hour and can also be dispatched manually. It scans at most the newest 1,000 repository comments, fails closed if that documented bound is exhausted, marks expired active leases `stale`, fails abandoned no-lease queues after their preclaim deadline only when the canonical predecessor still matches, updates the matching check, and reports `dispatched: 0`. A malformed trusted-bot marker emits a bounded `invalid_state_detected` audit event and is skipped so it cannot suppress recovery for unrelated targets; same-target intake still fails closed on malformed state. The 1,000-comment bound is accepted for this repository's initial scale and must be revisited before broader/high-volume deployment. Maintenance never starts or retries agent work.
 

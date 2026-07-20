@@ -75,6 +75,7 @@ class FakeGitHub:
             "id": 100 + len(self.comments),
             "body": body,
             "user": {"id": BOT_ID, "type": "Bot", "login": "github-actions[bot]"},
+            "etag": f'"comment-{100 + len(self.comments)}-1"',
         }
         self.comments.append(comment)
         return copy.deepcopy(comment)
@@ -85,7 +86,17 @@ class FakeGitHub:
             raise ControlPlaneError("github_api_error", "GitHub API request failed.")
         comment = next(item for item in self.comments if item["id"] == comment_id)
         comment["body"] = body
+        version = int(str(comment["etag"]).rsplit("-", 1)[1].rstrip('"')) + 1
+        comment["etag"] = f'"comment-{comment_id}-{version}"'
         return copy.deepcopy(comment)
+
+    def update_comment_if_match(
+        self, repository: str, comment_id: int, body: str, etag: str
+    ) -> JsonObject:
+        comment = next(item for item in self.comments if item["id"] == comment_id)
+        if comment["etag"] != etag:
+            raise ControlPlaneError("state_write_conflict", "concurrent comment update")
+        return self.update_comment(repository, comment_id, body)
 
     def workflow_run(self, repository: str, run_id: int) -> JsonObject:
         return copy.deepcopy(self.workflow)
