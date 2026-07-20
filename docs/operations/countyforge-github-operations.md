@@ -81,6 +81,8 @@ Use:
 
 Cancellation requires an active canonical run. The adapter verifies repository ID, target type/number, exact workflow run ID, workflow path, `workflow_dispatch` event, and CountyForge run ID in the display title before calling GitHub's cancellation API. The comment first moves to `cancel_requested`; status or maintenance later reconciles the actual terminal conclusion. Repeating cancel after `cancel_requested` or `cancelled` returns the existing state without another cancellation call.
 
+If cancellation stops a review before it uploads result evidence, terminal publication may conservatively report `failed` with `invalid_result_evidence` rather than `cancelled`. This is a retryable fail-closed outcome; the canonical history still records the earlier cancellation request.
+
 Do not force-cancel another workflow manually unless the ordinary GitHub cancellation endpoint is unresponsive and repository incident procedure authorizes it. The kernel's wall-clock budget remains the independent execution timeout.
 
 ## Retry
@@ -104,7 +106,7 @@ Successful or active runs are not retry-eligible in the initial policy.
 | Trusted SHA mismatch | Claim recovery marks the run failed after the default branch moves; use `/countyforge retry` so trusted facts are rebuilt without duplicating the original semantic command. |
 | Claim failed before lease | Claim recovery marks the queued run failed; use `/countyforge retry` on the unchanged target. |
 | Preparation failed | Confirm the fork/source head and resolved merge-base objects are fetchable and the bounded artifact is under 100 MB. Do not run target scripts to diagnose. |
-| Provider job failed before a result | Publication records `workflow_failed`; inspect sanitized evidence and provider availability, then use retry only on the unchanged head. |
+| Provider job failed before a valid result | Publication records `invalid_result_evidence`, `runner_exit_code_missing`, or `runner_exit_nonzero`; inspect sanitized evidence and provider availability, then use retry only on the unchanged head. |
 | Lease expired | Let maintenance or a new authorized command mark it stale; never edit the hidden marker manually. |
 | Multiple canonical bot comments | Stop execution and reconcile manually through reviewed tooling; do not trust a user-authored marker. |
 | Provider credential suspected in output | Treat as an incident, cancel the run, rotate the selected key, restrict/delete affected artifacts, and add a regression fixture before re-enabling review. |

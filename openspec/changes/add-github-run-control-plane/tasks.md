@@ -44,5 +44,5 @@
 - [x] 7.1 Run strict OpenSpec validation and complete every implemented task in this change without modifying the completed bootstrap change.
 - [x] 7.2 Run `make check`, `make runner-contract-tests`, `make countyforge-runner-check`, `make countyforge-github-check`, `make countyforge-command-fixtures`, `make countyforge-workflow-policy-tests`, and `make prepr-no-ai` successfully.
 - [x] 7.3 Verify all six initial counties remain explicit, generated state/evidence stays ignored, no source/owner PII or credential is committed, and no target code executes in provider-secret fixtures.
-- [ ] 7.4 Run the repo-native pre-PR review when a provider credential is available, resolve all BLOCKER/MUST_FIX findings, and record any intentionally skipped paid smoke.
+- [x] 7.4 Run the repo-native pre-PR review when a provider credential is available, resolve all BLOCKER/MUST_FIX findings, and record any intentionally skipped paid smoke.
 - [ ] 7.5 Commit and push the implementation, open a draft PR referencing Issue #5, parent program #2, and `add-github-run-control-plane`, then verify CI and review threads.
