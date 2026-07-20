@@ -1,0 +1,645 @@
+name: CountyForge run
+run-name: CountyForge / ${{ inputs.command }} / ${{ inputs.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: Base64url-encoded strict CountyForge trigger
+        required: true
+        type: string
+      status_comment_id:
+        description: Bot-owned canonical status comment ID
+        required: true
+        type: string
+      idempotency_key:
+        description: Semantic idempotency key
+        required: true
+        type: string
+      run_id:
+        description: Immutable CountyForge run ID
+        required: true
+        type: string
+      command:
+        description: Normalized executable command
+        required: true
+        type: string
+      target_type:
+        description: issue or pull_request
+        required: true
+        type: string
+      target_number:
+        description: Issue or pull request number
+        required: true
+        type: string
+      trusted_tool_sha:
+        description: Immutable default-branch tooling SHA
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      trigger: {required: true, type: string}
+      status_comment_id: {required: true, type: string}
+      idempotency_key: {required: true, type: string}
+      run_id: {required: true, type: string}
+      command: {required: true, type: string}
+      target_type: {required: true, type: string}
+      target_number: {required: true, type: string}
+      trusted_tool_sha: {required: true, type: string}
+    secrets:
+      OPENAI_API_KEY: {required: false}
+      SAKANA_API_KEY: {required: false}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: countyforge-run-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    name: Claim canonical run state
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      nonce: ${{ steps.claim.outputs.nonce }}
+      repository: ${{ steps.trigger.outputs.repository }}
+      source_repository: ${{ steps.trigger.outputs.source_repository }}
+      base_sha: ${{ steps.trigger.outputs.base_sha }}
+      head_sha: ${{ steps.trigger.outputs.head_sha }}
+      provider: ${{ steps.trigger.outputs.provider }}
+    steps:
+      - name: Require the dispatched trusted SHA
+        env:
+          ACTUAL_SHA: ${{ github.sha }}
+          TRUSTED_SHA: ${{ inputs.trusted_tool_sha }}
+        run: test "$ACTUAL_SHA" = "$TRUSTED_SHA"
+
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install trusted CountyForge packages
+        run: uv sync --frozen --package countyforge-github
+
+      - name: Decode and validate immutable trigger
+        id: trigger
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COMMAND: ${{ inputs.command }}
+          EXPECTED_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_TARGET_TYPE: ${{ inputs.target_type }}
+          EXPECTED_TARGET_NUMBER: ${{ inputs.target_number }}
+          TRUSTED_SHA: ${{ inputs.trusted_tool_sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/countyforge"
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/countyforge/trigger.json" <<'PY'
+          import base64
+          import pathlib
+          import sys
+          raw = base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4))
+          pathlib.Path(sys.argv[2]).write_bytes(raw)
+          PY
+          uv run --package countyforge-github countyforge-github idempotency-key \
+            --trigger "$RUNNER_TEMP/countyforge/trigger.json" > "$RUNNER_TEMP/countyforge/identity.json"
+          test "$(jq -r .idempotency_key "$RUNNER_TEMP/countyforge/identity.json")" = \
+            "$EXPECTED_IDEMPOTENCY_KEY"
+          test "$(jq -r .run_id "$RUNNER_TEMP/countyforge/identity.json")" = "$COUNTYFORGE_RUN_ID"
+          test "$(jq -r .command.command "$RUNNER_TEMP/countyforge/trigger.json")" = "$COMMAND"
+          test "$(jq -r .repository.full_name "$RUNNER_TEMP/countyforge/trigger.json")" = \
+            "$EXPECTED_REPOSITORY"
+          test "$(jq -r .target.type "$RUNNER_TEMP/countyforge/trigger.json")" = \
+            "$EXPECTED_TARGET_TYPE"
+          test "$(jq -r .target.number "$RUNNER_TEMP/countyforge/trigger.json")" = \
+            "$EXPECTED_TARGET_NUMBER"
+          test "$(jq -r .trusted_tool_sha "$RUNNER_TEMP/countyforge/trigger.json")" = \
+            "$TRUSTED_SHA"
+          echo "repository=$(jq -r .repository.full_name "$RUNNER_TEMP/countyforge/trigger.json")" >> "$GITHUB_OUTPUT"
+          echo "source_repository=$(jq -r .target.source_repository.full_name "$RUNNER_TEMP/countyforge/trigger.json")" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r .target.base_sha "$RUNNER_TEMP/countyforge/trigger.json")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .target.head_sha "$RUNNER_TEMP/countyforge/trigger.json")" >> "$GITHUB_OUTPUT"
+          echo "provider=$(jq -r --arg command "$COMMAND" '.commands[$command].provider // "none"' \
+            .ai/policies/countyforge-github-execution.v1.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Claim target lease and update canonical status
+        id: claim
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ steps.trigger.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          EXECUTION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          uv run --package countyforge-github countyforge-github claim-run \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$EXECUTION_WORKFLOW_RUN_ATTEMPT" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUNNER_TEMP/countyforge/claim.json"
+          echo "nonce=$(jq -r .nonce "$RUNNER_TEMP/countyforge/claim.json")" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Prepare frozen target data without provider secrets
+    needs: claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out immutable untrusted target data
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ${{ needs.claim.outputs.source_repository }}
+          ref: ${{ needs.claim.outputs.head_sha }}
+          path: target
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+
+      - name: Check out immutable untrusted base data
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ${{ needs.claim.outputs.repository }}
+          ref: ${{ needs.claim.outputs.base_sha }}
+          path: base-reference
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Prepare bound packet and bare target identity
+        env:
+          BASE_SHA: ${{ needs.claim.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.claim.outputs.head_sha }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          COMMAND: ${{ inputs.command }}
+          MAX_PREPARED_BYTES: "100000000"
+        run: |
+          MAX_PREPARED_BYTES="$MAX_PREPARED_BYTES" \
+            trusted/scripts/dev-loop/prepare-countyforge-target.sh \
+              "$GITHUB_WORKSPACE/target" \
+              "$GITHUB_WORKSPACE/base-reference" \
+              "$RUNNER_TEMP/countyforge-prepared" \
+              "$BASE_SHA" \
+              "$HEAD_SHA" \
+              "$TARGET_REPOSITORY" \
+              "$COMMAND"
+
+      - name: Upload bounded frozen preparation artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-prepared
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+          include-hidden-files: true
+
+  recover-claim-failure:
+    name: Recover a run that failed before lease claim
+    if: always() && needs.claim.result == 'failure'
+    needs: claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Mark an unclaimed queued run failed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          uv run --package countyforge-github countyforge-github fail-unclaimed-run \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  mark-running:
+    name: Publish running state without provider secrets
+    needs: [claim, prepare]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Update canonical running state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+        run: |
+          uv run --package countyforge-github countyforge-github advance-run \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" \
+            --target-state running \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --disposition provider_execution_started
+
+  future-mode:
+    name: Invoke fail-closed future profile
+    if: inputs.command != 'review'
+    needs: [claim, prepare, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download frozen target identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Build and invoke the unavailable profile without credentials
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+        run: |
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/trigger.json" <<'PY'
+          import base64
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[2]).write_bytes(
+              base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4))
+          )
+          PY
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/trigger.json" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" \
+            --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --json > "$RUNNER_TEMP/countyforge-result.json"
+          status=$?
+          set -e
+          test "$status" -eq 4
+          test "$(jq -r .disposition "$RUNNER_TEMP/countyforge-result.json")" = \
+            profile_not_implemented
+
+      - name: Upload sanitized unavailable-profile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            trusted/.ai/reviews/countyforge
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  review-sakana:
+    name: Packet-only Sakana review
+    if: inputs.command == 'review' && needs.claim.outputs.provider == 'sakana'
+    needs: [claim, prepare, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download frozen packet and target identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Validate frozen artifact and build trusted image
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          cd prepared
+          sha256sum --check checksums.sha256
+          cd "$GITHUB_WORKSPACE"
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/trigger.json" <<'PY'
+          import base64
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[2]).write_bytes(
+              base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4))
+          )
+          PY
+          mkdir -p "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID"
+          cp prepared/review-packet.md \
+            "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.md"
+          cp prepared/review-packet.provenance.json \
+            "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.provenance.json"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          CODEX_PROVIDER=sakana ./.ai/codex/01-build-codex-image.sh
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/trigger.json" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --packet ".ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.md" \
+            --packet-provenance ".ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.provenance.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+
+      - name: Invoke Sakana under the packet-only profile
+        env:
+          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+        run: |
+          cd trusted
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" \
+            --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+
+      - name: Upload sanitized review evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            ${{ runner.temp }}/countyforge-exit-code
+            trusted/.ai/reviews/codex-prepr
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  review-openai:
+    name: Packet-only OpenAI review
+    if: inputs.command == 'review' && needs.claim.outputs.provider == 'openai'
+    needs: [claim, prepare, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download frozen packet and target identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Validate frozen artifact and build trusted image
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          cd prepared
+          sha256sum --check checksums.sha256
+          cd "$GITHUB_WORKSPACE"
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/trigger.json" <<'PY'
+          import base64
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[2]).write_bytes(
+              base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4))
+          )
+          PY
+          mkdir -p "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID"
+          cp prepared/review-packet.md \
+            "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.md"
+          cp prepared/review-packet.provenance.json \
+            "trusted/.ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.provenance.json"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          CODEX_PROVIDER=openai ./.ai/codex/01-build-codex-image.sh
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/trigger.json" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --packet ".ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.md" \
+            --packet-provenance ".ai/reviews/github-prepared/$COUNTYFORGE_RUN_ID/review-packet.provenance.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+
+      - name: Invoke OpenAI under the packet-only profile
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cd trusted
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" \
+            --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+
+      - name: Upload sanitized review evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            ${{ runner.temp }}/countyforge-exit-code
+            trusted/.ai/reviews/codex-prepr
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  publish:
+    name: Publish sanitized terminal state
+    if: always() && needs.claim.result == 'success'
+    needs: [claim, prepare, mark-running, future-mode, review-sakana, review-openai]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download sanitized result evidence
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-result
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Resolve sanitized terminal disposition
+        id: terminal
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          result_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-result.json -type f -print -quit 2>/dev/null || true)"
+          exit_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-exit-code -type f -print -quit 2>/dev/null || true)"
+          arguments=(resolve-terminal-result --command "$COMMAND")
+          if [ -n "$result_file" ]; then
+            arguments+=(--result "$result_file")
+          fi
+          if [ -n "$exit_file" ]; then
+            arguments+=(--exit-code "$exit_file")
+          fi
+          uv run --package countyforge-github countyforge-github "${arguments[@]}" \
+            > "$RUNNER_TEMP/countyforge-terminal.json"
+          echo "state=$(jq -r .state "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+          echo "disposition=$(jq -r .disposition "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Update canonical comment and check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+          TERMINAL_STATE: ${{ steps.terminal.outputs.state }}
+          TERMINAL_DISPOSITION: ${{ steps.terminal.outputs.disposition }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --package countyforge-github countyforge-github advance-run \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" \
+            --target-state "$TERMINAL_STATE" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --disposition "$TERMINAL_DISPOSITION" \
+            --evidence-url "$EVIDENCE_URL"

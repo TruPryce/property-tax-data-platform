@@ -73,7 +73,7 @@ class Runner:
         self.kernel = kernel
         self.evidence_root = evidence_root
         self.review_adapter = review_adapter or (
-            kernel.repo_root / ".ai" / "codex" / "02-run-prepr-review-docker.sh"
+            kernel.contract_root / ".ai" / "codex" / "02-run-prepr-review-docker.sh"
         )
 
     def run(self, resolved: ResolvedRun) -> tuple[JsonObject, int]:
@@ -89,14 +89,14 @@ class Runner:
         return self._run_review(resolved)
 
     def _generic_run_dir(self, resolved: ResolvedRun) -> Path:
-        root = self.evidence_root or (self.kernel.repo_root / ".ai" / "reviews" / "countyforge")
+        root = self.evidence_root or (self.kernel.contract_root / ".ai" / "reviews" / "countyforge")
         return root / str(resolved.request["mode"]) / resolved.run_id
 
     def _review_run_dir(self, resolved: ResolvedRun) -> Path:
         if self.evidence_root is not None:
             return self.evidence_root / "codex-prepr" / _safe_branch(resolved) / resolved.run_id
         return (
-            self.kernel.repo_root
+            self.kernel.contract_root
             / ".ai"
             / "reviews"
             / "codex-prepr"
@@ -168,7 +168,7 @@ class Runner:
                 "PACKET_PATH": str(packet),
                 "OUT_DIR": str(run_dir),
                 "RUN_ID": resolved.run_id,
-                "COMPAT_DIR": str(self.kernel.repo_root / ".ai" / "reviews"),
+                "COMPAT_DIR": str(self.kernel.contract_root / ".ai" / "reviews"),
                 "REVIEW_BASE": str(resolved.request["repository"]["base_sha"]),
                 "CODEX_PROVIDER": str(resolved.provider["id"]),
                 "CODEX_MODEL": str(model["configured_model_id"]),
@@ -196,7 +196,7 @@ class Runner:
         environment = self._scoped_environment(resolved, run_dir)
         process = subprocess.Popen(  # noqa: S603 - fixed repository adapter path
             [str(self.review_adapter)],
-            cwd=self.kernel.repo_root,
+            cwd=self.kernel.contract_root,
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

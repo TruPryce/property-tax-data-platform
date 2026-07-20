@@ -13,6 +13,7 @@ dev = [
     "mypy>=1.15,<2",
     "pre-commit>=4.6.0",
     "pytest>=8.3,<9",
+    "pyyaml>=6.0,<7",
     "ruff>=0.11,<1",
     "types-jsonschema>=4.23,<5",
 ]
@@ -33,6 +34,7 @@ property-tax-application = { workspace = true }
 property-tax-adapters = { workspace = true }
 property-tax-ingestion-worker = { workspace = true }
 countyforge-runner = { workspace = true }
+countyforge-github = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
@@ -61,4 +63,5 @@ packages = [
     "property_tax_adapters",
     "property_tax_ingestion",
     "countyforge_runner",
+    "countyforge_github",
 ]

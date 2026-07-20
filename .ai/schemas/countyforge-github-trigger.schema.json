@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-trigger.schema.json",
+  "title": "CountyForge GitHub Trigger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "repository", "target", "comment", "actor", "authorization",
+    "command", "trusted_tool_sha", "workflow", "timestamp"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "full_name"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "full_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "number", "source_repository", "base_sha", "head_sha"],
+      "properties": {
+        "type": {"enum": ["issue", "pull_request"]},
+        "number": {"type": "integer", "minimum": 1},
+        "source_repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "full_name"],
+          "properties": {
+            "id": {"type": "integer", "minimum": 1},
+            "full_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+          }
+        },
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "comment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "event_action", "delivery_id"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "event_action": {"const": "created"},
+        "delivery_id": {"type": ["string", "null"], "maxLength": 128}
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login", "id", "type"],
+      "properties": {
+        "login": {"type": "string", "minLength": 1, "maxLength": 128},
+        "id": {"type": "integer", "minimum": 1},
+        "type": {"enum": ["User", "Bot", "Organization", "Mannequin"]}
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permission", "policy_version", "outcome", "reason_code"],
+      "properties": {
+        "permission": {"enum": ["admin", "maintain", "write", "triage", "read", "none"]},
+        "policy_version": {"const": 1},
+        "outcome": {"enum": ["allowed", "denied"]},
+        "reason_code": {
+          "enum": ["repository_permission_allowed", "permission_denied", "explicit_bot_allowed", "explicit_team_allowed", "bot_not_allowed"]
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "command", "arguments"],
+      "properties": {
+        "contract_version": {"const": 1},
+        "command": {"enum": ["plan", "implement", "validate", "review", "fix", "status", "cancel", "retry"]},
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "openspec_change": {"type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128}
+          }
+        }
+      }
+    },
+    "trusted_tool_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "run_attempt"],
+      "properties": {
+        "run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1}
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["original_idempotency_key", "original_run_id", "attempt"],
+      "properties": {
+        "original_idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "original_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "attempt": {"type": "integer", "minimum": 2}
+      }
+    },
+    "timestamp": {"type": "string", "format": "date-time"},
+    "display_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "maxLength": 256},
+        "url": {"type": "string", "pattern": "^https://github\\.com/", "maxLength": 1024}
+      }
+    }
+  }
+}

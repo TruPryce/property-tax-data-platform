@@ -5,6 +5,7 @@ Repository developer-platform packages live here so they cannot be confused with
 | Package | Purpose |
 |---|---|
 | [countyforge-runner](countyforge-runner/README.md) | Strict request validation, immutable profile/provider resolution, budgets, execution dispatch, and generic run evidence |
+| [countyforge-github](countyforge-github/README.md) | GitHub command parsing, authorization, semantic idempotency, canonical state, leases, and runner request dispatch |
 
 ## Related
 
@@ -12,3 +13,4 @@ Repository developer-platform packages live here so they cannot be confused with
 - [Contributor workflow](../CONTRIBUTING.md)
 - [Tooling agent guidance](AGENTS.md)
 - [Runner engineering guide](../docs/engineering/countyforge-runner-kernel.md)
+- [GitHub control-plane guide](../docs/engineering/countyforge-github-control-plane.md)

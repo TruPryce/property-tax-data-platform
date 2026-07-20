@@ -1,0 +1,59 @@
+name: CountyForge command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    countyforge-control-${{ github.event.repository.id }}-${{
+    github.event.issue.pull_request && 'pull-request' || 'issue' }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    name: Parse, authorize, and dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install trusted CountyForge packages
+        run: uv sync --frozen --package countyforge-github
+
+      - name: Process the created comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TRUSTED_TOOL_SHA: ${{ github.sha }}
+          CONTROL_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          CONTROL_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          uv run --package countyforge-github countyforge-github intake \
+            --event "$GITHUB_EVENT_PATH" \
+            --trusted-tool-sha "$TRUSTED_TOOL_SHA" \
+            --workflow-run-id "$CONTROL_WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$CONTROL_WORKFLOW_RUN_ATTEMPT" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --trusted-bot-id 41898282

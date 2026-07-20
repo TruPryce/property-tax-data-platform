@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-execution-policy.schema.json",
+  "title": "CountyForge GitHub Execution Selection Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "policy_id", "policy_version", "commands"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "policy_id": {"const": "countyforge-github-execution"},
+    "policy_version": {"const": 1},
+    "commands": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review", "plan", "implement", "fix", "validate"],
+      "properties": {
+        "review": {"$ref": "#/$defs/providerCommand"},
+        "plan": {"$ref": "#/$defs/providerCommand"},
+        "implement": {"$ref": "#/$defs/providerCommand"},
+        "fix": {"$ref": "#/$defs/providerCommand"},
+        "validate": {"$ref": "#/$defs/deterministicCommand"}
+      }
+    }
+  },
+  "$defs": {
+    "baseCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_version", "provider", "model_ref", "reasoning_effort"],
+      "properties": {
+        "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+        "profile_version": {"const": 1},
+        "provider": {"type": ["string", "null"], "enum": ["openai", "sakana", null]},
+        "model_ref": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9.-]+$"},
+        "reasoning_effort": {"enum": ["none", "low", "medium", "high", "xhigh"]}
+      }
+    },
+    "providerCommand": {
+      "allOf": [
+        {"$ref": "#/$defs/baseCommand"},
+        {"properties": {"provider": {"enum": ["openai", "sakana"]}, "model_ref": {"type": "string"}, "reasoning_effort": {"enum": ["high", "xhigh"]}}}
+      ]
+    },
+    "deterministicCommand": {
+      "allOf": [
+        {"$ref": "#/$defs/baseCommand"},
+        {"properties": {"provider": {"type": "null"}, "model_ref": {"type": "null"}, "reasoning_effort": {"const": "none"}}}
+      ]
+    }
+  }
+}

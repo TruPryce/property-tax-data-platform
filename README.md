@@ -15,9 +15,10 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 
 | Capability | Current state |
 |---|---|
-| GitHub Issue intake and OpenSpec planning | Scaffolded |
+| GitHub Issue intake and OpenSpec planning | Structured intake and accepted OpenSpec workflow |
 | Pre-commit and CI secret and source-artifact scanning | Scaffolded |
 | CountyForge mode-aware runner kernel | Review executable; plan/implement/fix/validate fail closed |
+| CountyForge GitHub control plane | Authorized comment commands, canonical status, cancel/retry, and packet-only review dispatch |
 | Dallas, Collin, Tarrant, Denton, Rockwall, and Ellis source registry | Scaffolded |
 | Hexagonal Python package boundaries | Scaffolded |
 | Immutable Bronze acquisition | Specified, not implemented |
@@ -39,7 +40,7 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 
 ## Development
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md). The active foundation change is [bootstrap-six-county-appraisal-platform](openspec/changes/bootstrap-six-county-appraisal-platform/README.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Accepted behavior lives in [OpenSpec](openspec/README.md); CountyForge architecture and operations are indexed from the [documentation hub](docs/README.md).
 
 ## Licensing
 

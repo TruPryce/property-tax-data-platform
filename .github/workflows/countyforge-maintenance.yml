@@ -1,0 +1,48 @@
+name: CountyForge maintenance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: countyforge-maintenance-${{ github.repository_id }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile expired CountyForge leases
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Reconcile only; never dispatch agent work
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: |
+          uv run --package countyforge-github countyforge-github maintain \
+            --repository "$TARGET_REPOSITORY" \
+            --trusted-bot-id 41898282 \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

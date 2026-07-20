@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-event.schema.json",
+  "title": "CountyForge GitHub Control Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "event_type", "command", "target_type", "authorization_outcome", "state", "outcome", "disposition", "timestamp"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "event_type": {"enum": ["command_received", "authorization_decided", "duplicate_detected", "lease_acquired", "lease_reclaimed", "lease_released", "workflow_dispatched", "cancellation_requested", "retry_started", "state_reconciled", "invalid_state_detected", "terminal_outcome"]},
+    "command": {"enum": ["plan", "implement", "validate", "review", "fix", "status", "cancel", "retry", "maintenance"]},
+    "target_type": {"enum": ["issue", "pull_request", "repository"]},
+    "authorization_outcome": {"enum": ["allowed", "denied", "not_applicable"]},
+    "state": {"enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]},
+    "outcome": {"enum": ["pending", "succeeded", "failed", "cancelled", "timed_out", "not_implemented", "denied", "duplicate"]},
+    "disposition": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "repository_id": {"type": "integer", "minimum": 1},
+    "target_number": {"type": "integer", "minimum": 1},
+    "run_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "workflow_run_id": {"type": ["integer", "null"], "minimum": 1},
+    "target_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "idempotency_key": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "reason_code": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+  }
+}

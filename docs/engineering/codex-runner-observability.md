@@ -106,3 +106,4 @@ make codex-observability-qa
 - [Review artifact contract](review-artifact-contract.md) - Per-run directory and evidence rules
 - [Runner event schema](../../.ai/schemas/codex-runner-event.schema.json) - Normalized event shape
 - [CountyForge runner kernel](countyforge-runner-kernel.md) - Generic event/summary and migration
+- [CountyForge GitHub control plane](countyforge-github-control-plane.md) - Sanitized command/state events and low-cardinality labels

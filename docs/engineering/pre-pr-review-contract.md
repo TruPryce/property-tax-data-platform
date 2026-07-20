@@ -16,6 +16,11 @@ This contract defines how automated and human-assisted pre-PR reviews work in `p
 complete loop. `make prepr-no-ai` runs the deterministic gates and packet builder without a paid
 model call.
 
+After the GitHub control workflows exist on the default branch, `/countyforge review` performs the
+same packet-only profile through a two-root pipeline: trusted default-branch tooling prepares a
+frozen packet from an immutable target in a no-secret job, and the provider job receives no target
+worktree. The local `make prepr` contract and evidence paths remain unchanged.
+
 ## Packet Context and Redaction
 
 The packet builder selects context from the frozen checkout without querying GitHub or another
@@ -141,6 +146,7 @@ Reviews must match `.ai/schemas/codex-prepr-review.schema.json` and include:
 - [Review artifact contract](review-artifact-contract.md)
 - [Runner observability](codex-runner-observability.md)
 - [CountyForge runner kernel](countyforge-runner-kernel.md)
+- [CountyForge GitHub control plane](countyforge-github-control-plane.md)
 - [Agent guide](../../AGENTS.md)
 - [Reviewer prompt](../../.ai/prompts/codex-prepr-review.md)
 - [Fix prompt](../../.ai/prompts/claude-fix-from-review.md)

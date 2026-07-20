@@ -1,0 +1,20 @@
+[project]
+name = "countyforge-github"
+version = "0.1.0"
+description = "GitHub command, authorization, and run-control adapter for CountyForge."
+license = "Apache-2.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "countyforge-runner",
+    "jsonschema>=4.23,<5",
+]
+
+[project.scripts]
+countyforge-github = "countyforge_github.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/countyforge_github"]

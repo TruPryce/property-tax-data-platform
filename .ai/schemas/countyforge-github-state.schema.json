@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-state.schema.json",
+  "title": "CountyForge GitHub Canonical State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "repository_id", "target_type", "target_number", "command", "command_arguments",
+    "profile_id", "profile_version", "target_head_sha", "run_id", "idempotency_key", "original_idempotency_key",
+    "attempt", "lifecycle_state", "workflow_run_id", "workflow_run_attempt", "check_run_id",
+    "lease", "disposition", "evidence_url", "original_comment_id", "original_delivery_id",
+    "original_actor_id", "trusted_tool_sha", "created_at", "updated_at", "history"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "repository_id": {"type": "integer", "minimum": 1},
+    "target_type": {"enum": ["issue", "pull_request"]},
+    "target_number": {"type": "integer", "minimum": 1},
+    "command": {"enum": ["plan", "implement", "validate", "review", "fix"]},
+    "command_arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "openspec_change": {"type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128}
+      }
+    },
+    "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9.-]+$"},
+    "profile_version": {"type": "integer", "minimum": 1},
+    "target_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "original_idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "lifecycle_state": {
+      "enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]
+    },
+    "workflow_run_id": {"type": ["integer", "null"], "minimum": 1},
+    "workflow_run_attempt": {"type": "integer", "minimum": 1},
+    "check_run_id": {"type": ["integer", "null"], "minimum": 1},
+    "lease": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract_version", "owner_workflow_run_id", "owner_run_attempt", "idempotency_key", "command", "target_sha", "acquired_at", "heartbeat_at", "expires_at", "nonce"],
+          "properties": {
+            "contract_version": {"const": 1},
+            "owner_workflow_run_id": {"type": "integer", "minimum": 1},
+            "owner_run_attempt": {"type": "integer", "minimum": 1},
+            "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "command": {"enum": ["plan", "implement", "validate", "review", "fix"]},
+            "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "acquired_at": {"type": "string", "format": "date-time"},
+            "heartbeat_at": {"type": "string", "format": "date-time"},
+            "expires_at": {"type": "string", "format": "date-time"},
+            "nonce": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,64}$"}
+          }
+        }
+      ]
+    },
+    "disposition": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "evidence_url": {"type": ["string", "null"], "pattern": "^https://github\\.com/", "maxLength": 1024},
+    "original_comment_id": {"type": "integer", "minimum": 1},
+    "original_delivery_id": {"type": ["string", "null"], "maxLength": 128},
+    "original_actor_id": {"type": "integer", "minimum": 1},
+    "trusted_tool_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "history": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "idempotency_key", "attempt", "lifecycle_state", "disposition", "evidence_url", "finished_at"],
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+          "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "attempt": {"type": "integer", "minimum": 1},
+          "lifecycle_state": {"enum": ["succeeded", "failed", "cancelled", "timed_out", "stale", "not_implemented"]},
+          "disposition": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+          "evidence_url": {"type": ["string", "null"], "pattern": "^https://github\\.com/", "maxLength": 1024},
+          "finished_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

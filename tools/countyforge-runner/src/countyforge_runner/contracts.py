@@ -4,14 +4,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 
 from countyforge_runner.errors import KernelError
 
 JsonObject = dict[str, Any]
+_RFC3339_DATE_TIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+_FORMAT_CHECKER = FormatChecker()
+
+
+@_FORMAT_CHECKER.checks("date-time")
+def _is_rfc3339_date_time(value: object) -> bool:
+    """Validate the date-time format without jsonschema's optional extras."""
+
+    if not isinstance(value, str) or _RFC3339_DATE_TIME.fullmatch(value) is None:
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def load_json_object(path: Path, *, kind: str) -> JsonObject:
@@ -43,7 +62,7 @@ def validate_document(document: JsonObject, schema: JsonObject, *, kind: str) ->
         ) from None
 
     errors = sorted(
-        Draft202012Validator(schema).iter_errors(document),
+        Draft202012Validator(schema, format_checker=_FORMAT_CHECKER).iter_errors(document),
         key=lambda item: (list(item.absolute_path), item.validator or ""),
     )
     if errors:

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-lease.schema.json",
+  "title": "CountyForge GitHub Lease",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "owner_workflow_run_id", "owner_run_attempt", "idempotency_key",
+    "command", "target_sha", "acquired_at", "heartbeat_at", "expires_at", "nonce"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "owner_workflow_run_id": {"type": "integer", "minimum": 1},
+    "owner_run_attempt": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "command": {"enum": ["plan", "implement", "validate", "review", "fix"]},
+    "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "acquired_at": {"type": "string", "format": "date-time"},
+    "heartbeat_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "nonce": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,64}$"}
+  }
+}

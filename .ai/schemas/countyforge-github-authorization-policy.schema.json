@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-authorization-policy.schema.json",
+  "title": "CountyForge GitHub Authorization Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "policy_id", "policy_version", "allowed_permissions",
+    "denied_permissions", "allowed_bots", "allowed_teams"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "policy_id": {"const": "countyforge-github-authorization"},
+    "policy_version": {"const": 1},
+    "allowed_permissions": {
+      "const": ["admin", "maintain", "write"]
+    },
+    "denied_permissions": {
+      "const": ["triage", "read", "none"]
+    },
+    "allowed_bots": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["login", "id"],
+        "properties": {
+          "login": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\\[bot\\])?$"},
+          "id": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "allowed_teams": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 128}
+    }
+  }
+}

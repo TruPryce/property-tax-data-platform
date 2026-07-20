@@ -29,14 +29,20 @@ CountyForge is a separate repository developer-platform boundary, not part of th
 flow:
 
 ```text
-GitHub / local trigger facts
-          |
-          v
-CountyForge kernel ---> immutable profile + provider catalog
-          |
-          +-- review --> isolated packet-only adapter
-          |
-          +-- future modes --> fail closed until their owning epics
+GitHub created comment ----> trusted countyforge-github adapter
+                                      |
+                                      +-- authorize / state / lease / dispatch
+                                      |
+untrusted base + source SHAs --no secret+--> frozen packet + bounded bare Git identity
+                                                        |
+                                                        v
+local trigger facts --------------------------> CountyForge kernel
+                                                        |
+                              immutable profile + provider catalog
+                                                        |
+                              +-- review --> isolated packet-only adapter
+                              |
+                              +-- future modes --> fail closed
 ```
 
 The kernel lives under `tools/` and does not alter the hexagonal dependency direction above.
@@ -55,3 +61,5 @@ The first deployment is an independent Akamai Cloud runtime. Tailscale carries a
 - [Appraisal API decision](../decisions/0004-consumer-neutral-appraisal-api.md)
 - [Mode-aware runner decision](../decisions/0005-mode-aware-runner-kernel.md)
 - [CountyForge runner guide](../engineering/countyforge-runner-kernel.md)
+- [CountyForge control-plane guide](../engineering/countyforge-github-control-plane.md)
+- [GitHub-native control-plane decision](../decisions/0006-github-native-countyforge-control-plane.md)

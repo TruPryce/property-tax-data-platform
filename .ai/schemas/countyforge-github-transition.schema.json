@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-transition.schema.json",
+  "title": "CountyForge GitHub State Transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "from", "to", "at", "reason_code"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "from": {"enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]},
+    "to": {"enum": ["received", "authorized", "deduplicated", "queued", "preparing", "running", "succeeded", "failed", "cancel_requested", "cancelled", "timed_out", "stale", "not_implemented"]},
+    "at": {"type": "string", "format": "date-time"},
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+  }
+}

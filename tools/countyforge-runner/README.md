@@ -14,6 +14,18 @@ uv run --package countyforge-runner countyforge-runner explain --request request
 uv run --package countyforge-runner countyforge-runner run --request request.json --json
 ```
 
+GitHub-dispatched runs keep trusted contracts separate from the immutable target:
+
+```bash
+uv run --package countyforge-runner countyforge-runner run \
+  --request request.json \
+  --contract-root /path/to/trusted-tools \
+  --target-root /path/to/immutable-target.git \
+  --json
+```
+
+`--repo-root` remains the local compatibility option and defaults both roots to one checkout.
+
 ## Validation
 
 ```bash
@@ -28,3 +40,5 @@ make countyforge-request-fixtures
 - [Runner engineering guide](../../docs/engineering/countyforge-runner-kernel.md)
 - [Agent-runner OpenSpec](../../openspec/changes/build-mode-aware-runner-kernel/specs/agent-runner-kernel/spec.md)
 - [Mode-aware runner ADR](../../docs/decisions/0005-mode-aware-runner-kernel.md)
+- [GitHub control-plane package](../countyforge-github/README.md)
+- [GitHub control-plane guide](../../docs/engineering/countyforge-github-control-plane.md)
