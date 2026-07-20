@@ -23,38 +23,31 @@ def _sha256(path: Path) -> str:
 
 def _bare_target(tmp_path: Path, repo_root: Path, head_sha: str) -> Path:
     target = tmp_path / "synthetic-target.git"
-    subprocess.run(["git", "init", "--bare", str(target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(repo_root), str(target)],
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(
         [
             "git",
             "-C",
             str(target),
             "remote",
-            "add",
+            "set-url",
             "origin",
             "git@github.com:TruPryce/property-tax-data-platform.git",
         ],
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(target),
-            "fetch",
-            "--no-tags",
-            str(repo_root),
-            f"{head_sha}:refs/heads/countyforge-target",
-        ],
+    actual_head = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"],
         check=True,
         capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(target), "symbolic-ref", "HEAD", "refs/heads/countyforge-target"],
-        check=True,
-        capture_output=True,
-    )
+        text=True,
+    ).stdout.strip()
+    assert actual_head == head_sha
     return target
 
 
