@@ -85,10 +85,12 @@ The provider job receives a bounded bare target repository so it can validate im
 | `review-openai` | Build trusted OpenAI image and invoke packet reviewer | `OPENAI_API_KEY` only on invocation |
 | `plan-sakana` / `plan-openai` | Invoke the bounded read-only planning profile | Selected provider key only on invocation |
 | `future-mode` | Invoke kernel for implement/fix/validate and require `profile_not_implemented` | None |
-| `publish` | Verify the live planning lease, map sanitized result to canonical comment/check, and release terminal lease; planning publication uses the narrow trusted contents-write exception | None |
+| `plan-validation` | Materialize and validate the bounded planning draft outside the state lane | None |
+| `plan-publish` | Verify the live planning lease, publish deterministic planning refs/draft PRs, and release terminal lease | None |
+| `publish` | Map sanitized non-planning result to canonical comment/check and release terminal lease | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
-All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `publish` job may use `contents: write`, and it receives no provider secret.
+All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `plan-publish` job may use `contents: write`, and it receives no provider secret. Planning materialization and validation run in the separate read-only `plan-validation` job outside the state lane; the write-capable lane performs only the live lease check, deterministic Git data API mutation, and canonical finalization.
 
 The trusted publication job runs the repository-pinned `npx --yes @fission-ai/openspec@1.6.0` validator before any Git data API mutation. This is an intentional v1 supply-chain trade-off: the package version is pinned, execution occurs from the trusted checkout, and no provider secret is present. Future hardening may move validation into a pre-provisioned trusted image, but must preserve the same no-secret and trusted-root boundary.
 

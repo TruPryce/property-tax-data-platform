@@ -120,7 +120,11 @@ def initial_state(
         "planning_branch": None,
         "planning_pr_number": None,
         "planning_predecessor_run_id": None,
-        "planning_context_sha256": None,
+        "planning_context_sha256": (
+            str(trigger.get("planning_context_sha256"))
+            if command == "plan" and trigger.get("planning_context_sha256") is not None
+            else None
+        ),
         "planning_result_sha256": None,
         "implementation_eligible": False,
     }

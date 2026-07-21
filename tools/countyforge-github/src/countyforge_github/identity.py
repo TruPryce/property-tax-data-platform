@@ -23,6 +23,7 @@ def build_trigger(
     workflow_run_id: int,
     workflow_run_attempt: int,
     delivery_id: str | None = None,
+    planning_context_sha256: str | None = None,
     timestamp: str | None = None,
     contracts: ControlContracts | None = None,
 ) -> JsonObject:
@@ -74,6 +75,8 @@ def build_trigger(
         "workflow": {"run_id": workflow_run_id, "run_attempt": workflow_run_attempt},
         "timestamp": timestamp or iso_now(),
     }
+    if planning_context_sha256 is not None:
+        trigger["planning_context_sha256"] = planning_context_sha256
     issue = event.get("issue")
     if isinstance(issue, dict):
         metadata: JsonObject = {}
@@ -117,6 +120,8 @@ def semantic_idempotency_key(
         "profile_version": selection["profile_version"],
         "target_head_sha": trigger["target"]["head_sha"],
     }
+    if command == "plan" and "planning_context_sha256" in trigger:
+        facts["planning_context_sha256"] = trigger["planning_context_sha256"]
     return hashlib.sha256(canonical_bytes(facts)).hexdigest()
 
 

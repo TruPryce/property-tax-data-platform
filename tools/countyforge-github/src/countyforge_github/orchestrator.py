@@ -26,7 +26,7 @@ from countyforge_github.observability import (
     state_event,
     with_audit,
 )
-from countyforge_github.planning import classify_issue
+from countyforge_github.planning import classify_issue, planning_context_fingerprint
 from countyforge_github.state import (
     ACTIVE_STATES,
     begin_new_state,
@@ -492,6 +492,7 @@ def process_intake(
             decision,
         )
 
+    planning_context_sha256: str | None = None
     target = _target_facts(event, github, repository, trusted_tool_sha)
     if operation == "plan":
         issue_document = event.get("issue")
@@ -505,6 +506,7 @@ def process_intake(
                 events=events,
                 authorization=decision,
             )
+        planning_context_sha256 = planning_context_fingerprint(issue_document, comments)
         labels = [
             str(label.get("name"))
             for label in issue_document.get("labels", [])
@@ -535,6 +537,7 @@ def process_intake(
         workflow_run_id=workflow_run_id,
         workflow_run_attempt=workflow_run_attempt,
         delivery_id=delivery_id,
+        planning_context_sha256=planning_context_sha256,
         timestamp=timestamp,
         contracts=resolved,
     )

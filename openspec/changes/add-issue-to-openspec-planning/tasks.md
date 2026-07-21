@@ -34,3 +34,6 @@
 - [x] 5.6 Bind resolved planning model and reasoning effort to image labels and runtime configuration.
 - [x] 5.7 Render valid OpenSpec delta sections, X.Y tasks, readable citations, and validate generated drafts in a temporary fixture.
 - [x] 5.8 Record bounded excluded-candidate provenance and select the repository’s numbered ADR files.
+- [x] 5.9 Split planning validation from the write-capable publication lane and scope contents write to `plan-publish` only.
+- [x] 5.10 Redact credential-looking issue/comment literals and bind the redacted planning-context fingerprint into semantic identity before deduplication.
+- [x] 5.11 Preserve complete accepted kernel/control-plane guarantees in delta specs and keep legacy canonical planning fields optional.

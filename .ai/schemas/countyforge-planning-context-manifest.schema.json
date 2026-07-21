@@ -12,7 +12,9 @@
     "issue_number": {"type": "integer", "minimum": 1},
     "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "sources": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source_id", "path", "category", "sha256", "bytes", "truncated"], "properties": {"source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"}, "path": {"type": "string", "maxLength": 240}, "category": {"type": "string", "maxLength": 64}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "truncated": {"type": "boolean"}}}},
+    "planning_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "redaction_count": {"type": "integer", "minimum": 0, "maximum": 256},
+    "sources": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source_id", "path", "category", "sha256", "bytes", "truncated"], "properties": {"source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"}, "path": {"type": "string", "maxLength": 240}, "category": {"type": "string", "maxLength": 64}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "truncated": {"type": "boolean"}, "redacted": {"type": "boolean"}, "redaction_count": {"type": "integer", "minimum": 0, "maximum": 256}}}},
     "excluded_candidates": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["path", "category", "reason_code"], "properties": {"path": {"type": "string", "maxLength": 240}, "category": {"type": "string", "maxLength": 64}, "reason_code": {"type": "string", "enum": ["file_limit", "byte_limit", "symlink_escape", "non_regular", "outside_root"]}}}}
   }
 }

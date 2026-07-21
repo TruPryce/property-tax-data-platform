@@ -76,19 +76,20 @@ def test_forbidden_permissions_are_never_granted_write() -> None:
             for permission in FORBIDDEN_WRITE_PERMISSIONS:
                 if (
                     name == "countyforge-run.yml"
-                    and job_name == "publish"
+                    and job_name == "plan-publish"
                     and permission == "contents"
                 ):
                     continue
                 assert permissions.get(permission) != "write"
-    publish = _jobs("countyforge-run.yml")["publish"]["permissions"]
-    assert publish == {
+    plan_publish = _jobs("countyforge-run.yml")["plan-publish"]["permissions"]
+    assert plan_publish == {
         "actions": "read",
         "checks": "write",
         "contents": "write",
         "issues": "write",
         "pull-requests": "write",
     }
+    assert _jobs("countyforge-run.yml")["publish"]["permissions"]["contents"] == "read"
 
 
 def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
@@ -114,7 +115,7 @@ def test_canonical_state_mutations_share_one_serialized_lane() -> None:
     assert "pull_request" in command_group
     assert command_jobs["intake"]["concurrency"]["cancel-in-progress"] == "false"
 
-    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish")
+    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish", "plan-publish")
     run_group = run_jobs["claim"]["concurrency"]["group"]
     assert run_group == (
         "countyforge-state-${{ github.repository_id }}-"
@@ -141,11 +142,13 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "mark-running",
         "future-mode",
         "plan-packet",
+        "plan-validation",
         "plan-sakana",
         "plan-openai",
         "review-sakana",
         "review-openai",
         "publish",
+        "plan-publish",
     ):
         text = str(jobs[name])
         assert "path': 'target" not in text
@@ -162,7 +165,8 @@ def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     assert "SAKANA_API_KEY" not in prepare
     assert "pytest" not in prepare
     assert " make " not in prepare
-    assert "uv sync --frozen --package countyforge-github" not in prepare
+    assert "uv sync" not in prepare
+    assert "uv pip install" not in prepare
     assert "target/.github/workflows" not in prepare
     assert "trusted/scripts/dev-loop/prepare-countyforge-target.sh" in prepare
     assert "MAX_PREPARED_BYTES" in prepare
@@ -205,6 +209,7 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         "mark-running",
         "future-mode",
         "publish",
+        "plan-publish",
     ):
         text = str(jobs[name])
         assert "OPENAI_API_KEY" not in text
@@ -271,17 +276,18 @@ def test_publication_uses_fail_closed_result_evidence_resolver() -> None:
 
 def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> None:
     jobs = _jobs("countyforge-run.yml")
-    publish = str(jobs["publish"])
+    assert "concurrency" not in jobs["plan-validation"]
+    assert jobs["plan-validation"]["permissions"] == {"contents": "read", "actions": "read"}
+    assert "npx --yes @fission-ai/openspec@1.6.0" in str(jobs["plan-validation"])
+    publish = str(jobs["plan-publish"])
     assert "verify-publication" in publish
     assert "countyforge-state-${{ github.repository_id }}" in publish
-    assert any(
-        step.get("if") == "always()"
-        for step in _jobs("countyforge-run.yml")["publish"].get("steps", [])
-    )
-    assert "PLANNING_MATERIALIZATION_OUTCOME" in publish
+    assert "npx --yes @fission-ai/openspec@1.6.0" not in publish
+    assert any(step.get("if") == "always()" for step in jobs["plan-publish"].get("steps", []))
+    assert "PLANNING_VALIDATION_JOB_RESULT" in publish
     assert 'TERMINAL_STATE" = "succeeded"' in publish
     publication_step = next(
-        step for step in jobs["publish"]["steps"] if step.get("id") == "planning-publication"
+        step for step in jobs["plan-publish"]["steps"] if step.get("id") == "planning-publication"
     )
     assert "steps.verify-publication.outcome == 'success'" in publication_step["if"]
 

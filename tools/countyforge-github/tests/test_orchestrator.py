@@ -215,6 +215,36 @@ def test_authorized_review_dispatches_once_and_deduplicates(
     assert len([item for item in github.comments if "countyforge-status:v1" in item["body"]]) == 1
 
 
+def test_planning_context_change_creates_new_identity_after_terminal_run(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    first_event = event_factory("/countyforge plan")
+    first_event["issue"].pop("pull_request")
+    first_event["issue"]["title"] = "Feature: bounded planning"
+    first_event["issue"]["body"] = "Problem: one. Outcome: plan one."
+    first = _intake(github, first_event, head_sha)
+    comment_id, queued = _canonical(github)
+    assert queued["planning_context_sha256"]
+    failed = transition_state(
+        queued,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": "planning_fixture_failure",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+    changed = copy.deepcopy(first_event)
+    changed["comment"]["id"] = 999
+    changed["issue"]["body"] = "Problem: two. Outcome: plan two."
+    second = _intake(github, changed, head_sha, at="2026-07-19T12:02:00Z")
+    assert second["status"] == "dispatched"
+    assert second["idempotency_key"] != first["idempotency_key"]
+
+
 def test_check_creation_failure_makes_published_queue_retryable(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:

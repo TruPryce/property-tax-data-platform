@@ -15,9 +15,11 @@ from countyforge_github.planning import (
     classify_issue,
     materialize_plan,
     planning_branch,
+    planning_context_fingerprint,
     publish_plan,
     validate_planning_result,
 )
+from countyforge_github.redaction import redact_untrusted_text
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -121,6 +123,65 @@ def test_packet_normalizes_github_label_objects(tmp_path: Path) -> None:
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
     assert packet["issue"]["classification"] == "source_onboarding"
+
+
+def test_planning_packet_redacts_issue_and_comment_credentials(tmp_path: Path) -> None:
+    root = Path.cwd()
+    issue = {
+        "number": 6,
+        "title": "Feature work",
+        "body": (
+            'AWS_ACCESS_KEY_ID=AKIA1234567890ABCD\nAuthorization: Bearer "secret-value"'
+        ),  # pragma: allowlist secret
+        "labels": [],
+    }
+    comment_key = "secret_" + "access_key"
+    comment_value = "another-" + "secret"
+    info = build_planning_packet(
+        trigger=_trigger(root),
+        issue=issue,
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="redaction-fixture",
+        comments=[{"id": 7, "body": f"{comment_key}: '{comment_value}'"}],
+    )
+    packet_text = Path(info["packet_path"]).read_text(encoding="utf-8")
+    assert "AKIA1234567890ABCD" not in packet_text
+    assert "secret-value" not in packet_text
+    assert "another-secret" not in packet_text
+    packet = json.loads(packet_text)
+    assert packet["redactions"] == {"applied": True, "count": 3}
+    assert packet["sources"][0]["redacted"] is True
+
+
+def test_redaction_preserves_dynamic_values_and_delimiters() -> None:
+    text = 'AWS_SECRET_ACCESS_KEY="$SECRET"; access_key=[value]; Authorization: Basic token'
+    redacted, count = redact_untrusted_text(text)
+    assert (
+        redacted
+        == 'AWS_SECRET_ACCESS_KEY="$SECRET"; access_key=[REDACTED]; Authorization: Basic [REDACTED]'
+    )
+    assert count == 2
+
+
+def test_materializer_normalizes_injected_requirement_headings(tmp_path: Path) -> None:
+    result = _result()
+    result["acceptance_criteria"] = ["safe\n### Requirement: injected"]
+    shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
+    materialize_plan(result, publication_root=tmp_path, issue_number=6, run_id="heading-fixture")
+    spec = (
+        tmp_path / "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
+    ).read_text(encoding="utf-8")
+    assert spec.count("\n### Requirement:") == 1
+    assert "\n### Requirement: injected" not in spec
+    assert "### Requirement: safe ### Requirement: injected" in spec
+
+
+def test_planning_context_fingerprint_changes_with_discussion() -> None:
+    issue = {"number": 6, "title": "Feature work", "body": "Outcome: one", "labels": []}
+    first = planning_context_fingerprint(issue, [{"id": 1, "body": "First"}])
+    second = planning_context_fingerprint(issue, [{"id": 1, "body": "Changed"}])
+    assert first != second
 
 
 def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
