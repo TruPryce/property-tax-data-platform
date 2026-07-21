@@ -48,6 +48,7 @@ _ALLOWED_FILES = {
     "tasks.md",
     "spec.md",
 }
+MAX_PLANNING_COMMENTS = 16
 
 
 def _spec_capability(result: JsonObject) -> str:
@@ -68,8 +69,53 @@ class ContextLimits:
     max_issue_bytes: int = 20_000
 
 
+def _comment_sort_key(comment: JsonObject) -> tuple[int, str, str]:
+    """Order GitHub comments newest-first using immutable ID then timestamps."""
+
+    raw_id = comment.get("id", 0)
+    try:
+        comment_id = int(raw_id)
+    except (TypeError, ValueError):
+        comment_id = 0
+    return (
+        comment_id,
+        str(comment.get("created_at", "")),
+        str(comment.get("updated_at", "")),
+    )
+
+
+def select_planning_comments(
+    comments: Iterable[JsonObject], *, trigger_comment_id: int | None = None
+) -> list[JsonObject]:
+    """Return a stable newest-first window, retaining the triggering comment when present."""
+
+    unique: dict[int, JsonObject] = {}
+    no_id: list[JsonObject] = []
+    for comment in comments:
+        try:
+            comment_id = int(comment.get("id", 0))
+        except (TypeError, ValueError):
+            comment_id = 0
+        if comment_id > 0:
+            unique[comment_id] = comment
+        else:
+            no_id.append(comment)
+    ordered = sorted([*unique.values(), *no_id], key=_comment_sort_key, reverse=True)
+    window = ordered[:MAX_PLANNING_COMMENTS]
+    if trigger_comment_id is not None and trigger_comment_id in unique:
+        trigger = unique[trigger_comment_id]
+        if not any(int(item.get("id", 0)) == trigger_comment_id for item in window):
+            window = [*window[: MAX_PLANNING_COMMENTS - 1], trigger]
+            window.sort(key=_comment_sort_key, reverse=True)
+    return window
+
+
 def planning_context_fingerprint(
-    issue: JsonObject, comments: Iterable[JsonObject] = (), limits: ContextLimits | None = None
+    issue: JsonObject,
+    comments: Iterable[JsonObject] = (),
+    limits: ContextLimits | None = None,
+    *,
+    trigger_comment_id: int | None = None,
 ) -> str:
     """Hash the bounded, redacted issue discussion before execution deduplication."""
 
@@ -90,7 +136,7 @@ def planning_context_fingerprint(
         ),
     }
     comment_records: list[JsonObject] = []
-    for comment in list(comments)[:16]:
+    for comment in select_planning_comments(comments, trigger_comment_id=trigger_comment_id):
         raw_comment = str(comment.get("body", ""))[:4000]
         comment_body, _ = redact_untrusted_text(raw_comment)
         comment_records.append({"id": int(comment.get("id", 0)), "body": comment_body})
@@ -231,7 +277,13 @@ def build_planning_packet(
     classification = classify_issue(title, body, labels)
     issue_content = f"TITLE (untrusted): {title}\nBODY (untrusted):\n{body}"
     issue_content_bytes = len(issue_content.encode())
-    comment_records = list(comments)[:16]
+    trigger_comment = trigger.get("comment")
+    trigger_comment_id = (
+        int(trigger_comment["id"])
+        if isinstance(trigger_comment, dict) and trigger_comment.get("id") is not None
+        else None
+    )
+    comment_records = select_planning_comments(comments, trigger_comment_id=trigger_comment_id)
     bounded_comments: list[str] = []
     comment_redactions = 0
     comment_redaction_counts: list[int] = []
@@ -303,7 +355,9 @@ def build_planning_packet(
         },
         "planning_context_sha256": str(
             trigger.get("planning_context_sha256")
-            or planning_context_fingerprint(issue, comment_records, limits)
+            or planning_context_fingerprint(
+                issue, comment_records, limits, trigger_comment_id=trigger_comment_id
+            )
         ),
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,

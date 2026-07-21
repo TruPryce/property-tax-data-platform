@@ -506,7 +506,18 @@ def process_intake(
                 events=events,
                 authorization=decision,
             )
-        planning_context_sha256 = planning_context_fingerprint(issue_document, comments)
+        event_comment = event.get("comment")
+        trigger_comment_id = (
+            int(event_comment["id"])
+            if isinstance(event_comment, dict) and event_comment.get("id") is not None
+            else None
+        )
+        planning_comments = list(comments)
+        if isinstance(event_comment, dict):
+            planning_comments.append(event_comment)
+        planning_context_sha256 = planning_context_fingerprint(
+            issue_document, planning_comments, trigger_comment_id=trigger_comment_id
+        )
         labels = [
             str(label.get("name"))
             for label in issue_document.get("labels", [])

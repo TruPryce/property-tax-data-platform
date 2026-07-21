@@ -278,14 +278,21 @@ jobs:
           pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
           PY
           gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
-          gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER/comments?per_page=100" \
+          gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER/comments?per_page=100&sort=created&direction=desc" \
             > "$RUNNER_TEMP/countyforge-issue-comments.json"
+          trigger_comment_id="$(jq -er '.comment.id' "$RUNNER_TEMP/countyforge-trigger.json")"
+          gh api "repos/$TARGET_REPOSITORY/issues/comments/$trigger_comment_id" \
+            > "$RUNNER_TEMP/countyforge-trigger-comment.json"
+          jq -s '.[0] + [.[1]]' \
+            "$RUNNER_TEMP/countyforge-issue-comments.json" \
+            "$RUNNER_TEMP/countyforge-trigger-comment.json" \
+            > "$RUNNER_TEMP/countyforge-issue-comments-with-trigger.json"
           cd trusted
           uv sync --frozen --package countyforge-github
           uv run --package countyforge-github countyforge-github build-planning-packet \
             --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
             --issue "$RUNNER_TEMP/countyforge-issue.json" \
-            --comments "$RUNNER_TEMP/countyforge-issue-comments.json" \
+            --comments "$RUNNER_TEMP/countyforge-issue-comments-with-trigger.json" \
             --output-dir "$RUNNER_TEMP/countyforge-planning"
 
       - name: Upload bounded planning packet

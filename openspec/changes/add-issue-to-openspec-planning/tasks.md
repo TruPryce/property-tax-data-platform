@@ -37,3 +37,5 @@
 - [x] 5.9 Split planning validation from the write-capable publication lane and scope contents write to `plan-publish` only.
 - [x] 5.10 Redact credential-looking issue/comment literals and bind the redacted planning-context fingerprint into semantic identity before deduplication.
 - [x] 5.11 Preserve complete accepted kernel/control-plane guarantees in delta specs and keep legacy canonical planning fields optional.
+- [x] 5.12 Archive immutable command/profile/target facts and render bounded newest-first recent-run history.
+- [x] 5.13 Select planning comments newest-first, retain the triggering comment, and bind late discussion changes into context identity.

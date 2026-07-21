@@ -8,7 +8,7 @@ import json
 from collections.abc import Callable
 
 import pytest
-from countyforge_github.contracts import JsonObject
+from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.control import (
     find_canonical_state,
     is_duplicate,
@@ -16,12 +16,13 @@ from countyforge_github.control import (
     upsert_canonical_status,
 )
 from countyforge_github.errors import ControlPlaneError
-from countyforge_github.identity import retry_idempotency_key
+from countyforge_github.identity import retry_idempotency_key, semantic_idempotency_key
 from countyforge_github.leases import acquire_lease, heartbeat_lease, mark_expired_stale
 from countyforge_github.state import (
     MARKER_PREFIX,
     MARKER_SUFFIX,
     MAX_MARKER_BYTES,
+    begin_new_state,
     bump_revision,
     check_status,
     decode_marker,
@@ -137,6 +138,28 @@ def test_legacy_state_without_planning_metadata_remains_readable(
     body = render_status(state)
     decoded = decode_marker(body, author_id=41898282, author_type="Bot", trusted_bot_id=41898282)
     assert decoded == state
+
+
+def test_recent_runs_preserve_immutable_display_facts_and_bound_history(
+    contracts: ControlContracts,
+    trigger_factory: Callable[[str], JsonObject],
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    previous = queued_state_factory("validate")
+    previous = _transition(previous, "running", "2026-07-19T12:01:00Z", "started")
+    previous = _transition(previous, "failed", "2026-07-19T12:02:00Z", "failed")
+    trigger = trigger_factory("review")
+    key = semantic_idempotency_key(trigger, contracts.execution_policy)
+    current = begin_new_state(trigger, contracts.execution_policy, key, previous)
+    entry = current["history"][0]
+    assert entry["command"] == "validate"
+    assert entry["profile_id"] == previous["profile_id"]
+    assert entry["target_head_sha"] == previous["target_head_sha"]
+    current["history"] = [dict(entry, run_id=f"old-{index}") for index in range(20)]
+    body = render_status(current)
+    recent = body.split("### Recent runs", 1)[1]
+    assert recent.count("\n| `") == 10
+    assert "| `validate` |" in body
 
 
 def test_forged_user_marker_is_ignored(

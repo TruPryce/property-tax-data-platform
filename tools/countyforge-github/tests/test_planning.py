@@ -17,6 +17,7 @@ from countyforge_github.planning import (
     planning_branch,
     planning_context_fingerprint,
     publish_plan,
+    select_planning_comments,
     validate_planning_result,
 )
 from countyforge_github.redaction import redact_untrusted_text
@@ -182,6 +183,50 @@ def test_planning_context_fingerprint_changes_with_discussion() -> None:
     first = planning_context_fingerprint(issue, [{"id": 1, "body": "First"}])
     second = planning_context_fingerprint(issue, [{"id": 1, "body": "Changed"}])
     assert first != second
+
+
+def test_planning_context_uses_newest_comments_and_late_decisions() -> None:
+    issue = {"number": 6, "title": "Feature work", "body": "Outcome: one", "labels": []}
+    comments = [{"id": index, "body": f"Context {index}"} for index in range(1, 18)]
+    changed = [*comments[:-1], {"id": 17, "body": "Late architecture decision"}]
+    assert planning_context_fingerprint(issue, comments) != planning_context_fingerprint(
+        issue, changed
+    )
+    selected = select_planning_comments(comments)
+    assert len(selected) == 16
+    assert [item["id"] for item in selected] == list(range(17, 1, -1))
+
+
+def test_planning_context_retains_trigger_comment_outside_newest_window() -> None:
+    comments = [{"id": index, "body": f"Context {index}"} for index in range(2, 19)]
+    selected = select_planning_comments(comments, trigger_comment_id=2)
+    assert len(selected) == 16
+    assert 2 in [item["id"] for item in selected]
+
+
+def test_packet_retains_trigger_comment_when_window_is_full(tmp_path: Path) -> None:
+    root = Path.cwd()
+    trigger = _trigger(root)
+    trigger["comment"] = {"id": 2}
+    comments = [{"id": index, "body": f"Context {index}"} for index in range(2, 19)]
+    info = build_planning_packet(
+        trigger=trigger,
+        issue={
+            "number": 6,
+            "title": "Feature work",
+            "body": "Problem: bounded planning. Outcome: create a plan.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="trigger-comment-fixture",
+        comments=comments,
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    comment_paths = [
+        source["path"] for source in packet["sources"] if source["category"] == "comment"
+    ]
+    assert "github://issue/6/comment/2" in comment_paths
 
 
 def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:

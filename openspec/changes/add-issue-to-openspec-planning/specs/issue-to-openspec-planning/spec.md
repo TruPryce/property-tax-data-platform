@@ -28,6 +28,28 @@ The control plane SHALL deduplicate identical semantic planning requests. Change
 - **WHEN** an existing planning PR is manually adopted or materially edited
 - **THEN** a new superseding draft is created and the predecessor remains intact
 
+### Requirement: Recent discussion selection
+The planning adapter SHALL deduplicate issue comments and select a deterministic newest-first window of at most 16 comments using immutable comment identity and timestamps. When the triggering command comment is available, it MUST be retained in the selected window even if it falls outside the newest window. The selected comments, including their bounded redacted bodies and identities, MUST participate in the planning context fingerprint and packet provenance.
+
+#### Scenario: Late discussion changes planning identity
+- **WHEN** an issue has more than 16 comments and a later comment changes an accepted decision
+- **THEN** the newest window and context fingerprint include that late comment, causing a changed planning identity rather than silently reusing stale context
+
+#### Scenario: Trigger comment is retained
+- **WHEN** the triggering command comment is older than the newest 16 comments
+- **THEN** the bounded packet retains that comment alongside the newest discussion and remains deterministically hashable
+
+### Requirement: Canonical recent-run history
+The canonical bot-owned status comment SHALL remain a single comment and SHALL render a bounded newest-first `Recent runs` table. Each newly archived run MUST preserve immutable display facts including command, profile and version, target head SHA, attempt, lifecycle state, completion/update time, and sanitized evidence reference. Readers MUST render legacy history entries that lack newer display fields using bounded fallback values without invalidating the canonical state.
+
+#### Scenario: Completed validation remains visible after review
+- **WHEN** a completed validation run is followed by a review run on the same target
+- **THEN** the canonical comment shows the review as current and the validation in the bounded recent-run table without creating a second status comment
+
+#### Scenario: History remains bounded
+- **WHEN** more than the configured number of runs are archived
+- **THEN** only the newest bounded entries are rendered and older entries remain excluded from the visible table without overwriting the current state
+
 ### Requirement: Human approval
 The planning agent MUST NOT approve its own result. Implementation eligibility SHALL remain false until an authorized maintainer merges the planning PR under the documented approval contract; reactions and labels alone MUST NOT count as approval.
 

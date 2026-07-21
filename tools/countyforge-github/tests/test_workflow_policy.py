@@ -101,6 +101,13 @@ def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
     assert execution["cancel-in-progress"] == "false"
 
 
+def test_planning_packet_fetches_newest_comments_and_trigger_comment() -> None:
+    text = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    assert "comments?per_page=100&sort=created&direction=desc" in text
+    assert "countyforge-trigger-comment.json" in text
+    assert "countyforge-issue-comments-with-trigger.json" in text
+
+
 def test_canonical_state_mutations_share_one_serialized_lane() -> None:
     # GitHub does not honor If-Match/412 on issue-comment updates, so canonical-state
     # mutations rely on a shared per-target job concurrency lane for serialization instead
