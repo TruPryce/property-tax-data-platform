@@ -2,10 +2,30 @@
 set -euo pipefail
 
 PROVIDER="${CODEX_PROVIDER:-sakana}"
+MODEL_REF="${CODEX_MODEL_REF:-}"
+REASONING_EFFORT="${CODEX_REASONING_EFFORT:-xhigh}"
 case "$PROVIDER" in
-  sakana) IMAGE="${CODEX_IMAGE:-countyforge-plan-agent-sakana:v1}"; MODEL="fugu-ultra"; PROVIDER_URL="https://api.sakana.ai/v1" ;;
-  openai) IMAGE="${CODEX_IMAGE:-countyforge-plan-agent-openai:v1}"; MODEL="gpt-5.6"; PROVIDER_URL="" ;;
+  sakana)
+    IMAGE="${CODEX_IMAGE:-countyforge-plan-agent-sakana:v1}"
+    MODEL_REF="${MODEL_REF:-sakana.fugu-ultra}"
+    PROVIDER_URL="https://api.sakana.ai/v1"
+    ;;
+  openai)
+    IMAGE="${CODEX_IMAGE:-countyforge-plan-agent-openai:v1}"
+    MODEL_REF="${MODEL_REF:-openai.gpt-5.6}"
+    PROVIDER_URL=""
+    ;;
   *) echo "error: CODEX_PROVIDER must be openai or sakana" >&2; exit 2 ;;
+esac
+case "$PROVIDER:$MODEL_REF" in
+  sakana:sakana.fugu) MODEL="fugu" ;;
+  sakana:sakana.fugu-ultra) MODEL="fugu-ultra" ;;
+  openai:openai.gpt-5.6) MODEL="gpt-5.6" ;;
+  *) echo "error: model reference is not compatible with the planning provider" >&2; exit 2 ;;
+esac
+case "$REASONING_EFFORT" in
+  medium|high|xhigh) ;;
+  *) echo "error: unsupported planning reasoning effort" >&2; exit 2 ;;
 esac
 ROOT="$(git rev-parse --show-toplevel)"
 PROFILE_SHA="$(python3 - "$ROOT/.ai/profiles/plan.read-only.v1.json" <<'PY'
@@ -17,7 +37,7 @@ CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 cat > "$CTX/config.toml" <<EOF
 model = "$MODEL"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "$REASONING_EFFORT"
 [tools]
 web_search = false
 [features]
@@ -53,6 +73,8 @@ docker build --pull \
   --label "dev.trupryce.property-tax-data-platform.profile-id=plan.read-only.v1" \
   --label "dev.trupryce.property-tax-data-platform.profile-sha256=$PROFILE_SHA" \
   --label "dev.trupryce.property-tax-data-platform.provider=$PROVIDER" \
+  --label "dev.trupryce.property-tax-data-platform.model-ref=$MODEL_REF" \
+  --label "dev.trupryce.property-tax-data-platform.reasoning-effort=$REASONING_EFFORT" \
   --build-arg CODEX_VERSION=0.144.6 \
   -t "$IMAGE" -f - "$CTX" <<'DOCKERFILE'
 FROM node:22-bookworm-slim

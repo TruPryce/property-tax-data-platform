@@ -287,15 +287,15 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
     )
     planning_rows = ""
     if state["command"] == "plan":
-        pr_number = state["planning_pr_number"]
+        pr_number = state.get("planning_pr_number")
         draft_pr = (
-            f"[#${pr_number}](https://github.com/TruPryce/property-tax-data-platform/pull/{pr_number})"
+            f"[#{pr_number}](https://github.com/TruPryce/property-tax-data-platform/pull/{pr_number})"
             if pr_number
             else "Pending"
-        ).replace("#$", "#")
+        )
         planning_rows = (
-            f"| Planning revision | `{state['planning_revision']}` |\n"
-            f"| Proposed change | `{state['planning_change_name'] or 'Pending'}` |\n"
+            f"| Planning revision | `{state.get('planning_revision') or 1}` |\n"
+            f"| Proposed change | `{state.get('planning_change_name') or 'Pending'}` |\n"
             f"| Draft PR | {draft_pr} |\n"
             "| Implementation eligible | `false` |\n"
         )

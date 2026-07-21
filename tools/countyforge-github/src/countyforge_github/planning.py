@@ -25,6 +25,7 @@ from countyforge_runner.contracts import (
     validate_document,
 )
 from countyforge_runner.errors import KernelError
+from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
 from countyforge_github.errors import ControlPlaneError
@@ -46,6 +47,16 @@ _ALLOWED_FILES = {
     "tasks.md",
     "spec.md",
 }
+
+
+def _spec_capability(result: JsonObject) -> str:
+    """Return the bounded capability directory shared by all publication paths."""
+
+    capabilities = result.get("affected_capabilities")
+    candidate = str(capabilities[0]) if isinstance(capabilities, list) and capabilities else ""
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", candidate):
+        return candidate
+    return "issue-to-openspec-planning"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +110,7 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
     candidates.extend(fixed)
     for pattern, category in (
         ("**/AGENTS.md", "agent_guidance"),
-        ("docs/decisions/ADR-*.md", "adr"),
+        ("docs/decisions/[0-9][0-9][0-9][0-9]-*.md", "adr"),
         ("docs/engineering/*.md", "architecture"),
         ("docs/sources/*.md", "source_contract"),
         ("openspec/specs/**/*.md", "openspec"),
@@ -177,14 +188,19 @@ def build_planning_packet(
     issue_prefix_bytes = len(f"TITLE (untrusted): {title}\nBODY (untrusted):\n".encode())
     body_limit = max(min(limits.max_issue_bytes, 20_000 - issue_prefix_bytes), 0)
     body = raw_body.encode("utf-8")[:body_limit].decode("utf-8", "ignore")
-    labels = [str(value) for value in issue.get("labels", []) if isinstance(value, str)]
+    labels: list[str] = []
+    for value in issue.get("labels", []):
+        if isinstance(value, str):
+            labels.append(value)
+        elif isinstance(value, dict) and isinstance(value.get("name"), str):
+            labels.append(str(value["name"]))
     classification = classify_issue(title, body, labels)
-    issue_content_bytes = len(f"TITLE (untrusted): {title}\nBODY (untrusted):\n{body}".encode())
+    issue_content = f"TITLE (untrusted): {title}\nBODY (untrusted):\n{body}"
+    issue_content_bytes = len(issue_content.encode())
     comment_records = list(comments)[:16]
     bounded_comments = [str(comment.get("body", ""))[:4000] for comment in comment_records]
-    comment_content_bytes = sum(
-        len(f"COMMENT (untrusted):\n{text}".encode()) for text in bounded_comments
-    )
+    comment_contents = [f"COMMENT (untrusted):\n{text}" for text in bounded_comments]
+    comment_content_bytes = sum(len(content.encode()) for content in comment_contents)
     context_budget = max(limits.max_total_bytes - issue_content_bytes - comment_content_bytes, 1)
     selection_limits = replace(limits, max_total_bytes=context_budget)
     selected, excluded = _select_files(contract_root.resolve(strict=True), selection_limits)
@@ -192,26 +208,26 @@ def build_planning_packet(
         "source_id": _source_id("issue", f"issue-{issue.get('number', 0)}"),
         "category": "issue",
         "path": f"github://issue/{issue.get('number', 0)}",
-        "sha256": hashlib.sha256(
-            f"TITLE (untrusted): {title}\nBODY (untrusted):\n{body}".encode()
-        ).hexdigest(),
-        "bytes": len(body.encode("utf-8")),
-        "content": f"TITLE (untrusted): {title}\nBODY (untrusted):\n{body}",
+        "sha256": hashlib.sha256(issue_content.encode()).hexdigest(),
+        "bytes": len(issue_content.encode("utf-8")),
+        "content": issue_content,
         "truncated": len(raw_body.encode("utf-8")) > len(body.encode("utf-8")),
         "selection_reason": "originating structured issue",
         "untrusted": True,
     }
     comment_sources: list[JsonObject] = []
-    for comment, text in zip(comment_records, bounded_comments, strict=True):
+    for comment, _text, comment_content in zip(
+        comment_records, bounded_comments, comment_contents, strict=True
+    ):
         path = f"github://issue/{issue.get('number', 0)}/comment/{comment.get('id', 0)}"
         comment_sources.append(
             {
                 "source_id": _source_id("comment", path),
                 "category": "comment",
                 "path": path,
-                "sha256": hashlib.sha256(f"COMMENT (untrusted):\n{text}".encode()).hexdigest(),
-                "bytes": len(text.encode("utf-8")),
-                "content": f"COMMENT (untrusted):\n{text}",
+                "sha256": hashlib.sha256(comment_content.encode()).hexdigest(),
+                "bytes": len(comment_content.encode("utf-8")),
+                "content": comment_content,
                 "truncated": len(str(comment.get("body", ""))) > 4000,
                 "selection_reason": "bounded issue discussion",
                 "untrusted": True,
@@ -262,6 +278,14 @@ def build_planning_packet(
             }
             for source in packet["sources"]
         ],
+        "excluded_candidates": [
+            {
+                "path": str(candidate["path"]),
+                "category": "context_candidate",
+                "reason_code": str(candidate["reason_code"]),
+            }
+            for candidate in excluded
+        ],
     }
     manifest_schema = load_json_object(
         contract_root / ".ai/schemas/countyforge-planning-context-manifest.schema.json",
@@ -306,6 +330,12 @@ def validate_planning_result(
         raise ControlPlaneError(
             "invalid_plan_result", "Planning output does not satisfy its strict contract."
         ) from None
+    try:
+        validate_planning_payload(result)
+    except KernelError:
+        raise ControlPlaneError(
+            "unsafe_plan_payload", "Planning output contains executable-looking content."
+        ) from None
     if not _CHANGE.fullmatch(str(result["proposed_change_name"])):
         raise ControlPlaneError(
             "invalid_plan_result", "The proposed OpenSpec change name is invalid."
@@ -317,9 +347,23 @@ def validate_planning_result(
                 raise ControlPlaneError(
                     "prohibited_plan_path", "Planning output contains a prohibited path."
                 )
+            # A change name may legitimately discuss workflows, policies, or
+            # secrets.  Reject only prohibited path segments below that name.
+            segments = path.split("/")[3:]
             if any(
-                token in path.casefold()
-                for token in ("workflow", "secret", "policy", "src/", "dags/", "migrations/")
+                segment.casefold()
+                in {
+                    "workflow",
+                    "workflows",
+                    "secret",
+                    "secrets",
+                    "policy",
+                    "policies",
+                    "src",
+                    "dags",
+                    "migrations",
+                }
+                for segment in segments
             ):
                 raise ControlPlaneError(
                     "prohibited_plan_path", "Planning output contains a prohibited path."
@@ -377,13 +421,7 @@ def materialize_plan(
     validate_planning_result(result, contract_root=publication_root)
     change = str(result["proposed_change_name"])
     change_root = publication_root / "openspec" / "changes" / change
-    spec_capability = str(
-        result["affected_capabilities"][0]
-        if result["affected_capabilities"]
-        else "issue-to-openspec-planning"
-    )
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", spec_capability):
-        spec_capability = "issue-to-openspec-planning"
+    spec_capability = _spec_capability(result)
     spec_root = change_root / "specs" / spec_capability
     if change_root.exists() and any(change_root.iterdir()):
         raise ControlPlaneError(
@@ -393,13 +431,19 @@ def materialize_plan(
     for path in (change_root, spec_root):
         path.mkdir(parents=True, exist_ok=True)
     proposal = f"""## Why\n\n{result["problem_statement"]}\n\n## Outcome\n\n{result["desired_outcome"]}\n\n## Scope\n\n- Originating issue: #{issue_number}\n- CountyForge planning run: `{run_id}`\n- Affected capabilities: {", ".join(result["affected_capabilities"])}\n\n## Constraints\n\n{chr(10).join(f"- {item}" for item in result["security_privacy_considerations"])}\n\n## Non-goals\n\n{chr(10).join(f"- {item}" for item in result["non_goals"])}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\nThis draft requires human maintainer approval before implementation.\n"""
-    design = f"""## Current-state evidence\n\n{chr(10).join(f"- {item}" for item in result["evidence_citations"]) or "- See the bound planning packet."}\n\n## Proposed architecture\n\n{result["desired_outcome"]}\n\n## Dependency direction\n\nThe implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.\n\n## Trust boundaries\n\nIssue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.\n\n## Data and contract changes\n\nThe planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.\n\n## Alternatives considered\n\nNo alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.\n\n## Decisions and assumptions\n\n{chr(10).join(f"- {item}" for item in result["assumptions"]) or "- None recorded."}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Risks and compatibility\n\n{chr(10).join(f"- {item}" for item in result["risks"])}\n{chr(10).join(f"- {item}" for item in result["migration_compatibility_concerns"])}\n\n## Rollout and failure recovery\n\nValidation commands: {", ".join(result["validation_commands"])}. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.\n\n## Testing strategy\n\nRun the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.\n"""
+    citation_lines = "\n".join(
+        f"- `{citation['source_id']}`: {citation['excerpt']}"
+        for citation in result["evidence_citations"]
+    )
+    design = f"""## Current-state evidence\n\n{citation_lines or "- See the bound planning packet."}\n\n## Proposed architecture\n\n{result["desired_outcome"]}\n\n## Dependency direction\n\nThe implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.\n\n## Trust boundaries\n\nIssue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.\n\n## Data and contract changes\n\nThe planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.\n\n## Alternatives considered\n\nNo alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.\n\n## Decisions and assumptions\n\n{chr(10).join(f"- {item}" for item in result["assumptions"]) or "- None recorded."}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Risks and compatibility\n\n{chr(10).join(f"- {item}" for item in result["risks"])}\n{chr(10).join(f"- {item}" for item in result["migration_compatibility_concerns"])}\n\n## Rollout and failure recovery\n\nValidation commands: {", ".join(result["validation_commands"])}. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.\n\n## Testing strategy\n\nRun the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.\n"""
     tasks = (
         "## Tasks\n\n"
-        + "\n".join(f"- [ ] {index}. {task}" for index, task in enumerate(result["task_slices"], 1))
+        + "\n".join(
+            f"- [ ] 1.{index} {task}" for index, task in enumerate(result["task_slices"], 1)
+        )
         + "\n"
     )
-    spec = "## Requirements\n\n" + "\n".join(
+    spec = "## ADDED Requirements\n\n" + "\n".join(
         f"### Requirement: {criterion}\n\nThe implementation SHALL satisfy this criterion.\n\n#### Scenario: Acceptance\n- **WHEN** the implementation is evaluated\n- **THEN** the criterion is demonstrably satisfied\n"
         for criterion in result["acceptance_criteria"]
     )
@@ -450,6 +494,7 @@ def publish_plan(
     required = (
         "list_pull_requests",
         "create_git_blob",
+        "get_git_commit",
         "create_git_tree",
         "create_git_commit",
         "create_git_ref",
@@ -558,8 +603,7 @@ def publish_plan(
             f"openspec/changes/{change}/proposal.md",
             f"openspec/changes/{change}/design.md",
             f"openspec/changes/{change}/tasks.md",
-            f"openspec/changes/{change}/specs/"
-            f"{result['affected_capabilities'][0] if result['affected_capabilities'] else 'issue-to-openspec-planning'}/spec.md",
+            f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
         ]
         if not all((publication_root / relative).is_file() for relative in files):
             raise ControlPlaneError(
@@ -592,7 +636,13 @@ def publish_plan(
     # prevents a human edit on an earlier draft from becoming an implicit input to
     # a later generated plan.
     parent = target_sha
-    tree = github.create_git_tree(repository, parent, entries)
+    commit_document = github.get_git_commit(repository, parent)
+    tree_document = commit_document.get("tree")
+    if not isinstance(tree_document, dict) or not isinstance(tree_document.get("sha"), str):
+        raise ControlPlaneError(
+            "github_api_invalid_response", "GitHub commit tree identity is unavailable."
+        )
+    tree = github.create_git_tree(repository, str(tree_document["sha"]), entries)
     commit = github.create_git_commit(
         repository, f"plan: draft OpenSpec for issue #{issue}", tree, parent
     )
@@ -663,7 +713,7 @@ def publish_plan(
             f"openspec/changes/{change}/proposal.md",
             f"openspec/changes/{change}/design.md",
             f"openspec/changes/{change}/tasks.md",
-            f"openspec/changes/{change}/specs/{result['affected_capabilities'][0] if result['affected_capabilities'] else 'issue-to-openspec-planning'}/spec.md",
+            f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
         ],
         "validation": {
             "passed": True,

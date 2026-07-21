@@ -79,16 +79,18 @@ The provider job receives a bounded bare target repository so it can validate im
 | `countyforge-run.yml` claim | Validate semantic identity, claim lease, bind actual workflow run | None |
 | `countyforge-run.yml` claim recovery | Mark a pre-lease claim failure terminal so retry remains possible | None |
 | `countyforge-run.yml` prepare | Fetch target data, build packet/provenance, build bare target identity, upload frozen artifact | None |
-| `countyforge-run.yml` prepare (plan) | Fetch bounded issue context and build planning packet/manifest | None |
+| `countyforge-run.yml` plan-packet | Fetch bounded issue context and build planning packet/manifest from the trusted root; no target checkout or package hooks | None |
 | `countyforge-run.yml` mark-running | Heartbeat and publish running state | None |
 | `review-sakana` | Build trusted Sakana image and invoke packet reviewer | `SAKANA_API_KEY` only on invocation |
 | `review-openai` | Build trusted OpenAI image and invoke packet reviewer | `OPENAI_API_KEY` only on invocation |
 | `plan-sakana` / `plan-openai` | Invoke the bounded read-only planning profile | Selected provider key only on invocation |
 | `future-mode` | Invoke kernel for implement/fix/validate and require `profile_not_implemented` | None |
-| `publish` | Map sanitized result to canonical comment/check and release terminal lease | None |
+| `publish` | Verify the live planning lease, map sanitized result to canonical comment/check, and release terminal lease; planning publication uses the narrow trusted contents-write exception | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
-All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior.
+All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `publish` job may use `contents: write`, and it receives no provider secret.
+
+The trusted publication job runs the repository-pinned `npx --yes @fission-ai/openspec@1.6.0` validator before any Git data API mutation. This is an intentional v1 supply-chain trade-off: the package version is pinned, execution occurs from the trusted checkout, and no provider secret is present. Future hardening may move validation into a pre-provisioned trusted image, but must preserve the same no-secret and trusted-root boundary.
 
 ## Trigger and State Contracts
 

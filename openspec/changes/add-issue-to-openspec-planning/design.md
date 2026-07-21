@@ -15,11 +15,11 @@ openspec/changes/<change-name>/
   specs/<capability>/spec.md
 ```
 
-The publication job starts from the immutable trusted default-branch SHA, validates the deterministic branch `countyforge/plan/issue-<number>-<change-name>`, runs trusted gates, and creates or updates a draft PR. No raw model patch is applied.
+The publication job starts from the immutable trusted default-branch SHA, validates the deterministic branch `countyforge/plan/issue-<number>-<change-name>`, runs trusted gates, and creates or updates a draft PR. No raw model patch is applied. A per-target publication preflight rereads canonical state and requires the live workflow lease immediately before Git data API writes.
 
 ## Context selection and provenance
 
-Selection is stable and bounded: approved repository roots only, normalized paths, symlink confinement, regular files, deterministic ordering, per-file and aggregate byte/file ceilings, explicit truncation metadata, and SHA-256 hashes. The packet records issue facts as untrusted source material, never as instructions. A manifest records every included and excluded candidate with category, reason, hash, bytes, and source provenance; packet and manifest hashes are required in the runner request.
+Selection is stable and bounded: approved repository roots only, normalized paths, symlink confinement, regular files, deterministic ordering, per-file and aggregate byte/file ceilings, explicit truncation metadata, and SHA-256 hashes. The packet records issue facts as untrusted source material, never as instructions. A manifest records every included source and every excluded candidate with a bounded category and reason code; packet and manifest hashes are required in the runner request.
 
 ## Result and publication
 
@@ -29,7 +29,7 @@ The initial human approval rule is an authorized maintainer merging the planning
 
 ## Failure recovery and security
 
-Validation, binding, cancellation, or publication failures create no new commit/PR, preserve sanitized evidence, and transition canonical state through the existing per-target state lane. Cancellation before publication creates no branch or PR; a publication race rereads canonical state and reports any already-created branch/PR honestly. Provider credentials are available only to the selected plan execution step. Publication receives no provider secret.
+Validation, binding, cancellation, or publication failures create no new commit/PR, preserve sanitized evidence, and transition canonical state through the existing per-target state lane. Cancellation before publication creates no branch or PR; a publication race is stopped by a live lease preflight and reports any already-created branch/PR honestly. Provider credentials are available only to the selected plan execution step. Publication receives no provider secret. The trusted publication job is the only v1 workflow with contents write, narrowly authorized for deterministic planning refs and draft PRs.
 
 ## Compatibility
 

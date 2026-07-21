@@ -96,7 +96,7 @@
         "type": "object", "additionalProperties": false,
         "required": ["source", "target", "access"],
         "properties": {
-          "source": {"enum": ["schema_directory", "claimed_output_directory", "repository"]},
+          "source": {"enum": ["schema_directory", "frozen_planning_packet", "frozen_context_manifest", "claimed_output_directory", "repository"]},
           "target": {"type": "string", "pattern": "^/"},
           "access": {"enum": ["read_only", "read_write"]}
         }

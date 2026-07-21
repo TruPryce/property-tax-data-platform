@@ -34,3 +34,11 @@ The planning agent MUST NOT approve its own result. Implementation eligibility S
 #### Scenario: Unresolved decisions block implementation
 - **WHEN** the result contains a blocking unresolved decision
 - **THEN** the draft remains blocked and no implementation command becomes eligible
+
+### Requirement: Publication finalization is cancellation-aware
+
+The trusted workflow SHALL verify the live canonical planning lease in the per-target state lane immediately before any branch, commit, or draft PR mutation. Every materialization, validation, and publication failure SHALL reach a sanitized terminal state update.
+
+#### Scenario: Cancelled planning run creates no publication
+- **WHEN** cancellation wins before the publication preflight
+- **THEN** no planning branch or draft PR is created and the canonical issue status reports the failure or cancellation without claiming publication succeeded

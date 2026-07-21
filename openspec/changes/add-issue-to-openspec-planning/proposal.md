@@ -19,3 +19,9 @@ This change does not implement code-writing, remediation, arbitrary validation, 
 ## Traceability
 
 This change implements GitHub Issue #6 under parent program Issue #2. A generated plan remains a draft until an authorized maintainer approves it under the documented approval contract.
+
+## Capabilities
+
+- **ADDED** `issue-to-openspec-planning`: bounded issue intake, planning packets, strict results, trusted materialization, and draft publication.
+- **MODIFIED** `agent-runner-kernel`: make `plan.read-only.v1` executable with bound planning inputs, resolved provider/model/effort facts, and planning-result provenance.
+- **MODIFIED** `github-agent-control-plane`: add the trusted no-secret planning packet stage, the narrowly scoped planning publication permission, optional planning state metadata, and live lease/finalization checks.

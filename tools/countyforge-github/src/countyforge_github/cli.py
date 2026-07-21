@@ -32,7 +32,12 @@ from countyforge_github.planning import (
 from countyforge_github.requests import build_run_request
 from countyforge_github.results import resolve_terminal_result
 from countyforge_github.state import reconcile_workflow, render_status, transition_state
-from countyforge_github.workflow_control import advance_run, claim_run, fail_unclaimed_run
+from countyforge_github.workflow_control import (
+    advance_run,
+    claim_run,
+    fail_unclaimed_run,
+    verify_publication_lease,
+)
 
 
 def _file(parser: argparse.ArgumentParser, name: str, *, required: bool = True) -> None:
@@ -175,6 +180,16 @@ def build_parser() -> argparse.ArgumentParser:
     fail_unclaimed.add_argument("--idempotency-key", required=True)
     fail_unclaimed.add_argument("--run-id", required=True)
     fail_unclaimed.add_argument("--at", required=True)
+
+    verify_publication = subparsers.add_parser("verify-publication")
+    verify_publication.add_argument("--repository", required=True)
+    verify_publication.add_argument("--status-comment-id", type=int, required=True)
+    verify_publication.add_argument("--trusted-bot-id", type=int, required=True)
+    verify_publication.add_argument("--idempotency-key", required=True)
+    verify_publication.add_argument("--run-id", required=True)
+    verify_publication.add_argument("--workflow-run-id", type=int, required=True)
+    verify_publication.add_argument("--nonce", required=True)
+    verify_publication.add_argument("--at", required=True)
 
     maintain = subparsers.add_parser("maintain")
     maintain.add_argument("--repository", required=True)
@@ -526,6 +541,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 timestamp=args.at,
             )
             _emit(with_audit({"ok": True, "state": state}, [event]))
+            return 0
+        if command_name == "verify-publication":
+            state = verify_publication_lease(
+                _github_client(),
+                repository=args.repository,
+                status_comment_id=args.status_comment_id,
+                trusted_bot_id=args.trusted_bot_id,
+                idempotency_key=args.idempotency_key,
+                run_id=args.run_id,
+                workflow_run_id=args.workflow_run_id,
+                nonce=args.nonce,
+                at=args.at,
+            )
+            _emit({"ok": True, "state": state})
             return 0
         raise ControlPlaneError("unknown_command", "Unknown CountyForge adapter command.")
     except (ControlPlaneError, KernelError) as error:

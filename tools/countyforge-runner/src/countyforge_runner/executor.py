@@ -13,6 +13,7 @@ from pathlib import Path
 from countyforge_runner.contracts import JsonObject, load_json_object, validate_document
 from countyforge_runner.errors import KernelError
 from countyforge_runner.evidence import EvidenceWriter
+from countyforge_runner.planning_policy import validate_planning_payload
 from countyforge_runner.resolver import Kernel, ResolvedRun
 
 MODEL_OUTPUT_ARTIFACTS = (
@@ -177,6 +178,7 @@ class Runner:
                 "RUN_ID": resolved.run_id,
                 "CODEX_PROVIDER": str(resolved.provider["id"]),
                 "CODEX_MODEL": str(model["configured_model_id"]),
+                "CODEX_MODEL_REF": str(model["logical_ref"]),
                 "CODEX_IMAGE": str(selected_image),
                 "CODEX_REASONING_EFFORT": str(resolved.request["reasoning_effort"]),
                 "MAX_PACKET_BYTES": str(resolved.effective_budgets["max_input_bytes"]),
@@ -269,6 +271,7 @@ class Runner:
                     self.kernel._load_schema("countyforge-plan-result.schema.json"),
                     kind="planning result",
                 )
+                validate_planning_payload(result_document)
             except KernelError:
                 disposition = "validation_failed"
                 code = 5

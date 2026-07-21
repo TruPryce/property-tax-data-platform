@@ -145,6 +145,23 @@ def test_plan_dispatches_read_only_adapter_with_one_provider_credential(
     assert document["plan"]["implementation_eligibility"] is False
 
 
+def test_plan_profile_mounts_match_adapter_and_provenance_contract() -> None:
+    profile = json.loads(Path(".ai/profiles/plan.read-only.v1.json").read_text(encoding="utf-8"))
+    mounts = {
+        (mount["source"], mount["target"], mount["access"])
+        for mount in profile["filesystem_mounts"]
+    }
+    assert ("schema_directory", "/workspace/.ai/schemas", "read_only") in mounts
+    assert ("frozen_planning_packet", "/workspace/packet.json", "read_only") in mounts
+    assert ("frozen_context_manifest", "/workspace/manifest.json", "read_only") in mounts
+    assert ("claimed_output_directory", "/out", "read_write") in mounts
+    adapter = Path(".ai/codex/08-run-countyforge-plan-docker.sh").read_text(encoding="utf-8")
+    assert '-v "$PACKET_PATH:/workspace/packet.json:ro"' in adapter
+    assert '-v "$MANIFEST_PATH:/workspace/manifest.json:ro"' in adapter
+    assert '"frozen_planning_packet:/workspace/packet.json:read_only"' in adapter
+    assert '"frozen_context_manifest:/workspace/manifest.json:read_only"' in adapter
+
+
 def test_generic_metrics_are_low_cardinality(
     tmp_path: Path,
     request_factory: Callable[[str], JsonObject],

@@ -23,3 +23,14 @@
 - [x] 4.2 Add publication, duplicate/revision, human-edit, cancellation-race, and secret-scoping tests.
 - [x] 4.3 Add plan Make targets, CI policy checks, ADR, engineering guide, runbook, and contributor documentation.
 - [x] 4.4 Run all deterministic repository and CountyForge gates; record the controlled post-merge smoke procedure.
+
+## 5. Review contract corrections
+
+- [x] 5.1 Add MODIFIED deltas for the runner kernel and GitHub control-plane capabilities and document the narrow trusted publication permission.
+- [x] 5.2 Preserve legacy canonical-state readability with optional planning metadata and bounded rendering defaults.
+- [x] 5.3 Separate trusted planning-packet construction from target preparation and keep it secret-free.
+- [x] 5.4 Add live lease publication preflight and unconditional sanitized terminal finalization.
+- [x] 5.5 Resolve the Git tree base from the target commit and test commit/tree identity separately.
+- [x] 5.6 Bind resolved planning model and reasoning effort to image labels and runtime configuration.
+- [x] 5.7 Render valid OpenSpec delta sections, X.Y tasks, readable citations, and validate generated drafts in a temporary fixture.
+- [x] 5.8 Record bounded excluded-candidate provenance and select the repository’s numbered ADR files.

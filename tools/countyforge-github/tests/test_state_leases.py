@@ -119,6 +119,26 @@ def test_marker_requires_trusted_bot_identity(
     )
 
 
+def test_legacy_state_without_planning_metadata_remains_readable(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = queued_state_factory("review")
+    for field in (
+        "planning_revision",
+        "planning_change_name",
+        "planning_branch",
+        "planning_pr_number",
+        "planning_predecessor_run_id",
+        "planning_context_sha256",
+        "planning_result_sha256",
+        "implementation_eligible",
+    ):
+        state.pop(field, None)
+    body = render_status(state)
+    decoded = decode_marker(body, author_id=41898282, author_type="Bot", trusted_bot_id=41898282)
+    assert decoded == state
+
+
 def test_forged_user_marker_is_ignored(
     queued_state_factory: Callable[[str], JsonObject],
 ) -> None:

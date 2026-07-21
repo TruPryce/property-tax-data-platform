@@ -69,9 +69,9 @@ def test_forbidden_permissions_are_never_granted_write() -> None:
         permission_sets.extend(
             (job_name, job.get("permissions", {})) for job_name, job in workflow["jobs"].items()
         )
-        # The trusted publication job is the only job allowed to create/update a
-        # planning branch and draft PR.  It is intentionally the one exception
-        # to the otherwise read-only contents policy.
+        # The trusted planning publication job is the only narrowly-scoped v1
+        # exception: it creates deterministic planning refs and draft PRs.  No
+        # provider secret or model job receives this permission.
         for job_name, permissions in permission_sets:
             for permission in FORBIDDEN_WRITE_PERMISSIONS:
                 if (
@@ -81,6 +81,14 @@ def test_forbidden_permissions_are_never_granted_write() -> None:
                 ):
                     continue
                 assert permissions.get(permission) != "write"
+    publish = _jobs("countyforge-run.yml")["publish"]["permissions"]
+    assert publish == {
+        "actions": "read",
+        "checks": "write",
+        "contents": "write",
+        "issues": "write",
+        "pull-requests": "write",
+    }
 
 
 def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
@@ -132,6 +140,7 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "recover-claim-failure",
         "mark-running",
         "future-mode",
+        "plan-packet",
         "plan-sakana",
         "plan-openai",
         "review-sakana",
@@ -148,13 +157,12 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
 def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     prepare_job = _jobs("countyforge-run.yml")["prepare"]
     prepare = str(prepare_job)
-    assert prepare_job["permissions"] == {"contents": "read", "issues": "read"}
+    assert prepare_job["permissions"] == {"contents": "read"}
     assert "OPENAI_API_KEY" not in prepare
     assert "SAKANA_API_KEY" not in prepare
     assert "pytest" not in prepare
     assert " make " not in prepare
-    assert "cd trusted" in prepare
-    assert "uv sync --frozen --package countyforge-github" in prepare
+    assert "uv sync --frozen --package countyforge-github" not in prepare
     assert "target/.github/workflows" not in prepare
     assert "trusted/scripts/dev-loop/prepare-countyforge-target.sh" in prepare
     assert "MAX_PREPARED_BYTES" in prepare
@@ -164,6 +172,18 @@ def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     assert "build-review-packet.sh" in preparation_script
     assert "build-review-packet-provenance.py" in preparation_script
     assert "du -sb" in preparation_script
+
+
+def test_planning_packet_job_uses_trusted_root_without_target_checkout() -> None:
+    job = _jobs("countyforge-run.yml")["plan-packet"]
+    text = str(job)
+    assert job["permissions"] == {"contents": "read", "issues": "read"}
+    assert "uv sync --frozen --package countyforge-github" in text
+    assert "countyforge-prepared-" not in text
+    assert "target/scripts" not in text
+    assert "target/Makefile" not in text
+    assert "OPENAI_API_KEY" not in text
+    assert "SAKANA_API_KEY" not in text
 
 
 def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
@@ -247,6 +267,23 @@ def test_publication_uses_fail_closed_result_evidence_resolver() -> None:
     assert "resolve-terminal-result" in publish
     assert "countyforge-exit-code" in publish
     assert ".disposition //" not in publish
+
+
+def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> None:
+    jobs = _jobs("countyforge-run.yml")
+    publish = str(jobs["publish"])
+    assert "verify-publication" in publish
+    assert "countyforge-state-${{ github.repository_id }}" in publish
+    assert any(
+        step.get("if") == "always()"
+        for step in _jobs("countyforge-run.yml")["publish"].get("steps", [])
+    )
+    assert "PLANNING_MATERIALIZATION_OUTCOME" in publish
+    assert 'TERMINAL_STATE" = "succeeded"' in publish
+    publication_step = next(
+        step for step in jobs["publish"]["steps"] if step.get("id") == "planning-publication"
+    )
+    assert "steps.verify-publication.outcome == 'success'" in publication_step["if"]
 
 
 def test_claim_failure_recovery_has_no_provider_or_target_access() -> None:

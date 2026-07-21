@@ -10,9 +10,6 @@
     "attempt", "revision", "lifecycle_state", "workflow_run_id", "workflow_run_attempt", "check_run_id",
     "lease", "disposition", "evidence_url", "original_comment_id", "original_delivery_id",
     "original_actor_id", "trusted_tool_sha", "created_at", "updated_at", "history"
-    ,"planning_revision", "planning_change_name", "planning_branch", "planning_pr_number",
-    "planning_predecessor_run_id", "planning_context_sha256", "planning_result_sha256",
-    "implementation_eligible"
   ],
   "properties": {
     "contract_version": {"const": 1},

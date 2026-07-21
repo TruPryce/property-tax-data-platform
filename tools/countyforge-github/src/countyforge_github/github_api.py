@@ -46,6 +46,8 @@ class GitHubPort(Protocol):
 
     def create_git_blob(self, repository: str, content: str) -> str: ...
 
+    def get_git_commit(self, repository: str, sha: str) -> JsonObject: ...
+
     def create_git_tree(self, repository: str, base_sha: str, entries: list[JsonObject]) -> str: ...
 
     def create_git_commit(
@@ -233,6 +235,14 @@ class GitHubRestClient:
                 "github_api_invalid_response", "GitHub API returned an invalid blob response."
             )
         return cast(str, value["sha"])
+
+    def get_git_commit(self, repository: str, sha: str) -> JsonObject:
+        value = self._request("GET", f"/repos/{repository}/git/commits/{sha}")
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid commit response."
+            )
+        return value
 
     def create_git_tree(self, repository: str, base_sha: str, entries: list[JsonObject]) -> str:
         value = self._request(

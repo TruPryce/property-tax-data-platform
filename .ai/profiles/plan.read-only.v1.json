@@ -18,7 +18,7 @@
   "input_policy": {"approved_roots": [".ai/contexts"], "resolve_symlinks": true, "require_regular_files": true, "packet_provenance_schema": "countyforge-planning-context-manifest.schema.json"},
   "repository_policy": {"expected_full_name": "TruPryce/property-tax-data-platform", "remote_name": "origin", "verify_head": true, "base_policy": "ancestor_of_head"},
   "budgets": {"defaults": {"wall_clock_seconds": 1800, "attempts": 1, "max_output_bytes": 524288, "max_input_bytes": 5000000, "max_tokens": null, "max_cost_usd": null}, "ceilings": {"wall_clock_seconds": 3600, "attempts": 2, "max_output_bytes": 1048576, "max_input_bytes": 10000000, "max_tokens": 1000000, "max_cost_usd": 100.0}},
-  "filesystem_mounts": [{"source": "schema_directory", "target": "/workspace/.ai/schemas", "access": "read_only"}, {"source": "claimed_output_directory", "target": "/out", "access": "read_write"}],
+  "filesystem_mounts": [{"source": "schema_directory", "target": "/workspace/.ai/schemas", "access": "read_only"}, {"source": "frozen_planning_packet", "target": "/workspace/packet.json", "access": "read_only"}, {"source": "frozen_context_manifest", "target": "/workspace/manifest.json", "access": "read_only"}, {"source": "claimed_output_directory", "target": "/out", "access": "read_write"}],
   "repository_access": "none",
   "writable_paths": ["/out"],
   "model_tools": [],

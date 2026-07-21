@@ -12,8 +12,9 @@
 - Keep trusted default-branch tooling and immutable target data in separate roots.
 - Packet preparation receives no provider secret and executes no target script, hook, test, package, Make target, workflow, or binary.
 - Provider jobs never check out a target worktree and receive exactly one selected provider secret on the invocation step.
-- Do not add contents/package/deployment/OIDC/security-event write access or code-push credentials.
-- Plan, implement, fix, and validate remain fail-closed until their owning issue and OpenSpec change add separate executors.
+- Do not add broad contents/package/deployment/OIDC/security-event write access or code-push credentials.
+- The sole v1 exception is the trusted `countyforge-run.yml` `publish` job for deterministic planning-branch and draft-PR publication required by Issue #6. It receives no provider secret and no model or target-revision execution; every other job remains forbidden from write access.
+- Plan, implement, fix, and validate remain fail-closed until their owning issue and OpenSpec change add separate executors. The Issue #6 planning profile is the explicitly approved read-only model exception.
 
 ## Validation
 

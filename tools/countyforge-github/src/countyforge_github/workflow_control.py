@@ -8,7 +8,7 @@ from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.control import publish_canonical_state
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
-from countyforge_github.leases import acquire_lease, heartbeat_lease
+from countyforge_github.leases import acquire_lease, heartbeat_lease, lease_expired
 from countyforge_github.state import decode_marker, transition_state
 
 
@@ -36,6 +36,51 @@ def _load_owned_state(
     if state is None or state["idempotency_key"] != idempotency_key or state["run_id"] != run_id:
         raise ControlPlaneError(
             "workflow_state_mismatch", "Workflow inputs do not own canonical CountyForge state."
+        )
+    return state
+
+
+def verify_publication_lease(
+    github: GitHubPort,
+    *,
+    repository: str,
+    status_comment_id: int,
+    trusted_bot_id: int,
+    idempotency_key: str,
+    run_id: str,
+    workflow_run_id: int,
+    nonce: str,
+    at: str,
+) -> JsonObject:
+    """Authorize a publication before any Git data API mutation.
+
+    The caller runs in the per-target state lane.  This read is deliberately not a
+    heartbeat or state mutation: cancellation and terminal publication must be able
+    to win the same lane before this gate runs.  Once it succeeds, the publication
+    job performs only the bounded deterministic writes for this owned live lease.
+    """
+
+    state = _load_owned_state(
+        github,
+        repository=repository,
+        status_comment_id=status_comment_id,
+        trusted_bot_id=trusted_bot_id,
+        idempotency_key=idempotency_key,
+        run_id=run_id,
+    )
+    if state["lifecycle_state"] != "running":
+        raise ControlPlaneError(
+            "publication_not_active", "Planning publication is no longer active."
+        )
+    lease = state.get("lease")
+    if (
+        not isinstance(lease, dict)
+        or int(lease.get("owner_workflow_run_id", 0)) != workflow_run_id
+        or str(lease.get("nonce", "")) != nonce
+        or lease_expired(lease, at)
+    ):
+        raise ControlPlaneError(
+            "publication_lease_invalid", "Planning publication does not own a live lease."
         )
     return state
 
