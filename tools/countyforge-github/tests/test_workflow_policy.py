@@ -214,3 +214,23 @@ def test_maintenance_never_dispatches_work() -> None:
     assert "countyforge-github maintain" in job
     assert "workflow_dispatch" not in job
     assert "dispatch_workflow" not in job
+
+
+def test_maintenance_is_audit_only_outside_the_per_target_state_lane() -> None:
+    workflow = _load("countyforge-maintenance.yml")
+    job = _jobs("countyforge-maintenance.yml")["reconcile"]
+    assert workflow["concurrency"]["group"] == "countyforge-maintenance-${{ github.repository_id }}"
+    assert "concurrency" not in job
+    assert job["permissions"] == {
+        "actions": "read",
+        "checks": "read",
+        "contents": "read",
+        "issues": "read",
+        "pull-requests": "read",
+    }
+    source = Path("tools/countyforge-github/src/countyforge_github/maintenance.py").read_text(
+        encoding="utf-8"
+    )
+    assert "publish_canonical_state" not in source
+    assert "update_comment" not in source
+    assert '"mutation": "audit_only"' in source

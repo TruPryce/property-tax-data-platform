@@ -116,7 +116,7 @@ The adapter SHALL enforce versioned legal transitions among `received`, `authori
 ### Requirement: Target concurrency and renewable leases
 The workflows SHALL serialize short control decisions and target execution separately using repository/target-keyed concurrency groups with ordinary automatic cancellation disabled. Because GitHub does not honor conditional (`If-Match`/`412`) writes on the issue-comment update endpoint, canonical state mutations SHALL be serialized by a shared per-target `countyforge-state-<repository-id>-<target-type>-<target-number>` job concurrency lane that contains only the state transaction; target preparation, image build, provider execution, and artifact upload MUST run outside that lane so cancellation and status stay responsive. A monotonic revision advanced exactly once per successful mutation SHALL provide application-level stale-state detection, and a reread whose predecessor no longer matches MUST fail closed rather than overwrite newer state. State SHALL include a lease with owner workflow run/attempt, semantic key, command, target SHA, acquisition/heartbeat/expiry timestamps, and ownership nonce. Stage transitions SHALL refresh the heartbeat. Only one contender may acquire or reclaim a lease, an unexpired lease MUST block another execution, and expiry recovery MUST mark abandoned work stale without overwriting completed evidence. A queued state that has neither a workflow owner nor a lease MUST have a bounded preclaim deadline and become a retryable terminal failure when that deadline passes.
 
-Any canonical publication, including a terminal one, SHALL require a live lease: once the lease has expired the owning workflow MUST fail closed rather than publish. An expired lease therefore means no owner writer remains, and recovery of an expired run is the exclusive responsibility of the `stale` reclamation path. This preserves the completed-evidence invariant even though maintenance runs in a repository-wide lane outside the per-target state lane and canonical writes use plain reread/compare/PATCH without an atomic comment primitive.
+Any canonical publication, including a terminal one, SHALL require a live lease: once the lease has expired the owning workflow MUST fail closed rather than publish. An expired lease therefore means no owner writer remains, and recovery of an expired run is performed by the `stale` reclamation path inside the per-target state lane. Scheduled maintenance MAY discover and report expired candidates, but MUST NOT mutate canonical comments from its repository-wide lane. This preserves the completed-evidence invariant while canonical writes use plain reread/compare/PATCH without an atomic comment primitive.
 
 #### Scenario: Elect one lease winner
 - **WHEN** two authorized execution commands race for the same repository target
@@ -124,11 +124,11 @@ Any canonical publication, including a terminal one, SHALL require a live lease:
 
 #### Scenario: Reclaim expired work
 - **WHEN** an active run's lease is expired and no terminal state exists
-- **THEN** an authorized command or maintenance reconciliation may atomically mark it stale and acquire a new lease while preserving all prior evidence
+- **THEN** an authorized command or `/countyforge status` atomically marks it stale inside the target state lane and preserves all prior evidence; scheduled maintenance may only report the candidate
 
 #### Scenario: Refuse a post-expiry owner publication
 - **WHEN** an owning execution workflow attempts to publish a stage or terminal result after its lease has expired
-- **THEN** the publication fails closed on the expired lease and cannot overwrite a concurrent maintenance `stale` reclamation or any completed evidence
+- **THEN** the publication fails closed on the expired lease and cannot overwrite a concurrent stale reclamation or any completed evidence
 
 #### Scenario: Recover failure before lease claim
 - **WHEN** the dispatched execution workflow fails before it can acquire the queued run's lease
@@ -136,7 +136,7 @@ Any canonical publication, including a terminal one, SHALL require a live lease:
 
 #### Scenario: Recover an accepted dispatch that never starts
 - **WHEN** a queued run still has no workflow owner or lease after its preclaim deadline
-- **THEN** status, a later authorized command, or maintenance atomically marks it failed with a stable timeout disposition and concludes its existing check
+- **THEN** status or a later authorized command atomically marks it failed with a stable timeout disposition and concludes its existing check; scheduled maintenance only reports the candidate
 
 #### Scenario: Preserve completed evidence
 - **WHEN** maintenance encounters a terminal run whose former lease time is expired

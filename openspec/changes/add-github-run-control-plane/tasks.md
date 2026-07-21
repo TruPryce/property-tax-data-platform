@@ -53,3 +53,4 @@
 - [x] 8.2 Close the maintenance-versus-late-owner-publish race by requiring a live lease for every publication (an expired lease fails closed), and add interleaving tests for both race directions.
 - [x] 8.3 Update ADR-0006, design, spec, engineering, and operations docs to describe the lane model and fail-closed post-expiry publication.
 - [x] 8.4 Rerun `make check`, `make runner-contract-tests`, `make countyforge-runner-check`, `make countyforge-github-check`, `make countyforge-command-fixtures`, `make countyforge-workflow-policy-tests`, and `make prepr-no-ai` against the final committed tree, then commit, push, and open the draft PR from that tree. (Supersedes the earlier 7.2/7.5 runs, which validated the pre-correction HEAD.)
+- [x] 8.5 Make scheduled repository-wide maintenance audit-only, move all stale/claim-timeout mutations to the per-target state lane, add no-write regression coverage, and update the control-plane contracts and rollout documentation.

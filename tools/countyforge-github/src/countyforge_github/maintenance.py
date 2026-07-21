@@ -1,9 +1,8 @@
-"""Idempotent scheduled stale-lease reconciliation without dispatch."""
+"""Read-only scheduled stale-lease discovery without dispatch or state writes."""
 
 from __future__ import annotations
 
 from countyforge_github.contracts import JsonObject
-from countyforge_github.control import publish_canonical_state
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
 from countyforge_github.leases import mark_expired_stale
@@ -11,19 +10,24 @@ from countyforge_github.observability import control_event, state_event, with_au
 from countyforge_github.state import decode_marker
 
 
-def reconcile_expired_leases(
+def audit_expired_leases(
     github: GitHubPort,
     *,
     repository: str,
     trusted_bot_id: int,
     at: str,
 ) -> JsonObject:
-    """Mark owned expired leases stale and never start replacement work."""
+    """Discover candidates; leave every canonical mutation to a target state lane.
+
+    Scheduled maintenance deliberately remains repository-wide and read-only.  A status
+    command or a later authorized command performs the actual stale/claim-timeout
+    transition inside the existing ``countyforge-state-*`` lane.  This prevents a
+    repository-wide scan from racing a per-target claim, heartbeat, cancellation, or
+    terminal publication while retaining an auditable discovery signal.
+    """
 
     inspected = 0
-    stale = 0
-    failed = 0
-    conflicts = 0
+    candidates = 0
     invalid_state = 0
     events: list[JsonObject] = []
     for comment in github.list_repository_comments(repository):
@@ -59,36 +63,14 @@ def reconcile_expired_leases(
         updated = mark_expired_stale(state, at=at)
         if updated == state:
             continue
-        try:
-            publish_canonical_state(
-                github,
-                repository=repository,
-                target_number=int(updated["target_number"]),
-                trusted_bot_id=trusted_bot_id,
-                expected_state=state,
-                state=updated,
-            )
-        except ControlPlaneError as error:
-            if error.code != "state_write_conflict":
-                raise
-            conflicts += 1
-            continue
-        disposition = str(updated["disposition"] or "lease_expired")
-        if updated["lifecycle_state"] == "stale":
-            stale += 1
-        else:
-            failed += 1
+        candidates += 1
         events.append(
             state_event(
-                updated,
-                event_type=(
-                    "lease_reclaimed"
-                    if updated["lifecycle_state"] == "stale"
-                    else "terminal_outcome"
-                ),
+                state,
+                event_type="state_reconciled",
                 authorization_outcome="not_applicable",
-                outcome="failed",
-                disposition=disposition,
+                outcome="pending",
+                disposition="maintenance_candidate",
                 timestamp=at,
             )
         )
@@ -96,11 +78,17 @@ def reconcile_expired_leases(
         {
             "ok": True,
             "inspected": inspected,
-            "marked_stale": stale,
-            "marked_failed": failed,
-            "write_conflicts": conflicts,
+            "reconciliation_candidates": candidates,
+            "marked_stale": 0,
+            "marked_failed": 0,
+            "write_conflicts": 0,
             "invalid_state": invalid_state,
             "dispatched": 0,
+            "mutation": "audit_only",
         },
         events,
     )
+
+
+# Keep the operator-facing import stable while making the no-write behavior explicit.
+reconcile_expired_leases = audit_expired_leases

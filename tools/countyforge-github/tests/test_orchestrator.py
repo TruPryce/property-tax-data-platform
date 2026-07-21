@@ -13,7 +13,7 @@ from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.identity import effective_idempotency_key
 from countyforge_github.leases import acquire_lease
-from countyforge_github.maintenance import reconcile_expired_leases
+from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.orchestrator import process_intake
 from countyforge_github.state import decode_marker, render_status, transition_state
 from countyforge_github.workflow_control import advance_run, claim_run, fail_unclaimed_run
@@ -756,15 +756,17 @@ def test_maintenance_cannot_overwrite_concurrent_late_publish(
         },
     )
     github.replace_on_get = succeeded
-    result = reconcile_expired_leases(
+    result = audit_expired_leases(
         github,
         repository="TruPryce/property-tax-data-platform",
         trusted_bot_id=BOT_ID,
         at="2026-07-19T12:02:01Z",
     )
+    assert result["reconciliation_candidates"] == 1
     assert result["marked_stale"] == 0
-    assert result["write_conflicts"] == 1
-    assert _canonical(github)[1]["lifecycle_state"] == "succeeded"
+    assert result["write_conflicts"] == 0
+    assert result["mutation"] == "audit_only"
+    assert _canonical(github)[1]["lifecycle_state"] == "running"
 
 
 def test_maintenance_stale_reclaim_blocks_late_owner_terminal_publish(
@@ -797,15 +799,18 @@ def test_maintenance_stale_reclaim_blocks_late_owner_terminal_publish(
     )
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(running))
 
-    # Maintenance reclaims the expired lease first.
-    reclaimed = reconcile_expired_leases(
+    # Scheduled maintenance only discovers the expired candidate; it cannot write outside
+    # the per-target state lane.
+    reclaimed = audit_expired_leases(
         github,
         repository="TruPryce/property-tax-data-platform",
         trusted_bot_id=BOT_ID,
         at="2026-07-19T12:02:00Z",
     )
-    assert reclaimed["marked_stale"] == 1
-    assert _canonical(github)[1]["lifecycle_state"] == "stale"
+    assert reclaimed["reconciliation_candidates"] == 1
+    assert reclaimed["marked_stale"] == 0
+    assert reclaimed["mutation"] == "audit_only"
+    assert _canonical(github)[1]["lifecycle_state"] == "running"
 
     # The owner's late terminal publish fails closed on the expired lease.
     with pytest.raises(ControlPlaneError) as raised:
@@ -828,24 +833,26 @@ def test_maintenance_stale_reclaim_blocks_late_owner_terminal_publish(
         "lease_ownership_mismatch",
         "workflow_state_mismatch",
     }
-    assert _canonical(github)[1]["lifecycle_state"] == "stale"
+    assert _canonical(github)[1]["lifecycle_state"] == "running"
 
 
-def test_maintenance_recovers_dispatch_that_never_claimed_a_lease(
+def test_maintenance_reports_dispatch_that_never_claimed_a_lease(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
     github = FakeGitHub(head_sha)
     _intake(github, event_factory("/countyforge review"), head_sha)
-    result = reconcile_expired_leases(
+    result = audit_expired_leases(
         github,
         repository="TruPryce/property-tax-data-platform",
         trusted_bot_id=BOT_ID,
         at="2026-07-19T12:31:00Z",
     )
-    assert result["marked_failed"] == 1
+    assert result["reconciliation_candidates"] == 1
+    assert result["marked_failed"] == 0
     assert result["marked_stale"] == 0
-    assert _canonical(github)[1]["disposition"] == "workflow_claim_timeout"
-    assert github.checks[0]["conclusion"] == "failure"
+    assert result["mutation"] == "audit_only"
+    assert _canonical(github)[1]["lifecycle_state"] == "queued"
+    assert github.checks[0].get("conclusion") is None
 
 
 def test_maintenance_audits_malformed_bot_state_and_continues(head_sha: str) -> None:
@@ -857,7 +864,7 @@ def test_maintenance_audits_malformed_bot_state_and_continues(head_sha: str) -> 
             "user": {"id": BOT_ID, "type": "Bot", "login": "github-actions[bot]"},
         }
     )
-    result = reconcile_expired_leases(
+    result = audit_expired_leases(
         github,
         repository="TruPryce/property-tax-data-platform",
         trusted_bot_id=BOT_ID,
@@ -1045,7 +1052,7 @@ def test_retry_requires_unchanged_head_and_preserves_attempt(
     assert "issue a new execution command" in github.comments[-1]["body"]
 
 
-def test_maintenance_marks_expired_lease_stale_without_dispatch(
+def test_maintenance_reports_expired_lease_without_writing_or_dispatching(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
     github = FakeGitHub(head_sha)
@@ -1061,19 +1068,31 @@ def test_maintenance_marks_expired_lease_stale_without_dispatch(
     )
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(leased))
     before_dispatches = copy.deepcopy(github.dispatches)
-    result = reconcile_expired_leases(
+    result = audit_expired_leases(
         github,
         repository="TruPryce/property-tax-data-platform",
         trusted_bot_id=BOT_ID,
         at="2026-07-19T12:02:00Z",
     )
-    _, stale = _canonical(github)
-    assert stale["lifecycle_state"] == "stale"
-    assert {key: result[key] for key in ("ok", "inspected", "marked_stale", "dispatched")} == {
+    _, unchanged = _canonical(github)
+    assert unchanged["lifecycle_state"] == "queued"
+    assert {
+        key: result[key]
+        for key in (
+            "ok",
+            "inspected",
+            "reconciliation_candidates",
+            "marked_stale",
+            "dispatched",
+            "mutation",
+        )
+    } == {
         "ok": True,
         "inspected": 1,
-        "marked_stale": 1,
+        "reconciliation_candidates": 1,
+        "marked_stale": 0,
         "dispatched": 0,
+        "mutation": "audit_only",
     }
-    assert result["events"][0]["event_type"] == "lease_reclaimed"
+    assert result["events"][0]["event_type"] == "state_reconciled"
     assert github.dispatches == before_dispatches

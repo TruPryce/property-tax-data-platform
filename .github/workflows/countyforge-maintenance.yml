@@ -8,27 +8,26 @@ on:
 permissions:
   contents: read
 
-# Maintenance is repository-wide: one job reconciles expired leases across many targets, so it
-# cannot join a single per-target countyforge-state-* lane. It keeps its own non-cancelling
-# repository lane (one maintenance run at a time) and relies on compare-before-write revision
-# stale-detection in upsert_canonical_status. It only mutates targets whose leases are already
-# expired or whose queue was abandoned, which by definition have no active per-target state
-# writer, so it cannot lose an update against a live run.
+# Maintenance is repository-wide and therefore remains outside any one per-target
+# countyforge-state-* lane. It is intentionally audit-only: this job discovers expired or
+# abandoned candidates but never writes canonical comments. An authorized /countyforge status
+# command or a later command performs the candidate transition inside the existing per-target
+# state lane, so maintenance cannot race claim, heartbeat, cancellation, or publication.
 concurrency:
   group: countyforge-maintenance-${{ github.repository_id }}
   cancel-in-progress: false
 
 jobs:
   reconcile:
-    name: Reconcile expired CountyForge leases
+    name: Audit expired CountyForge leases
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read
-      checks: write
+      checks: read
       contents: read
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
     steps:
       - name: Check out immutable trusted tooling
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -42,7 +41,7 @@ jobs:
         with:
           version: "0.11.16"
 
-      - name: Reconcile only; never dispatch agent work
+      - name: Discover candidates only; never mutate or dispatch agent work
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}

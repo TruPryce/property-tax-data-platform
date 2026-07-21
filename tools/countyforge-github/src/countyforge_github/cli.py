@@ -20,7 +20,7 @@ from countyforge_github.identity import (
     effective_idempotency_key,
     execution_run_id,
 )
-from countyforge_github.maintenance import reconcile_expired_leases
+from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.observability import outcome_for_state, state_event, with_audit
 from countyforge_github.orchestrator import process_intake
 from countyforge_github.requests import build_run_request
@@ -385,7 +385,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if command_name == "maintain":
             _emit(
-                reconcile_expired_leases(
+                audit_expired_leases(
                     _github_client(),
                     repository=args.repository,
                     trusted_bot_id=args.trusted_bot_id,
