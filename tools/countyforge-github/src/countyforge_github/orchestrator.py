@@ -26,6 +26,7 @@ from countyforge_github.observability import (
     state_event,
     with_audit,
 )
+from countyforge_github.planning import classify_issue
 from countyforge_github.state import (
     ACTIVE_STATES,
     begin_new_state,
@@ -53,6 +54,10 @@ _REFUSAL_MESSAGES = {
     "cancellation_not_active": "CountyForge cancellation refused: no active run exists.",
     "review_requires_pull_request": (
         "CountyForge review requires a pull request with an immutable diff target."
+    ),
+    "insufficient_issue_intake": (
+        "CountyForge plan refused: the issue needs a supported type, problem statement, "
+        "and outcome."
     ),
 }
 
@@ -488,6 +493,39 @@ def process_intake(
         )
 
     target = _target_facts(event, github, repository, trusted_tool_sha)
+    if operation == "plan":
+        issue_document = event.get("issue")
+        if not isinstance(issue_document, dict):
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="insufficient_issue_intake",
+                events=events,
+                authorization=decision,
+            )
+        labels = [
+            str(label.get("name"))
+            for label in issue_document.get("labels", [])
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+        ]
+        try:
+            classify_issue(
+                str(issue_document.get("title", "")),
+                str(issue_document.get("body", "")),
+                labels,
+            )
+        except ControlPlaneError:
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="insufficient_issue_intake",
+                events=events,
+                authorization=decision,
+            )
     trigger = build_trigger(
         event=event,
         command=command,

@@ -153,6 +153,11 @@ def advance_run(
     at: str,
     disposition: str,
     evidence_url: str | None = None,
+    planning_change_name: str | None = None,
+    planning_branch: str | None = None,
+    planning_pr_number: int | None = None,
+    planning_context_sha256: str | None = None,
+    planning_result_sha256: str | None = None,
 ) -> JsonObject:
     """Advance an owned workflow stage and publish only sanitized state."""
 
@@ -196,6 +201,16 @@ def advance_run(
     updated["disposition"] = disposition
     if evidence_url is not None:
         updated["evidence_url"] = evidence_url
+    if planning_change_name is not None:
+        updated["planning_change_name"] = planning_change_name
+    if planning_branch is not None:
+        updated["planning_branch"] = planning_branch
+    if planning_pr_number is not None:
+        updated["planning_pr_number"] = planning_pr_number
+    if planning_context_sha256 is not None:
+        updated["planning_context_sha256"] = planning_context_sha256
+    if planning_result_sha256 is not None:
+        updated["planning_result_sha256"] = planning_result_sha256
     ControlContracts().validate("state", updated)
     publish_canonical_state(
         github,

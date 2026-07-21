@@ -115,6 +115,14 @@ def initial_state(
         "created_at": timestamp,
         "updated_at": timestamp,
         "history": [],
+        "planning_revision": 1 if command == "plan" else None,
+        "planning_change_name": None,
+        "planning_branch": None,
+        "planning_pr_number": None,
+        "planning_predecessor_run_id": None,
+        "planning_context_sha256": None,
+        "planning_result_sha256": None,
+        "implementation_eligible": False,
     }
     return state
 
@@ -128,6 +136,7 @@ def begin_new_state(
     """Begin a distinct semantic command while preserving terminal run history."""
 
     state = initial_state(trigger, execution_policy, idempotency_key)
+    command = str(trigger["command"]["command"])
     if previous is None:
         return state
     if previous["lifecycle_state"] not in TERMINAL_STATES:
@@ -149,6 +158,9 @@ def begin_new_state(
     )
     state["history"] = history[-20:]
     state["revision"] = int(previous["revision"]) + 1
+    if command == "plan":
+        state["planning_revision"] = int(previous.get("planning_revision") or 1) + 1
+        state["planning_predecessor_run_id"] = previous["run_id"]
     return state
 
 
@@ -273,6 +285,20 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         if state["evidence_url"] is not None
         else "Pending"
     )
+    planning_rows = ""
+    if state["command"] == "plan":
+        pr_number = state["planning_pr_number"]
+        draft_pr = (
+            f"[#${pr_number}](https://github.com/TruPryce/property-tax-data-platform/pull/{pr_number})"
+            if pr_number
+            else "Pending"
+        ).replace("#$", "#")
+        planning_rows = (
+            f"| Planning revision | `{state['planning_revision']}` |\n"
+            f"| Proposed change | `{state['planning_change_name'] or 'Pending'}` |\n"
+            f"| Draft PR | {draft_pr} |\n"
+            "| Implementation eligible | `false` |\n"
+        )
     return (
         "## CountyForge status\n\n"
         "| Field | Value |\n"
@@ -282,6 +308,7 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         f"| Target | `{short_sha}` |\n"
         f"| State | `{state['lifecycle_state']}` |\n"
         f"| Attempt | `{state['attempt']}` |\n"
+        f"{planning_rows}"
         f"| Updated | `{state['updated_at']}` |\n"
         f"| Evidence | {evidence} |"
         f"{guidance}\n\n{marker}"
@@ -402,5 +429,8 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
             "revision": int(state["revision"]) + 1,
         }
     )
+    if updated["command"] == "plan":
+        updated["planning_revision"] = int(state.get("planning_revision") or 1) + 1
+        updated["planning_predecessor_run_id"] = state["run_id"]
     ControlContracts().validate("state", updated)
     return updated

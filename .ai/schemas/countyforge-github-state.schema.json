@@ -10,6 +10,9 @@
     "attempt", "revision", "lifecycle_state", "workflow_run_id", "workflow_run_attempt", "check_run_id",
     "lease", "disposition", "evidence_url", "original_comment_id", "original_delivery_id",
     "original_actor_id", "trusted_tool_sha", "created_at", "updated_at", "history"
+    ,"planning_revision", "planning_change_name", "planning_branch", "planning_pr_number",
+    "planning_predecessor_run_id", "planning_context_sha256", "planning_result_sha256",
+    "implementation_eligible"
   ],
   "properties": {
     "contract_version": {"const": 1},
@@ -86,6 +89,14 @@
           "finished_at": {"type": "string", "format": "date-time"}
         }
       }
-    }
+    },
+    "planning_revision": {"type": ["integer", "null"], "minimum": 1},
+    "planning_change_name": {"type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 96},
+    "planning_branch": {"type": ["string", "null"], "pattern": "^countyforge/plan/issue-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r[0-9a-f]{8})?$", "maxLength": 180},
+    "planning_pr_number": {"type": ["integer", "null"], "minimum": 1},
+    "planning_predecessor_run_id": {"type": ["string", "null"], "maxLength": 128},
+    "planning_context_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "planning_result_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "implementation_eligible": {"const": false}
   }
 }

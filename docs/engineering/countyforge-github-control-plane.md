@@ -4,7 +4,7 @@
 
 GitHub Issue and pull-request comments provide the authenticated remote control surface for the CountyForge runner kernel. The accepted behavior is the [`github-agent-control-plane` OpenSpec capability](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md). This guide explains the implementation and trust boundaries; [GitHub operations](../operations/countyforge-github-operations.md) owns enablement and recovery procedures.
 
-Only `review.packet-only.v1` executes. Plan, implement, fix, and validate commands construct strict requests and preserve the kernel's `profile_not_implemented` outcome.
+`review.packet-only.v1` and `plan.read-only.v1` execute. Plan remains read-only and publishes only trusted, validated OpenSpec planning drafts; implement, fix, and validate commands remain fail-closed with the kernel's `profile_not_implemented` outcome.
 
 ## Command Grammar
 
@@ -79,10 +79,12 @@ The provider job receives a bounded bare target repository so it can validate im
 | `countyforge-run.yml` claim | Validate semantic identity, claim lease, bind actual workflow run | None |
 | `countyforge-run.yml` claim recovery | Mark a pre-lease claim failure terminal so retry remains possible | None |
 | `countyforge-run.yml` prepare | Fetch target data, build packet/provenance, build bare target identity, upload frozen artifact | None |
+| `countyforge-run.yml` prepare (plan) | Fetch bounded issue context and build planning packet/manifest | None |
 | `countyforge-run.yml` mark-running | Heartbeat and publish running state | None |
 | `review-sakana` | Build trusted Sakana image and invoke packet reviewer | `SAKANA_API_KEY` only on invocation |
 | `review-openai` | Build trusted OpenAI image and invoke packet reviewer | `OPENAI_API_KEY` only on invocation |
-| `future-mode` | Invoke kernel and require `profile_not_implemented` | None |
+| `plan-sakana` / `plan-openai` | Invoke the bounded read-only planning profile | Selected provider key only on invocation |
+| `future-mode` | Invoke kernel for implement/fix/validate and require `profile_not_implemented` | None |
 | `publish` | Map sanitized result to canonical comment/check and release terminal lease | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
@@ -159,7 +161,7 @@ Comments and checks contain no raw model output, provider response, target text,
 
 The repository-native `make prepr` gate does not activate an `issue_comment` workflow from a feature branch. After these workflows are present on the default branch, enable the command workflow in a controlled setting and post `/countyforge validate` on a same-repository controlled PR. Verify authorization, one canonical comment, dispatch, lease acquisition/release, no-secret preparation, `profile_not_implemented`, neutral check, sanitized artifacts, deduplication, status, and maintenance audit discovery. Then configure only the intended provider secret and post `/countyforge review`; verify that only the selected provider job receives it, target code is never executed in that job, packet/provenance binding passes, evidence is sanitized, and the check reaches the expected conclusion.
 
-Expected authorized refusals—no run, active work, stale or ineligible retry, an unclaimed cancellation window, and issue-scoped review—update one bounded bot-owned feedback comment with a safe next action. They retain a nonzero machine disposition but do not require maintainers to inspect Actions logs. `/countyforge review` is PR-only because its executable profile is diff-oriented; issue comments remain valid for the future plan/implement/validate control surface.
+Expected authorized refusals—no run, active work, stale or ineligible retry, an unclaimed cancellation window, insufficient planning intake, and issue-scoped review—update one bounded bot-owned feedback comment with a safe next action. They retain a nonzero machine disposition but do not require maintainers to inspect Actions logs. `/countyforge review` is PR-only because its executable profile is diff-oriented; `/countyforge plan` is issue-oriented and requires sufficient structured intake.
 
 ## CLI
 

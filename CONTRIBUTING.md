@@ -59,6 +59,9 @@ make countyforge-runner-check    # free kernel, profile, provider, and compatibi
 make countyforge-profile-tests   # immutable profile and execution-boundary fixtures
 make countyforge-request-fixtures # request, budget, provider, and version fixtures
 make countyforge-github-check     # GitHub adapter contracts, state, API-port, and request tests
+make countyforge-plan-check       # bounded planning contracts and materializer checks
+make countyforge-plan-fixtures    # no-cost planning and runner fixtures
+make countyforge-plan-policy-tests # planning workflow/request policy checks
 make countyforge-command-fixtures # malicious Markdown, auth, duplicate, cancel, retry, and lease fixtures
 make countyforge-workflow-policy-tests # workflow triggers, pins, permissions, target isolation, and secret scope
 make codex-observability-qa      # free fixture/latest-run export validation
@@ -79,7 +82,7 @@ RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke-openai
 dispatches the unchanged packet-only Docker adapter. Select `COUNTYFORGE_PROVIDER=openai` only
 after building the OpenAI-specific review image. Both live smoke paths are paid and opt-in.
 
-After the GitHub control workflows exist on the default branch, authorized repository maintainers may use `/countyforge review`, `/countyforge status`, `/countyforge cancel`, and `/countyforge retry` on issues or pull requests. Plan, implement, fix, and validate commands deliberately publish `profile_not_implemented`; they do not modify a repository. See the [control-plane guide](docs/engineering/countyforge-github-control-plane.md) and [operations runbook](docs/operations/countyforge-github-operations.md).
+After the GitHub control workflows exist on the default branch, authorized repository maintainers may use `/countyforge plan` on a structured issue and `/countyforge review`, `/countyforge status`, `/countyforge cancel`, and `/countyforge retry` on issues or pull requests. Planning publishes only a validated draft OpenSpec PR and remains ineligible for implementation until human approval; implement, fix, and validate still publish `profile_not_implemented`. See the [planning-agent guide](docs/engineering/countyforge-planning-agent.md), [control-plane guide](docs/engineering/countyforge-github-control-plane.md), and [operations runbook](docs/operations/countyforge-github-operations.md).
 
 ## Pull Requests
 
@@ -98,3 +101,4 @@ After the GitHub control workflows exist on the default branch, authorized repos
 - [CountyForge runner guide](docs/engineering/countyforge-runner-kernel.md)
 - [CountyForge GitHub control plane](docs/engineering/countyforge-github-control-plane.md)
 - [CountyForge GitHub operations](docs/operations/countyforge-github-operations.md)
+- [CountyForge planning agent](docs/engineering/countyforge-planning-agent.md)

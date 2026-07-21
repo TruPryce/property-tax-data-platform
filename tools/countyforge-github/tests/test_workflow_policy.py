@@ -65,10 +65,21 @@ def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:
 def test_forbidden_permissions_are_never_granted_write() -> None:
     for name in COUNTYFORGE_WORKFLOWS:
         workflow = _load(name)
-        permission_sets = [workflow.get("permissions", {})]
-        permission_sets.extend(job.get("permissions", {}) for job in workflow["jobs"].values())
-        for permissions in permission_sets:
+        permission_sets = [("workflow", workflow.get("permissions", {}))]
+        permission_sets.extend(
+            (job_name, job.get("permissions", {})) for job_name, job in workflow["jobs"].items()
+        )
+        # The trusted publication job is the only job allowed to create/update a
+        # planning branch and draft PR.  It is intentionally the one exception
+        # to the otherwise read-only contents policy.
+        for job_name, permissions in permission_sets:
             for permission in FORBIDDEN_WRITE_PERMISSIONS:
+                if (
+                    name == "countyforge-run.yml"
+                    and job_name == "publish"
+                    and permission == "contents"
+                ):
+                    continue
                 assert permissions.get(permission) != "write"
 
 
@@ -121,6 +132,8 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "recover-claim-failure",
         "mark-running",
         "future-mode",
+        "plan-sakana",
+        "plan-openai",
         "review-sakana",
         "review-openai",
         "publish",
@@ -135,12 +148,13 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
 def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     prepare_job = _jobs("countyforge-run.yml")["prepare"]
     prepare = str(prepare_job)
-    assert prepare_job["permissions"] == {"contents": "read"}
+    assert prepare_job["permissions"] == {"contents": "read", "issues": "read"}
     assert "OPENAI_API_KEY" not in prepare
     assert "SAKANA_API_KEY" not in prepare
     assert "pytest" not in prepare
     assert " make " not in prepare
-    assert "uv sync" not in prepare
+    assert "cd trusted" in prepare
+    assert "uv sync --frozen --package countyforge-github" in prepare
     assert "target/.github/workflows" not in prepare
     assert "trusted/scripts/dev-loop/prepare-countyforge-target.sh" in prepare
     assert "MAX_PREPARED_BYTES" in prepare
@@ -154,12 +168,16 @@ def test_preparation_has_no_provider_secret_or_target_execution() -> None:
 
 def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
     jobs = _jobs("countyforge-run.yml")
-    sakana = str(jobs["review-sakana"])
-    openai = str(jobs["review-openai"])
-    assert "SAKANA_API_KEY" in sakana
-    assert "OPENAI_API_KEY" not in sakana
-    assert "OPENAI_API_KEY" in openai
-    assert "SAKANA_API_KEY" not in openai
+    for sakana_name, openai_name in (
+        ("review-sakana", "review-openai"),
+        ("plan-sakana", "plan-openai"),
+    ):
+        sakana = str(jobs[sakana_name])
+        openai = str(jobs[openai_name])
+        assert "SAKANA_API_KEY" in sakana
+        assert "OPENAI_API_KEY" not in sakana
+        assert "OPENAI_API_KEY" in openai
+        assert "SAKANA_API_KEY" not in openai
     for name in (
         "claim",
         "prepare",
@@ -173,16 +191,48 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         assert "SAKANA_API_KEY" not in text
 
 
+def test_planning_image_and_request_build_have_no_provider_secret() -> None:
+    jobs = _jobs("countyforge-run.yml")
+    for name, credential in (
+        ("plan-sakana", "SAKANA_API_KEY"),
+        ("plan-openai", "OPENAI_API_KEY"),
+    ):
+        build_steps = [
+            step
+            for step in jobs[name]["steps"]
+            if "build trusted plan image" in str(step.get("name", ""))
+        ]
+        invoke_steps = [
+            step for step in jobs[name]["steps"] if "Invoke" in str(step.get("name", ""))
+        ]
+        assert len(build_steps) == 1
+        assert credential not in str(build_steps[0])
+        assert len(invoke_steps) == 1
+        assert credential in str(invoke_steps[0])
+
+
 def test_provider_jobs_cannot_mutate_repository_or_status() -> None:
     jobs = _jobs("countyforge-run.yml")
-    for name in ("review-sakana", "review-openai", "future-mode"):
+    for name in (
+        "review-sakana",
+        "review-openai",
+        "plan-sakana",
+        "plan-openai",
+        "future-mode",
+    ):
         permissions = jobs[name]["permissions"]
         assert permissions == {"actions": "read", "contents": "read"}
 
 
 def test_result_artifacts_include_explicit_hidden_evidence_paths() -> None:
     jobs = _jobs("countyforge-run.yml")
-    for name in ("future-mode", "review-sakana", "review-openai"):
+    for name in (
+        "future-mode",
+        "plan-sakana",
+        "plan-openai",
+        "review-sakana",
+        "review-openai",
+    ):
         upload_steps = [
             step
             for step in jobs[name]["steps"]

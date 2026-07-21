@@ -14,7 +14,7 @@
 - Never turn `review.packet-only.v1` into a repository-mounted or code-writing profile.
 - Reject unknown contract fields and capability, credential, artifact, provider, model, version, or budget expansion before execution.
 - Never read, emit, or log credential values. Tests use sentinels only.
-- Future plan, implement, fix, and validate execution remains unavailable until its owning OpenSpec change and issue add a separate executor boundary.
+- `plan.read-only.v1` is executable only through the Issue #6 bounded planning adapter and trusted OpenSpec materializer. Implement, fix, and validate remain unavailable until their owning OpenSpec change and issue add separate executor boundaries.
 
 ## Validation
 
@@ -22,6 +22,9 @@
 make countyforge-runner-check
 make countyforge-github-check
 make countyforge-workflow-policy-tests
+make countyforge-plan-check
+make countyforge-plan-fixtures
+make countyforge-plan-policy-tests
 make runner-contract-tests
 ```
 

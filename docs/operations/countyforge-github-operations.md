@@ -115,7 +115,7 @@ Successful or active runs are not retry-eligible in the initial policy.
 
 ## Paid Calls
 
-`/countyforge review` is a paid provider call. Plan, implement, fix, and validate currently stop at `profile_not_implemented`; they do not consume provider credentials. Local provider smoke tests remain explicitly opt-in and are documented in the [runner kernel guide](../engineering/countyforge-runner-kernel.md).
+`/countyforge review` and `/countyforge plan` are paid provider calls. Implement, fix, and validate stop at `profile_not_implemented` and do not consume provider credentials. Local provider smoke tests remain explicitly opt-in and are documented in the [runner kernel guide](../engineering/countyforge-runner-kernel.md).
 
 ## Related
 

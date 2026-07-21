@@ -23,6 +23,12 @@ from countyforge_github.identity import (
 from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.observability import outcome_for_state, state_event, with_audit
 from countyforge_github.orchestrator import process_intake
+from countyforge_github.planning import (
+    build_planning_packet,
+    materialize_plan,
+    publish_plan,
+    validate_planning_result,
+)
 from countyforge_github.requests import build_run_request
 from countyforge_github.results import resolve_terminal_result
 from countyforge_github.state import reconcile_workflow, render_status, transition_state
@@ -72,6 +78,33 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--target-root", type=Path, required=True)
     request.add_argument("--packet", type=Path)
     request.add_argument("--packet-provenance", type=Path)
+    request.add_argument("--planning-packet", type=Path)
+    request.add_argument("--context-manifest", type=Path)
+
+    planning_packet = subparsers.add_parser("build-planning-packet")
+    _file(planning_packet, "trigger")
+    _file(planning_packet, "issue")
+    _file(planning_packet, "comments", required=False)
+    planning_packet.add_argument("--output-dir", type=Path, required=True)
+
+    materialize = subparsers.add_parser("materialize-plan")
+    _file(materialize, "result")
+    materialize.add_argument("--publication-root", type=Path, required=True)
+    materialize.add_argument("--issue-number", type=int, required=True)
+    materialize.add_argument("--run-id", required=True)
+
+    publish = subparsers.add_parser("publish-plan")
+    _file(publish, "result")
+    publish.add_argument("--repository", required=True)
+    publish.add_argument("--default-branch", required=True)
+    publish.add_argument("--target-sha", required=True)
+    publish.add_argument("--issue-number", type=int, required=True)
+    publish.add_argument("--run-id", required=True)
+    publish.add_argument("--publication-root", type=Path, required=True)
+    publish.add_argument("--planning-packet", type=Path, required=True)
+    publish.add_argument("--context-manifest", type=Path, required=True)
+    publish.add_argument("--evidence-url")
+    publish.add_argument("--already-materialized", action="store_true")
 
     reconcile = subparsers.add_parser("reconcile")
     _file(reconcile, "state")
@@ -129,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--at", required=True)
     advance.add_argument("--disposition", required=True)
     advance.add_argument("--evidence-url")
+    advance.add_argument("--planning-change-name")
+    advance.add_argument("--planning-branch")
+    advance.add_argument("--planning-pr-number", type=int)
+    advance.add_argument("--planning-context-sha256")
+    advance.add_argument("--planning-result-sha256")
 
     fail_unclaimed = subparsers.add_parser("fail-unclaimed-run")
     fail_unclaimed.add_argument("--repository", required=True)
@@ -153,6 +191,20 @@ def _emit(value: object) -> None:
 
 def _load(path: Path, kind: str) -> JsonObject:
     return load_json_object(path, kind=kind)
+
+
+def _load_list(path: Path, kind: str) -> list[JsonObject]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ControlPlaneError(
+            "invalid_json",
+            f"{kind} is not readable valid JSON.",
+            {"error_type": type(error).__name__},
+        ) from None
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ControlPlaneError("invalid_json_type", f"{kind} must be a JSON array of objects.")
+    return value
 
 
 def _actor(event: JsonObject) -> JsonObject:
@@ -273,6 +325,59 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     target_root=args.target_root,
                     packet_path=args.packet,
                     packet_provenance_path=args.packet_provenance,
+                    planning_packet_path=args.planning_packet,
+                    context_manifest_path=args.context_manifest,
+                )
+            )
+            return 0
+        if command_name == "build-planning-packet":
+            trigger = _load(args.trigger, "GitHub trigger")
+            issue = _load(args.issue, "GitHub issue")
+            comments = _load_list(args.comments, "GitHub issue comments") if args.comments else []
+            result = build_planning_packet(
+                trigger=trigger,
+                issue=issue,
+                contract_root=contracts.contract_root,
+                output_dir=args.output_dir,
+                run_id=str(
+                    trigger.get("run_id") or execution_run_id(trigger, contracts.execution_policy)
+                ),
+                comments=comments,
+                contracts=contracts,
+            )
+            _emit({"ok": True, **result})
+            return 0
+        if command_name == "materialize-plan":
+            result = _load(args.result, "planning result")
+            validate_planning_result(result, contract_root=contracts.contract_root)
+            _emit(
+                {
+                    "ok": True,
+                    **materialize_plan(
+                        result,
+                        publication_root=args.publication_root,
+                        issue_number=args.issue_number,
+                        run_id=args.run_id,
+                    ),
+                }
+            )
+            return 0
+        if command_name == "publish-plan":
+            result = _load(args.result, "planning result")
+            _emit(
+                publish_plan(
+                    _github_client(),
+                    repository=args.repository,
+                    default_branch=args.default_branch,
+                    target_sha=args.target_sha,
+                    issue_number=args.issue_number,
+                    run_id=args.run_id,
+                    result=result,
+                    publication_root=args.publication_root,
+                    planning_packet_path=args.planning_packet,
+                    context_manifest_path=args.context_manifest,
+                    evidence_url=args.evidence_url,
+                    already_materialized=args.already_materialized,
                 )
             )
             return 0
@@ -351,6 +456,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 at=args.at,
                 disposition=args.disposition,
                 evidence_url=args.evidence_url,
+                planning_change_name=args.planning_change_name,
+                planning_branch=args.planning_branch,
+                planning_pr_number=args.planning_pr_number,
+                planning_context_sha256=args.planning_context_sha256,
+                planning_result_sha256=args.planning_result_sha256,
             )
             terminal = state["lifecycle_state"] in {
                 "succeeded",

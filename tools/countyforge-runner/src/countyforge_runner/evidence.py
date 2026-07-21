@@ -60,6 +60,8 @@ def sanitized_request(resolved: ResolvedRun) -> JsonObject:
     for key in (
         "packet_sha256",
         "packet_provenance_sha256",
+        "planning_packet_sha256",
+        "context_manifest_sha256",
         "selected_finding_ids",
         "expected_head_sha",
     ):
@@ -145,6 +147,7 @@ class EvidenceWriter:
         output_bytes: int,
         error_code: str | None,
         legacy_provenance: JsonObject | None = None,
+        extra_artifacts: tuple[str, ...] = (),
     ) -> JsonObject:
         """Write provenance, one event, summary, and metrics."""
 
@@ -233,7 +236,7 @@ class EvidenceWriter:
             "profile_sha256": self.resolved.profile_sha256,
             "profile": self.resolved.profile,
         }
-        artifacts = {name: True for name in GENERIC_ARTIFACTS}
+        artifacts = {name: True for name in (*GENERIC_ARTIFACTS, *extra_artifacts)}
         summary: JsonObject = {
             "summary_contract_version": 1,
             "request_contract_version": self.resolved.request["contract_version"],

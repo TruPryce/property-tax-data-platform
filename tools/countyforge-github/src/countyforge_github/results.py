@@ -70,6 +70,17 @@ def resolve_terminal_result(
                 "state": "failed",
                 "disposition": "invalid_result_evidence",
             }
+    if command == "plan" and raw_disposition == "completed":
+        summary = result.get("summary")
+        if (
+            result.get("ok") is not True
+            or result.get("mode") != "plan"
+            or not isinstance(summary, dict)
+            or summary.get("disposition") != "completed"
+            or summary.get("exit_code") != 0
+            or not isinstance(result.get("plan"), dict)
+        ):
+            return {"ok": True, "state": "failed", "disposition": "invalid_result_evidence"}
     states = {
         "completed": "succeeded",
         "profile_not_implemented": "not_implemented",

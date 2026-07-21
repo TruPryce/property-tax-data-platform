@@ -1,6 +1,6 @@
 # CountyForge GitHub Adapter
 
-`countyforge-github` is the Python 3.12 GitHub control-plane adapter for CountyForge. It parses bounded `/countyforge` comments, applies repository-permission authorization, creates immutable triggers and runner requests, derives semantic identities, enforces lifecycle/lease/cancel/retry policy, renders one canonical status comment, and isolates GitHub REST access behind typed ports.
+`countyforge-github` is the Python 3.12 GitHub control-plane adapter for CountyForge. It parses bounded `/countyforge` comments, applies repository-permission authorization, creates immutable triggers and runner requests, derives semantic identities, enforces lifecycle/lease/cancel/retry policy, renders one canonical status comment, and isolates GitHub REST access behind typed ports. Its planning adapter builds bounded issue context, validates strict plan results, and publishes only deterministic OpenSpec draft files.
 
 It depends on `countyforge-runner`. The runner kernel does not depend on this package or import GitHub workflow concepts.
 
@@ -10,7 +10,8 @@ It depends on `countyforge-runner`. The runner kernel does not depend on this pa
 - target issue or pull-request content is immutable untrusted data under a separate `target_root`; fork source identity and the ancestor merge base are explicit trigger facts;
 - packet preparation has no provider secret and executes no target code;
 - provider execution has no target worktree; and
-- only `review.packet-only.v1` executes.
+- `review.packet-only.v1` and `plan.read-only.v1` execute; implement/fix/validate remain
+  fail-closed.
 
 ## Commands
 
@@ -24,6 +25,8 @@ uv run --package countyforge-github countyforge-github idempotency-key --trigger
 uv run --package countyforge-github countyforge-github transition \
   --state state.json --transition transition.json
 uv run --package countyforge-github countyforge-github render-status --state state.json
+uv run --package countyforge-github countyforge-github build-planning-packet \
+  --trigger trigger.json --issue issue.json --output-dir "$RUNNER_TEMP/planning"
 uv run --package countyforge-github countyforge-github check
 ```
 
@@ -33,6 +36,8 @@ The `intake`, `claim-run`, `advance-run`, and `maintain` commands are workflow m
 
 ```bash
 make countyforge-github-check
+make countyforge-plan-check
+make countyforge-plan-fixtures
 make countyforge-command-fixtures
 make countyforge-workflow-policy-tests
 make runner-contract-tests

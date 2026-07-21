@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-planning-packet.schema.json",
+  "title": "CountyForge Planning Packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "packet_id", "run_id", "repository", "issue", "sources", "selection"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "packet_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "repository": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "full_name", "target_sha"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "full_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["number", "title", "body", "classification", "untrusted"],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1},
+        "title": {"type": "string", "maxLength": 512},
+        "body": {"type": "string", "maxLength": 20000},
+        "classification": {"enum": ["source_onboarding", "feature_work", "defect", "architecture_decision"]},
+        "untrusted": {"const": true}
+      }
+    },
+    "sources": {
+      "type": "array", "maxItems": 128,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "category", "path", "sha256", "bytes", "content", "truncated", "selection_reason", "untrusted"],
+        "properties": {
+          "source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"},
+          "category": {"enum": ["issue", "comment", "agent_guidance", "openspec", "adr", "architecture", "source_contract", "validation", "repository_fact"]},
+          "path": {"type": "string", "maxLength": 240},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "content": {"type": "string", "maxLength": 20000},
+          "truncated": {"type": "boolean"},
+          "selection_reason": {"type": "string", "maxLength": 256},
+          "untrusted": {"type": "boolean"}
+        }
+      }
+    },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_files", "max_bytes", "selected_files", "excluded_candidates"],
+      "properties": {
+        "max_files": {"type": "integer", "minimum": 1},
+        "max_bytes": {"type": "integer", "minimum": 1},
+        "selected_files": {"type": "integer", "minimum": 0},
+        "excluded_candidates": {
+          "type": "array", "maxItems": 256,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["path", "reason_code"],
+            "properties": {
+              "path": {"type": "string", "maxLength": 240},
+              "reason_code": {"enum": ["outside_root", "symlink_escape", "non_regular", "file_limit", "byte_limit", "unapproved", "external_reference"]}
+            }
+          }
+        }
+      }
+    }
+  }
+}

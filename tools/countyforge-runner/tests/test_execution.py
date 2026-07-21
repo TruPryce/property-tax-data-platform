@@ -14,7 +14,7 @@ from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
 from countyforge_runner.resolver import Kernel
 
 
-@pytest.mark.parametrize("mode", ["plan", "implement", "fix", "validate"])
+@pytest.mark.parametrize("mode", ["implement", "fix", "validate"])
 def test_unimplemented_profiles_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -106,6 +106,43 @@ def test_review_dispatches_existing_adapter_with_one_provider_credential(
     all_text = "\n".join(path.read_text(encoding="utf-8") for path in run_dir.iterdir())
     assert "openai-fixture-secret-value" not in all_text
     assert "sakana-fixture-secret-value" not in all_text
+
+
+def test_plan_dispatches_read_only_adapter_with_one_provider_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-plan-secret-value")
+    monkeypatch.setenv("SAKANA_API_KEY", "sakana-unused-plan-secret")
+    adapter = tmp_path / "plan-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'test -n "${OPENAI_API_KEY:-}" && test -z "${SAKANA_API_KEY:-}"\n'
+        'mkdir -p "$OUT_DIR"\n'
+        "cat > \"$OUT_DIR/countyforge-plan-result.json\" <<'JSON'\n"
+        '{"contract_version":1,"status":"planned","originating_issue":1,"proposed_change_name":"safe-plan",'
+        '"issue_classification":"feature_work","problem_statement":"A bounded problem.",'
+        '"desired_outcome":"A plan.","assumptions":["Trusted contracts"],'
+        '"unresolved_decisions":[],"affected_capabilities":["runner"],'
+        '"files_to_create":["openspec/changes/safe-plan/proposal.md"],'
+        '"files_to_modify":[],"proposed_files":["openspec/changes/safe-plan/proposal.md"],'
+        '"task_slices":["Write contracts"],"acceptance_criteria":["It validates"],'
+        '"risks":["Injection"],'
+        '"security_privacy_considerations":["Read-only"],'
+        '"migration_compatibility_concerns":["None"],"validation_commands":["openspec validate"],'
+        '"non_goals":["Implementation"],"implementation_eligibility":false,"blocked_reasons":[],"evidence_citations":[{"source_id":"s","excerpt":"evidence"}]}\n'
+        "JSON",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    kernel = Kernel()
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+    assert exit_code == 0
+    assert document["disposition"] == "completed"
+    assert document["plan"]["implementation_eligibility"] is False
 
 
 def test_generic_metrics_are_low_cardinality(

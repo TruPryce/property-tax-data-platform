@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-planning-publication-manifest.schema.json",
+  "title": "CountyForge Planning Publication Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "run_id", "issue_number", "change_name", "branch", "target_sha", "files", "validation", "implementation_eligibility"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "branch": {"type": "string", "pattern": "^countyforge/plan/issue-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r[0-9a-f]{8})?$"},
+    "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "files": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"type": "string", "pattern": "^openspec/changes/[a-z0-9]+(?:-[a-z0-9]+)*/.*$"}},
+    "validation": {"type": "object", "additionalProperties": false, "required": ["passed", "gates"], "properties": {"passed": {"type": "boolean"}, "gates": {"type": "array", "items": {"type": "string", "maxLength": 128}}}},
+    "implementation_eligibility": {"const": false}
+  }
+}

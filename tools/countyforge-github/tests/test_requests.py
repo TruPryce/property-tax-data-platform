@@ -172,7 +172,7 @@ def test_synthetic_workflow_dispatches_two_root_packet_only_review(
     assert "synthetic-unselected-provider-secret" not in evidence
 
 
-@pytest.mark.parametrize("mode", ["plan", "implement", "fix", "validate"])
+@pytest.mark.parametrize("mode", ["implement", "fix", "validate"])
 def test_future_command_reaches_kernel_and_fails_not_implemented(
     tmp_path: Path,
     repo_root: Path,
@@ -215,7 +215,7 @@ def test_unimplemented_request_never_exports_provider_values(
 def test_selected_provider_policy_matches_profile_capabilities(
     repo_root: Path, trigger_factory: Callable[[str], JsonObject]
 ) -> None:
-    for mode in ("plan", "implement", "fix", "validate"):
+    for mode in ("implement", "fix", "validate"):
         request = build_run_request(
             trigger_factory(mode), contract_root=repo_root, target_root=repo_root
         )

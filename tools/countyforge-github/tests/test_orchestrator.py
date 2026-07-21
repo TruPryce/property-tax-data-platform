@@ -599,6 +599,11 @@ def test_stale_reclaim_concludes_old_check_before_new_check(
     )
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(expired))
     plan_event = event_factory("/countyforge plan")
+    plan_event["issue"]["title"] = "Feature: document the next planning slice"
+    plan_event["issue"]["body"] = (
+        "Problem: the next slice is not documented.\n"
+        "Outcome: produce a bounded OpenSpec planning change."
+    )
     plan_event["comment"]["id"] = 914
     result = _intake(github, plan_event, head_sha, at="2026-07-19T12:02:00Z")
     assert result["status"] == "dispatched"
