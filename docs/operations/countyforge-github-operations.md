@@ -54,7 +54,7 @@ The feature-branch test suite is the acceptance path before merge; this controll
 
 ## Canonical Status and Evidence
 
-CountyForge edits one bot-owned status comment per issue or pull request. The visible table contains command, profile, abbreviated target SHA, lifecycle state, attempt, update time, and sanitized evidence link. A hidden schema-valid marker contains bounded recovery state.
+CountyForge edits one bot-owned status comment per issue or pull request. The primary visible table contains the current command, profile, abbreviated target SHA, lifecycle state, attempt, update time, and sanitized evidence link. When prior terminal runs exist, a bounded newest-first `Recent runs` table shows up to five archived command/profile/target/result/attempt/finished/evidence rows; it never shows `Pending` for history and uses a bounded disposition when evidence is unavailable. A hidden schema-valid marker contains bounded recovery state and the complete history facts.
 
 For pull requests, executable commands create one `CountyForge / <command>` check. The check and comment link to the GitHub Actions run, not a raw provider log or an externally shareable artifact URL.
 

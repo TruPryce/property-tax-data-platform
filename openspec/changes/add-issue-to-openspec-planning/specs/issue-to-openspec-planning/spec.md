@@ -55,7 +55,7 @@ The control plane SHALL accept `/countyforge plan` only for structured issue tar
 - **THEN** the control plane emits a sanitized `plan_requires_issue` refusal and creates no runner request, check, or execution workflow
 
 ### Requirement: Canonical recent-run history
-The canonical bot-owned status comment SHALL remain a single comment and SHALL render a bounded newest-first `Recent runs` table. Each newly archived run MUST preserve immutable display facts including command, profile and version, target head SHA, attempt, lifecycle state, completion/update time, and sanitized evidence reference. Readers MUST render legacy history entries that lack newer display fields using bounded fallback values without invalidating the canonical state.
+The canonical bot-owned status comment SHALL remain a single comment. Its primary table SHALL show the current active/latest run, and it SHALL render up to five prior completed runs from canonical history in a bounded newest-first `Recent runs` table. Each newly archived run MUST preserve immutable display facts including run ID, command, profile and version, target head SHA, idempotency key, attempt, revision, lifecycle state, completion/update time, and sanitized evidence reference. History entries MUST reject unknown properties; readers MAY render legacy entries that lack newer display fields with bounded fallback values without invalidating the canonical state. Only the current run may display `Pending`; a historical entry without an evidence URL MUST display its bounded disposition instead.
 
 #### Scenario: Completed validation remains visible after review
 - **WHEN** a completed validation run is followed by a review run on the same target
@@ -63,7 +63,11 @@ The canonical bot-owned status comment SHALL remain a single comment and SHALL r
 
 #### Scenario: History remains bounded
 - **WHEN** more than the configured number of runs are archived
-- **THEN** only the newest bounded entries are rendered and older entries remain excluded from the visible table without overwriting the current state
+- **THEN** only the newest five prior entries are rendered and older entries remain excluded from the visible table without overwriting the current state
+
+#### Scenario: Historical evidence is sanitized
+- **WHEN** a prior run has an approved GitHub evidence URL or no evidence URL
+- **THEN** the visible table renders the approved link safely or a bounded disposition, never an internal path, idempotency key, or unescaped display value
 
 ### Requirement: Human approval
 The planning agent MUST NOT approve its own result. Implementation eligibility SHALL remain false until an authorized maintainer merges the planning PR under the documented approval contract; reactions and labels alone MUST NOT count as approval.

@@ -140,6 +140,28 @@ def test_legacy_state_without_planning_metadata_remains_readable(
     assert decoded == state
 
 
+def test_legacy_history_entry_remains_readable_with_fallback_display(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = queued_state_factory("review")
+    state["history"] = [
+        {
+            "run_id": "legacy-run",
+            "idempotency_key": "a" * 64,
+            "attempt": 1,
+            "revision": 2,
+            "lifecycle_state": "failed",
+            "disposition": "legacy_failure",
+            "evidence_url": None,
+            "finished_at": "2026-07-19T12:00:00Z",
+        }
+    ]
+    body = render_status(state)
+    assert "| `legacy` |" in body
+    assert "`legacy_failure`" in body
+    assert "Pending" not in body.split("### Recent runs", 1)[1]
+
+
 def test_recent_runs_preserve_immutable_display_facts_and_bound_history(
     contracts: ControlContracts,
     trigger_factory: Callable[[str], JsonObject],
@@ -154,12 +176,120 @@ def test_recent_runs_preserve_immutable_display_facts_and_bound_history(
     entry = current["history"][0]
     assert entry["command"] == "validate"
     assert entry["profile_id"] == previous["profile_id"]
+    assert entry["profile_version"] == previous["profile_version"]
     assert entry["target_head_sha"] == previous["target_head_sha"]
-    current["history"] = [dict(entry, run_id=f"old-{index}") for index in range(20)]
+    for field in (
+        "run_id",
+        "idempotency_key",
+        "attempt",
+        "revision",
+        "lifecycle_state",
+        "disposition",
+        "evidence_url",
+        "finished_at",
+    ):
+        assert field in entry
+    current["history"] = [
+        dict(entry, run_id=f"old-{index}", disposition=f"result_{index}") for index in range(20)
+    ]
     body = render_status(current)
     recent = body.split("### Recent runs", 1)[1]
-    assert recent.count("\n| `") == 10
-    assert "| `validate` |" in body
+    assert recent.count("\n| `") == 5
+    assert "| `validate` |" in recent
+    assert "`result_19`" in recent
+    assert "`result_15`" in recent
+    assert "`result_13`" not in recent
+    assert "Pending" not in recent
+    assert recent.index("`result_19`") < recent.index("`result_15`")
+    assert "| `review` |" not in recent
+
+
+def test_completed_validation_remains_visible_when_review_starts(
+    contracts: ControlContracts,
+    trigger_factory: Callable[[str], JsonObject],
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    validation = queued_state_factory("validate")
+    validation = _transition(
+        validation, "not_implemented", "2026-07-19T12:01:00Z", "not_implemented"
+    )
+    trigger = trigger_factory("review")
+    current = begin_new_state(
+        trigger,
+        contracts.execution_policy,
+        semantic_idempotency_key(trigger, contracts.execution_policy),
+        validation,
+    )
+    body = render_status(current)
+    primary = body.split("### Recent runs", 1)[0]
+    recent = body.split("### Recent runs", 1)[1]
+    assert "| Command | `review` |" in primary
+    assert "| `validate` |" in recent
+    assert "validate.deterministic.v1@1" in recent
+    assert "not_implemented" in recent
+
+
+def test_active_run_is_not_archived_before_terminal_completion(
+    contracts: ControlContracts,
+    trigger_factory: Callable[[str], JsonObject],
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    active = queued_state_factory("validate")
+    trigger = trigger_factory("review")
+    with pytest.raises(ControlPlaneError, match="active"):
+        begin_new_state(
+            trigger,
+            contracts.execution_policy,
+            semantic_idempotency_key(trigger, contracts.execution_policy),
+            active,
+        )
+    assert active["history"] == []
+
+
+def test_history_evidence_is_sanitized_and_missing_evidence_uses_disposition(
+    contracts: ControlContracts,
+    trigger_factory: Callable[[str], JsonObject],
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    previous = queued_state_factory("validate")
+    previous = _transition(previous, "failed", "2026-07-19T12:01:00Z", "provider_failure")
+    trigger = trigger_factory("review")
+    current = begin_new_state(
+        trigger,
+        contracts.execution_policy,
+        semantic_idempotency_key(trigger, contracts.execution_policy),
+        previous,
+    )
+    current["history"][0]["evidence_url"] = "https://github.com/TruPryce/runs/1) | injected"
+    body = render_status(current)
+    recent = body.split("### Recent runs", 1)[1]
+    assert "https://github.com/TruPryce/runs/1%29" in recent
+    assert "| injected" not in recent
+
+
+def test_duplicate_history_identity_does_not_create_another_entry(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = queued_state_factory("review")
+    archived = dict(state, lifecycle_state="failed", disposition="failed")
+    state["history"] = [
+        {
+            "run_id": archived["run_id"],
+            "command": archived["command"],
+            "profile_id": archived["profile_id"],
+            "profile_version": archived["profile_version"],
+            "target_head_sha": archived["target_head_sha"],
+            "idempotency_key": archived["idempotency_key"],
+            "attempt": archived["attempt"],
+            "revision": archived["revision"],
+            "lifecycle_state": archived["lifecycle_state"],
+            "disposition": archived["disposition"],
+            "evidence_url": archived["evidence_url"],
+            "finished_at": archived["updated_at"],
+        }
+    ]
+    assert is_duplicate(state, state["idempotency_key"])
+    assert len(state["history"]) == 1
 
 
 def test_forged_user_marker_is_ignored(
@@ -476,6 +606,8 @@ def test_retry_preserves_completed_attempt_and_rejects_stale_head(
     assert retry["attempt"] == 2
     assert retry["run_id"] != failed["run_id"]
     assert retry["history"][0]["run_id"] == failed["run_id"]
+    assert retry["history"][0]["attempt"] == 1
+    assert retry["history"][0]["idempotency_key"] == failed["idempotency_key"]
     assert retry["original_idempotency_key"] == failed["idempotency_key"]
     authorized_retry = _transition(
         retry, "authorized", "2026-07-19T12:04:00Z", "authorization_allowed"

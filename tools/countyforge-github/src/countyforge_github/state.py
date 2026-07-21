@@ -7,6 +7,7 @@ import copy
 import json
 import re
 from typing import Final
+from urllib.parse import quote, urlsplit
 
 from countyforge_runner.errors import KernelError
 
@@ -17,7 +18,8 @@ from countyforge_github.identity import retry_idempotency_key
 MARKER_PREFIX: Final = "<!-- countyforge-status:v1:"
 MARKER_SUFFIX: Final = " -->"
 MAX_MARKER_BYTES: Final = 24_576
-MAX_RECENT_RUNS: Final = 10
+MAX_HISTORY_ENTRIES: Final = 20
+MAX_RECENT_RUNS: Final = 5
 _MARKER = re.compile(r"<!-- countyforge-status:v1:([A-Za-z0-9_-]+) -->")
 
 ACTIVE_STATES = frozenset(
@@ -169,7 +171,7 @@ def begin_new_state(
         )
     history = list(previous["history"])
     history.append(_history_entry(previous))
-    state["history"] = history[-20:]
+    state["history"] = history[-MAX_HISTORY_ENTRIES:]
     state["revision"] = int(previous["revision"]) + 1
     if command == "plan":
         state["planning_revision"] = int(previous.get("planning_revision") or 1) + 1
@@ -222,6 +224,31 @@ def bump_revision(state: JsonObject, *, at: str) -> JsonObject:
     updated["updated_at"] = at
     (ControlContracts()).validate("state", updated)
     return updated
+
+
+def _display_value(value: object, fallback: str, max_length: int) -> str:
+    """Return one bounded Markdown-table value with control syntax neutralized."""
+
+    text = fallback if value is None else str(value)
+    text = " ".join(text.split()).replace("`", "'").replace("|", "\\|")
+    return text[:max_length] or fallback
+
+
+def _display_evidence(entry: JsonObject) -> str:
+    """Render only an approved GitHub evidence URL; otherwise show a bounded result."""
+
+    value = entry.get("evidence_url")
+    if (
+        isinstance(value, str)
+        and len(value) <= 1024
+        and not any(character in value for character in "\r\n`")
+    ):
+        parsed = urlsplit(value)
+        if parsed.scheme == "https" and parsed.netloc == "github.com":
+            safe_url = quote(value, safe=":/?#[]@!$&'*+,;=%-._~")
+            return f"[Evidence]({safe_url})"
+    result = entry.get("disposition") or entry.get("lifecycle_state") or "unavailable"
+    return f"`{_display_value(result, 'unavailable', 64)}`"
 
 
 def encode_marker(state: JsonObject, contracts: ControlContracts | None = None) -> str:
@@ -284,7 +311,7 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
     """Render bounded human status and the machine-owned canonical marker."""
 
     marker = encode_marker(state, contracts)
-    short_sha = str(state["target_head_sha"])[:12]
+    short_sha = _display_value(str(state["target_head_sha"])[:12], "unknown", 12)
     guidance = ""
     if state["lifecycle_state"] in {"queued", "preparing", "running"}:
         guidance = "\n\nAuthorized maintainers may use `/countyforge cancel`."
@@ -293,11 +320,7 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
             "\n\nAuthorized maintainers may use `/countyforge retry` "
             "while the target SHA is unchanged."
         )
-    evidence = (
-        f"[Sanitized evidence]({state['evidence_url']})"
-        if state["evidence_url"] is not None
-        else "Pending"
-    )
+    evidence = "Pending" if state["evidence_url"] is None else _display_evidence(state)
     planning_rows = ""
     if state["command"] == "plan":
         pr_number = state.get("planning_pr_number")
@@ -307,54 +330,56 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
             else "Pending"
         )
         planning_rows = (
-            f"| Planning revision | `{state.get('planning_revision') or 1}` |\n"
-            f"| Proposed change | `{state.get('planning_change_name') or 'Pending'}` |\n"
+            f"| Planning revision | `{_display_value(state.get('planning_revision'), '1', 12)}` |\n"
+            "| Proposed change | `"
+            f"{_display_value(state.get('planning_change_name'), 'Pending', 96)}` |\n"
             f"| Draft PR | {draft_pr} |\n"
             "| Implementation eligible | `false` |\n"
         )
-    recent_entries: list[JsonObject] = [
-        {
-            "run_id": state["run_id"],
-            "command": state["command"],
-            "profile_id": state["profile_id"],
-            "profile_version": state["profile_version"],
-            "target_head_sha": state["target_head_sha"],
-            "attempt": state["attempt"],
-            "lifecycle_state": state["lifecycle_state"],
-            "evidence_url": state["evidence_url"],
-            "finished_at": state["updated_at"],
-        }
-    ]
-    recent_entries.extend(reversed(list(state.get("history", []))))
-    recent_rows = []
-    for entry in recent_entries[:MAX_RECENT_RUNS]:
-        profile_id = str(entry.get("profile_id", "legacy"))
+    recent_rows: list[str] = []
+    for entry in reversed(list(state.get("history", []))):
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("disposition") or entry.get("lifecycle_state") or "unknown"
+        profile_id = entry.get("profile_id") or "legacy"
         profile_version = entry.get("profile_version")
-        profile = f"{profile_id}@{profile_version}" if profile_version is not None else profile_id
-        evidence_value = entry.get("evidence_url")
-        evidence_link = f"[Evidence]({evidence_value})" if evidence_value is not None else "Pending"
-        recent_rows.append(
-            f"| `{entry.get('command', 'legacy')}` | `{profile}` | "
-            f"`{str(entry.get('target_head_sha', 'unknown'))[:12]}` | "
-            f"`{entry.get('lifecycle_state', 'unknown')}` | `{entry.get('attempt', '?')}` | "
-            f"`{entry.get('finished_at', 'unknown')}` | {evidence_link} |"
+        profile = (
+            f"{_display_value(profile_id, 'legacy', 80)}@{_display_value(profile_version, '?', 12)}"
+            if profile_version is not None
+            else _display_value(profile_id, "legacy", 80)
         )
-    recent_runs = (
-        "\n\n### Recent runs\n\n"
-        "| Command | Profile | Target | State | Attempt | Updated | Evidence |\n"
-        "|---|---|---|---|---:|---|---|\n" + "\n".join(recent_rows)
-    )
+        recent_rows.append(
+            f"| `{_display_value(entry.get('command'), 'legacy', 32)}` | `{profile}` | "
+            "`"
+            f"{_display_value(str(entry.get('target_head_sha', 'unknown'))[:12], 'unknown', 12)}` "
+            "| "
+            f"`{_display_value(result, 'unknown', 64)}` | "
+            f"`{_display_value(entry.get('attempt'), '?', 12)}` | "
+            f"`{_display_value(entry.get('finished_at'), 'unknown', 40)}` | "
+            f"{_display_evidence(entry)} |"
+        )
+        if len(recent_rows) == MAX_RECENT_RUNS:
+            break
+    recent_runs = ""
+    if recent_rows:
+        recent_runs = (
+            "\n\n### Recent runs\n\n"
+            "| Command | Profile | Target | Result | Attempt | Finished | Evidence |\n"
+            "|---|---|---|---|---:|---|---|\n" + "\n".join(recent_rows)
+        )
     return (
         "## CountyForge status\n\n"
         "| Field | Value |\n"
         "|---|---|\n"
-        f"| Command | `{state['command']}` |\n"
-        f"| Profile | `{state['profile_id']}@{state['profile_version']}` |\n"
+        f"| Command | `{_display_value(state.get('command'), 'unknown', 32)}` |\n"
+        "| Profile | `"
+        f"{_display_value(state.get('profile_id'), 'unknown', 80)}@"
+        f"{_display_value(state.get('profile_version'), '?', 12)}` |\n"
         f"| Target | `{short_sha}` |\n"
-        f"| State | `{state['lifecycle_state']}` |\n"
-        f"| Attempt | `{state['attempt']}` |\n"
+        f"| State | `{_display_value(state.get('lifecycle_state'), 'unknown', 32)}` |\n"
+        f"| Attempt | `{_display_value(state.get('attempt'), '?', 12)}` |\n"
         f"{planning_rows}"
-        f"| Updated | `{state['updated_at']}` |\n"
+        f"| Updated | `{_display_value(state.get('updated_at'), 'unknown', 40)}` |\n"
         f"| Evidence | {evidence} |"
         f"{guidance}{recent_runs}\n\n{marker}"
     )
@@ -459,7 +484,7 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
             "evidence_url": None,
             "created_at": at,
             "updated_at": at,
-            "history": history[-20:],
+            "history": history[-MAX_HISTORY_ENTRIES:],
             "revision": int(state["revision"]) + 1,
         }
     )
