@@ -278,8 +278,23 @@ jobs:
           pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
           PY
           gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
-          gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER/comments?per_page=100&sort=created&direction=desc" \
-            > "$RUNNER_TEMP/countyforge-issue-comments.json"
+          comments_ndjson="$RUNNER_TEMP/countyforge-issue-comments.ndjson"
+          : > "$comments_ndjson"
+          for page in $(seq 1 10); do
+            page_json="$RUNNER_TEMP/countyforge-issue-comments-$page.json"
+            gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER/comments?per_page=100&page=$page" \
+              > "$page_json"
+            page_count="$(jq -er 'length' "$page_json")"
+            jq -c '.[]' "$page_json" >> "$comments_ndjson"
+            if [ "$page_count" -lt 100 ]; then
+              break
+            fi
+            if [ "$page" -eq 10 ]; then
+              echo "error: issue comment pagination exceeded the bounded 10-page limit" >&2
+              exit 2
+            fi
+          done
+          jq -s '.' "$comments_ndjson" > "$RUNNER_TEMP/countyforge-issue-comments.json"
           trigger_comment_id="$(jq -er '.comment.id' "$RUNNER_TEMP/countyforge-trigger.json")"
           gh api "repos/$TARGET_REPOSITORY/issues/comments/$trigger_comment_id" \
             > "$RUNNER_TEMP/countyforge-trigger-comment.json"
@@ -293,6 +308,7 @@ jobs:
             --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
             --issue "$RUNNER_TEMP/countyforge-issue.json" \
             --comments "$RUNNER_TEMP/countyforge-issue-comments-with-trigger.json" \
+            --trusted-bot-id 41898282 \
             --output-dir "$RUNNER_TEMP/countyforge-planning"
 
       - name: Upload bounded planning packet

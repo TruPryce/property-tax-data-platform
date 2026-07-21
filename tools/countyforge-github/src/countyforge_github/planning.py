@@ -49,6 +49,11 @@ _ALLOWED_FILES = {
     "spec.md",
 }
 MAX_PLANNING_COMMENTS = 16
+DEFAULT_TRUSTED_BOT_ID = 41898282
+_TRUSTED_COUNTYFORGE_MARKERS = (
+    "<!-- countyforge-status:v1:",
+    "<!-- countyforge-feedback:v1 -->",
+)
 
 
 def _spec_capability(result: JsonObject) -> str:
@@ -85,13 +90,18 @@ def _comment_sort_key(comment: JsonObject) -> tuple[int, str, str]:
 
 
 def select_planning_comments(
-    comments: Iterable[JsonObject], *, trigger_comment_id: int | None = None
+    comments: Iterable[JsonObject],
+    *,
+    trigger_comment_id: int | None = None,
+    trusted_bot_id: int | None = DEFAULT_TRUSTED_BOT_ID,
 ) -> list[JsonObject]:
     """Return a stable newest-first window, retaining the triggering comment when present."""
 
     unique: dict[int, JsonObject] = {}
     no_id: list[JsonObject] = []
     for comment in comments:
+        if _is_trusted_countyforge_comment(comment, trusted_bot_id):
+            continue
         try:
             comment_id = int(comment.get("id", 0))
         except (TypeError, ValueError):
@@ -110,12 +120,31 @@ def select_planning_comments(
     return window
 
 
+def _is_trusted_countyforge_comment(comment: JsonObject, trusted_bot_id: int | None) -> bool:
+    """Exclude only bot-owned CountyForge output; user-authored marker text stays evidence."""
+
+    if trusted_bot_id is None:
+        return False
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return False
+    try:
+        author_id = int(user.get("id", 0))
+    except (TypeError, ValueError):
+        return False
+    if author_id != trusted_bot_id or str(user.get("type", "")) != "Bot":
+        return False
+    body = str(comment.get("body", ""))
+    return any(marker in body for marker in _TRUSTED_COUNTYFORGE_MARKERS)
+
+
 def planning_context_fingerprint(
     issue: JsonObject,
     comments: Iterable[JsonObject] = (),
     limits: ContextLimits | None = None,
     *,
     trigger_comment_id: int | None = None,
+    trusted_bot_id: int | None = DEFAULT_TRUSTED_BOT_ID,
 ) -> str:
     """Hash the bounded, redacted issue discussion before execution deduplication."""
 
@@ -138,7 +167,11 @@ def planning_context_fingerprint(
         ),
     }
     comment_records: list[JsonObject] = []
-    for comment in select_planning_comments(comments, trigger_comment_id=trigger_comment_id):
+    for comment in select_planning_comments(
+        comments,
+        trigger_comment_id=trigger_comment_id,
+        trusted_bot_id=trusted_bot_id,
+    ):
         raw_comment = str(comment.get("body", ""))[:4000]
         comment_body, _ = redact_untrusted_text(raw_comment)
         comment_records.append({"id": int(comment.get("id", 0)), "body": comment_body})
@@ -251,6 +284,7 @@ def build_planning_packet(
     comments: Iterable[JsonObject] = (),
     limits: ContextLimits | None = None,
     contracts: ControlContracts | None = None,
+    trusted_bot_id: int | None = DEFAULT_TRUSTED_BOT_ID,
 ) -> JsonObject:
     """Write a bounded packet and manifest and return their provenance facts."""
 
@@ -285,9 +319,17 @@ def build_planning_packet(
         if isinstance(trigger_comment, dict) and trigger_comment.get("id") is not None
         else None
     )
-    comment_records = select_planning_comments(comments, trigger_comment_id=trigger_comment_id)
+    comment_records = select_planning_comments(
+        comments,
+        trigger_comment_id=trigger_comment_id,
+        trusted_bot_id=trusted_bot_id,
+    )
     computed_context_sha256 = planning_context_fingerprint(
-        issue, comment_records, limits, trigger_comment_id=trigger_comment_id
+        issue,
+        comment_records,
+        limits,
+        trigger_comment_id=trigger_comment_id,
+        trusted_bot_id=trusted_bot_id,
     )
     supplied_context_sha256 = trigger.get("planning_context_sha256")
     if (

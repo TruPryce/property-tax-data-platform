@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded planning context
-The planning adapter SHALL classify structured issues and construct a strict packet and context manifest from approved repository material and bounded issue discussion. It MUST confine paths after symlink resolution, require regular files, enforce file/byte limits, record hashes and truncation, and label all issue/comment text as untrusted evidence. Packet preparation MUST recompute the bounded context fingerprint from the selected issue/comment window and fail closed if it differs from the intake fingerprint.
+The planning adapter SHALL classify structured issues and construct a strict packet and context manifest from approved repository material and bounded issue discussion. It MUST confine paths after symlink resolution, require regular files, enforce file/byte limits, record hashes and truncation, and label all issue/comment text as untrusted evidence. Trusted bot-owned CountyForge status and feedback comments MUST be excluded using immutable bot identity plus their canonical markers; user-authored marker text remains untrusted evidence. Packet preparation MUST recompute the bounded context fingerprint from the selected issue/comment window and fail closed if it differs from the intake fingerprint.
 
 #### Scenario: Reject unsafe context
 - **WHEN** a candidate path escapes an approved root, is a symlink to outside material, is non-regular, or exceeds a configured bound
@@ -10,6 +10,10 @@ The planning adapter SHALL classify structured issues and construct a strict pac
 #### Scenario: Reject context fingerprint drift
 - **WHEN** issue or discussion evidence changes between intake and packet preparation
 - **THEN** packet construction fails with a sanitized context-mismatch disposition before provider execution
+
+#### Scenario: Ignore mutable CountyForge output
+- **WHEN** a trusted CountyForge status comment is inserted or updated between intake and packet preparation
+- **THEN** the comment is excluded from both fingerprints and the packet, while an identical marker authored by a user remains selected as untrusted evidence
 
 ### Requirement: Strict planning result
 The planning result SHALL use a versioned schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail validation.

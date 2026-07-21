@@ -42,3 +42,5 @@
 - [x] 5.14 Require successful terminal plan evidence before lease preflight or planning publication.
 - [x] 5.15 Recompute and verify packet context fingerprints and refuse pull-request planning targets.
 - [x] 5.16 Keep free planning fixtures offline-safe and cover plan terminal evidence and unsafe context exclusions.
+- [x] 5.17 Exclude trusted CountyForge status/feedback comments from planning identity while retaining user-authored marker text.
+- [x] 5.18 Replace unsupported comment sorting with bounded pagination aligned with the intake adapter and cover 100+ comments.

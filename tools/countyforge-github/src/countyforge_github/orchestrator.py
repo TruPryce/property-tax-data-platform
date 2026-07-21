@@ -527,7 +527,10 @@ def process_intake(
         if isinstance(event_comment, dict):
             planning_comments.append(event_comment)
         planning_context_sha256 = planning_context_fingerprint(
-            issue_document, planning_comments, trigger_comment_id=trigger_comment_id
+            issue_document,
+            planning_comments,
+            trigger_comment_id=trigger_comment_id,
+            trusted_bot_id=trusted_bot_id,
         )
         labels = [
             str(label.get("name"))

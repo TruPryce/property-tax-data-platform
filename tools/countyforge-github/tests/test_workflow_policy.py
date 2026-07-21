@@ -103,9 +103,14 @@ def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
 
 def test_planning_packet_fetches_newest_comments_and_trigger_comment() -> None:
     text = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
-    assert "comments?per_page=100&sort=created&direction=desc" in text
+    assert "comments?per_page=100&page=$page" in text
+    assert "seq 1 10" in text
+    assert "countyforge-issue-comments.ndjson" in text
+    assert "sort=created" not in text
+    assert "direction=desc" not in text
     assert "countyforge-trigger-comment.json" in text
     assert "countyforge-issue-comments-with-trigger.json" in text
+    assert "--trusted-bot-id 41898282" in text
 
 
 def test_canonical_state_mutations_share_one_serialized_lane() -> None:

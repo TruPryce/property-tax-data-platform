@@ -198,6 +198,85 @@ def test_planning_context_uses_newest_comments_and_late_decisions() -> None:
     assert [item["id"] for item in selected] == list(range(17, 1, -1))
 
 
+def test_planning_context_uses_newest_window_after_bounded_pagination() -> None:
+    issue = {"number": 6, "title": "Feature work", "body": "Outcome: one", "labels": []}
+    comments = [{"id": index, "body": f"Context {index}"} for index in range(1, 121)]
+    changed = [*comments[:-1], {"id": 120, "body": "Late non-trigger decision"}]
+    selected = select_planning_comments(comments)
+    assert [item["id"] for item in selected] == list(range(120, 104, -1))
+    assert planning_context_fingerprint(issue, comments) != planning_context_fingerprint(
+        issue, changed
+    )
+
+
+def test_trusted_countyforge_comments_are_excluded_but_user_forgery_is_evidence() -> None:
+    comments = [
+        {
+            "id": 1,
+            "body": "<!-- countyforge-status:v1:trusted -->",
+            "user": {"id": 41898282, "type": "Bot"},
+        },
+        {
+            "id": 2,
+            "body": "<!-- countyforge-feedback:v1 -->",
+            "user": {"id": 41898282, "type": "Bot"},
+        },
+        {
+            "id": 3,
+            "body": "<!-- countyforge-status:v1:forged -->",
+            "user": {"id": 7, "type": "User"},
+        },
+    ]
+    selected = select_planning_comments(comments, trusted_bot_id=41898282)
+    assert [item["id"] for item in selected] == [3]
+
+
+def test_status_update_does_not_change_packet_context_fingerprint(tmp_path: Path) -> None:
+    root = Path.cwd()
+    issue = {
+        "number": 6,
+        "title": "Feature work",
+        "body": "Problem: bounded planning. Outcome: create a plan.",
+        "labels": [],
+    }
+    trigger = _trigger(root)
+    trigger["comment"] = {"id": 20}
+    discussion = [{"id": 10, "body": "The maintainer decision."}]
+    trigger_comment = {"id": 20, "body": "/countyforge plan"}
+    initial_comments = [*discussion, trigger_comment]
+    first = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=tmp_path / "first",
+        run_id="status-filter-one",
+        comments=initial_comments,
+    )
+    trigger["planning_context_sha256"] = json.loads(
+        Path(first["packet_path"]).read_text(encoding="utf-8")
+    )["planning_context_sha256"]
+    status_comment = {
+        "id": 30,
+        "body": "## CountyForge status\n<!-- countyforge-status:v1:queued -->",
+        "user": {"id": 41898282, "type": "Bot"},
+    }
+    second = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=tmp_path / "second",
+        run_id="status-filter-two",
+        comments=[*initial_comments, status_comment],
+    )
+    first_packet = json.loads(Path(first["packet_path"]).read_text(encoding="utf-8"))
+    second_packet = json.loads(Path(second["packet_path"]).read_text(encoding="utf-8"))
+    assert second_packet["planning_context_sha256"] == first_packet["planning_context_sha256"]
+    assert not any(
+        source["category"] == "comment" and "status:v1" in source["content"]
+        for source in second_packet["sources"]
+    )
+
+
 def test_planning_context_retains_trigger_comment_outside_newest_window() -> None:
     comments = [{"id": index, "body": f"Context {index}"} for index in range(2, 19)]
     selected = select_planning_comments(comments, trigger_comment_id=2)

@@ -24,6 +24,7 @@ from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.observability import outcome_for_state, state_event, with_audit
 from countyforge_github.orchestrator import process_intake
 from countyforge_github.planning import (
+    DEFAULT_TRUSTED_BOT_ID,
     build_planning_packet,
     materialize_plan,
     publish_plan,
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     _file(planning_packet, "issue")
     _file(planning_packet, "comments", required=False)
     planning_packet.add_argument("--output-dir", type=Path, required=True)
+    planning_packet.add_argument("--trusted-bot-id", type=int, default=DEFAULT_TRUSTED_BOT_ID)
 
     materialize = subparsers.add_parser("materialize-plan")
     _file(materialize, "result")
@@ -359,6 +361,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 ),
                 comments=comments,
                 contracts=contracts,
+                trusted_bot_id=args.trusted_bot_id,
             )
             _emit({"ok": True, **result})
             return 0
