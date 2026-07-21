@@ -185,11 +185,36 @@ class ResolvedRun:
 class Kernel:
     """Load and enforce repository-owned CountyForge contracts."""
 
-    def __init__(self, repo_root: Path | None = None) -> None:
-        self.repo_root = find_repo_root(repo_root)
-        self.schema_root = self.repo_root / ".ai" / "schemas"
-        self.profile_root = self.repo_root / ".ai" / "profiles"
-        self.provider_root = self.repo_root / ".ai" / "providers"
+    def __init__(
+        self,
+        repo_root: Path | None = None,
+        *,
+        contract_root: Path | None = None,
+        target_root: Path | None = None,
+    ) -> None:
+        if repo_root is not None and contract_root is not None:
+            raise KernelError(
+                "conflicting_repository_roots",
+                "Use either the compatibility repository root or an explicit contract root.",
+            )
+        self.contract_root = find_repo_root(contract_root or repo_root)
+        self.repo_root = self.contract_root
+        target_candidate = target_root or self.contract_root
+        try:
+            self.target_root = target_candidate.resolve(strict=True)
+        except OSError:
+            raise KernelError(
+                "target_repository_unavailable",
+                "The immutable target repository is unavailable.",
+            ) from None
+        if not self.target_root.is_dir():
+            raise KernelError(
+                "target_repository_unavailable",
+                "The immutable target repository is unavailable.",
+            )
+        self.schema_root = self.contract_root / ".ai" / "schemas"
+        self.profile_root = self.contract_root / ".ai" / "profiles"
+        self.provider_root = self.contract_root / ".ai" / "providers"
         self.request_schema = self._load_schema("countyforge-run-request.schema.json")
         self.profile_schema = self._load_schema("countyforge-profile.schema.json")
         self.catalog_schema = self._load_schema("countyforge-provider-catalog.schema.json")
@@ -277,7 +302,7 @@ class Kernel:
                     "A profile reasoning-effort policy is inconsistent.",
                 )
             output_schema = self.schema_root / str(profile["output_schema"])
-            prompt_path = self.repo_root / str(profile["prompt"]["path"])
+            prompt_path = self.contract_root / str(profile["prompt"]["path"])
             if not output_schema.is_file() or not prompt_path.is_file():
                 raise KernelError(
                     "contract_file_missing", "A profile contract file is unavailable."
@@ -387,7 +412,7 @@ class Kernel:
             seed = str(request["idempotency_seed"]).encode("utf-8")
             run_id = "seed-" + hashlib.sha256(seed).hexdigest()[:24]
         output_schema_path = self.schema_root / str(profile["output_schema"])
-        prompt_path = self.repo_root / str(profile["prompt"]["path"])
+        prompt_path = self.contract_root / str(profile["prompt"]["path"])
         return ResolvedRun(
             request=request,
             profile=profile,
@@ -487,7 +512,7 @@ class Kernel:
             return {}
 
         try:
-            repository_root = self.repo_root.resolve(strict=True)
+            repository_root = self.contract_root.resolve(strict=True)
         except OSError:
             raise KernelError(
                 "repository_unavailable", "The repository root is unavailable."
@@ -537,7 +562,7 @@ class Kernel:
     def _run_git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603 - fixed git executable and validated SHA arguments
             ["git", *arguments],
-            cwd=self.repo_root,
+            cwd=self.target_root,
             env=_git_environment(),
             capture_output=True,
             text=True,

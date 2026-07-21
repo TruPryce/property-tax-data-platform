@@ -4,12 +4,15 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 	codex-image review-packet prepr prepr-no-ai codex-smoke \
 	codex-observability-fixtures codex-observability-validate codex-observability-qa \
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
-	countyforge-request-fixtures codex-image-openai codex-smoke-openai
+	countyforge-request-fixtures countyforge-github-check countyforge-command-fixtures \
+	countyforge-workflow-policy-tests codex-image-openai codex-smoke-openai
 
 RUNNER_SHELL_SCRIPTS := \
 	scripts/dev-loop/build-review-packet.sh \
 	scripts/dev-loop/check-runner-identity.sh \
 	scripts/dev-loop/prepr.sh \
+	scripts/dev-loop/prepare-countyforge-target.sh \
+	scripts/dev-loop/test-countyforge-target-preparation.sh \
 	scripts/dev-loop/test-build-review-packet.sh \
 	scripts/dev-loop/test-review-output-paths.sh \
 	scripts/dev-loop/test-run-directory-guard.sh \
@@ -128,10 +131,28 @@ countyforge-runner-check:
 	$(UV) run pytest tools/countyforge-runner/tests -q
 	$(UV) run --package countyforge-runner countyforge-runner list-profiles --json >/dev/null
 
+countyforge-github-check:
+	$(UV) run ruff format --check tools/countyforge-github
+	$(UV) run ruff check tools/countyforge-github
+	$(UV) run mypy -p countyforge_github
+	$(UV) run pytest tools/countyforge-github/tests -q
+	$(UV) run --package countyforge-github countyforge-github check >/dev/null
+
+countyforge-command-fixtures:
+	$(UV) run pytest \
+		tools/countyforge-github/tests/test_commands.py \
+		tools/countyforge-github/tests/test_authorization_identity.py \
+		tools/countyforge-github/tests/test_orchestrator.py -q
+
+countyforge-workflow-policy-tests:
+	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py -q
+	./scripts/dev-loop/test-countyforge-target-preparation.sh
+
 # Free and deterministic: no Docker, provider, secret-manager, or collector call.
-runner-contract-tests: countyforge-runner-check
+runner-contract-tests: countyforge-runner-check countyforge-github-check \
+	countyforge-command-fixtures countyforge-workflow-policy-tests
 	bash -n $(RUNNER_SHELL_SCRIPTS)
-	@for schema in .ai/schemas/*.json .ai/profiles/*.json .ai/providers/*.json; do \
+	@for schema in .ai/schemas/*.json .ai/profiles/*.json .ai/providers/*.json .ai/policies/*.json; do \
 		python3 -m json.tool "$$schema" >/dev/null || exit 1; \
 	done
 	./scripts/dev-loop/test-build-review-packet.sh

@@ -1,0 +1,9 @@
+{
+  "contract_version": 1,
+  "policy_id": "countyforge-github-authorization",
+  "policy_version": 1,
+  "allowed_permissions": ["admin", "maintain", "write"],
+  "denied_permissions": ["triage", "read", "none"],
+  "allowed_bots": [],
+  "allowed_teams": []
+}

@@ -1,0 +1,42 @@
+{
+  "contract_version": 1,
+  "policy_id": "countyforge-github-execution",
+  "policy_version": 1,
+  "commands": {
+    "review": {
+      "profile_id": "review.packet-only.v1",
+      "profile_version": 1,
+      "provider": "sakana",
+      "model_ref": "sakana.fugu-ultra",
+      "reasoning_effort": "xhigh"
+    },
+    "plan": {
+      "profile_id": "plan.read-only.v1",
+      "profile_version": 1,
+      "provider": "sakana",
+      "model_ref": "sakana.fugu-ultra",
+      "reasoning_effort": "xhigh"
+    },
+    "implement": {
+      "profile_id": "implement.workspace-write.v1",
+      "profile_version": 1,
+      "provider": "openai",
+      "model_ref": "openai.gpt-5.6",
+      "reasoning_effort": "xhigh"
+    },
+    "fix": {
+      "profile_id": "fix.targeted-write.v1",
+      "profile_version": 1,
+      "provider": "openai",
+      "model_ref": "openai.gpt-5.6",
+      "reasoning_effort": "xhigh"
+    },
+    "validate": {
+      "profile_id": "validate.deterministic.v1",
+      "profile_version": 1,
+      "provider": null,
+      "model_ref": null,
+      "reasoning_effort": "none"
+    }
+  }
+}

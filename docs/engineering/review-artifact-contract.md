@@ -60,6 +60,11 @@ version-1 set: `countyforge-request.provenance.json`, `countyforge-profile.snaps
 their presence does not change `ARTIFACT_CONTRACT_VERSION=1`; the legacy files above remain
 readable and authoritative for this contract.
 
+GitHub-dispatched reviews upload this sanitized per-run evidence as a bounded workflow artifact and
+link the canonical status/check to the GitHub Actions run. The canonical GitHub comment and check
+are control-plane state, not replacements for these immutable review artifacts. Frozen target
+preparation is a separate short-retention artifact and never changes historical local evidence.
+
 `run.summary.json` is written on every path after a run directory is successfully claimed. Early
 preflight failures can legitimately omit execution and provenance artifacts; consumers must use
 the summary's `artifacts` map instead of assuming every file exists. Failures before a directory is
@@ -133,4 +138,5 @@ RUN_LIVE_PROVIDER_SMOKE=1 make codex-smoke-openai
 - [Pre-PR review contract](pre-pr-review-contract.md) - Review scope, severity, and verdict rules
 - [Runner observability](codex-runner-observability.md) - Event and metrics export contract
 - [CountyForge runner kernel](countyforge-runner-kernel.md) - Generic evidence and compatibility
+- [CountyForge GitHub control plane](countyforge-github-control-plane.md) - Canonical status and workflow artifact publication
 - [Review output schema](../../.ai/schemas/codex-prepr-review.schema.json) - Final review JSON shape

@@ -10,6 +10,9 @@ CountyForge uses a Python 3.12 developer-tool kernel to validate versioned run r
 versioned request
       |
       v
+tools/countyforge-github/       optional GitHub adapter; auth/state/dispatch
+      |
+      v
 tools/countyforge-runner/       schema validation, resolution, budgets, dispatch
       |           |
       |           +---- .ai/providers/   provider/model compatibility catalog
@@ -36,6 +39,11 @@ countyforge-runner resolve-profile --request <path> --json
 countyforge-runner list-profiles --json
 countyforge-runner explain --request <path> --json
 ```
+
+Local commands may continue to use `--repo-root <path>`. GitHub execution supplies
+`--contract-root <trusted-default-branch-path>` and `--target-root <immutable-target-path>`.
+The compatibility root defaults both to the current repository; an explicit contract root cannot
+be combined with the compatibility option.
 
 `validate-request`, `resolve-profile`, and `explain` validate schema, profile identity/version, mode, prompt, provider/model, Codex version, reasoning effort, budgets, canonical input files, repository identity and commits, packet provenance, output schema, and requested artifacts. They never read provider credentials.
 
@@ -131,6 +139,13 @@ The kernel preserves declared host-only Docker client, rootless-session, SSH tra
 
 OpenAI and Sakana use separately built provider-specific configuration bundles. Runtime request fields cannot switch an image's provider label, profile hash, tools, or mounts.
 
+For GitHub-dispatched runs, the trusted contract root and immutable target root are distinct. The
+kernel loads profiles, schemas, provider catalog, prompts, adapters, and evidence policy only from
+the contract root. Repository identity, exact head, base ancestry, and packet provenance are
+validated against the target root, which may be a bare Git repository with no worktree. The
+provider job therefore never needs a target checkout. See the
+[GitHub control-plane guide](countyforge-github-control-plane.md).
+
 ## Validation and Live Probes
 
 No-cost checks run in ordinary CI:
@@ -156,9 +171,13 @@ Run a live probe before relying on a rebuilt image, changed Codex/provider integ
 
 For Issue #4 acceptance on 2026-07-19, the Sakana `fugu-ultra` review path ran successfully through the new kernel at both `xhigh` and `high` effort. The dedicated paid adversarial Sakana smoke and paid OpenAI smoke were intentionally skipped; `openai.gpt-5.6` therefore remains `live_validation: not_run` in the catalog until an operator explicitly opts in.
 
-## Deferred Work
+## Integration and Deferred Work
 
-Issue #5 owns the GitHub command, authorization, dispatch, and run-control plane. Issues #6 and #7 own executable planning and isolated implementation workflows. Issue #8 owns PR review, targeted fixes, and convergence. Issues #9 and #10 own durable operational evidence and specialist routing. None of those capabilities are implemented by the kernel foundation.
+Issue #5 adds the GitHub command, authorization, dispatch, and run-control adapter without adding
+an executor to the kernel. Issues #6 and #7 own executable planning and isolated implementation
+workflows. Issue #8 owns targeted fixes and review convergence. Issues #9 and #10 own expanded
+durable operational evidence and specialist routing. None of those future execution capabilities
+is implied by the GitHub adapter.
 
 ## Related
 
@@ -167,5 +186,7 @@ Issue #5 owns the GitHub command, authorization, dispatch, and run-control plane
 - [Review artifact contract](review-artifact-contract.md)
 - [Legacy review observability](codex-runner-observability.md)
 - [Mode-aware runner ADR](../decisions/0005-mode-aware-runner-kernel.md)
+- [GitHub control plane](countyforge-github-control-plane.md)
+- [GitHub control-plane ADR](../decisions/0006-github-native-countyforge-control-plane.md)
 - [CountyForge package](../../tools/countyforge-runner/README.md)
 - [Issue #4](https://github.com/TruPryce/property-tax-data-platform/issues/4)

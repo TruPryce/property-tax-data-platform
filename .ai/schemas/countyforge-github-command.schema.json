@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-github-command.schema.json",
+  "title": "CountyForge GitHub Command",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "command", "arguments"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "command": {
+      "enum": ["plan", "implement", "validate", "review", "fix", "status", "cancel", "retry"]
+    },
+    "arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "openspec_change": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

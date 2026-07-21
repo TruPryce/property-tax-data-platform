@@ -18,6 +18,8 @@ def _request_parser(
     parser = subparsers.add_parser(name)
     parser.add_argument("--request", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--contract-root", type=Path)
+    parser.add_argument("--target-root", type=Path)
     parser.add_argument("--json", action="store_true", help="Emit JSON (the default contract).")
 
 
@@ -30,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
         _request_parser(subparsers, name)
     list_parser = subparsers.add_parser("list-profiles")
     list_parser.add_argument("--repo-root", type=Path)
+    list_parser.add_argument("--contract-root", type=Path)
+    list_parser.add_argument("--target-root", type=Path)
     list_parser.add_argument(
         "--json", action="store_true", help="Emit JSON (the default contract)."
     )
@@ -46,7 +50,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(arguments)
     try:
-        kernel = Kernel(args.repo_root)
+        kernel = Kernel(
+            args.repo_root,
+            contract_root=args.contract_root,
+            target_root=args.target_root,
+        )
         if args.command == "list-profiles":
             _emit({"ok": True, "profiles": kernel.list_profiles()})
             return 0
