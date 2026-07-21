@@ -74,7 +74,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["run_id", "idempotency_key", "attempt", "revision", "lifecycle_state", "disposition", "evidence_url", "finished_at"],
         "properties": {
           "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
           "command": {"enum": ["plan", "implement", "validate", "review", "fix"]},
@@ -88,7 +87,23 @@
           "disposition": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$"},
           "evidence_url": {"type": ["string", "null"], "pattern": "^https://github\\.com/", "maxLength": 1024},
           "finished_at": {"type": "string", "format": "date-time"}
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["run_id", "command", "profile_id", "profile_version", "target_head_sha", "idempotency_key", "attempt", "revision", "lifecycle_state", "disposition", "evidence_url", "finished_at"]
+          },
+          {
+            "required": ["run_id", "idempotency_key", "attempt", "revision", "lifecycle_state", "disposition", "evidence_url", "finished_at"],
+            "not": {
+              "anyOf": [
+                {"required": ["command"]},
+                {"required": ["profile_id"]},
+                {"required": ["profile_version"]},
+                {"required": ["target_head_sha"]}
+              ]
+            }
+          }
+        ]
       }
     },
     "planning_revision": {"type": ["integer", "null"], "minimum": 1},

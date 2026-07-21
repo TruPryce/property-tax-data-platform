@@ -44,3 +44,4 @@
 - [x] 5.16 Keep free planning fixtures offline-safe and cover plan terminal evidence and unsafe context exclusions.
 - [x] 5.17 Exclude trusted CountyForge status/feedback comments from planning identity while retaining user-authored marker text.
 - [x] 5.18 Replace unsupported comment sorting with bounded pagination aligned with the intake adapter and cover 100+ comments.
+- [x] 5.19 Render the current run separately from five sanitized newest-first prior history rows and require complete immutable display facts for new history entries.

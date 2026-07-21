@@ -25,6 +25,8 @@ Selection is stable and bounded: approved repository roots only, normalized path
 
 The planning result is strict JSON. It contains classification, problem/outcome, assumptions, unresolved decisions, affected capabilities, safe OpenSpec paths, task slices, acceptance criteria, risks, security/compatibility notes, validation commands, non-goals, implementation eligibility, blocked reasons, and packet citations. Trusted code validates those fields and renders templates, preserving the invariant that tasks are unmarked and production paths cannot be emitted. Model-provided text is redacted for high-confidence credential literals before packet export and normalized before Markdown headings are rendered.
 
+Canonical status remains one trusted bot comment. The current run is rendered in the primary status table; when a terminal run is replaced or retried, its complete immutable display facts are archived in bounded history and up to five prior terminal runs are rendered newest-first in `Recent runs`. Historical rows use sanitized evidence links or a bounded disposition when evidence is unavailable, so a new command never visually erases the prior result.
+
 The initial human approval rule is an authorized maintainer merging the planning PR. Unresolved blocking decisions make implementation ineligible. A repeated semantic request deduplicates; changed context creates a revision. To avoid overwriting human edits, a changed context creates a new linked superseding draft; only an exact same-run publication is idempotently reused. Human edits are never silently overwritten.
 
 ## Failure recovery and security
