@@ -151,7 +151,15 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     subprocess.run(
-        ["openspec", "validate", "--all", "--strict", "--no-interactive"],
+        [
+            "npx",
+            "--yes",
+            "@fission-ai/openspec@1.6.0",
+            "validate",
+            "--all",
+            "--strict",
+            "--no-interactive",
+        ],
         cwd=tmp_path,
         check=True,
         capture_output=True,
