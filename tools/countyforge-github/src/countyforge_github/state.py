@@ -17,6 +17,7 @@ from countyforge_github.identity import retry_idempotency_key
 MARKER_PREFIX: Final = "<!-- countyforge-status:v1:"
 MARKER_SUFFIX: Final = " -->"
 MAX_MARKER_BYTES: Final = 24_576
+MAX_RECENT_RUNS: Final = 10
 _MARKER = re.compile(r"<!-- countyforge-status:v1:([A-Za-z0-9_-]+) -->")
 
 ACTIVE_STATES = frozenset(
@@ -76,6 +77,25 @@ LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 
+def _history_entry(state: JsonObject) -> JsonObject:
+    """Capture immutable display facts before replacing the canonical current run."""
+
+    return {
+        "run_id": state["run_id"],
+        "command": state["command"],
+        "profile_id": state["profile_id"],
+        "profile_version": state["profile_version"],
+        "target_head_sha": state["target_head_sha"],
+        "idempotency_key": state["idempotency_key"],
+        "attempt": state["attempt"],
+        "revision": state["revision"],
+        "lifecycle_state": state["lifecycle_state"],
+        "disposition": state["disposition"],
+        "evidence_url": state["evidence_url"],
+        "finished_at": state["updated_at"],
+    }
+
+
 def initial_state(
     trigger: JsonObject,
     execution_policy: JsonObject,
@@ -115,6 +135,18 @@ def initial_state(
         "created_at": timestamp,
         "updated_at": timestamp,
         "history": [],
+        "planning_revision": 1 if command == "plan" else None,
+        "planning_change_name": None,
+        "planning_branch": None,
+        "planning_pr_number": None,
+        "planning_predecessor_run_id": None,
+        "planning_context_sha256": (
+            str(trigger.get("planning_context_sha256"))
+            if command == "plan" and trigger.get("planning_context_sha256") is not None
+            else None
+        ),
+        "planning_result_sha256": None,
+        "implementation_eligible": False,
     }
     return state
 
@@ -128,6 +160,7 @@ def begin_new_state(
     """Begin a distinct semantic command while preserving terminal run history."""
 
     state = initial_state(trigger, execution_policy, idempotency_key)
+    command = str(trigger["command"]["command"])
     if previous is None:
         return state
     if previous["lifecycle_state"] not in TERMINAL_STATES:
@@ -135,20 +168,12 @@ def begin_new_state(
             "active_run_exists", "This target already has active CountyForge work."
         )
     history = list(previous["history"])
-    history.append(
-        {
-            "run_id": previous["run_id"],
-            "idempotency_key": previous["idempotency_key"],
-            "attempt": previous["attempt"],
-            "revision": previous["revision"],
-            "lifecycle_state": previous["lifecycle_state"],
-            "disposition": previous["disposition"],
-            "evidence_url": previous["evidence_url"],
-            "finished_at": previous["updated_at"],
-        }
-    )
+    history.append(_history_entry(previous))
     state["history"] = history[-20:]
     state["revision"] = int(previous["revision"]) + 1
+    if command == "plan":
+        state["planning_revision"] = int(previous.get("planning_revision") or 1) + 1
+        state["planning_predecessor_run_id"] = previous["run_id"]
     return state
 
 
@@ -273,6 +298,52 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         if state["evidence_url"] is not None
         else "Pending"
     )
+    planning_rows = ""
+    if state["command"] == "plan":
+        pr_number = state.get("planning_pr_number")
+        draft_pr = (
+            f"[#{pr_number}](https://github.com/TruPryce/property-tax-data-platform/pull/{pr_number})"
+            if pr_number
+            else "Pending"
+        )
+        planning_rows = (
+            f"| Planning revision | `{state.get('planning_revision') or 1}` |\n"
+            f"| Proposed change | `{state.get('planning_change_name') or 'Pending'}` |\n"
+            f"| Draft PR | {draft_pr} |\n"
+            "| Implementation eligible | `false` |\n"
+        )
+    recent_entries: list[JsonObject] = [
+        {
+            "run_id": state["run_id"],
+            "command": state["command"],
+            "profile_id": state["profile_id"],
+            "profile_version": state["profile_version"],
+            "target_head_sha": state["target_head_sha"],
+            "attempt": state["attempt"],
+            "lifecycle_state": state["lifecycle_state"],
+            "evidence_url": state["evidence_url"],
+            "finished_at": state["updated_at"],
+        }
+    ]
+    recent_entries.extend(reversed(list(state.get("history", []))))
+    recent_rows = []
+    for entry in recent_entries[:MAX_RECENT_RUNS]:
+        profile_id = str(entry.get("profile_id", "legacy"))
+        profile_version = entry.get("profile_version")
+        profile = f"{profile_id}@{profile_version}" if profile_version is not None else profile_id
+        evidence_value = entry.get("evidence_url")
+        evidence_link = f"[Evidence]({evidence_value})" if evidence_value is not None else "Pending"
+        recent_rows.append(
+            f"| `{entry.get('command', 'legacy')}` | `{profile}` | "
+            f"`{str(entry.get('target_head_sha', 'unknown'))[:12]}` | "
+            f"`{entry.get('lifecycle_state', 'unknown')}` | `{entry.get('attempt', '?')}` | "
+            f"`{entry.get('finished_at', 'unknown')}` | {evidence_link} |"
+        )
+    recent_runs = (
+        "\n\n### Recent runs\n\n"
+        "| Command | Profile | Target | State | Attempt | Updated | Evidence |\n"
+        "|---|---|---|---|---:|---|---|\n" + "\n".join(recent_rows)
+    )
     return (
         "## CountyForge status\n\n"
         "| Field | Value |\n"
@@ -282,9 +353,10 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         f"| Target | `{short_sha}` |\n"
         f"| State | `{state['lifecycle_state']}` |\n"
         f"| Attempt | `{state['attempt']}` |\n"
+        f"{planning_rows}"
         f"| Updated | `{state['updated_at']}` |\n"
         f"| Evidence | {evidence} |"
-        f"{guidance}\n\n{marker}"
+        f"{guidance}{recent_runs}\n\n{marker}"
     )
 
 
@@ -372,18 +444,7 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
     new_key = retry_idempotency_key(str(state["original_idempotency_key"]), attempt)
     updated = copy.deepcopy(state)
     history = list(updated["history"])
-    history.append(
-        {
-            "run_id": state["run_id"],
-            "idempotency_key": state["idempotency_key"],
-            "attempt": state["attempt"],
-            "revision": state["revision"],
-            "lifecycle_state": state["lifecycle_state"],
-            "disposition": state["disposition"],
-            "evidence_url": state["evidence_url"],
-            "finished_at": state["updated_at"],
-        }
-    )
+    history.append(_history_entry(state))
     updated.update(
         {
             "run_id": f"gh-{new_key[:24]}-a{attempt}",
@@ -402,5 +463,8 @@ def retry_state(state: JsonObject, *, current_head_sha: str, at: str) -> JsonObj
             "revision": int(state["revision"]) + 1,
         }
     )
+    if updated["command"] == "plan":
+        updated["planning_revision"] = int(state.get("planning_revision") or 1) + 1
+        updated["planning_predecessor_run_id"] = state["run_id"]
     ControlContracts().validate("state", updated)
     return updated

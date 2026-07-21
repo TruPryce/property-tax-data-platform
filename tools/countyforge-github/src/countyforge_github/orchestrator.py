@@ -26,6 +26,7 @@ from countyforge_github.observability import (
     state_event,
     with_audit,
 )
+from countyforge_github.planning import classify_issue, planning_context_fingerprint
 from countyforge_github.state import (
     ACTIVE_STATES,
     begin_new_state,
@@ -53,6 +54,11 @@ _REFUSAL_MESSAGES = {
     "cancellation_not_active": "CountyForge cancellation refused: no active run exists.",
     "review_requires_pull_request": (
         "CountyForge review requires a pull request with an immutable diff target."
+    ),
+    "plan_requires_issue": "CountyForge plan requires a structured issue, not a pull request.",
+    "insufficient_issue_intake": (
+        "CountyForge plan refused: the issue needs a supported type, problem statement, "
+        "and outcome."
     ),
 }
 
@@ -487,7 +493,66 @@ def process_intake(
             decision,
         )
 
+    planning_context_sha256: str | None = None
+    if operation == "plan" and isinstance(issue.get("pull_request"), dict):
+        return _refused_result(
+            github,
+            repository=repository,
+            target_number=target_number,
+            trusted_bot_id=trusted_bot_id,
+            reason_code="plan_requires_issue",
+            events=events,
+            authorization=decision,
+        )
     target = _target_facts(event, github, repository, trusted_tool_sha)
+    if operation == "plan":
+        issue_document = event.get("issue")
+        if not isinstance(issue_document, dict):
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="insufficient_issue_intake",
+                events=events,
+                authorization=decision,
+            )
+        event_comment = event.get("comment")
+        trigger_comment_id = (
+            int(event_comment["id"])
+            if isinstance(event_comment, dict) and event_comment.get("id") is not None
+            else None
+        )
+        planning_comments = list(comments)
+        if isinstance(event_comment, dict):
+            planning_comments.append(event_comment)
+        planning_context_sha256 = planning_context_fingerprint(
+            issue_document,
+            planning_comments,
+            trigger_comment_id=trigger_comment_id,
+            trusted_bot_id=trusted_bot_id,
+        )
+        labels = [
+            str(label.get("name"))
+            for label in issue_document.get("labels", [])
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+        ]
+        try:
+            classify_issue(
+                str(issue_document.get("title", "")),
+                str(issue_document.get("body", "")),
+                labels,
+            )
+        except ControlPlaneError:
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="insufficient_issue_intake",
+                events=events,
+                authorization=decision,
+            )
     trigger = build_trigger(
         event=event,
         command=command,
@@ -497,6 +562,7 @@ def process_intake(
         workflow_run_id=workflow_run_id,
         workflow_run_attempt=workflow_run_attempt,
         delivery_id=delivery_id,
+        planning_context_sha256=planning_context_sha256,
         timestamp=timestamp,
         contracts=resolved,
     )

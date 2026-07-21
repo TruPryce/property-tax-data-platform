@@ -65,7 +65,9 @@ def _sha256(path: Path) -> str:
 def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
     repo_root = Path.cwd().resolve(strict=True)
     fixture_root = repo_root / ".ai" / "reviews" / "test-fixtures" / tmp_path.name
+    plan_fixture_root = repo_root / ".ai" / "contexts" / "test-fixtures" / tmp_path.name
     fixture_root.mkdir(parents=True)
+    plan_fixture_root.mkdir(parents=True)
     packet = fixture_root / "packet.md"
     head_sha = subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD^{commit}"],
@@ -110,6 +112,55 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
         + "\n",
         encoding="utf-8",
     )
+    planning_packet = plan_fixture_root / "countyforge-planning-packet.json"
+    planning_packet.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "packet_id": "fixture-planning-packet",
+                "run_id": "fixture-plan",
+                "repository": {
+                    "id": 987654,
+                    "full_name": "TruPryce/property-tax-data-platform",
+                    "target_sha": head_sha,
+                },
+                "issue": {
+                    "number": 1,
+                    "title": "Feature planning",
+                    "body": "Feature acceptance criteria",
+                    "classification": "feature_work",
+                    "untrusted": True,
+                },
+                "sources": [],
+                "selection": {
+                    "max_files": 1,
+                    "max_bytes": 1,
+                    "selected_files": 0,
+                    "excluded_candidates": [],
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    planning_manifest = plan_fixture_root / "countyforge-context-manifest.json"
+    planning_manifest.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "run_id": "fixture-plan",
+                "repository_full_name": "TruPryce/property-tax-data-platform",
+                "issue_number": 1,
+                "target_sha": head_sha,
+                "packet_sha256": _sha256(planning_packet),
+                "sources": [],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     def build(mode: str = "review") -> JsonObject:
         facts = MODE_FACTS[mode]
@@ -120,6 +171,13 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                 "packet_sha256": _sha256(packet),
                 "packet_provenance_path": str(provenance),
                 "packet_provenance_sha256": _sha256(provenance),
+            }
+        if mode == "plan":
+            input_facts = {
+                "planning_packet_path": str(planning_packet),
+                "planning_packet_sha256": _sha256(planning_packet),
+                "context_manifest_path": str(planning_manifest),
+                "context_manifest_sha256": _sha256(planning_manifest),
             }
         if mode == "fix":
             input_facts = {
@@ -150,3 +208,4 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
 
     yield build
     shutil.rmtree(fixture_root)
+    shutil.rmtree(plan_fixture_root)

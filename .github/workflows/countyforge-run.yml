@@ -242,6 +242,85 @@ jobs:
           compression-level: 6
           include-hidden-files: true
 
+  plan-packet:
+    name: Build bounded planning packet without target checkout
+    if: inputs.command == 'plan'
+    needs: [claim, prepare]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install trusted CountyForge packages outside target preparation
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Build bounded planning packet
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRIGGER_B64: ${{ inputs.trigger }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          TARGET_NUMBER: ${{ inputs.target_number }}
+        run: |
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/countyforge-trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
+          comments_ndjson="$RUNNER_TEMP/countyforge-issue-comments.ndjson"
+          : > "$comments_ndjson"
+          for page in $(seq 1 10); do
+            page_json="$RUNNER_TEMP/countyforge-issue-comments-$page.json"
+            gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER/comments?per_page=100&page=$page" \
+              > "$page_json"
+            page_count="$(jq -er 'length' "$page_json")"
+            jq -c '.[]' "$page_json" >> "$comments_ndjson"
+            if [ "$page_count" -lt 100 ]; then
+              break
+            fi
+            if [ "$page" -eq 10 ]; then
+              echo "error: issue comment pagination exceeded the bounded 10-page limit" >&2
+              exit 2
+            fi
+          done
+          jq -s '.' "$comments_ndjson" > "$RUNNER_TEMP/countyforge-issue-comments.json"
+          trigger_comment_id="$(jq -er '.comment.id' "$RUNNER_TEMP/countyforge-trigger.json")"
+          gh api "repos/$TARGET_REPOSITORY/issues/comments/$trigger_comment_id" \
+            > "$RUNNER_TEMP/countyforge-trigger-comment.json"
+          jq -s '.[0] + [.[1]]' \
+            "$RUNNER_TEMP/countyforge-issue-comments.json" \
+            "$RUNNER_TEMP/countyforge-trigger-comment.json" \
+            > "$RUNNER_TEMP/countyforge-issue-comments-with-trigger.json"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-planning-packet \
+            --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
+            --issue "$RUNNER_TEMP/countyforge-issue.json" \
+            --comments "$RUNNER_TEMP/countyforge-issue-comments-with-trigger.json" \
+            --trusted-bot-id 41898282 \
+            --output-dir "$RUNNER_TEMP/countyforge-planning"
+
+      - name: Upload bounded planning packet
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-planning-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-planning
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+          include-hidden-files: true
+
   recover-claim-failure:
     name: Recover a run that failed before lease claim
     if: always() && needs.claim.result == 'failure'
@@ -339,7 +418,7 @@ jobs:
 
   future-mode:
     name: Invoke fail-closed future profile
-    if: inputs.command != 'review'
+    if: inputs.command != 'review' && inputs.command != 'plan'
     needs: [claim, prepare, mark-running]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -403,6 +482,162 @@ jobs:
           path: |
             ${{ runner.temp }}/countyforge-result.json
             trusted/.ai/reviews/countyforge
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  plan-sakana:
+    name: Read-only Sakana planning
+    if: inputs.command == 'plan' && needs.claim.outputs.provider == 'sakana'
+    needs: [claim, prepare, plan-packet, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download frozen planning packet and target identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+      - name: Download bounded planning packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-planning-${{ inputs.run_id }}
+          path: prepared/planning
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Validate packet, resolve request, and build trusted plan image
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          cd prepared && sha256sum --check checksums.sha256 && cd ..
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          mkdir -p "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID"
+          cp prepared/planning/countyforge-planning-packet.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          cp prepared/planning/countyforge-context-manifest.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/trigger.json" --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --planning-packet ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-planning-packet.json" \
+            --context-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-context-manifest.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+          export CODEX_MODEL_REF="$(jq -r '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")"
+          export CODEX_REASONING_EFFORT="$(jq -r '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")"
+          CODEX_PROVIDER=sakana ./.ai/codex/07-build-countyforge-plan-image.sh
+
+      - name: Invoke Sakana under the read-only plan profile
+        env:
+          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+        run: |
+          cd "$GITHUB_WORKSPACE/trusted"
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+      - name: Upload sanitized planning evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            ${{ runner.temp }}/countyforge-exit-code
+            trusted/.ai/reviews/countyforge/plan
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  plan-openai:
+    name: Read-only OpenAI planning
+    if: inputs.command == 'plan' && needs.claim.outputs.provider == 'openai'
+    needs: [claim, prepare, plan-packet, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download frozen planning packet and target identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+      - name: Download bounded planning packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-planning-${{ inputs.run_id }}
+          path: prepared/planning
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Validate packet, resolve request, and build trusted plan image
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          cd prepared && sha256sum --check checksums.sha256 && cd ..
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          mkdir -p "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID"
+          cp prepared/planning/countyforge-planning-packet.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          cp prepared/planning/countyforge-context-manifest.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/trigger.json" --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --planning-packet ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-planning-packet.json" \
+            --context-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-context-manifest.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+          export CODEX_MODEL_REF="$(jq -r '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")"
+          export CODEX_REASONING_EFFORT="$(jq -r '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")"
+          CODEX_PROVIDER=openai ./.ai/codex/07-build-countyforge-plan-image.sh
+
+      - name: Invoke OpenAI under the read-only plan profile
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cd "$GITHUB_WORKSPACE/trusted"
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+      - name: Upload sanitized planning evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            ${{ runner.temp }}/countyforge-exit-code
+            trusted/.ai/reviews/countyforge/plan
           if-no-files-found: error
           retention-days: 14
           include-hidden-files: true
@@ -579,10 +814,83 @@ jobs:
           retention-days: 14
           include-hidden-files: true
 
-  publish:
-    name: Publish sanitized terminal state
-    if: always() && needs.claim.result == 'success'
-    needs: [claim, prepare, mark-running, future-mode, review-sakana, review-openai]
+  plan-validation:
+    name: Materialize and validate planning draft
+    if: always() && inputs.command == 'plan' && needs.claim.result == 'success'
+    needs: [claim, plan-packet, mark-running, plan-sakana, plan-openai]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download planning result evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-result
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Materialize the validated planning draft
+        env:
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          plan_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-plan-result.json -type f -print -quit 2>/dev/null || true)"
+          test -n "$plan_file"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github materialize-plan \
+            --result "$plan_file" --publication-root "$GITHUB_WORKSPACE/trusted" \
+            --issue-number "$ISSUE_NUMBER" --run-id "$COUNTYFORGE_RUN_ID" \
+            > "$RUNNER_TEMP/countyforge-materialization.json"
+
+      - name: Run trusted planning validation gates
+        run: |
+          cd trusted
+          npx --yes @fission-ai/openspec@1.6.0 validate --all --strict --no-interactive
+          npx --yes @fission-ai/openspec@1.6.0 doctor
+          uv run python scripts/check_doc_links.py
+          uv run python scripts/check_repository_artifacts.py
+
+      - name: Package the validated planning files
+        env:
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          change_name="$(jq -r .change_name "$RUNNER_TEMP/countyforge-materialization.json")"
+          test -n "$change_name" && test "$change_name" != "null"
+          mkdir -p "$RUNNER_TEMP/countyforge-publication/openspec/changes"
+          cp -R "trusted/openspec/changes/$change_name" \
+            "$RUNNER_TEMP/countyforge-publication/openspec/changes/"
+          cp "$RUNNER_TEMP/countyforge-materialization.json" \
+            "$RUNNER_TEMP/countyforge-publication/"
+
+      - name: Upload validated planning files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-plan-publication-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-publication
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  plan-publish:
+    name: Publish planning draft and terminal state
+    if: always() && inputs.command == 'plan' && needs.claim.result == 'success'
+    needs: [claim, plan-packet, mark-running, plan-sakana, plan-openai, plan-validation]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -591,7 +899,7 @@ jobs:
     permissions:
       actions: read
       checks: write
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
     steps:
@@ -609,6 +917,21 @@ jobs:
         with:
           name: countyforge-result-${{ inputs.run_id }}
           path: ${{ runner.temp }}/countyforge-result
+
+      - name: Download planning packet provenance
+        if: inputs.command == 'plan'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-planning-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-planning
+
+      - name: Download validated planning files
+        if: needs.plan-validation.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-plan-publication-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-publication
 
       - name: Install the pinned Python toolchain
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -634,7 +957,165 @@ jobs:
           echo "state=$(jq -r .state "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
           echo "disposition=$(jq -r .disposition "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
 
+      - name: Verify live planning publication lease
+        id: verify-publication
+        if: inputs.command == 'plan' && needs.plan-validation.result == 'success' && steps.terminal.outputs.state == 'succeeded' && steps.terminal.outputs.disposition == 'completed'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+        run: |
+          uv run --package countyforge-github countyforge-github verify-publication \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Publish the validated planning draft
+        id: planning-publication
+        continue-on-error: true
+        if: inputs.command == 'plan' && needs.plan-validation.result == 'success' && steps.terminal.outputs.state == 'succeeded' && steps.terminal.outputs.disposition == 'completed' && steps.verify-publication.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          TARGET_SHA: ${{ inputs.trusted_tool_sha }}
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cp -R "$RUNNER_TEMP/countyforge-publication/openspec/changes/." \
+            "$GITHUB_WORKSPACE/openspec/changes/"
+          plan_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-plan-result.json -type f -print -quit)"
+          test -n "$plan_file"
+          planning_packet="$RUNNER_TEMP/countyforge-planning/countyforge-planning-packet.json"
+          context_manifest="$RUNNER_TEMP/countyforge-planning/countyforge-context-manifest.json"
+          test -f "$planning_packet" && test -f "$context_manifest"
+          uv run --package countyforge-github countyforge-github publish-plan \
+            --result "$plan_file" --repository "$TARGET_REPOSITORY" --default-branch main \
+            --target-sha "$TARGET_SHA" --issue-number "$ISSUE_NUMBER" --run-id "$COUNTYFORGE_RUN_ID" \
+            --publication-root "$GITHUB_WORKSPACE" \
+            --planning-packet "$planning_packet" --context-manifest "$context_manifest" \
+            --evidence-url "$EVIDENCE_URL" --already-materialized > "$RUNNER_TEMP/countyforge-publication.json"
+          echo "change_name=$(jq -r .change_name "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
+          echo "branch=$(jq -r .branch "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(jq -r .pr_number "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
+          echo "context_sha256=$(jq -r .context_manifest_sha256 "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
+          echo "result_sha256=$(sha256sum "$plan_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Update canonical comment and check
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+          TERMINAL_STATE: ${{ steps.terminal.outputs.state }}
+          TERMINAL_DISPOSITION: ${{ steps.terminal.outputs.disposition }}
+          COMMAND: ${{ inputs.command }}
+          PLANNING_VALIDATION_JOB_RESULT: ${{ needs.plan-validation.result }}
+          PLANNING_PUBLICATION_OUTCOME: ${{ steps.planning-publication.outcome }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLANNING_CHANGE_NAME: ${{ steps.planning-publication.outputs.change_name }}
+          PLANNING_BRANCH: ${{ steps.planning-publication.outputs.branch }}
+          PLANNING_PR_NUMBER: ${{ steps.planning-publication.outputs.pr_number }}
+          PLANNING_CONTEXT_SHA256: ${{ steps.planning-publication.outputs.context_sha256 }}
+          PLANNING_RESULT_SHA256: ${{ steps.planning-publication.outputs.result_sha256 }}
+        run: |
+          if [ "$COMMAND" = "plan" ] && [ "$TERMINAL_STATE" = "succeeded" ] && \
+             [ "$PLANNING_VALIDATION_JOB_RESULT" != "success" ]; then
+            TERMINAL_STATE="failed"
+            TERMINAL_DISPOSITION="planning_validation_failed"
+          elif [ "$COMMAND" = "plan" ] && [ "$TERMINAL_STATE" = "succeeded" ] && \
+             [ "$PLANNING_PUBLICATION_OUTCOME" != "success" ]; then
+            TERMINAL_STATE="failed"
+            TERMINAL_DISPOSITION="planning_publication_failed"
+          fi
+          planning_args=()
+          if [ -n "$PLANNING_CHANGE_NAME" ]; then planning_args+=(--planning-change-name "$PLANNING_CHANGE_NAME"); fi
+          if [ -n "$PLANNING_BRANCH" ]; then planning_args+=(--planning-branch "$PLANNING_BRANCH"); fi
+          if [ -n "$PLANNING_PR_NUMBER" ]; then planning_args+=(--planning-pr-number "$PLANNING_PR_NUMBER"); fi
+          if [ -n "$PLANNING_CONTEXT_SHA256" ]; then planning_args+=(--planning-context-sha256 "$PLANNING_CONTEXT_SHA256"); fi
+          if [ -n "$PLANNING_RESULT_SHA256" ]; then planning_args+=(--planning-result-sha256 "$PLANNING_RESULT_SHA256"); fi
+          uv run --package countyforge-github countyforge-github advance-run \
+            --repository "$TARGET_REPOSITORY" \
+            --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" \
+            --target-state "$TERMINAL_STATE" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --disposition "$TERMINAL_DISPOSITION" \
+            --evidence-url "$EVIDENCE_URL" \
+            "${planning_args[@]}"
+
+  publish:
+    name: Publish non-planning terminal state
+    if: always() && inputs.command != 'plan' && needs.claim.result == 'success'
+    needs: [claim, prepare, mark-running, future-mode, review-sakana, review-openai]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download sanitized result evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-result-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-result
+
+      - name: Install the pinned Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+
+      - name: Resolve sanitized terminal disposition
+        id: terminal
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          result_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-result.json -type f -print -quit 2>/dev/null || true)"
+          exit_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-exit-code -type f -print -quit 2>/dev/null || true)"
+          arguments=(resolve-terminal-result --command "$COMMAND")
+          if [ -n "$result_file" ]; then arguments+=(--result "$result_file"); fi
+          if [ -n "$exit_file" ]; then arguments+=(--exit-code "$exit_file"); fi
+          uv run --package countyforge-github countyforge-github "${arguments[@]}" \
+            > "$RUNNER_TEMP/countyforge-terminal.json"
+          echo "state=$(jq -r .state "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+          echo "disposition=$(jq -r .disposition "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Update canonical comment and check
+        if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}

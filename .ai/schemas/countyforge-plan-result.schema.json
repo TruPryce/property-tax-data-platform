@@ -4,17 +4,44 @@
   "title": "CountyForge Plan Result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "assumptions", "unresolved_decisions", "affected_capabilities", "proposed_files", "task_slices", "acceptance_criteria", "risks", "non_goals"],
+  "required": [
+    "contract_version", "status", "originating_issue", "proposed_change_name",
+    "issue_classification", "problem_statement", "desired_outcome", "assumptions",
+    "unresolved_decisions", "affected_capabilities", "files_to_create", "files_to_modify",
+    "proposed_files", "task_slices", "acceptance_criteria", "risks",
+    "security_privacy_considerations", "migration_compatibility_concerns",
+    "validation_commands", "non_goals", "implementation_eligibility", "blocked_reasons",
+    "evidence_citations"
+  ],
   "properties": {
+    "contract_version": {"const": 1},
     "status": {"enum": ["planned", "blocked", "profile_not_implemented"]},
+    "originating_issue": {"type": "integer", "minimum": 1},
+    "proposed_change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 96},
+    "issue_classification": {"enum": ["source_onboarding", "feature_work", "defect", "architecture_decision"]},
+    "problem_statement": {"$ref": "#/$defs/text"},
+    "desired_outcome": {"$ref": "#/$defs/text"},
     "assumptions": {"$ref": "#/$defs/strings"},
     "unresolved_decisions": {"$ref": "#/$defs/strings"},
     "affected_capabilities": {"$ref": "#/$defs/strings"},
-    "proposed_files": {"$ref": "#/$defs/strings"},
+    "files_to_create": {"$ref": "#/$defs/paths"},
+    "files_to_modify": {"$ref": "#/$defs/paths"},
+    "proposed_files": {"$ref": "#/$defs/paths"},
     "task_slices": {"$ref": "#/$defs/strings"},
     "acceptance_criteria": {"$ref": "#/$defs/strings"},
     "risks": {"$ref": "#/$defs/strings"},
-    "non_goals": {"$ref": "#/$defs/strings"}
+    "security_privacy_considerations": {"$ref": "#/$defs/strings"},
+    "migration_compatibility_concerns": {"$ref": "#/$defs/strings"},
+    "validation_commands": {"$ref": "#/$defs/strings"},
+    "non_goals": {"$ref": "#/$defs/strings"},
+    "implementation_eligibility": {"const": false},
+    "blocked_reasons": {"$ref": "#/$defs/strings"},
+    "evidence_citations": {"$ref": "#/$defs/citations"}
   },
-  "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "strings": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 1000}},
+    "paths": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))openspec/changes/[a-z0-9]+(?:-[a-z0-9]+)*(?:/.*)?$", "maxLength": 240}},
+    "citations": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source_id", "excerpt"], "properties": {"source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"}, "excerpt": {"type": "string", "minLength": 1, "maxLength": 500}}}}
+  }
 }

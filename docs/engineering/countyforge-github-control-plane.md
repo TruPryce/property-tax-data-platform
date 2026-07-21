@@ -4,7 +4,7 @@
 
 GitHub Issue and pull-request comments provide the authenticated remote control surface for the CountyForge runner kernel. The accepted behavior is the [`github-agent-control-plane` OpenSpec capability](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md). This guide explains the implementation and trust boundaries; [GitHub operations](../operations/countyforge-github-operations.md) owns enablement and recovery procedures.
 
-Only `review.packet-only.v1` executes. Plan, implement, fix, and validate commands construct strict requests and preserve the kernel's `profile_not_implemented` outcome.
+`review.packet-only.v1` and `plan.read-only.v1` execute. Plan remains read-only and publishes only trusted, validated OpenSpec planning drafts; implement, fix, and validate commands remain fail-closed with the kernel's `profile_not_implemented` outcome.
 
 ## Command Grammar
 
@@ -79,14 +79,20 @@ The provider job receives a bounded bare target repository so it can validate im
 | `countyforge-run.yml` claim | Validate semantic identity, claim lease, bind actual workflow run | None |
 | `countyforge-run.yml` claim recovery | Mark a pre-lease claim failure terminal so retry remains possible | None |
 | `countyforge-run.yml` prepare | Fetch target data, build packet/provenance, build bare target identity, upload frozen artifact | None |
+| `countyforge-run.yml` plan-packet | Fetch bounded issue context and build planning packet/manifest from the trusted root; no target checkout or package hooks | None |
 | `countyforge-run.yml` mark-running | Heartbeat and publish running state | None |
 | `review-sakana` | Build trusted Sakana image and invoke packet reviewer | `SAKANA_API_KEY` only on invocation |
 | `review-openai` | Build trusted OpenAI image and invoke packet reviewer | `OPENAI_API_KEY` only on invocation |
-| `future-mode` | Invoke kernel and require `profile_not_implemented` | None |
-| `publish` | Map sanitized result to canonical comment/check and release terminal lease | None |
+| `plan-sakana` / `plan-openai` | Invoke the bounded read-only planning profile | Selected provider key only on invocation |
+| `future-mode` | Invoke kernel for implement/fix/validate and require `profile_not_implemented` | None |
+| `plan-validation` | Materialize and validate the bounded planning draft outside the state lane | None |
+| `plan-publish` | Verify the live planning lease, publish deterministic planning refs/draft PRs, and release terminal lease | None |
+| `publish` | Map sanitized non-planning result to canonical comment/check and release terminal lease | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
-All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior.
+All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `plan-publish` job may use `contents: write`, and it receives no provider secret. Planning materialization and validation run in the separate read-only `plan-validation` job outside the state lane; the write-capable lane performs only the live lease check, deterministic Git data API mutation, and canonical finalization.
+
+The trusted publication job runs the repository-pinned `npx --yes @fission-ai/openspec@1.6.0` validator before any Git data API mutation. This is an intentional v1 supply-chain trade-off: the package version is pinned, execution occurs from the trusted checkout, and no provider secret is present. Future hardening may move validation into a pre-provisioned trusted image, but must preserve the same no-secret and trusted-root boundary.
 
 ## Trigger and State Contracts
 
@@ -121,7 +127,7 @@ OpenSpec change, when declared
 
 Comment ID and delivery ID remain provenance only. Repeated semantic commands on the same head deduplicate even after completion. A changed head creates a distinct eligible key. Retry carries an explicit schema-bound envelope and derives a new key from the original key and incremented attempt; workflow claim revalidates that effective key and run ID.
 
-One bot-authored comment contains the human status table and a bounded hidden `countyforge-status:v1` marker. The marker is decoded only when the immutable author ID equals the configured GitHub Actions bot ID, exactly one well-formed marker exists, the strict state schema passes, and its repository ID plus target type/number match the current event. Malformed, duplicated, oversized, schema-invalid, or target-mismatched trusted state fails closed; user-authored copies are ignored. Updates edit that comment; they do not create status spam. Compact terminal history preserves prior run/evidence references across a new head or retry.
+One bot-authored comment contains the human status table, a bounded newest-first `Recent runs` table, and a hidden `countyforge-status:v1` marker. The marker is decoded only when the immutable author ID equals the configured GitHub Actions bot ID, exactly one well-formed marker exists, the strict state schema passes, and its repository ID plus target type/number match the current event. Malformed, duplicated, oversized, schema-invalid, or target-mismatched trusted state fails closed; user-authored copies are ignored. Updates edit that comment; they do not create status spam. Each newly archived run preserves its command, profile/version, target SHA, attempt, lifecycle, completion time, and evidence link; legacy history entries remain readable with bounded fallback display.
 
 ## Lifecycle, Concurrency, and Leases
 
@@ -159,7 +165,7 @@ Comments and checks contain no raw model output, provider response, target text,
 
 The repository-native `make prepr` gate does not activate an `issue_comment` workflow from a feature branch. After these workflows are present on the default branch, enable the command workflow in a controlled setting and post `/countyforge validate` on a same-repository controlled PR. Verify authorization, one canonical comment, dispatch, lease acquisition/release, no-secret preparation, `profile_not_implemented`, neutral check, sanitized artifacts, deduplication, status, and maintenance audit discovery. Then configure only the intended provider secret and post `/countyforge review`; verify that only the selected provider job receives it, target code is never executed in that job, packet/provenance binding passes, evidence is sanitized, and the check reaches the expected conclusion.
 
-Expected authorized refusals—no run, active work, stale or ineligible retry, an unclaimed cancellation window, and issue-scoped review—update one bounded bot-owned feedback comment with a safe next action. They retain a nonzero machine disposition but do not require maintainers to inspect Actions logs. `/countyforge review` is PR-only because its executable profile is diff-oriented; issue comments remain valid for the future plan/implement/validate control surface.
+Expected authorized refusals—no run, active work, stale or ineligible retry, an unclaimed cancellation window, insufficient planning intake, and issue-scoped review—update one bounded bot-owned feedback comment with a safe next action. They retain a nonzero machine disposition but do not require maintainers to inspect Actions logs. `/countyforge review` is PR-only because its executable profile is diff-oriented; `/countyforge plan` is issue-oriented and requires sufficient structured intake.
 
 ## CLI
 

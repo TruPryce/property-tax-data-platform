@@ -17,8 +17,8 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 |---|---|
 | GitHub Issue intake and OpenSpec planning | Structured intake and accepted OpenSpec workflow |
 | Pre-commit and CI secret and source-artifact scanning | Scaffolded |
-| CountyForge mode-aware runner kernel | Review executable; plan/implement/fix/validate fail closed |
-| CountyForge GitHub control plane | Authorized comment commands, canonical status, cancel/retry, and packet-only review dispatch |
+| CountyForge mode-aware runner kernel | Review and read-only plan executors; implement/fix/validate remain fail closed |
+| CountyForge GitHub control plane | Authorized comment commands, canonical status, cancel/retry, packet review, and bounded OpenSpec planning |
 | Dallas, Collin, Tarrant, Denton, Rockwall, and Ellis source registry | Scaffolded |
 | Hexagonal Python package boundaries | Scaffolded |
 | Immutable Bronze acquisition | Specified, not implemented |

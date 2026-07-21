@@ -65,11 +65,31 @@ def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:
 def test_forbidden_permissions_are_never_granted_write() -> None:
     for name in COUNTYFORGE_WORKFLOWS:
         workflow = _load(name)
-        permission_sets = [workflow.get("permissions", {})]
-        permission_sets.extend(job.get("permissions", {}) for job in workflow["jobs"].values())
-        for permissions in permission_sets:
+        permission_sets = [("workflow", workflow.get("permissions", {}))]
+        permission_sets.extend(
+            (job_name, job.get("permissions", {})) for job_name, job in workflow["jobs"].items()
+        )
+        # The trusted planning publication job is the only narrowly-scoped v1
+        # exception: it creates deterministic planning refs and draft PRs.  No
+        # provider secret or model job receives this permission.
+        for job_name, permissions in permission_sets:
             for permission in FORBIDDEN_WRITE_PERMISSIONS:
+                if (
+                    name == "countyforge-run.yml"
+                    and job_name == "plan-publish"
+                    and permission == "contents"
+                ):
+                    continue
                 assert permissions.get(permission) != "write"
+    plan_publish = _jobs("countyforge-run.yml")["plan-publish"]["permissions"]
+    assert plan_publish == {
+        "actions": "read",
+        "checks": "write",
+        "contents": "write",
+        "issues": "write",
+        "pull-requests": "write",
+    }
+    assert _jobs("countyforge-run.yml")["publish"]["permissions"]["contents"] == "read"
 
 
 def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
@@ -79,6 +99,18 @@ def test_control_and_execution_use_separate_non_cancelling_lanes() -> None:
     assert str(execution["group"]).startswith("countyforge-run-")
     assert command["cancel-in-progress"] == "false"
     assert execution["cancel-in-progress"] == "false"
+
+
+def test_planning_packet_fetches_newest_comments_and_trigger_comment() -> None:
+    text = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    assert "comments?per_page=100&page=$page" in text
+    assert "seq 1 10" in text
+    assert "countyforge-issue-comments.ndjson" in text
+    assert "sort=created" not in text
+    assert "direction=desc" not in text
+    assert "countyforge-trigger-comment.json" in text
+    assert "countyforge-issue-comments-with-trigger.json" in text
+    assert "--trusted-bot-id 41898282" in text
 
 
 def test_canonical_state_mutations_share_one_serialized_lane() -> None:
@@ -95,7 +127,7 @@ def test_canonical_state_mutations_share_one_serialized_lane() -> None:
     assert "pull_request" in command_group
     assert command_jobs["intake"]["concurrency"]["cancel-in-progress"] == "false"
 
-    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish")
+    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish", "plan-publish")
     run_group = run_jobs["claim"]["concurrency"]["group"]
     assert run_group == (
         "countyforge-state-${{ github.repository_id }}-"
@@ -121,9 +153,14 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "recover-claim-failure",
         "mark-running",
         "future-mode",
+        "plan-packet",
+        "plan-validation",
+        "plan-sakana",
+        "plan-openai",
         "review-sakana",
         "review-openai",
         "publish",
+        "plan-publish",
     ):
         text = str(jobs[name])
         assert "path': 'target" not in text
@@ -141,6 +178,7 @@ def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     assert "pytest" not in prepare
     assert " make " not in prepare
     assert "uv sync" not in prepare
+    assert "uv pip install" not in prepare
     assert "target/.github/workflows" not in prepare
     assert "trusted/scripts/dev-loop/prepare-countyforge-target.sh" in prepare
     assert "MAX_PREPARED_BYTES" in prepare
@@ -152,14 +190,30 @@ def test_preparation_has_no_provider_secret_or_target_execution() -> None:
     assert "du -sb" in preparation_script
 
 
+def test_planning_packet_job_uses_trusted_root_without_target_checkout() -> None:
+    job = _jobs("countyforge-run.yml")["plan-packet"]
+    text = str(job)
+    assert job["permissions"] == {"contents": "read", "issues": "read"}
+    assert "uv sync --frozen --package countyforge-github" in text
+    assert "countyforge-prepared-" not in text
+    assert "target/scripts" not in text
+    assert "target/Makefile" not in text
+    assert "OPENAI_API_KEY" not in text
+    assert "SAKANA_API_KEY" not in text
+
+
 def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
     jobs = _jobs("countyforge-run.yml")
-    sakana = str(jobs["review-sakana"])
-    openai = str(jobs["review-openai"])
-    assert "SAKANA_API_KEY" in sakana
-    assert "OPENAI_API_KEY" not in sakana
-    assert "OPENAI_API_KEY" in openai
-    assert "SAKANA_API_KEY" not in openai
+    for sakana_name, openai_name in (
+        ("review-sakana", "review-openai"),
+        ("plan-sakana", "plan-openai"),
+    ):
+        sakana = str(jobs[sakana_name])
+        openai = str(jobs[openai_name])
+        assert "SAKANA_API_KEY" in sakana
+        assert "OPENAI_API_KEY" not in sakana
+        assert "OPENAI_API_KEY" in openai
+        assert "SAKANA_API_KEY" not in openai
     for name in (
         "claim",
         "prepare",
@@ -167,22 +221,55 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         "mark-running",
         "future-mode",
         "publish",
+        "plan-publish",
     ):
         text = str(jobs[name])
         assert "OPENAI_API_KEY" not in text
         assert "SAKANA_API_KEY" not in text
 
 
+def test_planning_image_and_request_build_have_no_provider_secret() -> None:
+    jobs = _jobs("countyforge-run.yml")
+    for name, credential in (
+        ("plan-sakana", "SAKANA_API_KEY"),
+        ("plan-openai", "OPENAI_API_KEY"),
+    ):
+        build_steps = [
+            step
+            for step in jobs[name]["steps"]
+            if "build trusted plan image" in str(step.get("name", ""))
+        ]
+        invoke_steps = [
+            step for step in jobs[name]["steps"] if "Invoke" in str(step.get("name", ""))
+        ]
+        assert len(build_steps) == 1
+        assert credential not in str(build_steps[0])
+        assert len(invoke_steps) == 1
+        assert credential in str(invoke_steps[0])
+
+
 def test_provider_jobs_cannot_mutate_repository_or_status() -> None:
     jobs = _jobs("countyforge-run.yml")
-    for name in ("review-sakana", "review-openai", "future-mode"):
+    for name in (
+        "review-sakana",
+        "review-openai",
+        "plan-sakana",
+        "plan-openai",
+        "future-mode",
+    ):
         permissions = jobs[name]["permissions"]
         assert permissions == {"actions": "read", "contents": "read"}
 
 
 def test_result_artifacts_include_explicit_hidden_evidence_paths() -> None:
     jobs = _jobs("countyforge-run.yml")
-    for name in ("future-mode", "review-sakana", "review-openai"):
+    for name in (
+        "future-mode",
+        "plan-sakana",
+        "plan-openai",
+        "review-sakana",
+        "review-openai",
+    ):
         upload_steps = [
             step
             for step in jobs[name]["steps"]
@@ -197,6 +284,31 @@ def test_publication_uses_fail_closed_result_evidence_resolver() -> None:
     assert "resolve-terminal-result" in publish
     assert "countyforge-exit-code" in publish
     assert ".disposition //" not in publish
+
+
+def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> None:
+    jobs = _jobs("countyforge-run.yml")
+    assert "concurrency" not in jobs["plan-validation"]
+    assert jobs["plan-validation"]["permissions"] == {"contents": "read", "actions": "read"}
+    assert "npx --yes @fission-ai/openspec@1.6.0" in str(jobs["plan-validation"])
+    publish = str(jobs["plan-publish"])
+    assert "verify-publication" in publish
+    assert "countyforge-state-${{ github.repository_id }}" in publish
+    assert "npx --yes @fission-ai/openspec@1.6.0" not in publish
+    assert any(step.get("if") == "always()" for step in jobs["plan-publish"].get("steps", []))
+    assert "PLANNING_VALIDATION_JOB_RESULT" in publish
+    assert 'TERMINAL_STATE" = "succeeded"' in publish
+    publication_step = next(
+        step for step in jobs["plan-publish"]["steps"] if step.get("id") == "planning-publication"
+    )
+    verify_step = next(
+        step for step in jobs["plan-publish"]["steps"] if step.get("id") == "verify-publication"
+    )
+    assert "steps.terminal.outputs.state == 'succeeded'" in verify_step["if"]
+    assert "steps.terminal.outputs.disposition == 'completed'" in verify_step["if"]
+    assert "steps.verify-publication.outcome == 'success'" in publication_step["if"]
+    assert "steps.terminal.outputs.state == 'succeeded'" in publication_step["if"]
+    assert "steps.terminal.outputs.disposition == 'completed'" in publication_step["if"]
 
 
 def test_claim_failure_recovery_has_no_provider_or_target_access() -> None:

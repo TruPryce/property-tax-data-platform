@@ -2,7 +2,7 @@
 
 `countyforge-runner` is the Python 3.12 developer-tool kernel for versioned requests, immutable capability profiles, provider/model compatibility, hard budgets, fail-closed dispatch, and generic evidence.
 
-Only `review.packet-only.v1` executes. It dispatches the existing locked-down review adapter. Plan, implement, fix, and validate requests resolve and explain normally but `run` returns `profile_not_implemented` before credential or executor access.
+`review.packet-only.v1` and `plan.read-only.v1` execute through separate locked-down adapters. Planning receives only a frozen packet/context manifest and emits a strict result; implement, fix, and validate requests still return `profile_not_implemented` before credential or executor access.
 
 ## Commands
 

@@ -19,6 +19,8 @@ def build_run_request(
     target_root: Path,
     packet_path: Path | None = None,
     packet_provenance_path: Path | None = None,
+    planning_packet_path: Path | None = None,
+    context_manifest_path: Path | None = None,
 ) -> JsonObject:
     """Build and resolve one profile-specific request without loading credentials."""
 
@@ -67,6 +69,18 @@ def build_run_request(
         request_input = {
             "selected_finding_ids": ["profile-not-implemented"],
             "expected_head_sha": trigger["target"]["head_sha"],
+        }
+    elif mode == "plan":
+        if planning_packet_path is None or context_manifest_path is None:
+            raise ControlPlaneError(
+                "planning_context_required",
+                "Planning requires a frozen planning packet and context manifest.",
+            )
+        request_input = {
+            "planning_packet_path": str(planning_packet_path),
+            "planning_packet_sha256": file_sha256(planning_packet_path),
+            "context_manifest_path": str(context_manifest_path),
+            "context_manifest_sha256": file_sha256(context_manifest_path),
         }
     runner_trigger: JsonObject = {
         "type": "pull_request" if trigger["target"]["type"] == "pull_request" else "github_issue",

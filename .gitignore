@@ -52,6 +52,8 @@ data/quarantine/
 # Generated AI review artifacts (keep only the directory placeholder)
 .ai/reviews/*
 !.ai/reviews/.gitkeep
+.ai/contexts/*
+!.ai/contexts/.gitkeep
 
 # Editors and operating systems
 .idea/

@@ -506,7 +506,12 @@ class Kernel:
             )
 
     def _resolve_inputs(self, request: JsonObject, profile: JsonObject) -> dict[str, Path]:
-        path_keys = ("packet_path", "packet_provenance_path", "context_manifest_path")
+        path_keys = (
+            "packet_path",
+            "packet_provenance_path",
+            "context_manifest_path",
+            "planning_packet_path",
+        )
         requested = {key: request["input"][key] for key in path_keys if key in request["input"]}
         if not requested:
             return {}
@@ -621,6 +626,72 @@ class Kernel:
         profile: JsonObject,
         canonical_inputs: dict[str, Path],
     ) -> None:
+        if request["mode"] == "plan":
+            packet = canonical_inputs.get("planning_packet_path")
+            manifest = canonical_inputs.get("context_manifest_path")
+            if packet is None or manifest is None:
+                raise KernelError(
+                    "planning_context_required",
+                    "Planning requires a frozen packet and context manifest.",
+                )
+            if file_sha256(packet) != request["input"]["planning_packet_sha256"]:
+                raise KernelError(
+                    "planning_packet_hash_mismatch",
+                    "Planning packet hash does not match the request.",
+                )
+            if file_sha256(manifest) != request["input"]["context_manifest_sha256"]:
+                raise KernelError(
+                    "context_manifest_hash_mismatch",
+                    "Planning context manifest hash does not match the request.",
+                )
+            packet_document = load_json_object(packet, kind="planning packet")
+            manifest_document = load_json_object(manifest, kind="planning context manifest")
+            validate_document(
+                packet_document,
+                self._load_schema("countyforge-planning-packet.schema.json"),
+                kind="planning packet",
+            )
+            validate_document(
+                manifest_document,
+                self._load_schema("countyforge-planning-context-manifest.schema.json"),
+                kind="planning context manifest",
+            )
+            repository = request["repository"]
+            issue = request["trigger"].get("issue_number")
+            expected = {
+                "contract_version": 1,
+                "run_id": str(request.get("run_id", "")),
+                "repository_full_name": repository["full_name"],
+                "target_sha": repository["head_sha"],
+                "issue_number": issue,
+            }
+            if packet_document["run_id"] != expected["run_id"]:
+                raise KernelError(
+                    "planning_provenance_mismatch",
+                    "Planning packet is not bound to the requested run.",
+                )
+            packet_repository = packet_document["repository"]
+            if (
+                packet_repository["full_name"] != expected["repository_full_name"]
+                or packet_repository["target_sha"] != expected["target_sha"]
+                or (issue is not None and packet_document["issue"]["number"] != issue)
+            ):
+                raise KernelError(
+                    "planning_provenance_mismatch",
+                    "Planning packet does not agree with immutable request facts.",
+                )
+            if (
+                manifest_document["run_id"] != expected["run_id"]
+                or manifest_document["repository_full_name"] != expected["repository_full_name"]
+                or manifest_document["target_sha"] != expected["target_sha"]
+                or (issue is not None and manifest_document["issue_number"] != issue)
+                or manifest_document["packet_sha256"] != request["input"]["planning_packet_sha256"]
+            ):
+                raise KernelError(
+                    "planning_provenance_mismatch",
+                    "Planning context manifest does not agree with immutable request facts.",
+                )
+            return
         if request["mode"] != "review":
             return
         packet = canonical_inputs["packet_path"]

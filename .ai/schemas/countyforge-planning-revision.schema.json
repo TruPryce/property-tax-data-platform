@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-planning-revision.schema.json",
+  "title": "CountyForge Planning Revision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "revision", "semantic_identity", "context_sha256", "predecessor_run_id", "predecessor_pr_number", "supersession_reason"],
+  "properties": {"contract_version": {"const": 1}, "revision": {"type": "integer", "minimum": 1}, "semantic_identity": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "context_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "predecessor_run_id": {"type": ["string", "null"], "maxLength": 128}, "predecessor_pr_number": {"type": ["integer", "null"], "minimum": 1}, "supersession_reason": {"type": "string", "maxLength": 256}}
+}

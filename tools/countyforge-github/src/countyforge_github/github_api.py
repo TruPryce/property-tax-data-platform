@@ -42,6 +42,28 @@ class GitHubPort(Protocol):
 
     def update_check(self, repository: str, check_id: int, payload: JsonObject) -> JsonObject: ...
 
+    def list_pull_requests(self, repository: str, *, head: str, base: str) -> list[JsonObject]: ...
+
+    def create_git_blob(self, repository: str, content: str) -> str: ...
+
+    def get_git_commit(self, repository: str, sha: str) -> JsonObject: ...
+
+    def create_git_tree(self, repository: str, base_sha: str, entries: list[JsonObject]) -> str: ...
+
+    def create_git_commit(
+        self, repository: str, message: str, tree_sha: str, parent_sha: str
+    ) -> str: ...
+
+    def create_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
+
+    def update_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
+
+    def create_pull_request(self, repository: str, payload: JsonObject) -> JsonObject: ...
+
+    def update_pull_request(
+        self, repository: str, number: int, payload: JsonObject
+    ) -> JsonObject: ...
+
 
 class GitHubRestClient:
     """Small API adapter; token values never enter exceptions or return values."""
@@ -192,4 +214,74 @@ class GitHubRestClient:
         return cast(
             JsonObject,
             self._request("PATCH", f"/repos/{repository}/check-runs/{check_id}", payload),
+        )
+
+    def list_pull_requests(self, repository: str, *, head: str, base: str) -> list[JsonObject]:
+        value = self._request(
+            "GET", f"/repos/{repository}/pulls?state=open&head={head}&base={base}&per_page=100"
+        )
+        if not isinstance(value, list):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid response."
+            )
+        return value
+
+    def create_git_blob(self, repository: str, content: str) -> str:
+        value = self._request(
+            "POST", f"/repos/{repository}/git/blobs", {"content": content, "encoding": "utf-8"}
+        )
+        if not isinstance(value, dict) or not isinstance(value.get("sha"), str):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid blob response."
+            )
+        return cast(str, value["sha"])
+
+    def get_git_commit(self, repository: str, sha: str) -> JsonObject:
+        value = self._request("GET", f"/repos/{repository}/git/commits/{sha}")
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid commit response."
+            )
+        return value
+
+    def create_git_tree(self, repository: str, base_sha: str, entries: list[JsonObject]) -> str:
+        value = self._request(
+            "POST", f"/repos/{repository}/git/trees", {"base_tree": base_sha, "tree": entries}
+        )
+        if not isinstance(value, dict) or not isinstance(value.get("sha"), str):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid tree response."
+            )
+        return cast(str, value["sha"])
+
+    def create_git_commit(
+        self, repository: str, message: str, tree_sha: str, parent_sha: str
+    ) -> str:
+        value = self._request(
+            "POST",
+            f"/repos/{repository}/git/commits",
+            {"message": message, "tree": tree_sha, "parents": [parent_sha]},
+        )
+        if not isinstance(value, dict) or not isinstance(value.get("sha"), str):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid commit response."
+            )
+        return cast(str, value["sha"])
+
+    def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
+        self._request("POST", f"/repos/{repository}/git/refs", {"ref": ref, "sha": sha})
+
+    def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
+        self._request(
+            "PATCH",
+            f"/repos/{repository}/git/refs/{ref.removeprefix('refs/heads/')}",
+            {"sha": sha, "force": False},
+        )
+
+    def create_pull_request(self, repository: str, payload: JsonObject) -> JsonObject:
+        return cast(JsonObject, self._request("POST", f"/repos/{repository}/pulls", payload))
+
+    def update_pull_request(self, repository: str, number: int, payload: JsonObject) -> JsonObject:
+        return cast(
+            JsonObject, self._request("PATCH", f"/repos/{repository}/pulls/{number}", payload)
         )

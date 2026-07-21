@@ -16,7 +16,12 @@ from countyforge_github.leases import acquire_lease
 from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.orchestrator import process_intake
 from countyforge_github.state import decode_marker, render_status, transition_state
-from countyforge_github.workflow_control import advance_run, claim_run, fail_unclaimed_run
+from countyforge_github.workflow_control import (
+    advance_run,
+    claim_run,
+    fail_unclaimed_run,
+    verify_publication_lease,
+)
 
 BOT_ID = 41898282
 
@@ -208,6 +213,36 @@ def test_authorized_review_dispatches_once_and_deduplicates(
     _assert_authorization(second, "allowed")
     assert len(github.dispatches) == 1
     assert len([item for item in github.comments if "countyforge-status:v1" in item["body"]]) == 1
+
+
+def test_planning_context_change_creates_new_identity_after_terminal_run(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    first_event = event_factory("/countyforge plan")
+    first_event["issue"].pop("pull_request")
+    first_event["issue"]["title"] = "Feature: bounded planning"
+    first_event["issue"]["body"] = "Problem: one. Outcome: plan one."
+    first = _intake(github, first_event, head_sha)
+    comment_id, queued = _canonical(github)
+    assert queued["planning_context_sha256"]
+    failed = transition_state(
+        queued,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": "planning_fixture_failure",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+    changed = copy.deepcopy(first_event)
+    changed["comment"]["id"] = 999
+    changed["issue"]["body"] = "Problem: two. Outcome: plan two."
+    second = _intake(github, changed, head_sha, at="2026-07-19T12:02:00Z")
+    assert second["status"] == "dispatched"
+    assert second["idempotency_key"] != first["idempotency_key"]
 
 
 def test_check_creation_failure_makes_published_queue_retryable(
@@ -473,6 +508,17 @@ def test_issue_review_is_refused_before_paid_dispatch(
     assert github.checks == []
 
 
+def test_plan_is_refused_on_pull_request_targets_before_paid_dispatch(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    result = _intake(github, event_factory("/countyforge plan"), head_sha)
+    assert result["disposition"] == "plan_requires_issue"
+    _assert_authorization(result, "allowed")
+    assert github.dispatches == []
+    assert github.checks == []
+
+
 def test_claim_and_terminal_publication_keep_one_status_comment(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
@@ -558,6 +604,88 @@ def test_owner_cannot_publish_terminal_result_after_lease_expiry(
     assert current["lifecycle_state"] == "running"
 
 
+def test_publication_preflight_requires_owned_live_running_lease(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    event = event_factory("/countyforge plan")
+    event["issue"].pop("pull_request")
+    event["issue"]["title"] = "Feature: bounded planning"
+    event["issue"]["body"] = "Problem: planning is missing. Outcome: create a plan."
+    event["issue"]["labels"] = []
+    result = _intake(github, event, head_sha)
+    comment_id, _ = _canonical(github)
+    claim_run(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        status_comment_id=comment_id,
+        trusted_bot_id=BOT_ID,
+        idempotency_key=result["idempotency_key"],
+        run_id=result["run_id"],
+        workflow_run_id=800,
+        workflow_run_attempt=1,
+        at="2026-07-19T12:01:00Z",
+        nonce="planning-publication-nonce",
+    )
+    running = advance_run(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        status_comment_id=comment_id,
+        trusted_bot_id=BOT_ID,
+        idempotency_key=result["idempotency_key"],
+        run_id=result["run_id"],
+        workflow_run_id=800,
+        nonce="planning-publication-nonce",
+        target_state="running",
+        at="2026-07-19T12:01:01Z",
+        disposition="workflow_running",
+    )
+    verified = verify_publication_lease(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        status_comment_id=comment_id,
+        trusted_bot_id=BOT_ID,
+        idempotency_key=result["idempotency_key"],
+        run_id=result["run_id"],
+        workflow_run_id=800,
+        nonce="planning-publication-nonce",
+        at="2026-07-19T12:02:00Z",
+    )
+    assert verified["revision"] == running["revision"]
+    cancelled = copy.deepcopy(running)
+    cancelled["lifecycle_state"] = "cancel_requested"
+    github.update_comment(
+        "TruPryce/property-tax-data-platform", comment_id, render_status(cancelled)
+    )
+    with pytest.raises(ControlPlaneError, match="no longer active"):
+        verify_publication_lease(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            status_comment_id=comment_id,
+            trusted_bot_id=BOT_ID,
+            idempotency_key=result["idempotency_key"],
+            run_id=result["run_id"],
+            workflow_run_id=800,
+            nonce="planning-publication-nonce",
+            at="2026-07-19T12:02:01Z",
+        )
+    expired = copy.deepcopy(running)
+    expired["lease"]["expires_at"] = "2026-07-19T12:01:30Z"
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(expired))
+    with pytest.raises(ControlPlaneError, match="live lease"):
+        verify_publication_lease(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            status_comment_id=comment_id,
+            trusted_bot_id=BOT_ID,
+            idempotency_key=result["idempotency_key"],
+            run_id=result["run_id"],
+            workflow_run_id=800,
+            nonce="planning-publication-nonce",
+            at="2026-07-19T12:02:01Z",
+        )
+
+
 def test_preclaim_failure_becomes_retryable_terminal_state(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
@@ -598,9 +726,9 @@ def test_stale_reclaim_concludes_old_check_before_new_check(
         nonce="stale-old-check-nonce",
     )
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(expired))
-    plan_event = event_factory("/countyforge plan")
-    plan_event["comment"]["id"] = 914
-    result = _intake(github, plan_event, head_sha, at="2026-07-19T12:02:00Z")
+    next_event = event_factory("/countyforge validate")
+    next_event["comment"]["id"] = 914
+    result = _intake(github, next_event, head_sha, at="2026-07-19T12:02:00Z")
     assert result["status"] == "dispatched"
     assert len(github.checks) == 2
     assert github.checks[0]["status"] == "completed"

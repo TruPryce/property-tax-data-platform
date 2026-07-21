@@ -74,7 +74,7 @@ Fix requests require selected finding IDs and an expected head SHA matching the 
 | Profile | Mode | Repository posture | Execution in Issue #4 |
 |---|---|---|---|
 | `review.packet-only.v1` | review | no repository mount or access | implemented through `.ai/codex/` |
-| `plan.read-only.v1` | plan | future read-only repository/context | `profile_not_implemented` |
+| `plan.read-only.v1` | plan | bounded packet/context, no repository write | executable through the trusted planning adapter |
 | `implement.workspace-write.v1` | implement | future isolated workspace write; arbitrary network disabled | `profile_not_implemented` |
 | `fix.targeted-write.v1` | fix | future selected-finding write at expected SHA; arbitrary network disabled | `profile_not_implemented` |
 | `validate.deterministic.v1` | validate | future repository-declared deterministic checks | `profile_not_implemented` |

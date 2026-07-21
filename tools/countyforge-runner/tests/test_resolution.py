@@ -179,6 +179,46 @@ def test_embedded_packet_provenance_must_agree_with_request(
 
 
 @pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("packet_hash", "planning_packet_hash_mismatch"),
+        ("manifest_hash", "context_manifest_hash_mismatch"),
+        ("run_id", "planning_provenance_mismatch"),
+        ("issue_number", "planning_provenance_mismatch"),
+    ],
+)
+def test_planning_provenance_bindings_fail_closed(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+    mutation: str,
+    code: str,
+) -> None:
+    request = request_factory("plan")
+    if mutation == "packet_hash":
+        request["input"]["planning_packet_sha256"] = "0" * 64
+    elif mutation == "manifest_hash":
+        request["input"]["context_manifest_sha256"] = "0" * 64
+    elif mutation == "run_id":
+        request["run_id"] = "fixture-plan-other"
+    else:
+        request["trigger"]["issue_number"] = 2
+    assert_error(kernel, request, code)
+
+
+def test_planning_manifest_packet_binding_fails_closed(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("plan")
+    manifest_path = Path(str(request["input"]["context_manifest_path"]))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["packet_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+    request["input"]["context_manifest_sha256"] = file_sha256(manifest_path)
+    assert_error(kernel, request, "planning_provenance_mismatch")
+
+
+@pytest.mark.parametrize(
     ("mode", "schema"),
     [
         ("review", "codex-prepr-review.schema.json"),

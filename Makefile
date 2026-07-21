@@ -5,7 +5,8 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 	codex-observability-fixtures codex-observability-validate codex-observability-qa \
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
 	countyforge-request-fixtures countyforge-github-check countyforge-command-fixtures \
-	countyforge-workflow-policy-tests codex-image-openai codex-smoke-openai
+	countyforge-workflow-policy-tests countyforge-plan-check countyforge-plan-fixtures \
+	countyforge-plan-policy-tests countyforge-plan-image codex-image-openai codex-smoke-openai
 
 RUNNER_SHELL_SCRIPTS := \
 	scripts/dev-loop/build-review-packet.sh \
@@ -22,7 +23,9 @@ RUNNER_SHELL_SCRIPTS := \
 	.ai/codex/03-smoke-test.sh \
 	.ai/codex/04-validate-observability-export.sh \
 	.ai/codex/05-test-observability-export-fixtures.sh \
-	.ai/codex/06-qa-observability.sh
+	.ai/codex/06-qa-observability.sh \
+	.ai/codex/07-build-countyforge-plan-image.sh \
+	.ai/codex/08-run-countyforge-plan-docker.sh
 
 sync:
 	$(UV) sync --all-packages --group dev
@@ -148,9 +151,25 @@ countyforge-workflow-policy-tests:
 	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py -q
 	./scripts/dev-loop/test-countyforge-target-preparation.sh
 
+countyforge-plan-check:
+	$(UV) run ruff format --check tools/countyforge-github/src/countyforge_github/planning.py tools/countyforge-github/tests/test_planning.py
+	$(UV) run ruff check tools/countyforge-github/src/countyforge_github/planning.py tools/countyforge-github/tests/test_planning.py
+	$(UV) run mypy tools/countyforge-github/src/countyforge_github/planning.py
+	$(UV) run python3 -m json.tool .ai/schemas/countyforge-plan-result.schema.json >/dev/null
+
+countyforge-plan-fixtures:
+	$(UV) run pytest tools/countyforge-github/tests/test_planning.py tools/countyforge-runner/tests/test_execution.py -q
+
+countyforge-plan-policy-tests:
+	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py tools/countyforge-github/tests/test_requests.py -q
+
+countyforge-plan-image:
+	./.ai/codex/07-build-countyforge-plan-image.sh
+
 # Free and deterministic: no Docker, provider, secret-manager, or collector call.
 runner-contract-tests: countyforge-runner-check countyforge-github-check \
-	countyforge-command-fixtures countyforge-workflow-policy-tests
+	countyforge-command-fixtures countyforge-workflow-policy-tests countyforge-plan-check \
+	countyforge-plan-fixtures countyforge-plan-policy-tests
 	bash -n $(RUNNER_SHELL_SCRIPTS)
 	@for schema in .ai/schemas/*.json .ai/profiles/*.json .ai/providers/*.json .ai/policies/*.json; do \
 		python3 -m json.tool "$$schema" >/dev/null || exit 1; \
