@@ -508,6 +508,17 @@ def test_issue_review_is_refused_before_paid_dispatch(
     assert github.checks == []
 
 
+def test_plan_is_refused_on_pull_request_targets_before_paid_dispatch(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    result = _intake(github, event_factory("/countyforge plan"), head_sha)
+    assert result["disposition"] == "plan_requires_issue"
+    _assert_authorization(result, "allowed")
+    assert github.dispatches == []
+    assert github.checks == []
+
+
 def test_claim_and_terminal_publication_keep_one_status_comment(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
@@ -715,14 +726,9 @@ def test_stale_reclaim_concludes_old_check_before_new_check(
         nonce="stale-old-check-nonce",
     )
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(expired))
-    plan_event = event_factory("/countyforge plan")
-    plan_event["issue"]["title"] = "Feature: document the next planning slice"
-    plan_event["issue"]["body"] = (
-        "Problem: the next slice is not documented.\n"
-        "Outcome: produce a bounded OpenSpec planning change."
-    )
-    plan_event["comment"]["id"] = 914
-    result = _intake(github, plan_event, head_sha, at="2026-07-19T12:02:00Z")
+    next_event = event_factory("/countyforge validate")
+    next_event["comment"]["id"] = 914
+    result = _intake(github, next_event, head_sha, at="2026-07-19T12:02:00Z")
     assert result["status"] == "dispatched"
     assert len(github.checks) == 2
     assert github.checks[0]["status"] == "completed"

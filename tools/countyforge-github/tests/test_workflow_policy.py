@@ -296,7 +296,14 @@ def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> No
     publication_step = next(
         step for step in jobs["plan-publish"]["steps"] if step.get("id") == "planning-publication"
     )
+    verify_step = next(
+        step for step in jobs["plan-publish"]["steps"] if step.get("id") == "verify-publication"
+    )
+    assert "steps.terminal.outputs.state == 'succeeded'" in verify_step["if"]
+    assert "steps.terminal.outputs.disposition == 'completed'" in verify_step["if"]
     assert "steps.verify-publication.outcome == 'success'" in publication_step["if"]
+    assert "steps.terminal.outputs.state == 'succeeded'" in publication_step["if"]
+    assert "steps.terminal.outputs.disposition == 'completed'" in publication_step["if"]
 
 
 def test_claim_failure_recovery_has_no_provider_or_target_access() -> None:

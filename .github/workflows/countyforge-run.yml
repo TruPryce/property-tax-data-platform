@@ -943,7 +943,7 @@ jobs:
 
       - name: Verify live planning publication lease
         id: verify-publication
-        if: inputs.command == 'plan' && needs.plan-validation.result == 'success'
+        if: inputs.command == 'plan' && needs.plan-validation.result == 'success' && steps.terminal.outputs.state == 'succeeded' && steps.terminal.outputs.disposition == 'completed'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -967,7 +967,7 @@ jobs:
       - name: Publish the validated planning draft
         id: planning-publication
         continue-on-error: true
-        if: inputs.command == 'plan' && needs.plan-validation.result == 'success' && steps.verify-publication.outcome == 'success'
+        if: inputs.command == 'plan' && needs.plan-validation.result == 'success' && steps.terminal.outputs.state == 'succeeded' && steps.terminal.outputs.disposition == 'completed' && steps.verify-publication.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}

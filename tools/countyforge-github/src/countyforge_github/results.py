@@ -43,7 +43,7 @@ def resolve_terminal_result(
     raw_disposition = result.get("disposition")
     if not isinstance(raw_disposition, str) or _DISPOSITION.fullmatch(raw_disposition) is None:
         return {"ok": True, "state": "failed", "disposition": "invalid_result_evidence"}
-    if command == "review":
+    if command in {"review", "plan"}:
         exit_code = _read_exit_code(exit_code_path)
         if exit_code is None:
             return {
@@ -58,12 +58,16 @@ def resolve_terminal_result(
                 "disposition": "runner_exit_nonzero",
             }
         summary = result.get("summary")
-        if raw_disposition == "completed" and (
-            result.get("ok") is not True
-            or result.get("mode") != "review"
-            or not isinstance(summary, dict)
-            or summary.get("disposition") != "completed"
-            or summary.get("exit_code") != 0
+        if (
+            command == "review"
+            and raw_disposition == "completed"
+            and (
+                result.get("ok") is not True
+                or result.get("mode") != "review"
+                or not isinstance(summary, dict)
+                or summary.get("disposition") != "completed"
+                or summary.get("exit_code") != 0
+            )
         ):
             return {
                 "ok": True,

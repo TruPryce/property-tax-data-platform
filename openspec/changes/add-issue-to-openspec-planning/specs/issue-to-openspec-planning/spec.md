@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded planning context
-The planning adapter SHALL classify structured issues and construct a strict packet and context manifest from approved repository material and bounded issue discussion. It MUST confine paths after symlink resolution, require regular files, enforce file/byte limits, record hashes and truncation, and label all issue/comment text as untrusted evidence.
+The planning adapter SHALL classify structured issues and construct a strict packet and context manifest from approved repository material and bounded issue discussion. It MUST confine paths after symlink resolution, require regular files, enforce file/byte limits, record hashes and truncation, and label all issue/comment text as untrusted evidence. Packet preparation MUST recompute the bounded context fingerprint from the selected issue/comment window and fail closed if it differs from the intake fingerprint.
 
 #### Scenario: Reject unsafe context
 - **WHEN** a candidate path escapes an approved root, is a symlink to outside material, is non-regular, or exceeds a configured bound
 - **THEN** the candidate is excluded with a reason code and no provider call is started
+
+#### Scenario: Reject context fingerprint drift
+- **WHEN** issue or discussion evidence changes between intake and packet preparation
+- **THEN** packet construction fails with a sanitized context-mismatch disposition before provider execution
 
 ### Requirement: Strict planning result
 The planning result SHALL use a versioned schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail validation.
@@ -38,6 +42,13 @@ The planning adapter SHALL deduplicate issue comments and select a deterministic
 #### Scenario: Trigger comment is retained
 - **WHEN** the triggering command comment is older than the newest 16 comments
 - **THEN** the bounded packet retains that comment alongside the newest discussion and remains deterministically hashable
+
+### Requirement: Issue-only planning intake
+The control plane SHALL accept `/countyforge plan` only for structured issue targets. Pull-request-backed issue comments MUST be refused before target preparation, provider credential access, workflow dispatch, or runner execution.
+
+#### Scenario: Pull-request plan is refused
+- **WHEN** an authorized maintainer posts `/countyforge plan` on a pull request
+- **THEN** the control plane emits a sanitized `plan_requires_issue` refusal and creates no runner request, check, or execution workflow
 
 ### Requirement: Canonical recent-run history
 The canonical bot-owned status comment SHALL remain a single comment and SHALL render a bounded newest-first `Recent runs` table. Each newly archived run MUST preserve immutable display facts including command, profile and version, target head SHA, attempt, lifecycle state, completion/update time, and sanitized evidence reference. Readers MUST render legacy history entries that lack newer display fields using bounded fallback values without invalidating the canonical state.

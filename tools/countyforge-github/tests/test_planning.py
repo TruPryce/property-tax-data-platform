@@ -11,6 +11,7 @@ import pytest
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning import (
     ContextLimits,
+    _select_files,
     build_planning_packet,
     classify_issue,
     materialize_plan,
@@ -229,6 +230,47 @@ def test_packet_retains_trigger_comment_when_window_is_full(tmp_path: Path) -> N
     assert "github://issue/6/comment/2" in comment_paths
 
 
+def test_packet_rejects_context_fingerprint_drift(tmp_path: Path) -> None:
+    root = Path.cwd()
+    trigger = _trigger(root)
+    trigger["planning_context_sha256"] = "0" * 64
+    with pytest.raises(ControlPlaneError, match="context changed"):
+        build_planning_packet(
+            trigger=trigger,
+            issue={
+                "number": 6,
+                "title": "Feature work",
+                "body": "Problem: bounded planning. Outcome: create a plan.",
+                "labels": [],
+            },
+            contract_root=root,
+            output_dir=tmp_path,
+            run_id="context-drift-fixture",
+        )
+
+
+def test_context_selector_excludes_symlink_non_regular_and_broken_paths(tmp_path: Path) -> None:
+    decisions = tmp_path / "docs" / "decisions"
+    decisions.mkdir(parents=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (decisions / "0001-escape.md").symlink_to(outside)
+        (decisions / "0002-directory.md").mkdir()
+        (decisions / "0003-broken.md").symlink_to(tmp_path / "missing.md")
+    except OSError:
+        pytest.skip("symlink fixtures are unavailable on this filesystem")
+    selected, excluded = _select_files(
+        tmp_path,
+        ContextLimits(max_files=20, max_file_bytes=1000, max_total_bytes=20_000),
+    )
+    assert not any("0001-escape.md" == source["path"] for source in selected)
+    reasons = {entry["path"]: entry["reason_code"] for entry in excluded}
+    assert reasons["docs/decisions/0001-escape.md"] == "symlink_escape"
+    assert reasons["docs/decisions/0002-directory.md"] == "non_regular"
+    assert reasons["docs/decisions/0003-broken.md"] == "outside_root"
+
+
 def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
     root = Path.cwd()
     result = _result()
@@ -256,21 +298,8 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
     assert "- [ ] 1.1 Add strict contracts" in (change_root / "tasks.md").read_text(
         encoding="utf-8"
     )
-    subprocess.run(
-        [
-            "npx",
-            "--yes",
-            "@fission-ai/openspec@1.6.0",
-            "validate",
-            "--all",
-            "--strict",
-            "--no-interactive",
-        ],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    # OpenSpec CLI validation runs in the trusted workflow, not this free,
+    # offline-safe fixture suite. The generated structure is checked above.
     assert not (tmp_path / "property_tax_application" / "generated.py").exists()
     with pytest.raises(ControlPlaneError, match="already exists"):
         materialize_plan(result, publication_root=tmp_path, issue_number=6, run_id="plan-again")

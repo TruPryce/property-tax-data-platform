@@ -55,6 +55,7 @@ _REFUSAL_MESSAGES = {
     "review_requires_pull_request": (
         "CountyForge review requires a pull request with an immutable diff target."
     ),
+    "plan_requires_issue": "CountyForge plan requires a structured issue, not a pull request.",
     "insufficient_issue_intake": (
         "CountyForge plan refused: the issue needs a supported type, problem statement, "
         "and outcome."
@@ -493,6 +494,16 @@ def process_intake(
         )
 
     planning_context_sha256: str | None = None
+    if operation == "plan" and isinstance(issue.get("pull_request"), dict):
+        return _refused_result(
+            github,
+            repository=repository,
+            target_number=target_number,
+            trusted_bot_id=trusted_bot_id,
+            reason_code="plan_requires_issue",
+            events=events,
+            authorization=decision,
+        )
     target = _target_facts(event, github, repository, trusted_tool_sha)
     if operation == "plan":
         issue_document = event.get("issue")

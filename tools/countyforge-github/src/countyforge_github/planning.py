@@ -122,7 +122,9 @@ def planning_context_fingerprint(
     effective = limits or ContextLimits()
     title, _ = redact_untrusted_text(str(issue.get("title", ""))[:512])
     raw_body = str(issue.get("body", ""))
-    body = raw_body.encode("utf-8")[: effective.max_issue_bytes].decode("utf-8", "ignore")
+    issue_prefix_bytes = len(f"TITLE (untrusted): {title}\nBODY (untrusted):\n".encode())
+    body_limit = max(min(effective.max_issue_bytes, 20_000 - issue_prefix_bytes), 0)
+    body = raw_body.encode("utf-8")[:body_limit].decode("utf-8", "ignore")
     body, _ = redact_untrusted_text(body)
     issue_record: JsonObject = {
         "number": int(issue.get("number", 0)),
@@ -284,6 +286,18 @@ def build_planning_packet(
         else None
     )
     comment_records = select_planning_comments(comments, trigger_comment_id=trigger_comment_id)
+    computed_context_sha256 = planning_context_fingerprint(
+        issue, comment_records, limits, trigger_comment_id=trigger_comment_id
+    )
+    supplied_context_sha256 = trigger.get("planning_context_sha256")
+    if (
+        supplied_context_sha256 is not None
+        and str(supplied_context_sha256) != computed_context_sha256
+    ):
+        raise ControlPlaneError(
+            "planning_context_mismatch",
+            "Planning context changed between intake and packet preparation.",
+        )
     bounded_comments: list[str] = []
     comment_redactions = 0
     comment_redaction_counts: list[int] = []
@@ -353,12 +367,7 @@ def build_planning_packet(
             "selected_files": len(selected),
             "excluded_candidates": excluded,
         },
-        "planning_context_sha256": str(
-            trigger.get("planning_context_sha256")
-            or planning_context_fingerprint(
-                issue, comment_records, limits, trigger_comment_id=trigger_comment_id
-            )
-        ),
+        "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,
             "count": title_redactions + body_redactions + comment_redactions,
@@ -671,6 +680,7 @@ def publish_plan(
         or manifest["repository_full_name"] != repository
         or manifest["target_sha"] != target_sha
         or manifest["packet_sha256"] != packet_sha
+        or manifest.get("planning_context_sha256") != packet.get("planning_context_sha256")
     ):
         raise ControlPlaneError(
             "planning_provenance_mismatch",

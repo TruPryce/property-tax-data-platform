@@ -39,3 +39,6 @@
 - [x] 5.11 Preserve complete accepted kernel/control-plane guarantees in delta specs and keep legacy canonical planning fields optional.
 - [x] 5.12 Archive immutable command/profile/target facts and render bounded newest-first recent-run history.
 - [x] 5.13 Select planning comments newest-first, retain the triggering comment, and bind late discussion changes into context identity.
+- [x] 5.14 Require successful terminal plan evidence before lease preflight or planning publication.
+- [x] 5.15 Recompute and verify packet context fingerprints and refuse pull-request planning targets.
+- [x] 5.16 Keep free planning fixtures offline-safe and cover plan terminal evidence and unsafe context exclusions.
