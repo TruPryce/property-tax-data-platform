@@ -14,6 +14,7 @@ from countyforge_runner.errors import KernelError
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.identity import retry_idempotency_key
+from countyforge_github.implementation import implementation_revision
 
 MARKER_PREFIX: Final = "<!-- countyforge-status:v1:"
 MARKER_SUFFIX: Final = " -->"
@@ -149,6 +150,28 @@ def initial_state(
         ),
         "planning_result_sha256": None,
         "implementation_eligible": False,
+        "implementation_change_sha256": (
+            str(trigger.get("implementation_change_sha256"))
+            if command == "implement" and trigger.get("implementation_change_sha256")
+            else None
+        ),
+        "implementation_revision": (
+            implementation_revision(
+                str(trigger["implementation_change_sha256"]), str(trigger["target"]["base_sha"])
+            )
+            if command == "implement" and trigger.get("implementation_change_sha256")
+            else (1 if command == "implement" else None)
+        ),
+        "implementation_change_name": (
+            trigger["command"]["arguments"].get("openspec_change")
+            if command == "implement"
+            else None
+        ),
+        "implementation_branch": None,
+        "implementation_pr_number": None,
+        "implementation_completed_task_count": 0,
+        "implementation_incomplete_task_count": 0,
+        "implementation_blocked_task_count": 0,
     }
     return state
 
@@ -336,6 +359,25 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
             f"| Draft PR | {draft_pr} |\n"
             "| Implementation eligible | `false` |\n"
         )
+    implementation_rows = ""
+    if state["command"] == "implement":
+        implementation_rows = (
+            "| OpenSpec change | `"
+            f"{_display_value(state.get('implementation_change_name'), 'Pending', 96)}` |\n"
+            "| Implementation revision | `"
+            f"{_display_value(state.get('implementation_revision'), '1', 12)}` |\n"
+            "| Tasks | `"
+            f"{_display_value(state.get('implementation_completed_task_count'), '0', 12)}` "
+            "completed / `"
+            f"{_display_value(state.get('implementation_incomplete_task_count'), '0', 12)}` "
+            "incomplete / `"
+            f"{_display_value(state.get('implementation_blocked_task_count'), '0', 12)}` "
+            "blocked |\n"
+            "| Implementation branch | `"
+            f"{_display_value(state.get('implementation_branch'), 'Pending', 200)}` |\n"
+            "| Draft PR | `"
+            f"{_display_value(state.get('implementation_pr_number'), 'Pending', 12)}` |\n"
+        )
     recent_rows: list[str] = []
     for entry in reversed(list(state.get("history", []))):
         if not isinstance(entry, dict):
@@ -379,6 +421,7 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         f"| State | `{_display_value(state.get('lifecycle_state'), 'unknown', 32)}` |\n"
         f"| Attempt | `{_display_value(state.get('attempt'), '?', 12)}` |\n"
         f"{planning_rows}"
+        f"{implementation_rows}"
         f"| Updated | `{_display_value(state.get('updated_at'), 'unknown', 40)}` |\n"
         f"| Evidence | {evidence} |"
         f"{guidance}{recent_runs}\n\n{marker}"

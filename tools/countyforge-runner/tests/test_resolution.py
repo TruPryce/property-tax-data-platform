@@ -240,9 +240,12 @@ def test_each_mode_resolves_its_schema(
 def test_mode_cannot_change_after_profile_selection(
     kernel: Kernel, request_factory: Callable[[str], JsonObject]
 ) -> None:
-    request = request_factory("review")
-    request["mode"] = "implement"
-    assert_error(kernel, request, "mode_profile_mismatch")
+    request = request_factory("implement")
+    request["mode"] = "review"
+    request["expected_output_schema"] = "codex-prepr-review.schema.json"
+    request["prompt"] = {"id": "codex-prepr-review", "version": 1}
+    request["reasoning_effort"] = "xhigh"
+    assert_error(kernel, request, "schema_validation_failed")
 
 
 @pytest.mark.parametrize("name", ["tool", "mount", "network_destination", "credential"])

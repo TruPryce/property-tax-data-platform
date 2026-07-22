@@ -467,15 +467,14 @@ def test_changed_head_produces_new_eligible_identity_after_terminal_run(
     assert len(github.dispatches) == 2
 
 
-def test_future_mode_dispatches_without_provider_selection_in_intake(
+def test_implementation_requires_an_originating_issue_before_dispatch(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
     github = FakeGitHub(head_sha)
     result = _intake(github, event_factory("/countyforge implement"), head_sha)
-    assert result["status"] == "dispatched"
-    serialized = str(github.dispatches[0])
-    assert "OPENAI_API_KEY" not in serialized
-    assert "SAKANA_API_KEY" not in serialized
+    assert result["status"] == "refused"
+    assert result["disposition"] == "implement_requires_issue"
+    assert github.dispatches == []
 
 
 def test_authorized_refusals_are_visible_and_reuse_feedback_comment(
@@ -556,6 +555,52 @@ def test_claim_and_terminal_publication_keep_one_status_comment(
     assert github.checks[0]["conclusion"] == "neutral"
     assert len([item for item in github.comments if "countyforge-status:v1" in item["body"]]) == 1
     assert state["run_id"] == published["run_id"]
+
+
+def test_implementation_terminal_publication_records_branch_and_task_counts(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    """Trusted publication metadata is retained in the canonical state."""
+
+    github = FakeGitHub(head_sha)
+    result = _intake(github, event_factory("/countyforge validate"), head_sha)
+    comment_id, _ = _canonical(github)
+    claim_run(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        status_comment_id=comment_id,
+        trusted_bot_id=BOT_ID,
+        idempotency_key=result["idempotency_key"],
+        run_id=result["run_id"],
+        workflow_run_id=801,
+        workflow_run_attempt=1,
+        at="2026-07-19T12:01:00Z",
+        nonce="implementation-publication-nonce",
+    )
+    published = advance_run(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        status_comment_id=comment_id,
+        trusted_bot_id=BOT_ID,
+        idempotency_key=result["idempotency_key"],
+        run_id=result["run_id"],
+        workflow_run_id=801,
+        nonce="implementation-publication-nonce",
+        target_state="succeeded",
+        at="2026-07-19T12:02:00Z",
+        disposition="completed",
+        implementation_change_name="add-safe-change",
+        implementation_revision=2,
+        implementation_branch="countyforge/implement/issue-7-add-safe-change-r2",
+        implementation_pr_number=123,
+        implementation_completed_task_count=3,
+        implementation_incomplete_task_count=1,
+        implementation_blocked_task_count=0,
+    )
+    assert published["implementation_branch"] == "countyforge/implement/issue-7-add-safe-change-r2"
+    assert published["implementation_pr_number"] == 123
+    assert published["implementation_completed_task_count"] == 3
+    assert published["implementation_incomplete_task_count"] == 1
 
 
 def test_owner_cannot_publish_terminal_result_after_lease_expiry(

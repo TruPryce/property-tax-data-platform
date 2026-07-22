@@ -53,6 +53,19 @@ def test_review_executable_posture_matches_profile() -> None:
     assert 'PROVIDER_CREDENTIAL="SAKANA_API_KEY"' in runner
 
 
+def test_plan_sakana_image_uses_sakana_provider_path() -> None:
+    build = Path(".ai/codex/07-build-countyforge-plan-image.sh").read_text(encoding="utf-8")
+
+    assert 'model_provider = "sakana"' in build
+    assert 'model_catalog_json = "/opt/countyforge/fugu.json"' in build
+    assert "COPY fugu.json /opt/countyforge/fugu.json" in build
+    assert "[model_providers.sakana]" in build
+    assert 'base_url = "$PROVIDER_URL"' in build
+    assert 'env_key = "SAKANA_API_KEY"' in build
+    assert "stream_max_retries" in build
+    assert "request_max_retries" in build
+
+
 def test_image_compatibility_gate_precedes_provider_credential_resolution() -> None:
     runner = Path(".ai/codex/02-run-prepr-review-docker.sh").read_text(encoding="utf-8")
     gate = runner.index("# --- Image/model compatibility before credential resolution")

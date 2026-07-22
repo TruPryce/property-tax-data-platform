@@ -161,6 +161,106 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
         + "\n",
         encoding="utf-8",
     )
+    implementation_packet = plan_fixture_root / "countyforge-implementation-packet.json"
+    implementation_packet.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+                "issue": {"number": 1, "title": "Implementation", "body": "Bounded task"},
+                "change": {
+                    "name": "build-mode-aware-runner-kernel",
+                    "sha256": "a" * 64,
+                    "files": [
+                        "openspec/changes/build-mode-aware-runner-kernel/.openspec.yaml",
+                        "openspec/changes/build-mode-aware-runner-kernel/proposal.md",
+                        "openspec/changes/build-mode-aware-runner-kernel/design.md",
+                        "openspec/changes/build-mode-aware-runner-kernel/tasks.md",
+                    ],
+                },
+                "trusted_base_sha": head_sha,
+                "run_id": "fixture-implement",
+                "implementation_revision": 1,
+                "eligibility": {
+                    "contract_version": 1,
+                    "eligible": True,
+                    "repository": "TruPryce/property-tax-data-platform",
+                    "issue_number": 1,
+                    "change_name": "build-mode-aware-runner-kernel",
+                    "change_sha256": "a" * 64,
+                    "trusted_base_sha": head_sha,
+                    "planning_pr_merged": True,
+                    "approval_actor_id": 42,
+                    "blocking_reasons": [],
+                },
+                "sources": [],
+                "tasks": [
+                    {
+                        "task_id": "1.1",
+                        "description": "Implement the fixture task",
+                        "status": "incomplete",
+                        "allowed_paths": ["tools"],
+                        "required_checks": ["make check"],
+                        "risk": "normal",
+                    }
+                ],
+                "policies": {
+                    "path_policy": "countyforge-implementation-paths.v1",
+                    "network": "disabled",
+                    "command_registry": "countyforge-implementation-commands.v1",
+                },
+                "non_goals": ["merge"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    implementation_manifest = plan_fixture_root / "countyforge-implementation-context-manifest.json"
+    implementation_manifest.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "repository": "TruPryce/property-tax-data-platform",
+                "issue_number": 1,
+                "change_name": "build-mode-aware-runner-kernel",
+                "trusted_base_sha": head_sha,
+                "run_id": "fixture-implement",
+                "implementation_revision": 1,
+                "packet_sha256": _sha256(implementation_packet),
+                "sources": [],
+                "excluded_candidates": [],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    implementation_tasks = plan_fixture_root / "countyforge-implementation-task-plan.json"
+    implementation_tasks.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "run_id": "fixture-implement",
+                "change_name": "build-mode-aware-runner-kernel",
+                "tasks": [
+                    {
+                        "task_id": "1.1",
+                        "description": "Implement the fixture task",
+                        "allowed_paths": ["tools"],
+                        "required_checks": ["make check"],
+                        "prerequisites": [],
+                        "risk": "normal",
+                        "status": "incomplete",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (plan_fixture_root / "workspace").mkdir()
 
     def build(mode: str = "review") -> JsonObject:
         facts = MODE_FACTS[mode]
@@ -183,6 +283,16 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
             input_facts = {
                 "selected_finding_ids": ["finding-1"],
                 "expected_head_sha": head_sha,
+            }
+        if mode == "implement":
+            input_facts = {
+                "implementation_packet_path": str(implementation_packet),
+                "implementation_packet_sha256": _sha256(implementation_packet),
+                "implementation_manifest_path": str(implementation_manifest),
+                "implementation_manifest_sha256": _sha256(implementation_manifest),
+                "implementation_task_plan_path": str(implementation_tasks),
+                "implementation_task_plan_sha256": _sha256(implementation_tasks),
+                "workspace_path": str(plan_fixture_root / "workspace"),
             }
         return {
             "contract_version": 1,

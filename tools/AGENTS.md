@@ -14,7 +14,7 @@
 - Never turn `review.packet-only.v1` into a repository-mounted or code-writing profile.
 - Reject unknown contract fields and capability, credential, artifact, provider, model, version, or budget expansion before execution.
 - Never read, emit, or log credential values. Tests use sentinels only.
-- `plan.read-only.v1` is executable only through the Issue #6 bounded planning adapter and trusted OpenSpec materializer. Implement, fix, and validate remain unavailable until their owning OpenSpec change and issue add separate executor boundaries.
+- `plan.read-only.v1` and `implement.workspace-write.v1` are executable only through their bounded, trusted adapters. Fix and validate remain unavailable until their owning OpenSpec change and issue add separate executor boundaries. The implementation model never receives GitHub publication credentials.
 
 ## Validation
 
@@ -25,6 +25,9 @@ make countyforge-workflow-policy-tests
 make countyforge-plan-check
 make countyforge-plan-fixtures
 make countyforge-plan-policy-tests
+make countyforge-implement-check
+make countyforge-implement-fixtures
+make countyforge-implement-policy-tests
 make runner-contract-tests
 ```
 

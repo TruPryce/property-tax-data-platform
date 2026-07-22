@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
 from countyforge_runner.resolver import Kernel
 
 
-@pytest.mark.parametrize("mode", ["implement", "fix", "validate"])
+@pytest.mark.parametrize("mode", ["fix", "validate"])
 def test_unimplemented_profiles_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -33,6 +34,57 @@ def test_unimplemented_profiles_fail_closed(
     run_dir = tmp_path / "evidence" / mode / f"fixture-{mode}"
     all_text = "\n".join(path.read_text(encoding="utf-8") for path in run_dir.iterdir())
     assert sentinel not in all_text
+
+
+def test_implemented_profile_requires_frozen_context_before_provider_execution(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    kernel = Kernel()
+    request = request_factory("implement")
+    request["input"].pop("implementation_packet_path")
+    with pytest.raises(KernelError, match="schema_validation_failed"):
+        kernel.resolve(request)
+
+
+def test_implementation_dispatches_isolated_adapter_with_structured_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = tmp_path / "implementation-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'test -n "${OPENAI_API_KEY:-}"\n'
+        'test -z "${SAKANA_API_KEY:-}"\n'
+        'mkdir -p "$OUT_DIR"\n'
+        "cat > \"$OUT_DIR/countyforge-implementation-result.json\" <<'JSON'\n"
+        '{"contract_version":1,"status":"partial","repository":"TruPryce/property-tax-data-platform",'
+        '"issue_number":1,"openspec_change":"build-mode-aware-runner-kernel",'
+        '"run_id":"fixture-implement","implementation_revision":1,"base_sha":"'
+        + subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        + '","profile":{"id":"implement.workspace-write.v1","version":1,"provider":"openai",'
+        '"model_ref":"openai.gpt-5.6","reasoning_effort":"high"},"completed_task_ids":[],'
+        '"incomplete_task_ids":["1.1"],"blocked_task_ids":[],"files_created":[],"files_modified":[],'
+        '"files_deleted":[],"diff":{"files":0,"bytes_added":0,"bytes_deleted":0},"tests_run":[],'
+        '"command_evidence":[],"validation_results":[],"deviations":[],"residual_risks":[],'
+        '"dependency_changes":[],"migration_changes":[],"security_sensitive_changes":[],'
+        '"publication_eligibility":"trusted_validation_required","blocked_reasons":[],"output_artifact_hashes":{}}\n'
+        "JSON\n",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    monkeypatch.setenv("OPENAI_API_KEY", "implementation-fixture-secret")
+    kernel = Kernel()
+    resolved = kernel.resolve(request_factory("implement"))
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", implementation_adapter=adapter
+    ).run(resolved)
+    assert exit_code == 0
+    assert document["ok"] is True
+    assert document["mode"] == "implement"
+    assert document["implementation"]["incomplete_task_ids"] == ["1.1"]
 
 
 def test_unimplemented_execution_has_no_global_credential_lookup() -> None:

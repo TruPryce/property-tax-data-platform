@@ -28,6 +28,7 @@ case "$REASONING_EFFORT" in
   *) echo "error: unsupported planning reasoning effort" >&2; exit 2 ;;
 esac
 ROOT="$(git rev-parse --show-toplevel)"
+FUGU_SRC="$ROOT/.ai/codex/fugu"
 PROFILE_SHA="$(python3 - "$ROOT/.ai/profiles/plan.read-only.v1.json" <<'PY'
 import hashlib, json, sys
 print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1])), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest())
@@ -35,9 +36,18 @@ PY
 )"
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
+cp "$FUGU_SRC/fugu.json" "$CTX/fugu.json"
 cat > "$CTX/config.toml" <<EOF
 model = "$MODEL"
 model_reasoning_effort = "$REASONING_EFFORT"
+EOF
+if [ "$PROVIDER" = "sakana" ]; then
+cat >> "$CTX/config.toml" <<'EOF'
+model_provider = "sakana"
+model_catalog_json = "/opt/countyforge/fugu.json"
+EOF
+fi
+cat >> "$CTX/config.toml" <<EOF
 [tools]
 web_search = false
 [features]
@@ -58,6 +68,9 @@ name = "Sakana API"
 base_url = "$PROVIDER_URL"
 env_key = "SAKANA_API_KEY"
 wire_api = "responses"
+stream_idle_timeout_ms = 7200000
+stream_max_retries = 5
+request_max_retries = 4
 EOF
 fi
 cat > "$CTX/entrypoint.sh" <<'EOF'
@@ -79,8 +92,13 @@ docker build --pull \
   -t "$IMAGE" -f - "$CTX" <<'DOCKERFILE'
 FROM node:22-bookworm-slim
 ARG CODEX_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 LABEL dev.trupryce.property-tax-data-platform.codex-cli-version="${CODEX_VERSION}"
+COPY fugu.json /opt/countyforge/fugu.json
 COPY config.toml /opt/countyforge/config.toml
 COPY entrypoint.sh /usr/local/bin/codex-entrypoint.sh
 RUN chmod +x /usr/local/bin/codex-entrypoint.sh

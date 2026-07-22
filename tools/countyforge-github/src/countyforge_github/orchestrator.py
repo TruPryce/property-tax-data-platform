@@ -19,6 +19,7 @@ from countyforge_github.control import (
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
 from countyforge_github.identity import build_trigger, iso_now, semantic_idempotency_key
+from countyforge_github.implementation import implementation_change_hash
 from countyforge_github.leases import mark_expired_stale
 from countyforge_github.observability import (
     control_event,
@@ -56,6 +57,9 @@ _REFUSAL_MESSAGES = {
         "CountyForge review requires a pull request with an immutable diff target."
     ),
     "plan_requires_issue": "CountyForge plan requires a structured issue, not a pull request.",
+    "implement_requires_issue": (
+        "CountyForge implement requires an originating issue, not a pull request."
+    ),
     "insufficient_issue_intake": (
         "CountyForge plan refused: the issue needs a supported type, problem statement, "
         "and outcome."
@@ -494,6 +498,7 @@ def process_intake(
         )
 
     planning_context_sha256: str | None = None
+    implementation_change_sha256: str | None = None
     if operation == "plan" and isinstance(issue.get("pull_request"), dict):
         return _refused_result(
             github,
@@ -504,6 +509,32 @@ def process_intake(
             events=events,
             authorization=decision,
         )
+    if operation == "implement" and isinstance(issue.get("pull_request"), dict):
+        return _refused_result(
+            github,
+            repository=repository,
+            target_number=target_number,
+            trusted_bot_id=trusted_bot_id,
+            reason_code="implement_requires_issue",
+            events=events,
+            authorization=decision,
+        )
+    if operation == "implement":
+        change_name = command["arguments"].get("openspec_change")
+        try:
+            implementation_change_sha256 = implementation_change_hash(
+                resolved.contract_root, str(change_name)
+            )
+        except ControlPlaneError:
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="openspec_change_not_found",
+                events=events,
+                authorization=decision,
+            )
     target = _target_facts(event, github, repository, trusted_tool_sha)
     if operation == "plan":
         issue_document = event.get("issue")
@@ -563,6 +594,7 @@ def process_intake(
         workflow_run_attempt=workflow_run_attempt,
         delivery_id=delivery_id,
         planning_context_sha256=planning_context_sha256,
+        implementation_change_sha256=implementation_change_sha256,
         timestamp=timestamp,
         contracts=resolved,
     )

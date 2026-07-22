@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-implementation-eligibility.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "eligible", "repository", "issue_number", "change_name", "change_sha256", "trusted_base_sha", "planning_pr_merged", "approval_actor_id", "blocking_reasons"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "eligible": {"type": "boolean"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "change_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trusted_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "planning_pr_merged": {"type": "boolean"},
+    "approval_actor_id": {"type": ["integer", "null"], "minimum": 1},
+    "blocking_reasons": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}
+  }
+}

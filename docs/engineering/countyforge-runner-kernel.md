@@ -20,7 +20,8 @@ tools/countyforge-runner/       schema validation, resolution, budgets, dispatch
       |
       +---- review only ----> .ai/codex/ packet-only container adapter
       |
-      +---- future modes ----> profile_not_implemented before credentials/executor
+      +---- fix/validate ----> profile_not_implemented before credentials/executor
+      +---- implement -----> isolated workspace-write adapter
       |
       v
 .ai/reviews/                    ignored generic and legacy run evidence
@@ -75,13 +76,13 @@ Fix requests require selected finding IDs and an expected head SHA matching the 
 |---|---|---|---|
 | `review.packet-only.v1` | review | no repository mount or access | implemented through `.ai/codex/` |
 | `plan.read-only.v1` | plan | bounded packet/context, no repository write | executable through the trusted planning adapter |
-| `implement.workspace-write.v1` | implement | future isolated workspace write; arbitrary network disabled | `profile_not_implemented` |
+| `implement.workspace-write.v1` | implement | ephemeral workspace write; arbitrary network disabled | executable through trusted handoff |
 | `fix.targeted-write.v1` | fix | future selected-finding write at expected SHA; arbitrary network disabled | `profile_not_implemented` |
 | `validate.deterministic.v1` | validate | future repository-declared deterministic checks | `profile_not_implemented` |
 
 Profiles are strict JSON documents under `.ai/profiles/`. Canonical compact JSON with sorted keys is SHA-256 hashed. Tools, mounts, network, credential names, writable paths, image identity, budgets, or any other posture change therefore creates a different capability hash.
 
-Future profiles describe the capability boundary needed by Issues #6–#8; they do not grant that capability today. A runtime flag cannot change `implementation_state`.
+Fix and validate profiles describe future capability boundaries and remain fail-closed. The implementation profile is executable only with a trusted accepted-plan packet, isolated workspace, and the Issue #7 publication workflow; a runtime flag cannot expand its policy.
 
 ## Provider and Model Compatibility
 
@@ -173,9 +174,8 @@ For Issue #4 acceptance on 2026-07-19, the Sakana `fugu-ultra` review path ran s
 
 ## Integration and Deferred Work
 
-Issue #5 adds the GitHub command, authorization, dispatch, and run-control adapter without adding
-an executor to the kernel. Issues #6 and #7 own executable planning and isolated implementation
-workflows. Issue #8 owns targeted fixes and review convergence. Issues #9 and #10 own expanded
+Issue #5 adds the GitHub command, authorization, dispatch, and run-control adapter. Issue #6 owns
+bounded executable planning and Issue #7 owns isolated implementation workflows. Issue #8 owns targeted fixes and review convergence. Issues #9 and #10 own expanded
 durable operational evidence and specialist routing. None of those future execution capabilities
 is implied by the GitHub adapter.
 

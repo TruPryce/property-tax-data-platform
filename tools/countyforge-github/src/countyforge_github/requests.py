@@ -21,6 +21,10 @@ def build_run_request(
     packet_provenance_path: Path | None = None,
     planning_packet_path: Path | None = None,
     context_manifest_path: Path | None = None,
+    implementation_packet_path: Path | None = None,
+    implementation_manifest_path: Path | None = None,
+    implementation_task_plan_path: Path | None = None,
+    workspace_path: Path | None = None,
 ) -> JsonObject:
     """Build and resolve one profile-specific request without loading credentials."""
 
@@ -82,6 +86,27 @@ def build_run_request(
             "context_manifest_path": str(context_manifest_path),
             "context_manifest_sha256": file_sha256(context_manifest_path),
         }
+    elif mode == "implement":
+        if (
+            implementation_packet_path is None
+            or implementation_manifest_path is None
+            or implementation_task_plan_path is None
+            or workspace_path is None
+        ):
+            raise ControlPlaneError(
+                "implementation_context_required",
+                "Implementation requires a frozen packet, manifest, task plan, and workspace.",
+            )
+        else:
+            request_input = {
+                "implementation_packet_path": str(implementation_packet_path),
+                "implementation_packet_sha256": file_sha256(implementation_packet_path),
+                "implementation_manifest_path": str(implementation_manifest_path),
+                "implementation_manifest_sha256": file_sha256(implementation_manifest_path),
+                "implementation_task_plan_path": str(implementation_task_plan_path),
+                "implementation_task_plan_sha256": file_sha256(implementation_task_plan_path),
+                "workspace_path": str(workspace_path),
+            }
     runner_trigger: JsonObject = {
         "type": "pull_request" if trigger["target"]["type"] == "pull_request" else "github_issue",
         "actor": {"id": str(trigger["actor"]["id"])},

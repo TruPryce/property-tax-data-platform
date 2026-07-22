@@ -62,6 +62,9 @@ def sanitized_request(resolved: ResolvedRun) -> JsonObject:
         "packet_provenance_sha256",
         "planning_packet_sha256",
         "context_manifest_sha256",
+        "implementation_packet_sha256",
+        "implementation_manifest_sha256",
+        "implementation_task_plan_sha256",
         "selected_finding_ids",
         "expected_head_sha",
     ):

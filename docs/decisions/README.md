@@ -13,6 +13,7 @@ An ADR records context, decision, alternatives, consequences, status, date, and 
 | [ADR-0005](0005-mode-aware-runner-kernel.md) | Accepted | Use a developer-tool kernel with immutable mode profiles while preserving the isolated packet reviewer. |
 | [ADR-0006](0006-github-native-countyforge-control-plane.md) | Accepted | Use GitHub Actions, two trusted/target roots, and canonical bot-owned state for CountyForge commands. |
 | [ADR-0007](0007-issue-to-openspec-planning.md) | Accepted | Produce bounded, human-approved OpenSpec planning drafts through trusted publication. |
+| [ADR-0008](0008-isolated-openspec-to-code-implementation.md) | Accepted | Execute approved OpenSpec tasks in an isolated workspace with trusted validation and draft-only publication. |
 
 ## Related
 

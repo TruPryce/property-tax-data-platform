@@ -76,7 +76,7 @@ def test_forbidden_permissions_are_never_granted_write() -> None:
             for permission in FORBIDDEN_WRITE_PERMISSIONS:
                 if (
                     name == "countyforge-run.yml"
-                    and job_name == "plan-publish"
+                    and job_name in {"plan-publish", "implementation-publish"}
                     and permission == "contents"
                 ):
                     continue
@@ -89,6 +89,8 @@ def test_forbidden_permissions_are_never_granted_write() -> None:
         "issues": "write",
         "pull-requests": "write",
     }
+    implementation_publish = _jobs("countyforge-run.yml")["implementation-publish"]["permissions"]
+    assert implementation_publish == plan_publish
     assert _jobs("countyforge-run.yml")["publish"]["permissions"]["contents"] == "read"
 
 
@@ -127,7 +129,14 @@ def test_canonical_state_mutations_share_one_serialized_lane() -> None:
     assert "pull_request" in command_group
     assert command_jobs["intake"]["concurrency"]["cancel-in-progress"] == "false"
 
-    state_jobs = ("claim", "recover-claim-failure", "mark-running", "publish", "plan-publish")
+    state_jobs = (
+        "claim",
+        "recover-claim-failure",
+        "mark-running",
+        "publish",
+        "plan-publish",
+        "implementation-publish",
+    )
     run_group = run_jobs["claim"]["concurrency"]["group"]
     assert run_group == (
         "countyforge-state-${{ github.repository_id }}-"
@@ -161,6 +170,7 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "review-openai",
         "publish",
         "plan-publish",
+        "implementation-publish",
     ):
         text = str(jobs[name])
         assert "path': 'target" not in text
@@ -214,6 +224,13 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         assert "OPENAI_API_KEY" not in sakana
         assert "OPENAI_API_KEY" in openai
         assert "SAKANA_API_KEY" not in openai
+    implementation = str(jobs["implementation-openai"])
+    assert "OPENAI_API_KEY" in implementation
+    assert "SAKANA_API_KEY" not in implementation
+    assert jobs["implementation-openai"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+    }
     for name in (
         "claim",
         "prepare",
@@ -222,6 +239,9 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         "future-mode",
         "publish",
         "plan-publish",
+        "implementation-packet",
+        "implementation-validation",
+        "implementation-publish",
     ):
         text = str(jobs[name])
         assert "OPENAI_API_KEY" not in text
@@ -255,6 +275,7 @@ def test_provider_jobs_cannot_mutate_repository_or_status() -> None:
         "review-openai",
         "plan-sakana",
         "plan-openai",
+        "implementation-openai",
         "future-mode",
     ):
         permissions = jobs[name]["permissions"]

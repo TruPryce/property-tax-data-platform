@@ -65,7 +65,9 @@ def _parse_arguments(command: str, raw: str | None) -> JsonObject:
     pieces = raw.split()
     if command not in EXECUTION_COMMANDS:
         raise ValueError("arguments_not_allowed")
-    if len(pieces) == 2 and pieces[0].casefold() == "--openspec-change":
+    if command == "implement" and len(pieces) == 1 and not pieces[0].startswith("-"):
+        change = pieces[0]
+    elif len(pieces) == 2 and pieces[0].casefold() == "--openspec-change":
         change = pieces[1]
     elif len(pieces) == 1 and pieces[0].casefold().startswith("--openspec-change="):
         change = pieces[0].split("=", 1)[1]

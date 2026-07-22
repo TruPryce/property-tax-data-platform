@@ -4,7 +4,7 @@
 
 GitHub Issue and pull-request comments provide the authenticated remote control surface for the CountyForge runner kernel. The accepted behavior is the [`github-agent-control-plane` OpenSpec capability](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md). This guide explains the implementation and trust boundaries; [GitHub operations](../operations/countyforge-github-operations.md) owns enablement and recovery procedures.
 
-`review.packet-only.v1` and `plan.read-only.v1` execute. Plan remains read-only and publishes only trusted, validated OpenSpec planning drafts; implement, fix, and validate commands remain fail-closed with the kernel's `profile_not_implemented` outcome.
+`review.packet-only.v1`, `plan.read-only.v1`, and `implement.workspace-write.v1` execute through separate profile boundaries. Implementation requires an accepted merged planning change and publishes only a trusted draft PR; fix and validate remain fail-closed with the kernel's `profile_not_implemented` outcome.
 
 ## Command Grammar
 
@@ -84,15 +84,19 @@ The provider job receives a bounded bare target repository so it can validate im
 | `review-sakana` | Build trusted Sakana image and invoke packet reviewer | `SAKANA_API_KEY` only on invocation |
 | `review-openai` | Build trusted OpenAI image and invoke packet reviewer | `OPENAI_API_KEY` only on invocation |
 | `plan-sakana` / `plan-openai` | Invoke the bounded read-only planning profile | Selected provider key only on invocation |
-| `future-mode` | Invoke kernel for implement/fix/validate and require `profile_not_implemented` | None |
+| `future-mode` | Invoke kernel for fix/validate and require `profile_not_implemented` | None |
 | `plan-validation` | Materialize and validate the bounded planning draft outside the state lane | None |
 | `plan-publish` | Verify the live planning lease, publish deterministic planning refs/draft PRs, and release terminal lease | None |
+| `implementation-packet` | Verify merged-plan eligibility and build bounded packet/context/task artifacts | None |
+| `implementation-openai` | Run the implementation model in an ephemeral workspace with no publication permission | `OPENAI_API_KEY` only on invocation |
+| `implementation-validation` | Reconstruct a clean trusted worktree, enforce artifact/path policy, and run deterministic gates | None |
+| `implementation-publish` | Verify validation and live lease, create/update a deterministic draft implementation PR, and finalize state | None |
 | `publish` | Map sanitized non-planning result to canonical comment/check and release terminal lease | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
 All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `plan-publish` job may use `contents: write`, and it receives no provider secret. Planning materialization and validation run in the separate read-only `plan-validation` job outside the state lane; the write-capable lane performs only the live lease check, deterministic Git data API mutation, and canonical finalization.
 
-The trusted publication job runs the repository-pinned `npx --yes @fission-ai/openspec@1.6.0` validator before any Git data API mutation. This is an intentional v1 supply-chain trade-off: the package version is pinned, execution occurs from the trusted checkout, and no provider secret is present. Future hardening may move validation into a pre-provisioned trusted image, but must preserve the same no-secret and trusted-root boundary.
+The read-only `plan-validation` and `implementation-validation` jobs run the repository-pinned `npx --yes @fission-ai/openspec@1.6.0` validator before any Git data API mutation. This is an intentional v1 supply-chain trade-off: the package version is pinned, execution occurs from the trusted checkout, and no provider secret is present. The write-capable publication jobs perform only live-lease checks, deterministic Git data API mutation, and canonical finalization. Future hardening may move validation into a pre-provisioned trusted image, but must preserve the same no-secret and trusted-root boundary.
 
 ## Trigger and State Contracts
 

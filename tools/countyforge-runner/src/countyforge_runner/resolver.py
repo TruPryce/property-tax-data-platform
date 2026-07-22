@@ -511,6 +511,9 @@ class Kernel:
             "packet_provenance_path",
             "context_manifest_path",
             "planning_packet_path",
+            "implementation_packet_path",
+            "implementation_manifest_path",
+            "implementation_task_plan_path",
         )
         requested = {key: request["input"][key] for key in path_keys if key in request["input"]}
         if not requested:
@@ -690,6 +693,70 @@ class Kernel:
                 raise KernelError(
                     "planning_provenance_mismatch",
                     "Planning context manifest does not agree with immutable request facts.",
+                )
+            return
+        if request["mode"] == "implement":
+            packet = canonical_inputs.get("implementation_packet_path")
+            manifest = canonical_inputs.get("implementation_manifest_path")
+            task_plan = canonical_inputs.get("implementation_task_plan_path")
+            if packet is None or manifest is None or task_plan is None:
+                raise KernelError(
+                    "implementation_context_required",
+                    "Implementation requires a frozen packet, manifest, task plan, and workspace.",
+                )
+            input_facts = request["input"]
+            for path, key in (
+                (packet, "implementation_packet_sha256"),
+                (manifest, "implementation_manifest_sha256"),
+                (task_plan, "implementation_task_plan_sha256"),
+            ):
+                if file_sha256(path) != input_facts[key]:
+                    raise KernelError(
+                        "implementation_input_hash_mismatch",
+                        "Implementation input hash does not match the request.",
+                    )
+            packet_document = load_json_object(packet, kind="implementation packet")
+            manifest_document = load_json_object(manifest, kind="implementation context manifest")
+            task_document = load_json_object(task_plan, kind="implementation task plan")
+            validate_document(
+                packet_document,
+                self._load_schema("countyforge-implementation-packet.schema.json"),
+                kind="implementation packet",
+            )
+            validate_document(
+                manifest_document,
+                self._load_schema("countyforge-implementation-context-manifest.schema.json"),
+                kind="implementation context manifest",
+            )
+            validate_document(
+                task_document,
+                self._load_schema("countyforge-implementation-task-plan.schema.json"),
+                kind="implementation task plan",
+            )
+            expected_issue = request["trigger"].get("issue_number")
+            if (
+                packet_document["run_id"] != str(request.get("run_id", ""))
+                or packet_document["repository"]["full_name"] != request["repository"]["full_name"]
+                or packet_document["trusted_base_sha"] != request["repository"]["base_sha"]
+                or packet_document["change"]["name"] != request["openspec_change"]
+                or (
+                    request["trigger"].get("implementation_change_sha256") is not None
+                    and packet_document["change"]["sha256"]
+                    != request["trigger"]["implementation_change_sha256"]
+                )
+                or (
+                    expected_issue is not None
+                    and packet_document["issue"]["number"] != expected_issue
+                )
+                or manifest_document["packet_sha256"] != file_sha256(packet)
+                or manifest_document["run_id"] != str(request.get("run_id", ""))
+                or task_document["run_id"] != str(request.get("run_id", ""))
+                or manifest_document["implementation_revision"]
+                != packet_document["implementation_revision"]
+            ):
+                raise KernelError(
+                    "implementation_provenance_mismatch",
+                    "Implementation packet provenance does not agree with immutable request facts.",
                 )
             return
         if request["mode"] != "review":

@@ -20,6 +20,13 @@ from countyforge_github.identity import (
     effective_idempotency_key,
     execution_run_id,
 )
+from countyforge_github.implementation import (
+    build_implementation_packet,
+    publish_implementation,
+    validate_implementation_artifact,
+    validate_implementation_result,
+    validate_implementation_tasks,
+)
 from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.observability import outcome_for_state, state_event, with_audit
 from countyforge_github.orchestrator import process_intake
@@ -86,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--packet-provenance", type=Path)
     request.add_argument("--planning-packet", type=Path)
     request.add_argument("--context-manifest", type=Path)
+    request.add_argument("--implementation-packet", type=Path)
+    request.add_argument("--implementation-manifest", type=Path)
+    request.add_argument("--implementation-task-plan", type=Path)
+    request.add_argument("--workspace", type=Path)
 
     planning_packet = subparsers.add_parser("build-planning-packet")
     _file(planning_packet, "trigger")
@@ -94,11 +105,45 @@ def build_parser() -> argparse.ArgumentParser:
     planning_packet.add_argument("--output-dir", type=Path, required=True)
     planning_packet.add_argument("--trusted-bot-id", type=int, default=DEFAULT_TRUSTED_BOT_ID)
 
+    implementation_packet = subparsers.add_parser("build-implementation-packet")
+    _file(implementation_packet, "trigger")
+    _file(implementation_packet, "issue")
+    implementation_packet.add_argument("--change-name", required=True)
+    implementation_packet.add_argument("--output-dir", type=Path, required=True)
+    implementation_packet.add_argument("--planning-pr-merged", action="store_true")
+    implementation_packet.add_argument("--approval-actor-id", type=int)
+
     materialize = subparsers.add_parser("materialize-plan")
     _file(materialize, "result")
     materialize.add_argument("--publication-root", type=Path, required=True)
     materialize.add_argument("--issue-number", type=int, required=True)
     materialize.add_argument("--run-id", required=True)
+
+    implementation_result = subparsers.add_parser("validate-implementation-result")
+    _file(implementation_result, "result")
+    _file(implementation_result, "task-plan")
+    implementation_result.add_argument("--expected-revision", type=int)
+    implementation_result.add_argument("--workspace", type=Path)
+
+    implementation_artifact = subparsers.add_parser("validate-implementation-artifact")
+    _file(implementation_artifact, "result")
+    _file(implementation_artifact, "manifest")
+    implementation_artifact.add_argument("--workspace", type=Path, required=True)
+    implementation_artifact.add_argument("--policy-root", type=Path, required=True)
+    implementation_artifact.add_argument("--run-id", required=True)
+    implementation_artifact.add_argument("--issue-number", type=int, required=True)
+    implementation_artifact.add_argument("--change-name", required=True)
+    implementation_artifact.add_argument("--base-sha", required=True)
+
+    implementation_publish = subparsers.add_parser("publish-implementation")
+    implementation_publish.add_argument("--repository", required=True)
+    implementation_publish.add_argument("--issue-number", type=int, required=True)
+    implementation_publish.add_argument("--change-name", required=True)
+    implementation_publish.add_argument("--revision", type=int, required=True)
+    implementation_publish.add_argument("--base-sha", required=True)
+    implementation_publish.add_argument("--run-id", required=True)
+    implementation_publish.add_argument("--workspace", type=Path, required=True)
+    implementation_publish.add_argument("--evidence-url")
 
     publish = subparsers.add_parser("publish-plan")
     _file(publish, "result")
@@ -174,6 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--planning-pr-number", type=int)
     advance.add_argument("--planning-context-sha256")
     advance.add_argument("--planning-result-sha256")
+    advance.add_argument("--implementation-change-name")
+    advance.add_argument("--implementation-revision", type=int)
+    advance.add_argument("--implementation-branch")
+    advance.add_argument("--implementation-pr-number", type=int)
+    advance.add_argument("--implementation-completed-task-count", type=int)
+    advance.add_argument("--implementation-incomplete-task-count", type=int)
+    advance.add_argument("--implementation-blocked-task-count", type=int)
+    advance.add_argument("--implementation-eligible", choices=("true", "false"))
 
     fail_unclaimed = subparsers.add_parser("fail-unclaimed-run")
     fail_unclaimed.add_argument("--repository", required=True)
@@ -344,6 +397,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     packet_provenance_path=args.packet_provenance,
                     planning_packet_path=args.planning_packet,
                     context_manifest_path=args.context_manifest,
+                    implementation_packet_path=args.implementation_packet,
+                    implementation_manifest_path=args.implementation_manifest,
+                    implementation_task_plan_path=args.implementation_task_plan,
+                    workspace_path=args.workspace,
                 )
             )
             return 0
@@ -365,6 +422,23 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             _emit({"ok": True, **result})
             return 0
+        if command_name == "build-implementation-packet":
+            trigger = _load(args.trigger, "GitHub trigger")
+            issue = _load(args.issue, "GitHub issue")
+            result = build_implementation_packet(
+                trigger=trigger,
+                issue=issue,
+                contract_root=contracts.contract_root,
+                output_dir=args.output_dir,
+                run_id=str(
+                    trigger.get("run_id") or execution_run_id(trigger, contracts.execution_policy)
+                ),
+                change_name=args.change_name,
+                planning_pr_merged=args.planning_pr_merged,
+                approval_actor_id=args.approval_actor_id,
+            )
+            _emit({"ok": True, **result})
+            return 0
         if command_name == "materialize-plan":
             result = _load(args.result, "planning result")
             validate_planning_result(result, contract_root=contracts.contract_root)
@@ -379,6 +453,46 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     ),
                 }
             )
+            return 0
+        if command_name == "validate-implementation-result":
+            result = _load(args.result, "implementation result")
+            task_plan = _load(args.task_plan, "implementation task plan")
+            validate_implementation_result(
+                result,
+                workspace_root=args.workspace,
+                expected_revision=args.expected_revision,
+            )
+            validate_implementation_tasks(result, task_plan)
+            _emit({"ok": True, "publication_eligibility": "trusted_validation_required"})
+            return 0
+        if command_name == "validate-implementation-artifact":
+            result = _load(args.result, "implementation result")
+            manifest = _load(args.manifest, "implementation workspace manifest")
+            validate_implementation_artifact(
+                result,
+                manifest,
+                workspace_root=args.workspace,
+                policy_root=args.policy_root,
+                expected_run_id=args.run_id,
+                expected_issue_number=args.issue_number,
+                expected_change_name=args.change_name,
+                expected_base_sha=args.base_sha,
+            )
+            _emit({"ok": True, "publication_eligibility": "trusted_validation_required"})
+            return 0
+        if command_name == "publish-implementation":
+            result = publish_implementation(
+                _github_client(),
+                repository=args.repository,
+                issue_number=args.issue_number,
+                change_name=args.change_name,
+                revision=args.revision,
+                base_sha=args.base_sha,
+                run_id=args.run_id,
+                workspace=args.workspace,
+                evidence_url=args.evidence_url,
+            )
+            _emit({"ok": True, **result})
             return 0
         if command_name == "publish-plan":
             result = _load(args.result, "planning result")
@@ -479,6 +593,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 planning_pr_number=args.planning_pr_number,
                 planning_context_sha256=args.planning_context_sha256,
                 planning_result_sha256=args.planning_result_sha256,
+                implementation_change_name=args.implementation_change_name,
+                implementation_revision=args.implementation_revision,
+                implementation_branch=args.implementation_branch,
+                implementation_pr_number=args.implementation_pr_number,
+                implementation_completed_task_count=args.implementation_completed_task_count,
+                implementation_incomplete_task_count=args.implementation_incomplete_task_count,
+                implementation_blocked_task_count=args.implementation_blocked_task_count,
+                implementation_eligible=(
+                    args.implementation_eligible == "true"
+                    if args.implementation_eligible is not None
+                    else None
+                ),
             )
             terminal = state["lifecycle_state"] in {
                 "succeeded",
