@@ -686,6 +686,23 @@ def test_incomplete_compare_file_evidence_is_refused() -> None:
     assert approval["eligible"] is False
 
 
+def test_malformed_compare_metadata_is_refused() -> None:
+    class MalformedCompareGitHub(_ApprovalGitHub):
+        def compare_commits(
+            self, repository: str, base_sha: str, head_sha: str
+        ) -> dict[str, object]:
+            return {"status": "ahead", "files": [], "total_commits": "unknown"}
+
+    approval = resolve_merged_planning_approval(
+        MalformedCompareGitHub(),
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=7,
+        change_name="safe-change",
+        trusted_base_sha="c" * 40,
+    )
+    assert approval["eligible"] is False
+
+
 class _PublicationGitHub:
     def __init__(self) -> None:
         self.calls: list[str] = []

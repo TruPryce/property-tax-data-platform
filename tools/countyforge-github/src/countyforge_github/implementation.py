@@ -382,9 +382,14 @@ def resolve_merged_planning_approval(
             # GitHub compare responses are capped at 300 files.  A capped response
             # cannot prove that the accepted OpenSpec change stayed unchanged.
             continue
+        try:
+            total_commits = int(comparison.get("total_commits", 0))
+        except (TypeError, ValueError):
+            # Malformed compare metadata is not proof of an unchanged approved plan.
+            continue
         if (
             comparison.get("status") in {"ahead", "behind"}
-            and int(comparison.get("total_commits", 0)) > 0
+            and total_commits > 0
             and not later_files
         ):
             # A non-empty commit range with no file list is incomplete evidence, not
@@ -397,7 +402,7 @@ def resolve_merged_planning_approval(
             # The accepted planning content changed after its approval merge. Require a
             # fresh planning PR rather than silently implementing a different hash.
             continue
-        if int(comparison.get("total_commits", 0)) > 250:
+        if total_commits > 250:
             # Compare responses are bounded by GitHub; an unbounded history cannot prove
             # that the approved OpenSpec files were untouched.
             continue
