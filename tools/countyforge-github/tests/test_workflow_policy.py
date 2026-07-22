@@ -305,6 +305,9 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "HTTPS_PROXY=http://${PROXY_NAME}:45000" in adapter
     assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
+    assert "--tmpfs /workspace/.github/workflows:ro" in adapter
+    assert "--tmpfs /workspace/.ai/policies:ro" in adapter
+    assert "--tmpfs /workspace/.env:ro" in adapter
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
     assert "apt-get install --no-install-recommends --yes bubblewrap" in validation
@@ -333,6 +336,9 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "countyforge-implementation-bundle-" in implementation_model
     assert "--workspace-binding" in implementation_model
     publish = str(jobs["implementation-publish"])
+    assert "countyforge-implementation-bundle-" in publish
+    assert "Download frozen implementation bundle" in publish
+    assert "countyforge-workspace.tar.gz" in publish
     assert "Verify live implementation publication lease" in publish
     assert "steps.verify-publication.outcome == 'success'" in publish
     assert 'final_state="failed"' in publish

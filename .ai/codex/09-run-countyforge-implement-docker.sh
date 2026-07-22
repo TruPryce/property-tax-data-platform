@@ -107,6 +107,9 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "$WORKSPACE_PATH:/workspace:rw" \
   --tmpfs /workspace/.git:rw,noexec,nosuid,nodev,size=16m \
+  --tmpfs /workspace/.github/workflows:ro,noexec,nosuid,nodev,size=16m \
+  --tmpfs /workspace/.ai/policies:ro,noexec,nosuid,nodev,size=16m \
+  --tmpfs /workspace/.env:ro,noexec,nosuid,nodev,size=16m \
   -v "$IMPLEMENTATION_PACKET_PATH:/workspace/implementation-packet.json:ro" \
   -v "$IMPLEMENTATION_MANIFEST_PATH:/workspace/implementation-manifest.json:ro" \
   -v "$IMPLEMENTATION_TASK_PLAN_PATH:/workspace/implementation-task-plan.json:ro" \

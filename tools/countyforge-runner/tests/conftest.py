@@ -276,6 +276,7 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                 "issue_number": 1,
                 "change_name": "build-mode-aware-runner-kernel",
                 "run_id": "fixture-implement",
+                "implementation_revision": 1,
                 "base_sha": head_sha,
                 "workspace_path": str(workspace.resolve()),
                 "workspace_sha256": workspace_sha256(workspace),

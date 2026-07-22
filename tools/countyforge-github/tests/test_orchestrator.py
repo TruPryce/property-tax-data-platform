@@ -477,6 +477,40 @@ def test_implementation_requires_an_originating_issue_before_dispatch(
     assert github.dispatches == []
 
 
+def test_approved_implementation_issue_dispatches_before_provider_execution(
+    event_factory: Callable[[str, str, str], JsonObject],
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github = FakeGitHub(head_sha)
+    event = event_factory("/countyforge implement add-isolated-openspec-to-code-agents")
+    event["issue"].pop("pull_request")
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.resolve_merged_planning_approval",
+        lambda *args, **kwargs: {
+            "eligible": True,
+            "planning_pr_number": 123,
+            "planning_pr_merge_sha": head_sha,
+            "approval_actor_id": 42,
+            "approval_actor_type": "User",
+            "approval_actor_login": "maintainer",
+            "approval_permission": "write",
+        },
+    )
+    result = _intake(github, event, head_sha)
+    assert result["status"] == "dispatched"
+    assert len(github.dispatches) == 1
+    dispatched = github.dispatches[0]["inputs"]
+    assert dispatched["command"] == "implement"
+    assert dispatched["target_type"] == "issue"
+    assert dispatched["target_number"] == "11"
+    encoded_trigger = str(dispatched["trigger"])
+    trigger = json.loads(base64.urlsafe_b64decode(encoded_trigger).decode("utf-8"))
+    assert trigger["command"]["arguments"]["openspec_change"] == (
+        "add-isolated-openspec-to-code-agents"
+    )
+
+
 def test_authorized_refusals_are_visible_and_reuse_feedback_comment(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:

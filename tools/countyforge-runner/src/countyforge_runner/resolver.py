@@ -768,6 +768,28 @@ class Kernel:
                 kind="implementation workspace binding",
             )
             expected_issue = request["trigger"].get("issue_number")
+            packet_tasks = packet_document["tasks"]
+            task_plan_tasks = task_document["tasks"]
+
+            def task_projection(tasks: list[Any]) -> list[JsonObject]:
+                return [
+                    {
+                        "task_id": str(task["task_id"]),
+                        "description": str(task["description"]),
+                        "allowed_paths": list(task["allowed_paths"]),
+                        "required_checks": list(task["required_checks"]),
+                        "risk": str(task["risk"]),
+                    }
+                    for task in sorted(tasks, key=lambda item: str(item["task_id"]))
+                ]
+
+            if not isinstance(packet_tasks, list) or not isinstance(task_plan_tasks, list):
+                raise KernelError(
+                    "implementation_provenance_mismatch",
+                    "Implementation task inputs are malformed.",
+                )
+            task_plan_projection = task_projection(task_plan_tasks)
+            packet_projection = task_projection(packet_tasks)
             if (
                 packet_document["run_id"] != str(request.get("run_id", ""))
                 or packet_document["repository"]["full_name"] != request["repository"]["full_name"]
@@ -783,16 +805,29 @@ class Kernel:
                     and packet_document["issue"]["number"] != expected_issue
                 )
                 or manifest_document["packet_sha256"] != file_sha256(packet)
+                or manifest_document["repository"] != request["repository"]["full_name"]
+                or (
+                    expected_issue is not None
+                    and manifest_document["issue_number"] != expected_issue
+                )
+                or manifest_document["change_name"] != request["openspec_change"]
+                or manifest_document["trusted_base_sha"] != request["repository"]["base_sha"]
                 or manifest_document["run_id"] != str(request.get("run_id", ""))
                 or task_document["run_id"] != str(request.get("run_id", ""))
+                or task_document["change_name"] != request["openspec_change"]
+                or task_plan_projection != packet_projection
                 or manifest_document["implementation_revision"]
                 != packet_document["implementation_revision"]
                 or binding_document["run_id"] != str(request.get("run_id", ""))
                 or binding_document["repository"] != request["repository"]["full_name"]
+                or binding_document["implementation_revision"]
+                != packet_document["implementation_revision"]
                 or binding_document["base_sha"] != request["repository"]["base_sha"]
                 or binding_document["git_head_sha"] != request["repository"]["head_sha"]
                 or binding_document["change_name"] != request["openspec_change"]
                 or binding_document["workspace_path"] != str(workspace)
+                or set(binding_document["model_mount_excludes"])
+                != {".git", ".github/workflows", ".ai/policies", ".env"}
                 or (
                     expected_issue is not None
                     and binding_document["issue_number"] != expected_issue

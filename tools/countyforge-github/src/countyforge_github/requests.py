@@ -150,6 +150,11 @@ def build_run_request(
                 "issue_number": issue_number,
                 "change_name": str(trigger["command"]["arguments"].get("openspec_change", "")),
                 "run_id": run_id,
+                "implementation_revision": int(
+                    load_json_object(implementation_packet_path, kind="implementation packet")[
+                        "implementation_revision"
+                    ]
+                ),
                 "base_sha": str(target["base_sha"]),
                 "workspace_path": str(workspace),
                 "workspace_sha256": workspace_sha256(workspace),

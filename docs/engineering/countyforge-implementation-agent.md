@@ -29,14 +29,16 @@ home, SSH agent, Tailscale socket, or production network.
 
 Before provider selection, trusted tooling writes and hashes a strict workspace-binding
 manifest containing the repository, issue, accepted change, run, immutable base/head, Git hook
-and credential-helper settings, and workspace content hash. The model mount masks `.git`; Git
-metadata remains available only to trusted host tooling.
+and credential-helper settings, implementation revision, exact protected mount exclusions, and
+workspace content hash. The model mount masks `.git`, `.github/workflows`, `.ai/policies`, and
+`.env`; Git metadata remains available only to trusted host tooling.
 
 ## Commands and changes
 
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
 output limits, and offline network policy for trusted validation. Non-mutating commands are
-snapshotted before and after execution; any candidate-tree change fails validation. The model
+snapshotted before and after execution; only the two expected `prepr-no-ai` review packet files
+are ignored as generated output, and any other candidate-tree change fails validation. The model
 cannot start a process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
 sidecar restricted to the selected provider endpoint; command execution remains offline.
 The broker uses a deny-by-default filesystem and masks host homes, temporary directories, `/run`,

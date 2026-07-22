@@ -137,10 +137,16 @@ def workspace_sha256(root: Path) -> str:
         ".ruff_cache",
         "__pycache__",
     }
+    volatile_files = {
+        Path(".ai/reviews/review-packet.md"),
+        Path(".ai/reviews/review-packet.provenance.json"),
+    }
     entries: list[JsonObject] = []
     for path in sorted(resolved.rglob("*")):
         relative = path.relative_to(resolved)
         if any(part in volatile_parts for part in relative.parts):
+            continue
+        if relative in volatile_files:
             continue
         if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
             raise KernelError(

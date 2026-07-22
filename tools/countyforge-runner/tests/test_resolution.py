@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from countyforge_runner.contracts import JsonObject, document_sha256
+from countyforge_runner.contracts import JsonObject, document_sha256, workspace_sha256
 from countyforge_runner.errors import KernelError
 from countyforge_runner.resolver import Kernel
 
@@ -23,6 +23,19 @@ def assert_error(kernel: Kernel, request: JsonObject, code: str) -> None:
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_workspace_hash_ignores_only_expected_generated_review_artifacts(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    before = workspace_sha256(tmp_path)
+    review_dir = tmp_path / ".ai" / "reviews"
+    review_dir.mkdir(parents=True)
+    (review_dir / "review-packet.md").write_text("generated\n", encoding="utf-8")
+    (review_dir / "review-packet.provenance.json").write_text("{}\n", encoding="utf-8")
+    assert workspace_sha256(tmp_path) == before
+    source.write_text("value = 2\n", encoding="utf-8")
+    assert workspace_sha256(tmp_path) != before
 
 
 def test_valid_review_resolves(
@@ -225,6 +238,58 @@ def test_workspace_binding_hash_mismatch_fails_before_provider(
     request = request_factory("implement")
     workspace = Path(str(request["input"]["workspace_path"]))
     (workspace / "workspace-binding-fixture.txt").write_text("changed\n", encoding="utf-8")
+    assert_error(kernel, request, "implementation_provenance_mismatch")
+
+
+@pytest.mark.parametrize("field", ["repository", "issue_number", "change_name", "trusted_base_sha"])
+def test_implementation_manifest_facts_are_bound_before_provider(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+    field: str,
+) -> None:
+    request = request_factory("implement")
+    if field == "issue_number":
+        request["trigger"] = {
+            "type": "github_issue",
+            "actor": {"id": "fixture-actor"},
+            "issue_number": 1,
+        }
+    manifest_path = Path(str(request["input"]["implementation_manifest_path"]))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = {
+        "repository": "example/other",
+        "issue_number": 999,
+        "change_name": "other-change",
+        "trusted_base_sha": "0" * 40,
+    }[field]
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+    request["input"]["implementation_manifest_sha256"] = file_sha256(manifest_path)
+    assert_error(kernel, request, "implementation_provenance_mismatch")
+
+
+def test_stale_implementation_task_plan_is_refused_before_provider(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("implement")
+    task_path = Path(str(request["input"]["implementation_task_plan_path"]))
+    task_plan = json.loads(task_path.read_text(encoding="utf-8"))
+    task_plan["tasks"][0]["allowed_paths"] = ["docs"]
+    task_path.write_text(json.dumps(task_plan, sort_keys=True) + "\n", encoding="utf-8")
+    request["input"]["implementation_task_plan_sha256"] = file_sha256(task_path)
+    assert_error(kernel, request, "implementation_provenance_mismatch")
+
+
+def test_workspace_binding_revision_is_bound_before_provider(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("implement")
+    binding_path = Path(str(request["input"]["workspace_binding_path"]))
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["implementation_revision"] = 2
+    binding_path.write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
+    request["input"]["workspace_binding_sha256"] = file_sha256(binding_path)
     assert_error(kernel, request, "implementation_provenance_mismatch")
 
 
