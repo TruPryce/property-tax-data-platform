@@ -114,7 +114,9 @@ def workspace_sha256(root: Path) -> str:
 
     The implementation workspace is bound before provider credentials are selected.  Git
     metadata is deliberately excluded because it is kept outside the model mount and can
-    change as trusted tooling performs checkout/configuration.  Symlinks and non-regular
+    change as trusted tooling performs checkout/configuration.  Known interpreter/tool
+    caches are also excluded because deterministic gates create them as normal runtime
+    state; all publishable source files remain part of the hash. Symlinks and non-regular
     files fail closed rather than becoming ambiguous input.
     """
 
@@ -126,10 +128,19 @@ def workspace_sha256(root: Path) -> str:
         ) from None
     if not resolved.is_dir():
         raise KernelError("workspace_unavailable", "The implementation workspace is unavailable.")
+    volatile_parts = {
+        ".git",
+        ".venv",
+        ".cache",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+    }
     entries: list[JsonObject] = []
     for path in sorted(resolved.rglob("*")):
         relative = path.relative_to(resolved)
-        if ".git" in relative.parts or ".venv" in relative.parts or ".cache" in relative.parts:
+        if any(part in volatile_parts for part in relative.parts):
             continue
         if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
             raise KernelError(
