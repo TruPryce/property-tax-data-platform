@@ -267,7 +267,9 @@ def test_artifact_policy_rejects_symlink_escape(tmp_path: Path, repo_root: Path)
         )
 
 
-def test_artifact_policy_rejects_result_provenance_mismatch(tmp_path: Path, repo_root: Path) -> None:
+def test_artifact_policy_rejects_result_provenance_mismatch(
+    tmp_path: Path, repo_root: Path
+) -> None:
     content = "safe\n"
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs/generated.md").write_text(content, encoding="utf-8")
