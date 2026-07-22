@@ -20,8 +20,10 @@ The model receives a frozen packet and an ephemeral workspace copied from the im
 it never receives a GitHub write token, Git credentials, production credentials, Docker socket,
 or production network. The model has no process-execution tools and emits a bounded file bundle;
 trusted tooling materializes it only after policy checks. Versioned command and path policies
-constrain trusted validation, with command network denied by default. Provider HTTPS traffic is
-restricted to a trusted allowlist proxy sidecar for the selected model endpoint.
+constrain trusted validation, with command network denied by default. The trusted request is
+bound to a workspace manifest recording immutable base/head and disabled Git settings; `.git`
+is masked from the model mount. Provider HTTPS traffic is restricted to a trusted allowlist
+proxy sidecar for the selected model endpoint.
 
 Trusted code owns eligibility, task reconciliation, artifact validation, deterministic gates,
 Git data API publication, draft PR creation, and canonical state. The model's result is
@@ -32,6 +34,10 @@ The no-provider-secret validation job may execute model-authored files through t
 deterministic gates. This is an explicit v1 residual risk, bounded by no GitHub write permission,
 no provider or production credentials, and registry commands enforced in a no-network sandbox;
 the separate publisher still revalidates the artifact and live lease before any Git mutation.
+The broker uses a deny-by-default filesystem with host homes, temporary directories, and host
+Unix sockets masked. OpenSpec is installed before entering the sandbox and is mounted from the
+trusted contract root, so no sandboxed gate relies on an uncached network fetch. Generic runner
+failure evidence is uploaded separately from the frozen implementation bundle.
 
 The implementation package remains under `tools/`; the runner stays GitHub-neutral. Review
 and planning profiles retain their existing boundaries, while fix and validate remain

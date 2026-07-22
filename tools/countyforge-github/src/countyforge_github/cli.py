@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from countyforge_runner.command_broker import CommandBroker
-from countyforge_runner.contracts import validate_document
+from countyforge_runner.contracts import file_sha256, validate_document
 from countyforge_runner.errors import KernelError
 
 from countyforge_github.authorization import authorize
@@ -131,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--implementation-manifest", type=Path)
     request.add_argument("--implementation-task-plan", type=Path)
     request.add_argument("--workspace", type=Path)
+    request.add_argument("--workspace-binding", type=Path)
 
     planning_packet = subparsers.add_parser("build-planning-packet")
     _file(planning_packet, "trigger")
@@ -159,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_result.add_argument("--expected-revision", type=int)
     implementation_result.add_argument("--workspace", type=Path)
     implementation_result.add_argument("--command-events", type=Path, required=True)
+
+    implementation_context = subparsers.add_parser("validate-implementation-context")
+    _file(implementation_context, "packet")
+    _file(implementation_context, "manifest")
+    _file(implementation_context, "task-plan")
 
     implementation_artifact = subparsers.add_parser("validate-implementation-artifact")
     _file(implementation_artifact, "result")
@@ -197,12 +203,17 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_publish.add_argument("--at", required=True)
     implementation_publish.add_argument("--implementation-result", type=Path, required=True)
     implementation_publish.add_argument("--policy-root", type=Path, required=True)
+    implementation_publish.add_argument("--validation-report", type=Path, required=True)
+
+    implementation_report = subparsers.add_parser("validate-implementation-report")
+    _file(implementation_report, "report")
 
     implementation_command = subparsers.add_parser("run-implementation-command")
     implementation_command.add_argument("--command-id", required=True)
     implementation_command.add_argument("--registry", type=Path, required=True)
     implementation_command.add_argument("--schema", type=Path, required=True)
     implementation_command.add_argument("--workspace", type=Path, required=True)
+    implementation_command.add_argument("--contract-root", type=Path)
     implementation_command.add_argument("--run-id", default="local")
     implementation_command.add_argument("--workspace-revision")
 
@@ -338,6 +349,20 @@ def _load_list(path: Path, kind: str) -> list[JsonObject]:
     return value
 
 
+def _validate_contract(
+    document: JsonObject,
+    *,
+    contracts: ControlContracts,
+    schema_name: str,
+    kind: str,
+) -> None:
+    schema = load_json_object(
+        contracts.contract_root / ".ai" / "schemas" / schema_name,
+        kind=f"{kind} schema",
+    )
+    validate_document(document, schema, kind=kind)
+
+
 def _actor(event: JsonObject) -> JsonObject:
     comment = event.get("comment")
     if isinstance(comment, dict) and isinstance(comment.get("user"), dict):
@@ -462,6 +487,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     implementation_manifest_path=args.implementation_manifest,
                     implementation_task_plan_path=args.implementation_task_plan,
                     workspace_path=args.workspace,
+                    workspace_binding_path=args.workspace_binding,
                 )
             )
             return 0
@@ -518,6 +544,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if command_name == "validate-implementation-result":
             result = _load(args.result, "implementation result")
             task_plan = _load(args.task_plan, "implementation task plan")
+            _validate_contract(
+                result,
+                contracts=contracts,
+                schema_name="countyforge-implementation-result.schema.json",
+                kind="implementation result",
+            )
+            _validate_contract(
+                task_plan,
+                contracts=contracts,
+                schema_name="countyforge-implementation-task-plan.schema.json",
+                kind="implementation task plan",
+            )
             events = _load_command_events(
                 args.command_events,
                 contracts.contract_root
@@ -543,9 +581,47 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             _emit({"ok": True, "publication_eligibility": "trusted_validation_required"})
             return 0
+        if command_name == "validate-implementation-context":
+            packet = _load(args.packet, "implementation packet")
+            manifest = _load(args.manifest, "implementation context manifest")
+            task_plan = _load(args.task_plan, "implementation task plan")
+            for document, schema_name, kind in (
+                (
+                    packet,
+                    "countyforge-implementation-packet.schema.json",
+                    "implementation packet",
+                ),
+                (
+                    manifest,
+                    "countyforge-implementation-context-manifest.schema.json",
+                    "implementation context manifest",
+                ),
+                (
+                    task_plan,
+                    "countyforge-implementation-task-plan.schema.json",
+                    "implementation task plan",
+                ),
+            ):
+                _validate_contract(
+                    document, contracts=contracts, schema_name=schema_name, kind=kind
+                )
+            _emit({"ok": True, "validated": ["packet", "manifest", "task_plan"]})
+            return 0
         if command_name == "validate-implementation-artifact":
             result = _load(args.result, "implementation result")
             manifest = _load(args.manifest, "implementation workspace manifest")
+            _validate_contract(
+                result,
+                contracts=contracts,
+                schema_name="countyforge-implementation-result.schema.json",
+                kind="implementation result",
+            )
+            _validate_contract(
+                manifest,
+                contracts=contracts,
+                schema_name="countyforge-implementation-workspace-manifest.schema.json",
+                kind="implementation workspace manifest",
+            )
             validate_implementation_artifact(
                 result,
                 manifest,
@@ -560,6 +636,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if command_name == "freeze-implementation-artifact":
             result = _load(args.result, "implementation result")
+            _validate_contract(
+                result,
+                contracts=contracts,
+                schema_name="countyforge-implementation-result.schema.json",
+                kind="implementation result",
+            )
             manifest = freeze_implementation_artifact(
                 result,
                 workspace_root=args.workspace,
@@ -574,6 +656,41 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if command_name == "publish-implementation":
             github = _github_client()
+            implementation_result = _load(args.implementation_result, "implementation result")
+            manifest_path = args.workspace / "countyforge-workspace-manifest.json"
+            manifest = _load(manifest_path, "implementation workspace manifest")
+            report = _load(args.validation_report, "implementation validation report")
+            _validate_contract(
+                implementation_result,
+                contracts=contracts,
+                schema_name="countyforge-implementation-result.schema.json",
+                kind="implementation result",
+            )
+            _validate_contract(
+                manifest,
+                contracts=contracts,
+                schema_name="countyforge-implementation-workspace-manifest.schema.json",
+                kind="implementation workspace manifest",
+            )
+            _validate_contract(
+                report,
+                contracts=contracts,
+                schema_name="countyforge-implementation-validation-report.schema.json",
+                kind="implementation validation report",
+            )
+            if (
+                report.get("run_id") != args.run_id
+                or report.get("issue_number") != args.issue_number
+                or report.get("change_name") != args.change_name
+                or report.get("base_sha") != args.base_sha
+                or report.get("artifact_sha256") != file_sha256(args.implementation_result)
+                or report.get("valid") is not True
+                or report.get("publication_eligible") is not True
+            ):
+                raise ControlPlaneError(
+                    "implementation_validation_failed",
+                    "Trusted implementation validation is not publication-eligible.",
+                )
             result = publish_implementation(
                 github,
                 repository=args.repository,
@@ -584,7 +701,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 workspace=args.workspace,
                 evidence_url=args.evidence_url,
-                implementation_result=_load(args.implementation_result, "implementation result"),
+                implementation_result=implementation_result,
                 policy_root=args.policy_root,
                 publication_preflight=lambda: verify_publication_lease(
                     github,
@@ -598,13 +715,42 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     at=args.at,
                 ),
             )
-            _emit({"ok": True, **result})
+            publication_manifest = {
+                "contract_version": 1,
+                "run_id": args.run_id,
+                "issue_number": args.issue_number,
+                "change_name": args.change_name,
+                "revision": args.revision,
+                "base_sha": args.base_sha,
+                "branch": result["branch"],
+                "commit_sha": result["commit_sha"],
+                "draft_pr_number": result["pr_number"],
+                "validation_report_sha256": file_sha256(args.validation_report),
+            }
+            _validate_contract(
+                publication_manifest,
+                contracts=contracts,
+                schema_name="countyforge-implementation-publication-manifest.schema.json",
+                kind="implementation publication manifest",
+            )
+            _emit({"ok": True, **result, "publication_manifest": publication_manifest})
+            return 0
+        if command_name == "validate-implementation-report":
+            report = _load(args.report, "implementation validation report")
+            _validate_contract(
+                report,
+                contracts=contracts,
+                schema_name="countyforge-implementation-validation-report.schema.json",
+                kind="implementation validation report",
+            )
+            _emit({"ok": True, "report": report})
             return 0
         if command_name == "run-implementation-command":
             broker = CommandBroker(args.registry, args.schema)
             evidence = broker.run(
                 args.command_id,
                 workspace=args.workspace,
+                contract_root=args.contract_root,
                 run_id=args.run_id,
                 workspace_revision=args.workspace_revision,
             )

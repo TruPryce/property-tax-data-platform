@@ -7,7 +7,12 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from countyforge_runner.contracts import JsonObject, file_sha256, validate_document
+from countyforge_runner.contracts import (
+    JsonObject,
+    file_sha256,
+    validate_document,
+    workspace_sha256,
+)
 from countyforge_runner.errors import KernelError
 from countyforge_runner.resolver import Kernel, ResolvedRun
 
@@ -43,6 +48,17 @@ def _write_json(path: Path, document: JsonObject, secret_values: tuple[str, ...]
 
 def _input_fact(path_value: str) -> JsonObject:
     path = Path(path_value)
+    if path.is_dir():
+        bytes_total = sum(
+            child.stat().st_size
+            for child in path.rglob("*")
+            if child.is_file() and ".git" not in child.parts
+        )
+        return {
+            "name": path.name,
+            "bytes": bytes_total,
+            "sha256": workspace_sha256(path),
+        }
     return {
         "name": path.name,
         "bytes": path.stat().st_size,
@@ -65,6 +81,7 @@ def sanitized_request(resolved: ResolvedRun) -> JsonObject:
         "implementation_packet_sha256",
         "implementation_manifest_sha256",
         "implementation_task_plan_sha256",
+        "workspace_binding_sha256",
         "selected_finding_ids",
         "expected_head_sha",
     ):

@@ -218,6 +218,16 @@ def test_planning_manifest_packet_binding_fails_closed(
     assert_error(kernel, request, "planning_provenance_mismatch")
 
 
+def test_workspace_binding_hash_mismatch_fails_before_provider(
+    kernel: Kernel,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    request = request_factory("implement")
+    workspace = Path(str(request["input"]["workspace_path"]))
+    (workspace / "workspace-binding-fixture.txt").write_text("changed\n", encoding="utf-8")
+    assert_error(kernel, request, "implementation_provenance_mismatch")
+
+
 @pytest.mark.parametrize(
     ("mode", "schema"),
     [

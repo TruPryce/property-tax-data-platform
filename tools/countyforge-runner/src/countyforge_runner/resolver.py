@@ -18,6 +18,7 @@ from countyforge_runner.contracts import (
     file_sha256,
     load_json_object,
     validate_document,
+    workspace_sha256,
 )
 from countyforge_runner.errors import KernelError
 from countyforge_runner.paths import find_repo_root
@@ -514,6 +515,8 @@ class Kernel:
             "implementation_packet_path",
             "implementation_manifest_path",
             "implementation_task_plan_path",
+            "workspace_path",
+            "workspace_binding_path",
         )
         requested = {key: request["input"][key] for key in path_keys if key in request["input"]}
         if not requested:
@@ -557,6 +560,22 @@ class Kernel:
                 raise KernelError(
                     "input_not_found", "A declared input file is unavailable."
                 ) from None
+            if key == "workspace_path":
+                if not path.is_dir():
+                    raise KernelError(
+                        "workspace_not_directory",
+                        "The implementation workspace must be a directory.",
+                    )
+                canonical[key] = path
+                continue
+            if key == "workspace_binding_path":
+                if not stat.S_ISREG(mode):
+                    raise KernelError(
+                        "workspace_binding_invalid",
+                        "The implementation workspace binding must be a file.",
+                    )
+                canonical[key] = path
+                continue
             if not any(path.is_relative_to(root) for root in approved_roots):
                 raise KernelError(
                     "input_path_not_approved",
@@ -699,7 +718,15 @@ class Kernel:
             packet = canonical_inputs.get("implementation_packet_path")
             manifest = canonical_inputs.get("implementation_manifest_path")
             task_plan = canonical_inputs.get("implementation_task_plan_path")
-            if packet is None or manifest is None or task_plan is None:
+            workspace = canonical_inputs.get("workspace_path")
+            binding = canonical_inputs.get("workspace_binding_path")
+            if (
+                packet is None
+                or manifest is None
+                or task_plan is None
+                or workspace is None
+                or binding is None
+            ):
                 raise KernelError(
                     "implementation_context_required",
                     "Implementation requires a frozen packet, manifest, task plan, and workspace.",
@@ -709,6 +736,7 @@ class Kernel:
                 (packet, "implementation_packet_sha256"),
                 (manifest, "implementation_manifest_sha256"),
                 (task_plan, "implementation_task_plan_sha256"),
+                (binding, "workspace_binding_sha256"),
             ):
                 if file_sha256(path) != input_facts[key]:
                     raise KernelError(
@@ -733,6 +761,12 @@ class Kernel:
                 self._load_schema("countyforge-implementation-task-plan.schema.json"),
                 kind="implementation task plan",
             )
+            binding_document = load_json_object(binding, kind="implementation workspace binding")
+            validate_document(
+                binding_document,
+                self._load_schema("countyforge-implementation-workspace-binding.schema.json"),
+                kind="implementation workspace binding",
+            )
             expected_issue = request["trigger"].get("issue_number")
             if (
                 packet_document["run_id"] != str(request.get("run_id", ""))
@@ -753,6 +787,17 @@ class Kernel:
                 or task_document["run_id"] != str(request.get("run_id", ""))
                 or manifest_document["implementation_revision"]
                 != packet_document["implementation_revision"]
+                or binding_document["run_id"] != str(request.get("run_id", ""))
+                or binding_document["repository"] != request["repository"]["full_name"]
+                or binding_document["base_sha"] != request["repository"]["base_sha"]
+                or binding_document["git_head_sha"] != request["repository"]["head_sha"]
+                or binding_document["change_name"] != request["openspec_change"]
+                or binding_document["workspace_path"] != str(workspace)
+                or (
+                    expected_issue is not None
+                    and binding_document["issue_number"] != expected_issue
+                )
+                or binding_document["workspace_sha256"] != workspace_sha256(workspace)
             ):
                 raise KernelError(
                     "implementation_provenance_mismatch",
@@ -826,7 +871,7 @@ class Kernel:
 
     @staticmethod
     def _validate_input_budget(inputs: dict[str, Path], budgets: JsonObject) -> None:
-        total = sum(path.stat().st_size for path in inputs.values())
+        total = sum(path.stat().st_size for path in inputs.values() if path.is_file())
         if total > int(budgets["max_input_bytes"]):
             raise KernelError(
                 "input_budget_exceeded", "Input context exceeds the effective byte budget."

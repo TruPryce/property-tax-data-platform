@@ -8,7 +8,7 @@ The control plane SHALL allow `implement <change>` only when the exact change ex
 - **THEN** intake returns a sanitized ineligible disposition before provider credentials, target preparation, or workflow dispatch
 
 ### Requirement: Isolated implementation workspace
-The executable profile SHALL provide the model only an ephemeral writable workspace derived from the immutable trusted base. Contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible.
+The executable profile SHALL provide the model only an ephemeral writable workspace derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible.
 
 #### Scenario: Workspace escape is blocked
 - **WHEN** the model attempts to write outside the workspace or access `.git`, credentials, workflows, policies, production data, or host sockets
@@ -21,12 +21,20 @@ Implementation commands SHALL come from a versioned repository registry with exa
 - **WHEN** trusted validation or an implementation request asks to execute a command not present in the active registry
 - **THEN** no process starts and a bounded command-policy event is emitted
 
+#### Scenario: Host sockets are unavailable
+- **WHEN** a registered validation command probes host home, temporary, Docker, SSH, or Tailscale socket paths
+- **THEN** the deny-by-default filesystem sandbox hides those paths and the command cannot establish network egress
+
 ### Requirement: Trusted implementation handoff
 The model SHALL produce a strict result, task evidence, workspace manifest, declared file bundle, and checksums bound to the run, issue, change hash, base SHA, profile, packet, and context manifest. Trusted validation SHALL reconstruct a clean worktree, apply only declared files, enforce path/size/secret policy, and determine publication eligibility.
 
 #### Scenario: Undeclared artifact is rejected
 - **WHEN** the handoff contains a file not in the declared manifest or a checksum/provenance mismatch
 - **THEN** validation fails without creating a branch, commit, or draft PR
+
+#### Scenario: Failure evidence survives bundle rejection
+- **WHEN** model execution, schema validation, or safe-bundle freezing fails
+- **THEN** generic sanitized runner result and exit evidence are uploaded independently, while no unsafe workspace bundle is uploaded or published
 
 ### Requirement: Deterministic task reconciliation
 Trusted code SHALL derive task slices from accepted OpenSpec tasks and require bounded diff and required-check evidence for completion. Model prose alone MUST NOT mark a task complete, and accepted OpenSpec task checkboxes MUST NOT be rewritten automatically.

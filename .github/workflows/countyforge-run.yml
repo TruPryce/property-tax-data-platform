@@ -941,7 +941,9 @@ jobs:
             --implementation-packet ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-packet.json" \
             --implementation-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-context-manifest.json" \
             --implementation-task-plan ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-task-plan.json" \
-            --workspace "$RUNNER_TEMP/countyforge-workspace" > "$RUNNER_TEMP/countyforge-request.json"
+            --workspace "$RUNNER_TEMP/countyforge-workspace" \
+            --workspace-binding "$RUNNER_TEMP/countyforge-workspace-binding.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
           export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
           import hashlib, json, sys
           document = json.loads(open(sys.argv[1], encoding="utf-8").read())
@@ -964,6 +966,8 @@ jobs:
           echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
           set -e
       - name: Freeze only the trusted, declared implementation bundle
+        id: freeze
+        continue-on-error: true
         env:
           WORKSPACE_DIR: ${{ runner.temp }}/countyforge-workspace
           RUN_ID: ${{ inputs.run_id }}
@@ -981,18 +985,26 @@ jobs:
             --output "$bundle" --run-id "$RUN_ID" --issue-number "$ISSUE_NUMBER" \
             --change-name "$change_name" --base-sha "$BASE_SHA"
           tar --sort=name -czf "$RUNNER_TEMP/countyforge-workspace.tar.gz" -C "$bundle" .
-      - name: Upload implementation evidence
+      - name: Upload implementation execution evidence
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: countyforge-implementation-result-${{ inputs.run_id }}
           path: |
             ${{ runner.temp }}/countyforge-result.json
             ${{ runner.temp }}/countyforge-exit-code
-            ${{ runner.temp }}/countyforge-workspace.tar.gz
             trusted/.ai/reviews/countyforge/implement
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
           include-hidden-files: true
+      - name: Upload frozen implementation bundle
+        if: steps.freeze.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-workspace.tar.gz
+          if-no-files-found: error
+          retention-days: 14
 
   implementation-validation:
     name: Trusted implementation validation
@@ -1017,6 +1029,12 @@ jobs:
         with:
           name: countyforge-implementation-result-${{ inputs.run_id }}
           path: ${{ runner.temp }}/implementation-result
+      - name: Download frozen implementation bundle
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-result
       - name: Download frozen implementation packet
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -1036,11 +1054,9 @@ jobs:
           bwrap --version
       - name: Provision pinned OpenSpec validator for offline gates
         run: |
-          npm install --global --prefix "$RUNNER_TEMP/openspec-tool" \
+          npm install --prefix "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec" \
             --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
-          test -x "$RUNNER_TEMP/openspec-tool/bin/openspec"
-          mkdir -p "$RUNNER_TEMP/openspec-bin"
-          ln -sf "$RUNNER_TEMP/openspec-tool/bin/openspec" "$RUNNER_TEMP/openspec-bin/openspec"
+          test -x "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec/node_modules/.bin/openspec"
       - name: Validate artifact and trusted gates
         env:
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
@@ -1063,6 +1079,8 @@ jobs:
           test -n "$packet_file" && test -n "$manifest_file" && test -n "$task_file"
           cd trusted
           uv sync --frozen --all-packages --group dev
+          uv run --package countyforge-github countyforge-github validate-implementation-context \
+            --packet "$packet_file" --manifest "$manifest_file" --task-plan "$task_file"
           python3 - "$packet_file" "$manifest_file" "$task_file" "$result_file" "$COUNTYFORGE_RUN_ID" "$BASE_SHA" <<'PY'
           import hashlib, json, pathlib, sys
           packet_path, manifest_path, task_path, result_path, run_id, base_sha = sys.argv[1:]
@@ -1124,14 +1142,14 @@ jobs:
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copyfile(source, target)
           PY
-          export PATH="$RUNNER_TEMP/openspec-bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/trusted/.ai/tools/openspec/node_modules/.bin:$PATH"
           command_registry="$GITHUB_WORKSPACE/trusted/.ai/policies/countyforge-implementation-commands.v1.json"
           command_schema="$GITHUB_WORKSPACE/trusted/.ai/schemas/countyforge-implementation-command-registry.schema.json"
           run_registered() {
             evidence="$(uv run --package countyforge-github countyforge-github run-implementation-command \
               --command-id "$1" --registry "$command_registry" --schema "$command_schema" \
-              --workspace "$candidate_root" --run-id "$COUNTYFORGE_RUN_ID" \
-              --workspace-revision "$BASE_SHA")"
+              --workspace "$candidate_root" --contract-root "$GITHUB_WORKSPACE/trusted" \
+              --run-id "$COUNTYFORGE_RUN_ID")"
             jq -e '.ok == true and (.evidence | type == "object")' <<<"$evidence" >/dev/null
             jq -c '.evidence' <<<"$evidence" >> "$COMMAND_EVENTS_PATH"
           }
@@ -1146,7 +1164,9 @@ jobs:
             --workspace "$candidate_root" \
             --expected-revision "$(jq -er '.implementation_revision' "$packet_file")" \
             --command-events "$COMMAND_EVENTS_PATH"
-          printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
+          printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","issue_number":'"$ISSUE_NUMBER"',"change_name":"'"$change_name"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
+          uv run --package countyforge-github countyforge-github validate-implementation-report \
+            --report "$RUNNER_TEMP/implementation-validation.json" >/dev/null
       - name: Upload trusted validation report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1275,7 +1295,8 @@ jobs:
             --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" \
             --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" --nonce "$LEASE_NONCE" \
             --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --implementation-result "$implementation_file" --policy-root "$GITHUB_WORKSPACE/trusted"; })"
+            --implementation-result "$implementation_file" --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --validation-report "$RUNNER_TEMP/implementation-validation/implementation-validation.json"; })"
           printf '%s\n' "$publication"
           echo "branch=$(jq -r '.branch' <<<"$publication")" >> "$GITHUB_OUTPUT"
           echo "pr_number=$(jq -r '.pr_number' <<<"$publication")" >> "$GITHUB_OUTPUT"

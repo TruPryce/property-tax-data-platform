@@ -39,6 +39,7 @@ class CommandBroker:
         command_id: str,
         *,
         workspace: Path,
+        contract_root: Path | None = None,
         run_id: str = "local",
         workspace_revision: str | None = None,
     ) -> JsonObject:
@@ -62,34 +63,89 @@ class CommandBroker:
                 "network_sandbox_unavailable",
                 "The required no-network command sandbox is unavailable.",
             )
+        runtime_roots = ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/opt", "/etc")
         sandboxed_argv = [
             sandbox,
             "--die-with-parent",
             "--unshare-net",
             "--new-session",
-            "--ro-bind",
-            "/",
-            "/",
-            "--bind",
-            str(root),
-            str(root),
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--tmpfs",
-            "/tmp",
-            "--chdir",
-            str(root),
-            "--",
-            *argv,
+            "--clearenv",
         ]
+        for runtime_root in runtime_roots:
+            if Path(runtime_root).exists():
+                sandboxed_argv.extend(("--ro-bind", runtime_root, runtime_root))
+        sandboxed_argv.extend(
+            [
+                "--tmpfs",
+                "/home",
+                "--tmpfs",
+                "/root",
+                "--tmpfs",
+                "/run",
+                "--tmpfs",
+                "/var",
+                "--tmpfs",
+                "/var/run",
+                "--tmpfs",
+                "/sys",
+                "--tmpfs",
+                "/boot",
+                "--tmpfs",
+                "/mnt",
+                "--tmpfs",
+                "/media",
+                "--tmpfs",
+                "/srv",
+                "--tmpfs",
+                "/tmp",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--dir",
+                "/workspace",
+                "--bind",
+                str(root),
+                "/workspace",
+            ]
+        )
+        if contract_root is not None:
+            contract = contract_root.resolve(strict=True)
+            if not contract.is_dir():
+                raise KernelError(
+                    "contract_root_unavailable", "Trusted contract root is unavailable."
+                )
+            sandboxed_argv.extend(
+                ("--dir", "/countyforge", "--ro-bind", str(contract), "/countyforge/contract")
+            )
         environment = {
             name: os.environ[name]
             for name in entry["environment"]
             if name in os.environ and name not in {"OPENAI_API_KEY", "SAKANA_API_KEY"}
         }
-        environment["PWD"] = str(root)
+        environment["PWD"] = "/workspace"
+        environment["HOME"] = "/workspace/.home"
+        environment["TMPDIR"] = "/tmp"
+        if contract_root is not None:
+            contract_host_path = str(contract)
+            if "PATH" in environment:
+                environment["PATH"] = environment["PATH"].replace(
+                    contract_host_path, "/countyforge/contract"
+                )
+            environment["PYTHONPATH"] = (
+                "/countyforge/contract/tools/countyforge-github/src:"
+                "/countyforge/contract/tools/countyforge-runner/src"
+            )
+        for name, value in environment.items():
+            sandboxed_argv.extend(("--setenv", name, value))
+        sandboxed_argv.extend(
+            [
+                "--chdir",
+                "/workspace",
+                "--",
+                *argv,
+            ]
+        )
         started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         limit = int(entry["max_output_bytes"])
         try:

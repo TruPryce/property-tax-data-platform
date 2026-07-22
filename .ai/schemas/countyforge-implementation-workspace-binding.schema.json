@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-implementation-workspace-binding.schema.json",
+  "title": "CountyForge Implementation Workspace Binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "repository",
+    "issue_number",
+    "change_name",
+    "run_id",
+    "base_sha",
+    "workspace_path",
+    "workspace_sha256",
+    "git_head_sha",
+    "git_metadata_present",
+    "hooks_path",
+    "credential_helper",
+    "fsmonitor_enabled",
+    "model_mount_excludes"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "run_id": {"type": "string", "maxLength": 128},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "workspace_path": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "workspace_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "git_metadata_present": {"const": true},
+    "hooks_path": {"const": "/dev/null"},
+    "credential_helper": {"const": ""},
+    "fsmonitor_enabled": {"const": false},
+    "model_mount_excludes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"enum": [".git", ".github/workflows", ".ai/policies", ".env"]}
+    }
+  }
+}

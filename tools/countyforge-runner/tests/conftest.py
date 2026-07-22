@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from countyforge_runner.contracts import JsonObject
+from countyforge_runner.contracts import JsonObject, workspace_sha256
 
 MODE_FACTS: dict[str, dict[str, Any]] = {
     "review": {
@@ -261,7 +261,41 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
         + "\n",
         encoding="utf-8",
     )
-    (plan_fixture_root / "workspace").mkdir()
+    workspace = plan_fixture_root / "workspace"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", str(repo_root), str(workspace)],
+        check=True,
+        capture_output=True,
+    )
+    workspace_binding = plan_fixture_root / "countyforge-implementation-workspace-binding.json"
+    workspace_binding.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "repository": "TruPryce/property-tax-data-platform",
+                "issue_number": 1,
+                "change_name": "build-mode-aware-runner-kernel",
+                "run_id": "fixture-implement",
+                "base_sha": head_sha,
+                "workspace_path": str(workspace.resolve()),
+                "workspace_sha256": workspace_sha256(workspace),
+                "git_head_sha": head_sha,
+                "git_metadata_present": True,
+                "hooks_path": "/dev/null",
+                "credential_helper": "",
+                "fsmonitor_enabled": False,
+                "model_mount_excludes": [
+                    ".git",
+                    ".github/workflows",
+                    ".ai/policies",
+                    ".env",
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     def build(mode: str = "review") -> JsonObject:
         facts = MODE_FACTS[mode]
@@ -293,7 +327,9 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                 "implementation_manifest_sha256": _sha256(implementation_manifest),
                 "implementation_task_plan_path": str(implementation_tasks),
                 "implementation_task_plan_sha256": _sha256(implementation_tasks),
-                "workspace_path": str(plan_fixture_root / "workspace"),
+                "workspace_path": str(workspace),
+                "workspace_binding_path": str(workspace_binding),
+                "workspace_binding_sha256": _sha256(workspace_binding),
             }
         return {
             "contract_version": 1,

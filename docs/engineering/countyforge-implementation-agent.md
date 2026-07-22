@@ -27,12 +27,20 @@ receives only the selected provider key during model invocation.
 It receives no GitHub write token, Git credentials, production credentials, Docker socket, host
 home, SSH agent, Tailscale socket, or production network.
 
+Before provider selection, trusted tooling writes and hashes a strict workspace-binding
+manifest containing the repository, issue, accepted change, run, immutable base/head, Git hook
+and credential-helper settings, and workspace content hash. The model mount masks `.git`; Git
+metadata remains available only to trusted host tooling.
+
 ## Commands and changes
 
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
 output limits, and offline network policy for trusted validation. The model cannot start a
 process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
 sidecar restricted to the selected provider endpoint; command execution remains offline.
+The broker uses a deny-by-default filesystem and masks host homes, temporary directories, `/run`,
+`/var/run`, and host sockets. OpenSpec is installed in a trusted no-secret step and exposed
+through the read-only contract mount so offline validation never performs a package fetch.
 The path policy rejects workflows,
 CODEOWNERS, policies, providers, credentials, `.git`, infrastructure, data archives, and other
 sensitive roots. Trusted reconciliation compares the result's task/path claims with the
@@ -44,6 +52,8 @@ The model artifact is a bounded file bundle plus strict result, task, command, w
 checksum evidence. A no-provider-secret validation job reconstructs a clean candidate worktree
 from the trusted base while keeping the trusted tooling checkout immutable, applies only
 declared files, enforces the path policy, runs repository gates, and emits a validation report.
+The report is itself schema-validated and binds the issue, accepted change, base SHA, and exact
+implementation-result checksum before publication.
 Only then does the short per-target state-lane publisher derive
 `countyforge/implement/issue-<issue>-<change>-r<revision>`, create a commit, and open/update a
 draft PR. The PR always requires human review; no merge, deployment, or issue closure occurs.
@@ -60,6 +70,8 @@ Identical accepted-change/base requests deduplicate or resume only from validate
 Changed OpenSpec content or base SHA creates a new revision and never silently overwrites a
 human-edited branch. Cancellation is checked before workspace execution, validation, and Git
 mutation. If publication wins a race, status reports the created branch/PR honestly.
+The v1 publisher requires every accepted task to be complete with trusted command evidence;
+partial task results remain evidence only and do not create a draft PR.
 
 ## Related
 

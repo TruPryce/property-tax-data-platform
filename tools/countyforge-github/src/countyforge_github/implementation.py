@@ -21,6 +21,8 @@ from countyforge_runner.contracts import (
     JsonObject,
     canonical_bytes,
     file_sha256,
+    load_json_object,
+    validate_document,
 )
 
 from countyforge_github.errors import ControlPlaneError
@@ -55,7 +57,14 @@ _HIGHER_RISK = (
 
 
 def _has_unresolved_blocking_decision(files: Iterable[Path]) -> bool:
-    """Detect only affirmative, structured blocking markers in trusted change files."""
+    """Detect affirmative blocking markers and non-empty unresolved sections.
+
+    The planning agent is not allowed to turn prose into approval evidence.  Eligibility
+    therefore accepts only explicit structured markers (or an explicitly populated
+    ``Unresolved decisions``/``Blocking decisions`` section) from the trusted OpenSpec
+    files.  A section containing ``None``/``N/A`` is considered resolved; any other
+    content remains blocked for human clarification.
+    """
 
     markers = (
         re.compile(
@@ -68,10 +77,42 @@ def _has_unresolved_blocking_decision(files: Iterable[Path]) -> bool:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError):
             continue
-        for line in lines:
+        in_unresolved_section = False
+        section_lines: list[str] = []
+        for line in lines + ["# __countyforge_end__"]:
+            heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+            if heading:
+                if in_unresolved_section and _section_has_decision(section_lines):
+                    return True
+                title = heading.group(1).casefold()
+                in_unresolved_section = (
+                    "unresolved decision" in title
+                    or "blocking decision" in title
+                    or title in {"unresolved", "blocked"}
+                )
+                section_lines = []
+                continue
             if any(marker.search(line) for marker in markers):
                 return True
+            if in_unresolved_section and line.strip():
+                section_lines.append(line.strip())
     return False
+
+
+def _section_has_decision(lines: Iterable[str]) -> bool:
+    """Return true when an unresolved-decision section has substantive content."""
+
+    normalized = " ".join(line.strip(" -*") for line in lines).strip().casefold()
+    return bool(normalized) and normalized not in {
+        "none",
+        "none.",
+        "n/a",
+        "n/a.",
+        "not applicable",
+        "not applicable.",
+        "no unresolved decisions",
+        "no unresolved decisions.",
+    }
 
 
 def _validate_accepted_change(contract_root: Path, change_name: str) -> None:
@@ -161,7 +202,8 @@ def _change_hash(files: Iterable[Path], root: Path) -> str:
     return hashlib.sha256(canonical_bytes({"files": entries})).hexdigest()
 
 
-def _tasks_from_text(text: str) -> list[JsonObject]:
+def _tasks_from_text(text: str, *, allowed_paths: Iterable[str] | None = None) -> list[JsonObject]:
+    task_paths = list(allowed_paths or ("libs", "services", "dags", "docs", "openspec"))
     tasks: list[JsonObject] = []
     for line in text.splitlines():
         match = _TASK.match(line.strip())
@@ -173,12 +215,27 @@ def _tasks_from_text(text: str) -> list[JsonObject]:
                 "task_id": task_id,
                 "description": description[:1024],
                 "status": "incomplete",
-                "allowed_paths": ["libs", "services", "dags", "docs", "openspec"],
+                "allowed_paths": task_paths,
                 "required_checks": ["repo.check"],
                 "risk": "normal",
             }
         )
     return tasks
+
+
+def _load_implementation_path_policy(policy_root: Path) -> JsonObject:
+    policy_path = policy_root / ".ai" / "policies" / "countyforge-implementation-paths.v1.json"
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ControlPlaneError(
+            "implementation_policy_unavailable", "Implementation path policy is unavailable."
+        ) from None
+    if not isinstance(policy, dict) or not policy.get("allowed_write_roots"):
+        raise ControlPlaneError(
+            "implementation_policy_unavailable", "Implementation path policy is invalid."
+        )
+    return policy
 
 
 def implementation_change_files(contract_root: Path, change_name: str) -> list[Path]:
@@ -454,6 +511,17 @@ def build_implementation_packet(
             "implementation_ineligible",
             "The accepted OpenSpec change is not implementation-eligible.",
         )
+    validate_document(
+        eligibility,
+        load_json_object(
+            contract_root
+            / ".ai"
+            / "schemas"
+            / "countyforge-implementation-eligibility.schema.json",
+            kind="implementation eligibility schema",
+        ),
+        kind="implementation eligibility",
+    )
     files = implementation_change_files(contract_root, change_name)
     sources = [_read_bounded(contract_root, str(path.relative_to(contract_root))) for path in files]
     # Keep the implementation packet useful without dumping the repository. These are
@@ -505,7 +573,11 @@ def build_implementation_packet(
     tasks_text = next(
         source["content"] for source in sources if source["path"].endswith("/tasks.md")
     )
-    tasks = _tasks_from_text(tasks_text)
+    path_policy = _load_implementation_path_policy(contract_root)
+    tasks = _tasks_from_text(
+        tasks_text,
+        allowed_paths=[str(path) for path in path_policy["allowed_write_roots"]],
+    )
     if not tasks:
         raise ControlPlaneError(
             "implementation_tasks_missing", "The accepted change has no incomplete tasks."
@@ -817,13 +889,7 @@ def validate_implementation_artifact(
             "implementation_artifact_mismatch",
             "Implementation result and workspace manifest disagree.",
         )
-    policy_path = policy_root / ".ai" / "policies" / "countyforge-implementation-paths.v1.json"
-    try:
-        policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise ControlPlaneError(
-            "implementation_policy_unavailable", "Implementation path policy is unavailable."
-        ) from None
+    policy = _load_implementation_path_policy(policy_root)
     allowed_roots = tuple(
         str(item).rstrip("/") for item in (policy or {}).get("allowed_write_roots", ())
     )

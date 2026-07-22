@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -73,3 +74,89 @@ def test_broker_fails_closed_at_output_limit(tmp_path: Path) -> None:
     )
     with pytest.raises(KernelError, match="output limit"):
         broker.run("test.output", workspace=tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_broker_masks_host_temp_and_mounts_only_contract_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path.cwd().resolve()
+    marker = tmp_path / "host-only-marker"
+    marker.write_text("must remain hidden\n", encoding="utf-8")
+    registry = tmp_path / "registry.json"
+    monkeypatch.setenv("COUNTYFORGE_HOST_MARKER", str(marker))
+    probe = "import os; print(os.path.exists(os.environ['COUNTYFORGE_HOST_MARKER']))"
+    registry.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "policy_id": "countyforge-implementation-commands",
+                "version": 1,
+                "default_network": "disabled",
+                "commands": [
+                    {
+                        "id": "test.sandbox",
+                        "executable": "python3",
+                        "arguments": ["-c", probe],
+                        "phase": "validate",
+                        "network": "disabled",
+                        "workspace_mutating": False,
+                        "timeout_seconds": 30,
+                        "max_output_bytes": 1024,
+                        "environment": ["COUNTYFORGE_HOST_MARKER", "PATH"],
+                        "artifact_paths": [],
+                    },
+                    {
+                        "id": "test.contract",
+                        "executable": "test",
+                        "arguments": [
+                            "-f",
+                            "/countyforge/contract/.ai/schemas/countyforge-run-request.schema.json",
+                        ],
+                        "phase": "validate",
+                        "network": "disabled",
+                        "workspace_mutating": False,
+                        "timeout_seconds": 30,
+                        "max_output_bytes": 1024,
+                        "environment": ["PATH"],
+                        "artifact_paths": [],
+                    },
+                    {
+                        "id": "test.host-sockets",
+                        "executable": "test",
+                        "arguments": [
+                            "!",
+                            "-e",
+                            "/var/run/docker.sock",
+                            "-a",
+                            "!",
+                            "-e",
+                            "/run/user",
+                            "-a",
+                            "!",
+                            "-e",
+                            "/home/runner",
+                        ],
+                        "phase": "validate",
+                        "network": "disabled",
+                        "workspace_mutating": False,
+                        "timeout_seconds": 30,
+                        "max_output_bytes": 1024,
+                        "environment": ["PATH"],
+                        "artifact_paths": [],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    broker = CommandBroker(
+        registry,
+        repo_root / ".ai/schemas/countyforge-implementation-command-registry.schema.json",
+    )
+    evidence = broker.run("test.sandbox", workspace=tmp_path, contract_root=repo_root)
+    assert evidence["stdout_sha256"] == hashlib.sha256(b"False\n").hexdigest()
+    contract_evidence = broker.run("test.contract", workspace=tmp_path, contract_root=repo_root)
+    assert contract_evidence["exit_code"] == 0
+    socket_evidence = broker.run("test.host-sockets", workspace=tmp_path, contract_root=repo_root)
+    assert socket_evidence["exit_code"] == 0

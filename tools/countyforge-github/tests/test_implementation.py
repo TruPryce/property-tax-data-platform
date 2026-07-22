@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from countyforge_github.cli import main as github_cli_main
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.implementation import (
     _has_unresolved_blocking_decision,
@@ -54,6 +55,12 @@ def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: P
     assert _has_unresolved_blocking_decision([design]) is True
     design.write_text("There are no unresolved blocking decisions.\n", encoding="utf-8")
     assert _has_unresolved_blocking_decision([design]) is False
+    design.write_text(
+        "## Unresolved decisions\n\nDecide whether to migrate first.\n", encoding="utf-8"
+    )
+    assert _has_unresolved_blocking_decision([design]) is True
+    design.write_text("## Unresolved decisions\n\nNone.\n", encoding="utf-8")
+    assert _has_unresolved_blocking_decision([design]) is False
 
 
 def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> None:
@@ -80,6 +87,22 @@ def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> No
     assert (
         hashlib.sha256(Path(str(result["packet_path"])).read_bytes()).hexdigest()
         == result["packet_sha256"]
+    )
+    assert (
+        github_cli_main(
+            [
+                "--contract-root",
+                str(repo_root),
+                "validate-implementation-context",
+                "--packet",
+                str(result["packet_path"]),
+                "--manifest",
+                str(result["manifest_path"]),
+                "--task-plan",
+                str(result["task_plan_path"]),
+            ]
+        )
+        == 0
     )
 
 
@@ -141,6 +164,28 @@ def test_task_reconciliation_requires_complete_accounting_and_allowed_paths() ->
             ],
             changed_paths=["services/unsafe.py"],
         )
+
+
+def test_task_reconciliation_accepts_versioned_tools_and_tests_roots() -> None:
+    task_plan = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "required_checks": [],
+                "allowed_paths": ["tools", "tests"],
+            }
+        ]
+    }
+    validate_implementation_tasks(
+        {
+            "completed_task_ids": ["1.1"],
+            "incomplete_task_ids": [],
+            "blocked_task_ids": [],
+        },
+        task_plan,
+        trusted_command_events=[{"command_id": "repo.check", "exit_code": 0, "truncated": False}],
+        changed_paths=["tools/generated.py", "tests/test_generated.py"],
+    )
 
 
 def test_incomplete_or_blocked_tasks_never_publish() -> None:
@@ -279,6 +324,102 @@ def test_artifact_policy_rejects_oversized_files(tmp_path: Path, repo_root: Path
             expected_change_name="safe-change",
             expected_base_sha="a" * 40,
         )
+
+
+def test_trusted_artifact_cli_rejects_custom_valid_schema_invalid_result(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+    content = "safe\n"
+    (workspace / "docs/generated.md").write_text(content, encoding="utf-8")
+    manifest = tmp_path / "countyforge-workspace-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "run_id": "run",
+                "issue_number": 7,
+                "change_name": "safe-change",
+                "base_sha": "a" * 40,
+                "files": [
+                    {
+                        "path": "docs/generated.md",
+                        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                        "bytes": len(content.encode()),
+                        "kind": "created",
+                    }
+                ],
+                "total_bytes": len(content.encode()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = tmp_path / "implementation-result.json"
+    result.write_text(json.dumps(_artifact_result()), encoding="utf-8")
+    assert (
+        github_cli_main(
+            [
+                "--contract-root",
+                str(repo_root),
+                "validate-implementation-artifact",
+                "--result",
+                str(result),
+                "--manifest",
+                str(manifest),
+                "--workspace",
+                str(workspace),
+                "--policy-root",
+                str(repo_root),
+                "--run-id",
+                "run",
+                "--issue-number",
+                "7",
+                "--change-name",
+                "safe-change",
+                "--base-sha",
+                "a" * 40,
+            ]
+        )
+        == 2
+    )
+
+
+def test_trusted_context_cli_rejects_schema_invalid_task_plan(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    trigger, issue, _ = _facts()
+    result = build_implementation_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=repo_root,
+        output_dir=tmp_path,
+        run_id="fixture-context-invalid",
+        change_name="add-isolated-openspec-to-code-agents",
+        planning_pr_merged=True,
+        approval_actor_id=42,
+        approval_actor_type="User",
+    )
+    task_path = Path(str(result["task_plan_path"]))
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    task["unexpected"] = True
+    task_path.write_text(json.dumps(task), encoding="utf-8")
+    assert (
+        github_cli_main(
+            [
+                "--contract-root",
+                str(repo_root),
+                "validate-implementation-context",
+                "--packet",
+                str(result["packet_path"]),
+                "--manifest",
+                str(result["manifest_path"]),
+                "--task-plan",
+                str(task_path),
+            ]
+        )
+        == 2
+    )
 
 
 @pytest.mark.parametrize(

@@ -107,3 +107,45 @@ def file_sha256(path: Path) -> str:
             {"name": path.name},
         ) from None
     return digest.hexdigest()
+
+
+def workspace_sha256(root: Path) -> str:
+    """Hash a workspace's regular files without including Git metadata.
+
+    The implementation workspace is bound before provider credentials are selected.  Git
+    metadata is deliberately excluded because it is kept outside the model mount and can
+    change as trusted tooling performs checkout/configuration.  Symlinks and non-regular
+    files fail closed rather than becoming ambiguous input.
+    """
+
+    try:
+        resolved = root.resolve(strict=True)
+    except OSError:
+        raise KernelError(
+            "workspace_unavailable", "The implementation workspace is unavailable."
+        ) from None
+    if not resolved.is_dir():
+        raise KernelError("workspace_unavailable", "The implementation workspace is unavailable.")
+    entries: list[JsonObject] = []
+    for path in sorted(resolved.rglob("*")):
+        relative = path.relative_to(resolved)
+        if ".git" in relative.parts or ".venv" in relative.parts or ".cache" in relative.parts:
+            continue
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise KernelError(
+                "workspace_binding_invalid",
+                "The implementation workspace contains unsafe metadata.",
+            )
+        if path.is_dir():
+            continue
+        if not path.exists():
+            continue
+        raw = path.read_bytes()
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+            }
+        )
+    return hashlib.sha256(canonical_bytes({"files": entries})).hexdigest()
