@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from countyforge_runner.contracts import load_json_object, validate_document
 from countyforge_runner.errors import KernelError
 
 
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_broker_runs_only_declared_command(tmp_path: Path) -> None:
     repo_root = Path.cwd().resolve()
     broker = CommandBroker(

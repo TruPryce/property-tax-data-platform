@@ -1021,6 +1021,13 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.16"
+      - name: Provision the no-network command sandbox
+        run: |
+          if ! command -v bwrap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes bubblewrap
+          fi
+          bwrap --version
       - name: Validate artifact and trusted gates
         env:
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}

@@ -305,6 +305,10 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "HTTPS_PROXY=http://${PROXY_NAME}:45000" in adapter
     assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
+    validation = str(jobs["implementation-validation"])
+    assert "Provision the no-network command sandbox" in validation
+    assert "apt-get install --no-install-recommends --yes bubblewrap" in validation
+    assert "OPENAI_API_KEY" not in validation
     build = Path(__file__).parents[3] / ".ai/codex/10-build-countyforge-implement-image.sh"
     build_text = build.read_text(encoding="utf-8")
     assert "COUNTYFORGE_PROFILE_SHA256:?COUNTYFORGE_PROFILE_SHA256 is required" in build_text
