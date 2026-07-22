@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from countyforge_runner.command_broker import CommandBroker, validate_command_event
+from countyforge_runner.contracts import load_json_object, validate_document
 from countyforge_runner.errors import KernelError
 
 
@@ -17,7 +18,12 @@ def test_broker_runs_only_declared_command(tmp_path: Path) -> None:
     )
     result = broker.run("inspect.list-files", workspace=tmp_path)
     assert result["command_id"] == "inspect.list-files"
-    assert result["network"] == "disabled"
+    assert result["network_policy"] == "disabled"
+    schema = load_json_object(
+        repo_root / ".ai/schemas/countyforge-implementation-command-event.schema.json",
+        kind="command event schema",
+    )
+    validate_document(result, schema, kind="command event")
     with pytest.raises(KernelError, match="not declared"):
         broker.run("shell.arbitrary", workspace=tmp_path)
 

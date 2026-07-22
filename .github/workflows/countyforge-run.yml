@@ -936,6 +936,13 @@ jobs:
             --implementation-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-context-manifest.json" \
             --implementation-task-plan ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-task-plan.json" \
             --workspace "$RUNNER_TEMP/countyforge-workspace" > "$RUNNER_TEMP/countyforge-request.json"
+          export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
+          import hashlib, json, sys
+          document = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          payload = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+          print(hashlib.sha256(payload).hexdigest())
+          PY
+          )"
           ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
@@ -1019,6 +1026,7 @@ jobs:
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
           BASE_SHA: ${{ needs.claim.outputs.base_sha }}
           ISSUE_NUMBER: ${{ inputs.target_number }}
+          COMMAND_EVENTS_PATH: ${{ runner.temp }}/implementation-command-events.ndjson
         run: |
           result_file="$RUNNER_TEMP/implementation-result/countyforge-result.json"
           test -f "$result_file"
@@ -1035,9 +1043,6 @@ jobs:
           test -n "$packet_file" && test -n "$manifest_file" && test -n "$task_file"
           cd trusted
           uv sync --frozen --all-packages --group dev
-          uv run --package countyforge-github countyforge-github validate-implementation-result \
-            --result "$implementation_file" --task-plan "$task_file" \
-            --expected-revision "$(jq -er '.implementation_revision' "$packet_file")"
           python3 - "$packet_file" "$manifest_file" "$task_file" "$result_file" "$COUNTYFORGE_RUN_ID" "$BASE_SHA" <<'PY'
           import hashlib, json, pathlib, sys
           packet_path, manifest_path, task_path, result_path, run_id, base_sha = sys.argv[1:]
@@ -1090,21 +1095,31 @@ jobs:
           command_registry="$GITHUB_WORKSPACE/trusted/.ai/policies/countyforge-implementation-commands.v1.json"
           command_schema="$GITHUB_WORKSPACE/trusted/.ai/schemas/countyforge-implementation-command-registry.schema.json"
           run_registered() {
-            uv run --package countyforge-github countyforge-github run-implementation-command \
+            evidence="$(uv run --package countyforge-github countyforge-github run-implementation-command \
               --command-id "$1" --registry "$command_registry" --schema "$command_schema" \
-              --workspace "$GITHUB_WORKSPACE/trusted" >/dev/null
+              --workspace "$GITHUB_WORKSPACE/trusted" --run-id "$COUNTYFORGE_RUN_ID" \
+              --workspace-revision "$BASE_SHA")"
+            jq -e '.ok == true and (.evidence | type == "object")' <<<"$evidence" >/dev/null
+            jq -c '.evidence' <<<"$evidence" >> "$COMMAND_EVENTS_PATH"
           }
+          : > "$COMMAND_EVENTS_PATH"
           run_registered artifacts.check
           run_registered docs.links
           run_registered repo.check
           run_registered repo.runner-contract
           run_registered repo.prepr-no-ai
+          uv run --package countyforge-github countyforge-github validate-implementation-result \
+            --result "$implementation_file" --task-plan "$task_file" \
+            --expected-revision "$(jq -er '.implementation_revision' "$packet_file")" \
+            --command-events "$COMMAND_EVENTS_PATH"
           printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
       - name: Upload trusted validation report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: countyforge-implementation-validation-${{ inputs.run_id }}
-          path: ${{ runner.temp }}/implementation-validation.json
+          path: |
+            ${{ runner.temp }}/implementation-validation.json
+            ${{ runner.temp }}/implementation-command-events.ndjson
           if-no-files-found: error
           retention-days: 14
 

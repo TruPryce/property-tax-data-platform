@@ -10,7 +10,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from countyforge_runner.command_broker import validate_command_event
 from countyforge_runner.contracts import JsonObject, load_json_object, validate_document
 from countyforge_runner.errors import KernelError
 from countyforge_runner.evidence import EvidenceWriter
@@ -28,7 +27,7 @@ MODEL_OUTPUT_ARTIFACTS = (
     "countyforge-implementation-result.json",
     "countyforge-implementation-task-evidence.ndjson",
     "countyforge-implementation-workspace-manifest.json",
-    "countyforge-implementation-command-events.ndjson",
+    "countyforge-implementation-model-events.ndjson",
 )
 
 
@@ -52,28 +51,6 @@ def _output_bytes(run_dir: Path) -> int:
     return sum(
         path.stat().st_size for name in MODEL_OUTPUT_ARTIFACTS if (path := run_dir / name).is_file()
     )
-
-
-def _validate_implementation_command_events(path: Path, policy_path: Path) -> None:
-    """Reject optional model command evidence that names an undeclared command."""
-
-    policy = load_json_object(policy_path, kind="implementation command registry")
-    command_ids = {str(item["id"]) for item in policy.get("commands", []) if isinstance(item, dict)}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        raise KernelError(
-            "command_evidence_invalid", "Implementation command evidence is unavailable."
-        ) from None
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            validate_command_event(event, command_ids=command_ids)
 
 
 def _redacted_tail(text: str, environment: dict[str, str], limit: int = 4000) -> str:
@@ -516,13 +493,6 @@ class Runner:
                                 "prohibited_change",
                                 "Implementation result declares a prohibited path.",
                             )
-                command_events = run_dir / "countyforge-implementation-command-events.ndjson"
-                if command_events.is_file():
-                    _validate_implementation_command_events(
-                        command_events,
-                        self.kernel.contract_root
-                        / ".ai/policies/countyforge-implementation-commands.v1.json",
-                    )
             except (KernelError, OSError, UnicodeError):
                 implementation = None
                 disposition, code = "validation_failed", 5
@@ -570,7 +540,7 @@ class Runner:
                     "countyforge-implementation-result.json",
                     "countyforge-implementation-task-evidence.ndjson",
                     "countyforge-implementation-workspace-manifest.json",
-                    "countyforge-implementation-command-events.ndjson",
+                    "countyforge-implementation-model-events.ndjson",
                 )
                 if (run_dir / name).is_file()
             ),

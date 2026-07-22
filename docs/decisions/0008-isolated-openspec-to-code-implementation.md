@@ -21,12 +21,17 @@ it never receives a GitHub write token, Git credentials, production credentials,
 or production network. The model has no process-execution tools and emits a bounded file bundle;
 trusted tooling materializes it only after policy checks. Versioned command and path policies
 constrain trusted validation, with command network denied by default. Provider HTTPS traffic is
-restricted to an allowlist proxy for the selected model endpoint.
+restricted to a trusted allowlist proxy sidecar for the selected model endpoint.
 
 Trusted code owns eligibility, task reconciliation, artifact validation, deterministic gates,
 Git data API publication, draft PR creation, and canonical state. The model's result is
 evidence, not authority to publish. Only the dedicated publication job receives code-write
 permissions, and it creates a draft branch/PR rather than writing `main` or merging.
+
+The no-provider-secret validation job may execute model-authored files through the repository's
+deterministic gates. This is an explicit v1 residual risk, bounded by no GitHub write permission,
+no provider or production credentials, and registry commands enforced in a no-network sandbox;
+the separate publisher still revalidates the artifact and live lease before any Git mutation.
 
 The implementation package remains under `tools/`; the runner stays GitHub-neutral. Review
 and planning profiles retain their existing boundaries, while fix and validate remain

@@ -298,9 +298,19 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     adapter = (
         Path(__file__).parents[3] / ".ai/codex/09-run-countyforge-implement-docker.sh"
     ).read_text(encoding="utf-8")
-    assert "countyforge_runner.provider_proxy" in adapter
-    assert "--network=bridge" in adapter
+    assert "provider_proxy.py" in adapter
+    assert "docker network create --driver bridge --internal" in adapter
+    assert "docker network connect bridge" in adapter
+    assert '--network "$NETWORK_NAME"' in adapter
+    assert "HTTPS_PROXY=http://${PROXY_NAME}:45000" in adapter
+    assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
+    build = Path(__file__).parents[3] / ".ai/codex/10-build-countyforge-implement-image.sh"
+    build_text = build.read_text(encoding="utf-8")
+    assert "COUNTYFORGE_PROFILE_SHA256:?COUNTYFORGE_PROFILE_SHA256 is required" in build_text
+    implementation_model = str(jobs["implementation-openai"])
+    assert "export COUNTYFORGE_PROFILE_SHA256=" in implementation_model
+    assert "python3 - .ai/profiles/implement.workspace-write.v1.json" in implementation_model
     publish = str(jobs["implementation-publish"])
     assert "Verify live implementation publication lease" in publish
     assert "steps.verify-publication.outcome == 'success'" in publish

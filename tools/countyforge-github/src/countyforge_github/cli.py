@@ -9,11 +9,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from countyforge_runner.command_broker import CommandBroker
+from countyforge_runner.contracts import validate_document
 from countyforge_runner.errors import KernelError
 
 from countyforge_github.authorization import authorize
 from countyforge_github.commands import parse_event
-from countyforge_github.contracts import ControlContracts, JsonObject, load_json_object
+from countyforge_github.contracts import (
+    ControlContracts,
+    JsonObject,
+    load_json_object,
+)
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubRestClient
 from countyforge_github.identity import (
@@ -52,6 +57,33 @@ from countyforge_github.workflow_control import (
 
 def _file(parser: argparse.ArgumentParser, name: str, *, required: bool = True) -> None:
     parser.add_argument(f"--{name.replace('_', '-')}", type=Path, required=required)
+
+
+def _load_command_events(path: Path, schema_path: Path) -> list[JsonObject]:
+    """Load and strictly validate trusted broker event lines."""
+
+    try:
+        schema = load_json_object(schema_path, kind="implementation command-event schema")
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError, ControlPlaneError):
+        raise ControlPlaneError(
+            "command_evidence_invalid", "Trusted implementation command evidence is unavailable."
+        ) from None
+    events: list[JsonObject] = []
+    try:
+        for line in lines:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError
+            validate_document(event, schema, kind="implementation command event")
+            events.append(event)
+    except (ValueError, json.JSONDecodeError, ControlPlaneError):
+        raise ControlPlaneError(
+            "command_evidence_invalid", "Trusted implementation command evidence is invalid."
+        ) from None
+    return events
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     _file(implementation_result, "task-plan")
     implementation_result.add_argument("--expected-revision", type=int)
     implementation_result.add_argument("--workspace", type=Path)
+    implementation_result.add_argument("--command-events", type=Path, required=True)
 
     implementation_artifact = subparsers.add_parser("validate-implementation-artifact")
     _file(implementation_artifact, "result")
@@ -170,6 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_command.add_argument("--registry", type=Path, required=True)
     implementation_command.add_argument("--schema", type=Path, required=True)
     implementation_command.add_argument("--workspace", type=Path, required=True)
+    implementation_command.add_argument("--run-id", default="local")
+    implementation_command.add_argument("--workspace-revision")
 
     publish = subparsers.add_parser("publish-plan")
     _file(publish, "result")
@@ -483,12 +518,29 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if command_name == "validate-implementation-result":
             result = _load(args.result, "implementation result")
             task_plan = _load(args.task_plan, "implementation task plan")
+            events = _load_command_events(
+                args.command_events,
+                contracts.contract_root
+                / ".ai"
+                / "schemas"
+                / "countyforge-implementation-command-event.schema.json",
+            )
             validate_implementation_result(
                 result,
                 workspace_root=args.workspace,
                 expected_revision=args.expected_revision,
             )
-            validate_implementation_tasks(result, task_plan)
+            changed_paths = [
+                str(path)
+                for field in ("files_created", "files_modified", "files_deleted")
+                for path in result.get(field, [])
+            ]
+            validate_implementation_tasks(
+                result,
+                task_plan,
+                trusted_command_events=events,
+                changed_paths=changed_paths,
+            )
             _emit({"ok": True, "publication_eligibility": "trusted_validation_required"})
             return 0
         if command_name == "validate-implementation-artifact":
@@ -550,7 +602,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if command_name == "run-implementation-command":
             broker = CommandBroker(args.registry, args.schema)
-            evidence = broker.run(args.command_id, workspace=args.workspace)
+            evidence = broker.run(
+                args.command_id,
+                workspace=args.workspace,
+                run_id=args.run_id,
+                workspace_revision=args.workspace_revision,
+            )
             _emit({"ok": int(evidence["exit_code"]) == 0, "evidence": evidence})
             return 0 if int(evidence["exit_code"]) == 0 else 5
         if command_name == "publish-plan":

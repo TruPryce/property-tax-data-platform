@@ -68,20 +68,40 @@ document = {
 }
 pathlib.Path(path).write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
 PY
-PROXY_PORT=$((45000 + ($$ % 1000)))
-PYTHONPATH="$(pwd)/tools/countyforge-runner/src" python3 -m countyforge_runner.provider_proxy \
-  --port "$PROXY_PORT" --allowed-host api.openai.com >/dev/null 2>&1 &
-PROXY_PID=$!
-cleanup_proxy() { kill "$PROXY_PID" 2>/dev/null || true; }
-trap cleanup_proxy EXIT
-sleep 0.2
-kill -0 "$PROXY_PID" 2>/dev/null || { echo "provider proxy failed" >&2; exit 2; }
+NETWORK_NAME="countyforge-implement-${RANDOM}-$$"
+PROXY_NAME="${NETWORK_NAME}-proxy"
+cleanup_network() {
+  docker rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
+  docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+}
+trap cleanup_network EXIT
+docker network create --driver bridge --internal "$NETWORK_NAME" >/dev/null
+
+# The model is attached only to the internal network.  The proxy sidecar is the sole
+# container attached to both the internal network and Docker's ordinary egress network;
+# direct provider or arbitrary internet connections from the model are therefore impossible.
+docker run -d --name "$PROXY_NAME" \
+  --network "$NETWORK_NAME" \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+  --user 65532:65532 \
+  -v "$(pwd)/tools/countyforge-runner/src/countyforge_runner/provider_proxy.py:/provider_proxy.py:ro" \
+  python:3.12-alpine \
+  python /provider_proxy.py --host 0.0.0.0 --port 45000 --allowed-host api.openai.com \
+  >/dev/null
+docker network connect bridge "$PROXY_NAME"
+sleep 1
+docker inspect "$PROXY_NAME" --format '{{.State.Running}}' | grep -qx true || {
+  echo "provider proxy failed" >&2
+  exit 2
+}
 docker run --rm \
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges:true \
-  --network=bridge \
-  --add-host=host.docker.internal:host-gateway \
+  --network "$NETWORK_NAME" \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \
   --tmpfs /tmp/codex-home:rw,nosuid,nodev,size=256m \
   --user "$(id -u):$(id -g)" \
@@ -95,8 +115,8 @@ docker run --rm \
   -e CODEX_PROVIDER -e CODEX_MODEL -e CODEX_MODEL_REF -e CODEX_REASONING_EFFORT \
   -e HOME=/tmp/codex-home -e CODEX_HOME=/tmp/codex-home \
   -e OPENAI_API_KEY \
-  -e "HTTPS_PROXY=http://host.docker.internal:${PROXY_PORT}" \
-  -e "HTTP_PROXY=http://host.docker.internal:${PROXY_PORT}" \
+  -e "HTTPS_PROXY=http://${PROXY_NAME}:45000" \
+  -e "HTTP_PROXY=http://${PROXY_NAME}:45000" \
   -e NO_PROXY= \
   "$CODEX_IMAGE" \
   exec --ephemeral --ignore-rules --skip-git-repo-check --json --sandbox read-only \
@@ -105,7 +125,7 @@ docker run --rm \
     --output-schema /workspace/implementation-result.schema.json \
     --output-last-message /out/countyforge-implementation-result.json \
     "$(cat "$PROMPT_PATH")" \
-  > "$OUT_DIR/countyforge-implementation-command-events.ndjson"
+  > "$OUT_DIR/countyforge-implementation-model-events.ndjson"
 
 # The model emits a bounded structured file bundle because no process-execution tool is
 # available inside the container. Trusted host-side materialization is limited to relative

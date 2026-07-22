@@ -26,6 +26,11 @@ Trusted code derives a task plan from accepted OpenSpec checkboxes. Each slice r
 
 Validation downloads and checksums the artifact, verifies run/issue/change/base/profile/packet bindings, reconstructs a clean worktree, applies only declared files, enforces path and secret policy, runs the full deterministic CountyForge and repository gates plus change-selected tests, and emits a trusted validation report. Only a successful report and live lease permit publication. The publisher derives `countyforge/implement/issue-<issue>-<change>-r<revision>`, never writes `main`, creates a commit from the validated manifest, and opens or updates a draft PR with no provider credential. Human review remains required.
 
+Validation can execute model-authored files as part of those deterministic gates. This bounded v1
+residual risk is accepted only in the no-provider-secret, no-write validation job: registry
+commands run in an enforced no-network sandbox, and the publisher treats all model claims as
+untrusted until it rechecks the live lease and validates the declared manifest again.
+
 ## Resume, cancellation, and compatibility
 
 An unchanged semantic request deduplicates or resumes only from validated artifacts. A changed accepted hash or base SHA creates a superseding revision and never overwrites a human-edited branch/PR. Cancellation is checked at intake, execution, validation, and immediately before Git mutation; a cancellation/publication race reports any already-created ref honestly. Existing review/planning commands, state markers, history, leases, and artifacts remain readable; implementation metadata is optional for legacy states.

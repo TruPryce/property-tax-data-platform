@@ -122,7 +122,7 @@ def _tasks_from_text(text: str) -> list[JsonObject]:
                 "description": description[:1024],
                 "status": "incomplete",
                 "allowed_paths": ["libs", "services", "dags", "docs", "openspec"],
-                "required_checks": ["make check"],
+                "required_checks": ["repo.check"],
                 "risk": "normal",
             }
         )
@@ -623,8 +623,19 @@ def validate_implementation_result(
         raise ControlPlaneError("workspace_unavailable", "Implementation workspace is unavailable.")
 
 
-def validate_implementation_tasks(result: JsonObject, task_plan: JsonObject) -> None:
-    """Reconcile model task claims with the trusted accepted task plan."""
+def validate_implementation_tasks(
+    result: JsonObject,
+    task_plan: JsonObject,
+    *,
+    trusted_command_events: Iterable[JsonObject] | None = None,
+    changed_paths: Iterable[str] = (),
+) -> None:
+    """Reconcile task claims with trusted task and command evidence.
+
+    Model-authored prose is never accepted as completion evidence. Every task must be
+    accounted for exactly once, and publication validation requires every task to be complete
+    with its required checks observed as successful broker events.
+    """
 
     planned_tasks = {
         str(task["task_id"]): task
@@ -635,29 +646,52 @@ def validate_implementation_tasks(result: JsonObject, task_plan: JsonObject) -> 
     completed = {str(value) for value in result.get("completed_task_ids", [])}
     incomplete = {str(value) for value in result.get("incomplete_task_ids", [])}
     blocked = {str(value) for value in result.get("blocked_task_ids", [])}
-    if not planned or (completed | incomplete | blocked) - planned:
+    accounted = completed | incomplete | blocked
+    if not planned or accounted - planned or accounted != planned:
         raise ControlPlaneError(
             "implementation_task_mismatch",
-            "Implementation result contains an undeclared task.",
+            "Implementation result must account for every accepted task exactly once.",
         )
     if (completed & incomplete) or (completed & blocked) or (incomplete & blocked):
         raise ControlPlaneError(
             "implementation_task_mismatch",
             "Implementation task states overlap.",
         )
-    if completed and not result.get("command_evidence"):
+    if incomplete or blocked:
+        raise ControlPlaneError(
+            "implementation_tasks_incomplete",
+            "All accepted implementation tasks must be complete before publication.",
+        )
+    events = list(trusted_command_events or ())
+    successful_commands = {
+        str(event.get("command_id"))
+        for event in events
+        if event.get("exit_code") == 0 and event.get("truncated") is False
+    }
+    if completed and not events:
         raise ControlPlaneError(
             "implementation_task_evidence_missing",
-            "Completed implementation tasks require command evidence.",
+            "Completed implementation tasks require trusted command evidence.",
         )
-    evidence = {
-        str(value)
-        for field in ("tests_run", "validation_results", "command_evidence")
-        for value in result.get(field, [])
-    }
+    declared_paths = [str(path) for path in changed_paths]
+    allowed_roots = [
+        str(path)
+        for task_id in completed
+        for path in planned_tasks[task_id].get("allowed_paths", [])
+    ]
+    for changed in declared_paths:
+        if not any(
+            changed == root or changed.startswith(f"{root.rstrip('/')}/") or fnmatch(changed, root)
+            for root in allowed_roots
+        ):
+            raise ControlPlaneError(
+                "implementation_task_path_mismatch",
+                "A changed path is outside the accepted task paths.",
+            )
     for task_id in completed:
-        required = planned_tasks[task_id].get("required_checks", [])
-        if any(str(check) not in evidence for check in required):
+        task = planned_tasks[task_id]
+        required = {str(check) for check in task.get("required_checks", [])}
+        if not required.issubset(successful_commands):
             raise ControlPlaneError(
                 "implementation_task_evidence_missing",
                 "A completed implementation task lacks a required check.",

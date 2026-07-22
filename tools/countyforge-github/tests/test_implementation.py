@@ -88,17 +88,56 @@ def test_model_paths_fail_closed(path: str) -> None:
 
 
 def test_completed_task_requires_trusted_command_evidence() -> None:
-    task_plan = {"tasks": [{"task_id": "1.1", "required_checks": ["make check"]}]}
+    task_plan = {
+        "tasks": [{"task_id": "1.1", "required_checks": ["repo.check"], "allowed_paths": ["docs"]}]
+    }
     result = {
         "completed_task_ids": ["1.1"],
         "incomplete_task_ids": [],
         "blocked_task_ids": [],
-        "command_evidence": [],
     }
     with pytest.raises(ControlPlaneError, match="command evidence"):
         validate_implementation_tasks(result, task_plan)
-    result["command_evidence"] = ["make check"]
-    validate_implementation_tasks(result, task_plan)
+    validate_implementation_tasks(
+        result,
+        task_plan,
+        trusted_command_events=[{"command_id": "repo.check", "exit_code": 0, "truncated": False}],
+        changed_paths=["docs/generated.md"],
+    )
+
+
+def test_task_reconciliation_requires_complete_accounting_and_allowed_paths() -> None:
+    task_plan = {
+        "tasks": [
+            {"task_id": "1.1", "required_checks": [], "allowed_paths": ["docs"]},
+            {"task_id": "1.2", "required_checks": [], "allowed_paths": ["tests"]},
+        ]
+    }
+    with pytest.raises(ControlPlaneError, match="account for every"):
+        validate_implementation_tasks(
+            {"completed_task_ids": ["1.1"], "incomplete_task_ids": [], "blocked_task_ids": []},
+            task_plan,
+        )
+    with pytest.raises(ControlPlaneError, match="outside"):
+        validate_implementation_tasks(
+            {
+                "completed_task_ids": ["1.1", "1.2"],
+                "incomplete_task_ids": [],
+                "blocked_task_ids": [],
+            },
+            task_plan,
+            trusted_command_events=[
+                {"command_id": "repo.check", "exit_code": 0, "truncated": False}
+            ],
+            changed_paths=["services/unsafe.py"],
+        )
+
+
+def test_incomplete_or_blocked_tasks_never_publish() -> None:
+    task_plan = {"tasks": [{"task_id": "1.1", "required_checks": [], "allowed_paths": ["docs"]}]}
+    for field in ("incomplete_task_ids", "blocked_task_ids"):
+        with pytest.raises(ControlPlaneError, match="complete"):
+            validate_implementation_tasks({"completed_task_ids": [], field: ["1.1"]}, task_plan)
 
 
 def test_higher_risk_claims_fail_without_explicit_approval() -> None:
@@ -188,6 +227,79 @@ def test_artifact_policy_rejects_size_and_prohibited_paths(tmp_path: Path, repo_
     with pytest.raises(ControlPlaneError, match="prohibited"):
         validate_implementation_artifact(
             _artifact_result("docs/Makefile", "x"),
+            manifest,
+            workspace_root=workspace,
+            policy_root=repo_root,
+            expected_run_id="run",
+            expected_issue_number=7,
+            expected_change_name="safe-change",
+            expected_base_sha="a" * 40,
+        )
+
+
+def test_artifact_policy_rejects_oversized_files(tmp_path: Path, repo_root: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+    content = "x" * 500_001
+    candidate = workspace / "docs/large.md"
+    candidate.write_text(content, encoding="utf-8")
+    manifest = {
+        "run_id": "run",
+        "issue_number": 7,
+        "change_name": "safe-change",
+        "base_sha": "a" * 40,
+        "files": [
+            {
+                "path": "docs/large.md",
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "bytes": len(content.encode()),
+                "kind": "created",
+            }
+        ],
+        "total_bytes": len(content.encode()),
+    }
+    with pytest.raises(ControlPlaneError, match="exceeds"):
+        validate_implementation_artifact(
+            _artifact_result("docs/large.md", content),
+            manifest,
+            workspace_root=workspace,
+            policy_root=repo_root,
+            expected_run_id="run",
+            expected_issue_number=7,
+            expected_change_name="safe-change",
+            expected_base_sha="a" * 40,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative", ["docs/source.csv", "docs/private.pem", "pyproject.toml", "uv.lock"]
+)
+def test_artifact_policy_enforces_versioned_prohibited_globs(
+    relative: str, tmp_path: Path, repo_root: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    candidate = workspace / relative
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text("unsafe\n", encoding="utf-8")
+    content = candidate.read_text(encoding="utf-8")
+    manifest = {
+        "run_id": "run",
+        "issue_number": 7,
+        "change_name": "safe-change",
+        "base_sha": "a" * 40,
+        "files": [
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "bytes": len(content.encode()),
+                "kind": "created",
+            }
+        ],
+        "total_bytes": len(content.encode()),
+    }
+    with pytest.raises(ControlPlaneError, match="outside|prohibited"):
+        validate_implementation_artifact(
+            _artifact_result(relative, content),
             manifest,
             workspace_root=workspace,
             policy_root=repo_root,

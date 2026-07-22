@@ -29,8 +29,8 @@ home, SSH agent, Tailscale socket, or production network.
 
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
 output limits, and offline network policy for trusted validation. The model cannot start a
-process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a host-side
-allowlist proxy restricted to the selected provider endpoint; command execution remains offline.
+process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
+sidecar restricted to the selected provider endpoint; command execution remains offline.
 The path policy rejects workflows,
 CODEOWNERS, policies, providers, credentials, `.git`, infrastructure, data archives, and other
 sensitive roots. Trusted reconciliation compares the result's task/path claims with the
@@ -44,6 +44,12 @@ trusted base, applies only declared files, enforces the path policy, runs reposi
 emits a validation report. Only then does the short per-target state-lane publisher derive
 `countyforge/implement/issue-<issue>-<change>-r<revision>`, create a commit, and open/update a
 draft PR. The PR always requires human review; no merge, deployment, or issue closure occurs.
+
+The validation job may execute model-authored files while running these deterministic gates. This
+is an explicit v1 residual risk accepted because the job has no provider credential, no GitHub
+write permission, no ambient production credentials, and registry commands run in a no-network
+sandbox. The validated result remains untrusted evidence until the publisher rechecks its live
+lease and applies only the declared manifest.
 
 ## Resume and cancellation
 
