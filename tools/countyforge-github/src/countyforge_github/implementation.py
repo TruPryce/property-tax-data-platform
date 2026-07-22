@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -51,6 +52,57 @@ _HIGHER_RISK = (
     "cryptography",
     "secret",
 )
+
+
+def _has_unresolved_blocking_decision(files: Iterable[Path]) -> bool:
+    """Detect only affirmative, structured blocking markers in trusted change files."""
+
+    markers = (
+        re.compile(
+            r"^\s*(?:implementation_blocked|blocking_decisions?)\s*:\s*(?:true|yes|blocked)\b", re.I
+        ),
+        re.compile(r"^\s*(?:status|decision)\s*:\s*(?:blocked|unresolved)\b", re.I),
+    )
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        for line in lines:
+            if any(marker.search(line) for marker in markers):
+                return True
+    return False
+
+
+def _validate_accepted_change(contract_root: Path, change_name: str) -> None:
+    """Run the trusted OpenSpec validator before implementation eligibility is granted."""
+
+    executable = shutil.which("openspec")
+    if executable is None:
+        raise ControlPlaneError(
+            "openspec_validator_unavailable",
+            "The trusted OpenSpec validator is unavailable.",
+        )
+    try:
+        completed = subprocess.run(
+            [executable, "validate", "--all", "--strict", "--no-interactive"],
+            cwd=contract_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            # Preserve the hosted runner's Node/Python tool paths while passing no
+            # provider or workflow environment into eligibility validation.
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ControlPlaneError(
+            "openspec_validation_failed", "The accepted OpenSpec change could not be validated."
+        ) from None
+    if completed.returncode != 0:
+        raise ControlPlaneError(
+            "openspec_validation_failed", "The accepted OpenSpec change is not valid."
+        )
 
 
 def _source_id(category: str, path: str) -> str:
@@ -179,6 +231,7 @@ def evaluate_implementation_eligibility(
     trusted_base_sha: str,
     planning_pr_merged: bool,
     approval_actor_id: int | None = None,
+    approval_actor_type: str | None = None,
     planning_pr_number: int | None = None,
     planning_pr_merge_sha: str | None = None,
     approval_actor_login: str | None = None,
@@ -191,6 +244,7 @@ def evaluate_implementation_eligibility(
     change_hash = "0" * 64
     try:
         files = implementation_change_files(contract_root, change_name)
+        _validate_accepted_change(contract_root, change_name)
         change_hash = _change_hash(files, contract_root)
         issue = _change_issue(files[0])
         if issue != issue_number:
@@ -200,10 +254,7 @@ def evaluate_implementation_eligibility(
         )
         if not _tasks_from_text(tasks):
             reasons.append("tasks_missing")
-        if (
-            "blocking decision" in tasks.casefold()
-            or "implementation_blocked: true" in tasks.casefold()
-        ):
+        if _has_unresolved_blocking_decision(files):
             reasons.append("blocking_decision_unresolved")
     except ControlPlaneError as error:
         reasons.append(error.code)
@@ -211,6 +262,8 @@ def evaluate_implementation_eligibility(
         reasons.append("planning_pr_not_merged")
     elif approval_actor_id is None:
         reasons.append("approval_actor_missing")
+    elif approval_actor_type != "User":
+        reasons.append("approval_actor_not_human")
     if not re.fullmatch(r"[0-9a-f]{40}", trusted_base_sha):
         reasons.append("trusted_base_sha_invalid")
     return {
@@ -223,6 +276,7 @@ def evaluate_implementation_eligibility(
         "trusted_base_sha": trusted_base_sha,
         "planning_pr_merged": planning_pr_merged,
         "approval_actor_id": approval_actor_id,
+        "approval_actor_type": approval_actor_type,
         "planning_pr_number": planning_pr_number,
         "planning_pr_merge_sha": planning_pr_merge_sha,
         "approval_actor_login": approval_actor_login,
@@ -284,6 +338,7 @@ def resolve_merged_planning_approval(
         merged_by = pull.get("merged_by")
         if (
             not isinstance(merged_by, dict)
+            or merged_by.get("type") != "User"
             or not isinstance(merged_by.get("login"), str)
             or not isinstance(merged_by.get("id"), int)
             or int(merged_by["id"]) < 1
@@ -299,6 +354,7 @@ def resolve_merged_planning_approval(
             "planning_pr_number": number,
             "planning_pr_merge_sha": merged_sha,
             "approval_actor_id": int(merged_by["id"]),
+            "approval_actor_type": "User",
             "approval_actor_login": str(merged_by["login"]),
             "approval_permission": str(permission),
         }
@@ -315,6 +371,7 @@ def build_implementation_packet(
     change_name: str,
     planning_pr_merged: bool,
     approval_actor_id: int | None = None,
+    approval_actor_type: str | None = None,
     comments: Iterable[JsonObject] = (),
 ) -> JsonObject:
     """Build an immutable packet, manifest, and task plan under ``output_dir``."""
@@ -347,6 +404,11 @@ def build_implementation_packet(
         trusted_base_sha=str(target["base_sha"]),
         planning_pr_merged=planning_pr_merged,
         approval_actor_id=approval_actor_id,
+        approval_actor_type=(
+            str(approval["approval_actor_type"])
+            if isinstance(approval, dict) and approval.get("approval_actor_type")
+            else approval_actor_type
+        ),
         planning_pr_number=(
             int(approval["planning_pr_number"])
             if isinstance(approval, dict) and approval.get("planning_pr_number")
@@ -381,6 +443,7 @@ def build_implementation_packet(
                 "planning_pr_number",
                 "planning_pr_merge_sha",
                 "approval_actor_login",
+                "approval_actor_type",
                 "approval_permission",
             )
             if key in approval

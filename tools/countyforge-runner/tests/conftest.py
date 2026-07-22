@@ -191,6 +191,7 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                     "trusted_base_sha": head_sha,
                     "planning_pr_merged": True,
                     "approval_actor_id": 42,
+                    "approval_actor_type": "User",
                     "blocking_reasons": [],
                 },
                 "sources": [],

@@ -835,6 +835,12 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.16"
+      - name: Provision trusted OpenSpec validator
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/openspec-packet-tool" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$RUNNER_TEMP/openspec-packet-tool/bin/openspec"
+          echo "$RUNNER_TEMP/openspec-packet-tool/bin" >> "$GITHUB_PATH"
       - name: Build accepted implementation packet
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1028,6 +1034,13 @@ jobs:
             sudo apt-get install --no-install-recommends --yes bubblewrap
           fi
           bwrap --version
+      - name: Provision pinned OpenSpec validator for offline gates
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/openspec-tool" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$RUNNER_TEMP/openspec-tool/bin/openspec"
+          mkdir -p "$RUNNER_TEMP/openspec-bin"
+          ln -sf "$RUNNER_TEMP/openspec-tool/bin/openspec" "$RUNNER_TEMP/openspec-bin/openspec"
       - name: Validate artifact and trusted gates
         env:
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
@@ -1075,7 +1088,25 @@ jobs:
             --policy-root "$GITHUB_WORKSPACE/trusted" \
             --run-id "$COUNTYFORGE_RUN_ID" --issue-number "$ISSUE_NUMBER" \
             --change-name "$change_name" --base-sha "$BASE_SHA"
-          python3 - "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" "$RUNNER_TEMP/implementation-workspace" "$GITHUB_WORKSPACE/trusted" <<'PY'
+          candidate_root="$RUNNER_TEMP/implementation-candidate"
+          git clone --quiet --no-local --no-hardlinks \
+            --config core.hooksPath=/dev/null \
+            --config core.fsmonitor=false \
+            --config credential.helper= \
+            "$GITHUB_WORKSPACE/trusted" "$candidate_root"
+          git -C "$candidate_root" config --local core.hooksPath /dev/null
+          git -C "$candidate_root" config --local core.fsmonitor false
+          git -C "$candidate_root" config --local credential.helper ""
+          test "$(git -C "$candidate_root" rev-parse HEAD)" = "$BASE_SHA"
+          # Reuse only trusted, pre-provisioned developer tooling; never overlay model
+          # files onto the trusted checkout that runs the validators.
+          if [ -d "$GITHUB_WORKSPACE/trusted/.venv" ]; then
+            cp -a "$GITHUB_WORKSPACE/trusted/.venv" "$candidate_root/.venv"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/trusted/.cache" ]; then
+            cp -a "$GITHUB_WORKSPACE/trusted/.cache" "$candidate_root/.cache"
+          fi
+          python3 - "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" "$RUNNER_TEMP/implementation-workspace" "$candidate_root" <<'PY'
           import json, pathlib, shutil, sys
           manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
           source_root = pathlib.Path(sys.argv[2]).resolve()
@@ -1093,18 +1124,13 @@ jobs:
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copyfile(source, target)
           PY
-          cat > "$RUNNER_TEMP/openspec" <<'SH'
-          #!/bin/sh
-          exec npx --yes @fission-ai/openspec@1.6.0 "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/openspec"
-          export PATH="$RUNNER_TEMP:$PATH"
+          export PATH="$RUNNER_TEMP/openspec-bin:$PATH"
           command_registry="$GITHUB_WORKSPACE/trusted/.ai/policies/countyforge-implementation-commands.v1.json"
           command_schema="$GITHUB_WORKSPACE/trusted/.ai/schemas/countyforge-implementation-command-registry.schema.json"
           run_registered() {
             evidence="$(uv run --package countyforge-github countyforge-github run-implementation-command \
               --command-id "$1" --registry "$command_registry" --schema "$command_schema" \
-              --workspace "$GITHUB_WORKSPACE/trusted" --run-id "$COUNTYFORGE_RUN_ID" \
+              --workspace "$candidate_root" --run-id "$COUNTYFORGE_RUN_ID" \
               --workspace-revision "$BASE_SHA")"
             jq -e '.ok == true and (.evidence | type == "object")' <<<"$evidence" >/dev/null
             jq -c '.evidence' <<<"$evidence" >> "$COMMAND_EVENTS_PATH"
@@ -1117,6 +1143,7 @@ jobs:
           run_registered repo.prepr-no-ai
           uv run --package countyforge-github countyforge-github validate-implementation-result \
             --result "$implementation_file" --task-plan "$task_file" \
+            --workspace "$candidate_root" \
             --expected-revision "$(jq -er '.implementation_revision' "$packet_file")" \
             --command-events "$COMMAND_EVENTS_PATH"
           printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"

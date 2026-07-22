@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.implementation import (
+    _has_unresolved_blocking_decision,
     build_implementation_packet,
     evaluate_implementation_eligibility,
     freeze_implementation_artifact,
@@ -47,6 +48,14 @@ def test_unmerged_plan_is_not_eligible(repo_root: Path) -> None:
     assert "planning_pr_not_merged" in decision["blocking_reasons"]
 
 
+def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: Path) -> None:
+    design = tmp_path / "design.md"
+    design.write_text("decision: unresolved\n", encoding="utf-8")
+    assert _has_unresolved_blocking_decision([design]) is True
+    design.write_text("There are no unresolved blocking decisions.\n", encoding="utf-8")
+    assert _has_unresolved_blocking_decision([design]) is False
+
+
 def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> None:
     trigger, issue, _ = _facts()
     result = build_implementation_packet(
@@ -58,6 +67,7 @@ def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> No
         change_name="add-isolated-openspec-to-code-agents",
         planning_pr_merged=True,
         approval_actor_id=42,
+        approval_actor_type="User",
     )
     packet = load_json_object(Path(str(result["packet_path"])), kind="implementation packet")
     schema = load_json_object(
@@ -467,7 +477,7 @@ class _ApprovalGitHub:
             "merged_at": "2026-07-22T00:00:00Z",
             "merge_commit_sha": "b" * 40,
             "body": "Originating issue #7; accepted change safe-change",
-            "merged_by": {"id": 42, "login": "maintainer"},
+            "merged_by": {"id": 42, "login": "maintainer", "type": "User"},
         }
 
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, object]:
@@ -490,6 +500,23 @@ def test_merged_planning_approval_is_bound_to_human_and_change() -> None:
     )
     assert approval["eligible"] is True
     assert approval["approval_actor_id"] == 42
+
+
+def test_bot_merged_planning_approval_is_refused() -> None:
+    class BotApprovalGitHub(_ApprovalGitHub):
+        def pull_request(self, repository: str, number: int) -> dict[str, object]:
+            pull = super().pull_request(repository, number)
+            pull["merged_by"] = {"id": 42, "login": "automation", "type": "Bot"}
+            return pull
+
+    approval = resolve_merged_planning_approval(
+        BotApprovalGitHub(),
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=7,
+        change_name="safe-change",
+        trusted_base_sha="c" * 40,
+    )
+    assert approval["eligible"] is False
 
 
 class _PublicationGitHub:

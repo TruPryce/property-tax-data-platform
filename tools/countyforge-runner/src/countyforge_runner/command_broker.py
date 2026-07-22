@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import selectors
 import shutil
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,8 +21,8 @@ from countyforge_runner.contracts import JsonObject, load_json_object, validate_
 from countyforge_runner.errors import KernelError
 
 
-def _hash_output(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+def _hash_output(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 class CommandBroker:
@@ -89,27 +91,95 @@ class CommandBroker:
         }
         environment["PWD"] = str(root)
         started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        limit = int(entry["max_output_bytes"])
         try:
-            completed = subprocess.run(  # noqa: S603 - executable and argv are registry-owned
+            process = subprocess.Popen(  # noqa: S603 - executable and argv are registry-owned
                 sandboxed_argv,
                 cwd=root,
                 env=environment,
-                capture_output=True,
-                text=True,
-                timeout=int(entry["timeout_seconds"]),
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-        except subprocess.TimeoutExpired as error:
+        except OSError as error:
             raise KernelError(
-                "command_timed_out", "Implementation command exceeded its limit."
+                "command_failed", "Implementation command could not start."
             ) from error
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        combined = (stdout + stderr).encode("utf-8", errors="replace")
-        limit = int(entry["max_output_bytes"])
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None
+        assert process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        output_bytes = 0
+        deadline = time.monotonic() + int(entry["timeout_seconds"])
+        output_exceeded = False
+        timed_out = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    break
+                ready = selector.select(min(0.25, remaining))
+                if not ready and process.poll() is not None:
+                    continue
+                for key, _ in ready:
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        try:
+                            os.close(key.fd)
+                        except OSError:
+                            pass
+                        continue
+                    room = limit - output_bytes
+                    if len(chunk) > room:
+                        first_excess = not output_exceeded
+                        output_exceeded = True
+                        if room > 0:
+                            buffers[key.data].extend(chunk[:room])
+                            output_bytes += room
+                        if first_excess:
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+                    elif not output_exceeded:
+                        buffers[key.data].extend(chunk)
+                        output_bytes += len(chunk)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        finally:
+            selector.close()
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        if timed_out:
+            raise KernelError("command_timed_out", "Implementation command exceeded its limit.")
+        if output_exceeded:
+            raise KernelError(
+                "command_output_limit_exceeded",
+                "Implementation command exceeded its output limit.",
+            )
+        stdout = bytes(buffers["stdout"])
+        stderr = bytes(buffers["stderr"])
         finished_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         revision = workspace_revision or _workspace_revision(root)
-        raw_exit_code = int(completed.returncode)
+        raw_exit_code = int(process.returncode or 0)
         exit_code = 128 + abs(raw_exit_code) if raw_exit_code < 0 else raw_exit_code
         return {
             "contract_version": 1,
@@ -121,8 +191,8 @@ class CommandBroker:
             "exit_code": exit_code,
             "stdout_sha256": _hash_output(stdout),
             "stderr_sha256": _hash_output(stderr),
-            "output_bytes": len(combined),
-            "truncated": len(combined) > limit,
+            "output_bytes": len(stdout) + len(stderr),
+            "truncated": False,
             "network_policy": network,
             "workspace_revision": revision,
             "workspace_mutating": entry["workspace_mutating"],

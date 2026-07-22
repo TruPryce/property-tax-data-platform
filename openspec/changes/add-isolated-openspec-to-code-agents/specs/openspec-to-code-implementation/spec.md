@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Accepted-plan implementation eligibility
-The control plane SHALL allow `implement <change>` only when the exact change exists and validates on the trusted default branch, identifies the originating issue, has no unresolved blocking decisions, and its planning PR was merged by an authorized maintainer. The request MUST bind an immutable trusted base SHA and semantic implementation revision. Reactions, labels, draft branches, bot output, and issue prose MUST NOT establish approval.
+The control plane SHALL allow `implement <change>` only when the exact change exists and validates on the trusted default branch, identifies the originating issue, has no unresolved blocking decisions, and its planning PR was merged by an authorized human maintainer whose immutable GitHub actor type is `User`. The request MUST bind an immutable trusted base SHA and semantic implementation revision. Reactions, labels, draft branches, bot output, and issue prose MUST NOT establish approval.
 
 #### Scenario: Draft planning change is refused
 - **WHEN** an authorized maintainer requests implementation for a planning change that exists only on an unmerged or draft branch

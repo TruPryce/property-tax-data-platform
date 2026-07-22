@@ -8,7 +8,9 @@ isolated implementation worker, not a GitHub bot with repository credentials.
 `/countyforge implement <change>` is accepted only on the originating issue. The exact
 kebab-case OpenSpec change must exist and validate on the trusted default branch, identify the
 issue, contain no unresolved blocking decision, and have a planning PR merged by an authorized
-`admin`, `maintain`, or `write` maintainer. Draft PRs, labels, reactions, bot comments, and
+human GitHub `User` with `admin`, `maintain`, or `write` permission. Trusted intake runs strict
+OpenSpec validation and checks structured blocking markers across the complete accepted change.
+Draft PRs, labels, reactions, bot comments, and
 planning-agent output are not approval evidence.
 
 ## Three roots and credentials
@@ -39,9 +41,10 @@ workspace manifest and computes publication eligibility itself.
 ## Validation and publication
 
 The model artifact is a bounded file bundle plus strict result, task, command, workspace, and
-checksum evidence. A no-provider-secret validation job reconstructs a clean worktree from the
-trusted base, applies only declared files, enforces the path policy, runs repository gates, and
-emits a validation report. Only then does the short per-target state-lane publisher derive
+checksum evidence. A no-provider-secret validation job reconstructs a clean candidate worktree
+from the trusted base while keeping the trusted tooling checkout immutable, applies only
+declared files, enforces the path policy, runs repository gates, and emits a validation report.
+Only then does the short per-target state-lane publisher derive
 `countyforge/implement/issue-<issue>-<change>-r<revision>`, create a commit, and open/update a
 draft PR. The PR always requires human review; no merge, deployment, or issue closure occurs.
 

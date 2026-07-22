@@ -308,6 +308,16 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
     assert "apt-get install --no-install-recommends --yes bubblewrap" in validation
+    assert "Provision pinned OpenSpec validator for offline gates" in validation
+    assert 'npm install --global --prefix "$RUNNER_TEMP/openspec-tool"' in validation
+    assert "npx --yes @fission-ai/openspec@1.6.0" not in validation
+    assert 'candidate_root="$RUNNER_TEMP/implementation-candidate"' in validation
+    assert '--workspace "$candidate_root"' in validation
+    assert '"$GITHUB_WORKSPACE/trusted" "$candidate_root"' in validation
+    assert 'git -C "$candidate_root" rev-parse HEAD' in validation
+    packet = str(jobs["implementation-packet"])
+    assert "Provision trusted OpenSpec validator" in packet
+    assert "openspec-packet-tool" in packet
     assert "OPENAI_API_KEY" not in validation
     build = Path(__file__).parents[3] / ".ai/codex/10-build-countyforge-implement-image.sh"
     build_text = build.read_text(encoding="utf-8")

@@ -88,6 +88,7 @@ def build_trigger(
                 "planning_pr_number",
                 "planning_pr_merge_sha",
                 "approval_actor_id",
+                "approval_actor_type",
                 "approval_actor_login",
                 "approval_permission",
             )

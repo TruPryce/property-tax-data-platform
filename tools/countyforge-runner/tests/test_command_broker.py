@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -35,3 +36,40 @@ def test_command_evidence_rejects_registry_bypass() -> None:
         validate_command_event(
             {"command_id": "shell.arbitrary"}, command_ids={"inspect.list-files"}
         )
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_broker_fails_closed_at_output_limit(tmp_path: Path) -> None:
+    repo_root = Path.cwd().resolve()
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "policy_id": "countyforge-implementation-commands",
+                "version": 1,
+                "default_network": "disabled",
+                "commands": [
+                    {
+                        "id": "test.output",
+                        "executable": "python3",
+                        "arguments": ["-c", 'print("x" * 128)'],
+                        "phase": "validate",
+                        "network": "disabled",
+                        "workspace_mutating": False,
+                        "timeout_seconds": 30,
+                        "max_output_bytes": 8,
+                        "environment": ["PATH"],
+                        "artifact_paths": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    broker = CommandBroker(
+        registry,
+        repo_root / ".ai/schemas/countyforge-implementation-command-registry.schema.json",
+    )
+    with pytest.raises(KernelError, match="output limit"):
+        broker.run("test.output", workspace=tmp_path)
