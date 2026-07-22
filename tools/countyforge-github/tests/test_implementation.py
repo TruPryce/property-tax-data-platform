@@ -198,6 +198,40 @@ def test_artifact_policy_rejects_size_and_prohibited_paths(tmp_path: Path, repo_
         )
 
 
+def test_artifact_policy_rejects_utf8_binary_content(tmp_path: Path, repo_root: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+    candidate = workspace / "docs/generated.md"
+    candidate.write_bytes(b"text\x00still-binary\n")
+    manifest = {
+        "run_id": "run",
+        "issue_number": 7,
+        "change_name": "safe-change",
+        "base_sha": "a" * 40,
+        "files": [
+            {
+                "path": "docs/generated.md",
+                "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                "bytes": candidate.stat().st_size,
+                "kind": "created",
+            }
+        ],
+        "total_bytes": candidate.stat().st_size,
+    }
+    result = _artifact_result("docs/generated.md", "text\x00still-binary\n")
+    with pytest.raises(ControlPlaneError, match="Binary"):
+        validate_implementation_artifact(
+            result,
+            manifest,
+            workspace_root=workspace,
+            policy_root=repo_root,
+            expected_run_id="run",
+            expected_issue_number=7,
+            expected_change_name="safe-change",
+            expected_base_sha="a" * 40,
+        )
+
+
 def test_artifact_policy_rejects_symlink_escape(tmp_path: Path, repo_root: Path) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "docs").mkdir(parents=True)

@@ -827,6 +827,10 @@ def validate_implementation_artifact(
             raise ControlPlaneError(
                 "implementation_limits_exceeded", "An implementation file exceeds its size limit."
             )
+        if b"\x00" in raw:
+            raise ControlPlaneError(
+                "prohibited_change", "Binary implementation artifacts are not permitted."
+            )
         try:
             _, redactions = redact_untrusted_text(raw.decode("utf-8"))
         except UnicodeDecodeError:
@@ -948,6 +952,10 @@ def freeze_implementation_artifact(
                 "implementation_artifact_mismatch", "Declared file is unavailable."
             )
         content = candidate.read_bytes()
+        if b"\x00" in content:
+            raise ControlPlaneError(
+                "prohibited_change", "Binary implementation artifacts are not permitted."
+            )
         try:
             content.decode("utf-8")
         except UnicodeDecodeError:
