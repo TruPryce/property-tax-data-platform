@@ -31,7 +31,7 @@ OpenAI review is available through the declared policy and separate immutable im
 OPENAI_API_KEY
 ```
 
-The review workflow has separate OpenAI and Sakana jobs. Only the selected job runs, and only its provider key is attached to the packet-review invocation step. Packet preparation, future-mode execution, status publication, and maintenance receive no provider key. Do not configure production database, Airflow, S3, deployment, package-publish, SSH, or code-push credentials for CountyForge.
+The review workflow has separate OpenAI and Sakana jobs. Only the selected job runs, and only its provider key is attached to the packet-review invocation step. Planning and implementation similarly receive only their selected provider key; packet preparation, trusted validation, future-mode execution, status publication, and maintenance receive no provider key. Do not configure production database, Airflow, S3, deployment, package-publish, SSH, or code-push credentials for CountyForge.
 
 For initial rollout, repository write-level authorization plus per-target serialization and profile hard ceilings is the accepted paid-review spend policy. There is no repository-wide aggregate cost limiter in v1. Operators must monitor provider usage and may narrow the version-controlled authorization or execution policy before broadening access; aggregate budgeting remains a rollout risk.
 
@@ -115,7 +115,7 @@ Successful or active runs are not retry-eligible in the initial policy.
 
 ## Paid Calls
 
-`/countyforge review`, `/countyforge plan`, and `/countyforge implement <change>` are provider calls. Implement receives only the selected implementation provider credential in its isolated model job; validation and publication receive none. Fix and validate remain `profile_not_implemented`. Local provider smoke tests remain explicitly opt-in and are documented in the [runner kernel guide](../engineering/countyforge-runner-kernel.md).
+`/countyforge review`, `/countyforge plan`, and `/countyforge implement <change>` are provider calls. Implement receives only the selected implementation provider credential in its isolated model job; its model has no shell/unified-exec tool, emits a bounded file bundle, and trusted validation runs only registry-declared commands. Validation and publication receive no provider key. Fix and validate remain `profile_not_implemented`. Local provider smoke tests remain explicitly opt-in and are documented in the [runner kernel guide](../engineering/countyforge-runner-kernel.md).
 
 ## Related
 

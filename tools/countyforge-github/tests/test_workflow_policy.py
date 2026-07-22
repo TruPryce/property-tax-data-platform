@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -227,6 +228,8 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
     implementation = str(jobs["implementation-openai"])
     assert "OPENAI_API_KEY" in implementation
     assert "SAKANA_API_KEY" not in implementation
+    assert "freeze-implementation-artifact" in implementation
+    assert "tar --exclude=.git" not in implementation
     assert jobs["implementation-openai"]["permissions"] == {
         "actions": "read",
         "contents": "read",
@@ -280,6 +283,30 @@ def test_provider_jobs_cannot_mutate_repository_or_status() -> None:
     ):
         permissions = jobs[name]["permissions"]
         assert permissions == {"actions": "read", "contents": "read"}
+
+
+def test_implementation_model_has_no_shell_and_publication_has_lease_preflight() -> None:
+    jobs = _jobs("countyforge-run.yml")
+    profile = json.loads(
+        (Path(__file__).parents[3] / ".ai/profiles/implement.workspace-write.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert profile["model_tools"] == ["structured_file_bundle"]
+    assert profile["expected_security_posture"]["model_shell"] is False
+    assert profile["container"]["availability"] == "available"
+    adapter = (
+        Path(__file__).parents[3] / ".ai/codex/09-run-countyforge-implement-docker.sh"
+    ).read_text(encoding="utf-8")
+    assert "countyforge_runner.provider_proxy" in adapter
+    assert "--network=bridge" in adapter
+    assert "--disable shell_tool --disable unified_exec" in adapter
+    publish = str(jobs["implementation-publish"])
+    assert "Verify live implementation publication lease" in publish
+    assert "steps.verify-publication.outcome == 'success'" in publish
+    assert 'final_state="failed"' in publish
+    assert 'final_disposition="implementation_validation_failed"' in publish
+    assert 'final_disposition="implementation_publication_failed"' in publish
 
 
 def test_result_artifacts_include_explicit_hidden_evidence_paths() -> None:

@@ -109,7 +109,7 @@
     },
     "model_tools": {
       "type": "array", "uniqueItems": true,
-      "items": {"enum": ["shell_tool", "unified_exec"]}
+      "items": {"enum": ["shell_tool", "unified_exec", "structured_file_bundle"]}
     },
     "deterministic_commands": {
       "type": "array", "uniqueItems": true,

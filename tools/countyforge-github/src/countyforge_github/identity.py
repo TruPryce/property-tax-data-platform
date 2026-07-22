@@ -25,6 +25,7 @@ def build_trigger(
     delivery_id: str | None = None,
     planning_context_sha256: str | None = None,
     implementation_change_sha256: str | None = None,
+    implementation_approval: JsonObject | None = None,
     timestamp: str | None = None,
     contracts: ControlContracts | None = None,
 ) -> JsonObject:
@@ -80,6 +81,18 @@ def build_trigger(
         trigger["planning_context_sha256"] = planning_context_sha256
     if implementation_change_sha256 is not None:
         trigger["implementation_change_sha256"] = implementation_change_sha256
+    if implementation_approval is not None:
+        trigger["implementation_approval"] = {
+            key: implementation_approval[key]
+            for key in (
+                "planning_pr_number",
+                "planning_pr_merge_sha",
+                "approval_actor_id",
+                "approval_actor_login",
+                "approval_permission",
+            )
+            if key in implementation_approval
+        }
     issue = event.get("issue")
     if isinstance(issue, dict):
         metadata: JsonObject = {}

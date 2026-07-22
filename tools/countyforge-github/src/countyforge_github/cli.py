@@ -8,6 +8,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+from countyforge_runner.command_broker import CommandBroker
 from countyforge_runner.errors import KernelError
 
 from countyforge_github.authorization import authorize
@@ -22,6 +23,7 @@ from countyforge_github.identity import (
 )
 from countyforge_github.implementation import (
     build_implementation_packet,
+    freeze_implementation_artifact,
     publish_implementation,
     validate_implementation_artifact,
     validate_implementation_result,
@@ -135,6 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_artifact.add_argument("--change-name", required=True)
     implementation_artifact.add_argument("--base-sha", required=True)
 
+    implementation_freeze = subparsers.add_parser("freeze-implementation-artifact")
+    _file(implementation_freeze, "result")
+    implementation_freeze.add_argument("--workspace", type=Path, required=True)
+    implementation_freeze.add_argument("--policy-root", type=Path, required=True)
+    implementation_freeze.add_argument("--output", type=Path, required=True)
+    implementation_freeze.add_argument("--run-id", required=True)
+    implementation_freeze.add_argument("--issue-number", type=int, required=True)
+    implementation_freeze.add_argument("--change-name", required=True)
+    implementation_freeze.add_argument("--base-sha", required=True)
+
     implementation_publish = subparsers.add_parser("publish-implementation")
     implementation_publish.add_argument("--repository", required=True)
     implementation_publish.add_argument("--issue-number", type=int, required=True)
@@ -144,6 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_publish.add_argument("--run-id", required=True)
     implementation_publish.add_argument("--workspace", type=Path, required=True)
     implementation_publish.add_argument("--evidence-url")
+    implementation_publish.add_argument("--status-comment-id", type=int, required=True)
+    implementation_publish.add_argument("--trusted-bot-id", type=int, required=True)
+    implementation_publish.add_argument("--idempotency-key", required=True)
+    implementation_publish.add_argument("--workflow-run-id", type=int, required=True)
+    implementation_publish.add_argument("--nonce", required=True)
+    implementation_publish.add_argument("--at", required=True)
+    implementation_publish.add_argument("--implementation-result", type=Path, required=True)
+    implementation_publish.add_argument("--policy-root", type=Path, required=True)
+
+    implementation_command = subparsers.add_parser("run-implementation-command")
+    implementation_command.add_argument("--command-id", required=True)
+    implementation_command.add_argument("--registry", type=Path, required=True)
+    implementation_command.add_argument("--schema", type=Path, required=True)
+    implementation_command.add_argument("--workspace", type=Path, required=True)
 
     publish = subparsers.add_parser("publish-plan")
     _file(publish, "result")
@@ -480,9 +506,24 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             _emit({"ok": True, "publication_eligibility": "trusted_validation_required"})
             return 0
+        if command_name == "freeze-implementation-artifact":
+            result = _load(args.result, "implementation result")
+            manifest = freeze_implementation_artifact(
+                result,
+                workspace_root=args.workspace,
+                policy_root=args.policy_root,
+                output_root=args.output,
+                expected_run_id=args.run_id,
+                expected_issue_number=args.issue_number,
+                expected_change_name=args.change_name,
+                expected_base_sha=args.base_sha,
+            )
+            _emit({"ok": True, "manifest": manifest})
+            return 0
         if command_name == "publish-implementation":
+            github = _github_client()
             result = publish_implementation(
-                _github_client(),
+                github,
                 repository=args.repository,
                 issue_number=args.issue_number,
                 change_name=args.change_name,
@@ -491,9 +532,27 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 workspace=args.workspace,
                 evidence_url=args.evidence_url,
+                implementation_result=_load(args.implementation_result, "implementation result"),
+                policy_root=args.policy_root,
+                publication_preflight=lambda: verify_publication_lease(
+                    github,
+                    repository=args.repository,
+                    status_comment_id=args.status_comment_id,
+                    trusted_bot_id=args.trusted_bot_id,
+                    idempotency_key=args.idempotency_key,
+                    run_id=args.run_id,
+                    workflow_run_id=args.workflow_run_id,
+                    nonce=args.nonce,
+                    at=args.at,
+                ),
             )
             _emit({"ok": True, **result})
             return 0
+        if command_name == "run-implementation-command":
+            broker = CommandBroker(args.registry, args.schema)
+            evidence = broker.run(args.command_id, workspace=args.workspace)
+            _emit({"ok": int(evidence["exit_code"]) == 0, "evidence": evidence})
+            return 0 if int(evidence["exit_code"]) == 0 else 5
         if command_name == "publish-plan":
             result = _load(args.result, "planning result")
             _emit(

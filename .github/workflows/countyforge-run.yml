@@ -849,30 +849,12 @@ jobs:
           PY
           gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
           change_name="$(jq -er '.command.arguments.openspec_change' "$RUNNER_TEMP/countyforge-trigger.json")"
-          associated="$(gh api "repos/$TARGET_REPOSITORY/commits/$TRUSTED_SHA/pulls?per_page=100")"
-          pr_number=""
-          approval_login=""
-          approval_actor_id=""
-          while IFS= read -r candidate; do
-            [ -n "$candidate" ] || continue
-            candidate_pr="$(gh api "repos/$TARGET_REPOSITORY/pulls/$candidate")"
-            test "$(jq -r '.merged_at // empty' <<<"$candidate_pr")" != "" || continue
-            test "$(jq -r '.merge_commit_sha // empty' <<<"$candidate_pr")" = "$TRUSTED_SHA" || continue
-            candidate_body="$(jq -r '.body // empty' <<<"$candidate_pr")"
-            printf '%s\n' "$candidate_body" | grep -F -- "$change_name" >/dev/null || continue
-            printf '%s\n' "$candidate_body" | grep -F -- "#$TARGET_NUMBER" >/dev/null || continue
-            pr_number="$candidate"
-            approval_login="$(jq -r '.merged_by.login // empty' <<<"$candidate_pr")"
-            approval_actor_id="$(jq -r '.merged_by.id // empty' <<<"$candidate_pr")"
-            break
-          done < <(jq -r '.[].number // empty' <<<"$associated")
-          test -n "$pr_number"
-          test -n "$approval_login" && test "$approval_actor_id" != "null"
-          approval_permission="$(gh api "repos/$TARGET_REPOSITORY/collaborators/$approval_login/permission" --jq '.permission')"
-          case "$approval_permission" in
-            admin|maintain|write) ;;
-            *) echo "planning PR was not merged by an authorized maintainer" >&2; exit 2 ;;
-          esac
+          approval_actor_id="$(jq -er '.implementation_approval.approval_actor_id' "$RUNNER_TEMP/countyforge-trigger.json")"
+          jq -e \
+            '.implementation_approval.planning_pr_number > 0 and
+             (.implementation_approval.planning_pr_merge_sha | test("^[0-9a-f]{40}$")) and
+             (.implementation_approval.approval_permission | IN("admin"; "maintain"; "write"))' \
+            "$RUNNER_TEMP/countyforge-trigger.json" >/dev/null
           cd trusted
           uv sync --frozen --package countyforge-github
           uv run --package countyforge-github countyforge-github build-implementation-packet \
@@ -932,7 +914,15 @@ jobs:
           import base64, pathlib, sys
           pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
           PY
-          git clone --no-checkout --config core.hooksPath=/dev/null prepared/target.git "$RUNNER_TEMP/countyforge-workspace"
+          git clone --no-checkout \
+            --config core.hooksPath=/dev/null \
+            --config core.fsmonitor=false \
+            --config credential.helper= \
+            --config protocol.ext.allow=never \
+            prepared/target.git "$RUNNER_TEMP/countyforge-workspace"
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.hooksPath /dev/null
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.fsmonitor false
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local credential.helper ""
           git -C "$RUNNER_TEMP/countyforge-workspace" checkout --detach "$TARGET_HEAD_SHA"
           mkdir -p "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID"
           cp prepared/implementation/countyforge-implementation-*.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
@@ -960,34 +950,24 @@ jobs:
             --json > "$RUNNER_TEMP/countyforge-result.json"
           echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
           set -e
-      - name: Freeze workspace artifact without Git metadata
+      - name: Freeze only the trusted, declared implementation bundle
         env:
           WORKSPACE_DIR: ${{ runner.temp }}/countyforge-workspace
           RUN_ID: ${{ inputs.run_id }}
           ISSUE_NUMBER: ${{ inputs.target_number }}
           BASE_SHA: ${{ needs.claim.outputs.base_sha }}
-          TRIGGER_PATH: ${{ runner.temp }}/countyforge-trigger.json
         run: |
-          python3 - "$WORKSPACE_DIR/countyforge-workspace-manifest.json" <<'PY'
-          import hashlib, json, os, pathlib, subprocess, sys
-          root = pathlib.Path(os.environ["WORKSPACE_DIR"])
-          trigger = json.loads(pathlib.Path(os.environ["TRIGGER_PATH"]).read_text(encoding="utf-8"))
-          rows = []
-          for line in subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).splitlines():
-              if not line.strip():
-                  continue
-              status, path = line[:2], line[3:]
-              candidate = (root / path).resolve()
-              if not candidate.is_relative_to(root.resolve()) or candidate.is_symlink():
-                  raise SystemExit("workspace contains an unsafe path")
-              if status == " D":
-                  rows.append({"path": path, "sha256": "0" * 64, "bytes": 0, "kind": "deleted"})
-                  continue
-              raw = candidate.read_bytes()
-              rows.append({"path": path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "kind": "created" if status == "??" else "modified"})
-          pathlib.Path(sys.argv[1]).write_text(json.dumps({"contract_version": 1, "run_id": os.environ["RUN_ID"], "issue_number": int(os.environ["ISSUE_NUMBER"]), "change_name": trigger["command"]["arguments"]["openspec_change"], "base_sha": os.environ["BASE_SHA"], "files": rows, "total_bytes": sum(row["bytes"] for row in rows)}, sort_keys=True), encoding="utf-8")
-          PY
-          tar --exclude=.git --sort=name -czf "$RUNNER_TEMP/countyforge-workspace.tar.gz" -C "$WORKSPACE_DIR" .
+          result_file="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          bundle="$RUNNER_TEMP/countyforge-safe-implementation"
+          test -n "$result_file"
+          change_name="$(jq -er '.openspec_change' "$result_file")"
+          test -f "$result_file"
+          cd trusted
+          uv run --package countyforge-github countyforge-github freeze-implementation-artifact \
+            --result "$result_file" --workspace "$WORKSPACE_DIR" --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --output "$bundle" --run-id "$RUN_ID" --issue-number "$ISSUE_NUMBER" \
+            --change-name "$change_name" --base-sha "$BASE_SHA"
+          tar --sort=name -czf "$RUNNER_TEMP/countyforge-workspace.tar.gz" -C "$bundle" .
       - name: Upload implementation evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1101,16 +1081,24 @@ jobs:
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copyfile(source, target)
           PY
-          uv run python scripts/check_repository_artifacts.py
-          uv run python scripts/check_doc_links.py
           cat > "$RUNNER_TEMP/openspec" <<'SH'
           #!/bin/sh
           exec npx --yes @fission-ai/openspec@1.6.0 "$@"
           SH
           chmod +x "$RUNNER_TEMP/openspec"
-          PATH="$RUNNER_TEMP:$PATH" make check
-          PATH="$RUNNER_TEMP:$PATH" make runner-contract-tests
-          BASE=HEAD PATH="$RUNNER_TEMP:$PATH" make prepr-no-ai
+          export PATH="$RUNNER_TEMP:$PATH"
+          command_registry="$GITHUB_WORKSPACE/trusted/.ai/policies/countyforge-implementation-commands.v1.json"
+          command_schema="$GITHUB_WORKSPACE/trusted/.ai/schemas/countyforge-implementation-command-registry.schema.json"
+          run_registered() {
+            uv run --package countyforge-github countyforge-github run-implementation-command \
+              --command-id "$1" --registry "$command_registry" --schema "$command_schema" \
+              --workspace "$GITHUB_WORKSPACE/trusted" >/dev/null
+          }
+          run_registered artifacts.check
+          run_registered docs.links
+          run_registered repo.check
+          run_registered repo.runner-contract
+          run_registered repo.prepr-no-ai
           printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
       - name: Upload trusted validation report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1186,9 +1174,29 @@ jobs:
           jq -e --arg run_id "$EXPECTED_RUN_ID" --arg base_sha "$EXPECTED_BASE_SHA" \
             '.valid == true and .publication_eligible == true and .run_id == $run_id and .base_sha == $base_sha' \
             "$report" >/dev/null
+      - name: Verify live implementation publication lease
+        id: verify-publication
+        if: steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' && steps.validation.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+        run: |
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github verify-publication \
+            --repository "$TARGET_REPOSITORY" --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
       - name: Publish validated implementation draft
         id: implementation-publication
-        if: steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' && steps.validation.outcome == 'success'
+        if: steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' && steps.validation.outcome == 'success' && steps.verify-publication.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -1198,6 +1206,10 @@ jobs:
           TARGET_SHA: ${{ needs.claim.outputs.base_sha }}
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
           EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
         run: |
           implementation_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit)"
           change_name="$(jq -er '.openspec_change' "$implementation_file")"
@@ -1210,7 +1222,11 @@ jobs:
             --revision "$(jq -er '.implementation_revision' "$implementation_file")" \
             --base-sha "$TARGET_SHA" --run-id "$COUNTYFORGE_RUN_ID" \
             --workspace "$RUNNER_TEMP/implementation-workspace" \
-            --evidence-url "$EVIDENCE_URL"; })"
+            --evidence-url "$EVIDENCE_URL" --status-comment-id "${STATUS_COMMENT_ID}" \
+            --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" --nonce "$LEASE_NONCE" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --implementation-result "$implementation_file" --policy-root "$GITHUB_WORKSPACE/trusted"; })"
           printf '%s\n' "$publication"
           echo "branch=$(jq -r '.branch' <<<"$publication")" >> "$GITHUB_OUTPUT"
           echo "pr_number=$(jq -r '.pr_number' <<<"$publication")" >> "$GITHUB_OUTPUT"
@@ -1234,8 +1250,25 @@ jobs:
           IMPLEMENTATION_PR_NUMBER: ${{ steps.implementation-publication.outputs.pr_number }}
           IMPLEMENTATION_CHANGE_NAME: ${{ steps.implementation-publication.outputs.change_name }}
           IMPLEMENTATION_ELIGIBLE: ${{ steps.validation.outcome == 'success' && steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' }}
+          IMPLEMENTATION_VALIDATION_RESULT: ${{ needs.implementation-validation.result }}
+          VALIDATION_OUTCOME: ${{ steps.validation.outcome }}
+          VERIFY_PUBLICATION_OUTCOME: ${{ steps.verify-publication.outcome }}
+          PUBLICATION_OUTCOME: ${{ steps.implementation-publication.outcome }}
         run: |
           cd trusted
+          final_state="$TERMINAL_STATE"
+          final_disposition="$TERMINAL_DISPOSITION"
+          if [ "$TERMINAL_STATE" = "succeeded" ]; then
+            if [ "$IMPLEMENTATION_VALIDATION_RESULT" != "success" ] || \
+               [ "$VALIDATION_OUTCOME" != "success" ]; then
+              final_state="failed"
+              final_disposition="implementation_validation_failed"
+            elif [ "$VERIFY_PUBLICATION_OUTCOME" != "success" ] || \
+                 [ "$PUBLICATION_OUTCOME" != "success" ]; then
+              final_state="failed"
+              final_disposition="implementation_publication_failed"
+            fi
+          fi
           implementation_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
           implementation_args=()
           if [ -n "$IMPLEMENTATION_CHANGE_NAME" ]; then implementation_args+=(--implementation-change-name "$IMPLEMENTATION_CHANGE_NAME"); fi
@@ -1252,8 +1285,8 @@ jobs:
             --repository "$TARGET_REPOSITORY" --status-comment-id "$STATUS_COMMENT_ID" \
             --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" --run-id "$COUNTYFORGE_RUN_ID" \
             --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" --nonce "$LEASE_NONCE" \
-            --target-state "$TERMINAL_STATE" --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --disposition "$TERMINAL_DISPOSITION" \
+            --target-state "$final_state" --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --disposition "$final_disposition" \
             --evidence-url "$EVIDENCE_URL" \
             "${implementation_args[@]}"
 

@@ -10,7 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+import shutil
+import subprocess
+from collections.abc import Callable, Iterable
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 
 from countyforge_runner.contracts import (
@@ -34,6 +37,19 @@ _FORBIDDEN = (
     ".git/",
     "infrastructure/",
     "data/",
+)
+_HIGHER_RISK = (
+    ".github/workflows/",
+    "codeowners",
+    ".ai/policies/",
+    ".ai/providers/",
+    "pyproject.toml",
+    "uv.lock",
+    "migrations/",
+    "infrastructure/",
+    "authentication",
+    "cryptography",
+    "secret",
 )
 
 
@@ -163,6 +179,10 @@ def evaluate_implementation_eligibility(
     trusted_base_sha: str,
     planning_pr_merged: bool,
     approval_actor_id: int | None = None,
+    planning_pr_number: int | None = None,
+    planning_pr_merge_sha: str | None = None,
+    approval_actor_login: str | None = None,
+    approval_permission: str | None = None,
 ) -> JsonObject:
     """Return a strict, credential-free eligibility decision from trusted facts."""
 
@@ -203,8 +223,86 @@ def evaluate_implementation_eligibility(
         "trusted_base_sha": trusted_base_sha,
         "planning_pr_merged": planning_pr_merged,
         "approval_actor_id": approval_actor_id,
+        "planning_pr_number": planning_pr_number,
+        "planning_pr_merge_sha": planning_pr_merge_sha,
+        "approval_actor_login": approval_actor_login,
+        "approval_permission": approval_permission,
         "blocking_reasons": sorted(set(reasons)),
     }
+
+
+def resolve_merged_planning_approval(
+    github: GitHubPort,
+    *,
+    repository: str,
+    issue_number: int,
+    change_name: str,
+    trusted_base_sha: str,
+) -> JsonObject:
+    """Resolve immutable approval evidence before implementation claim/provider use."""
+
+    prefix = f"openspec/changes/{change_name}/"
+    candidates: list[int] = []
+    for event in github.issue_timeline(repository, issue_number):
+        source = event.get("source")
+        issue = source.get("issue") if isinstance(source, dict) else None
+        if isinstance(issue, dict) and isinstance(issue.get("pull_request"), dict):
+            number = issue.get("number")
+            if isinstance(number, int) and number not in candidates:
+                candidates.append(number)
+    for number in candidates:
+        pull = github.pull_request(repository, number)
+        merged_at = pull.get("merged_at")
+        merged_sha = str(pull.get("merge_commit_sha") or "")
+        body = str(pull.get("body") or "")
+        if not merged_at or not re.fullmatch(r"[0-9a-f]{40}", merged_sha):
+            continue
+        if change_name not in body or f"#{issue_number}" not in body:
+            continue
+        comparison = github.compare_commits(repository, merged_sha, trusted_base_sha)
+        if comparison.get("status") not in {"identical", "ahead"}:
+            continue
+        later_files = comparison.get("files", [])
+        if isinstance(later_files, list) and any(
+            isinstance(item, dict) and str(item.get("filename", "")).startswith(prefix)
+            for item in later_files
+        ):
+            # The accepted planning content changed after its approval merge. Require a
+            # fresh planning PR rather than silently implementing a different hash.
+            continue
+        if comparison.get("status") == "ahead" and not isinstance(later_files, list):
+            # GitHub did not provide a bounded changed-file list, so exact content binding
+            # cannot be proven safely.
+            continue
+        if int(comparison.get("total_commits", 0)) > 250:
+            # Compare responses are bounded by GitHub; an unbounded history cannot prove
+            # that the approved OpenSpec files were untouched.
+            continue
+        files = github.pull_request_files(repository, number)
+        if not any(str(item.get("filename", "")).startswith(prefix) for item in files):
+            continue
+        merged_by = pull.get("merged_by")
+        if (
+            not isinstance(merged_by, dict)
+            or not isinstance(merged_by.get("login"), str)
+            or not isinstance(merged_by.get("id"), int)
+            or int(merged_by["id"]) < 1
+        ):
+            continue
+        permission = github.repository_permission(repository, str(merged_by["login"])).get(
+            "permission"
+        )
+        if permission not in {"admin", "maintain", "write"}:
+            continue
+        return {
+            "eligible": True,
+            "planning_pr_number": number,
+            "planning_pr_merge_sha": merged_sha,
+            "approval_actor_id": int(merged_by["id"]),
+            "approval_actor_login": str(merged_by["login"]),
+            "approval_permission": str(permission),
+        }
+    return {"eligible": False, "reason": "planning_pr_approval_not_found"}
 
 
 def build_implementation_packet(
@@ -231,6 +329,16 @@ def build_implementation_packet(
     issue_number = int(
         raw_issue_number if raw_issue_number is not None else target.get("number", 0)
     )
+    approval = trigger.get("implementation_approval")
+    if not isinstance(approval, dict) or not approval.get("eligible", True):
+        # Older local packet fixtures use an explicit planning_pr_merged argument. GitHub
+        # dispatched implementation runs must carry the immutable approval envelope.
+        if not planning_pr_merged:
+            raise ControlPlaneError(
+                "implementation_approval_missing",
+                "Implementation trigger lacks immutable planning approval evidence.",
+            )
+        approval = {}
     eligibility = evaluate_implementation_eligibility(
         contract_root=contract_root,
         repository=str(repository["full_name"]),
@@ -239,6 +347,26 @@ def build_implementation_packet(
         trusted_base_sha=str(target["base_sha"]),
         planning_pr_merged=planning_pr_merged,
         approval_actor_id=approval_actor_id,
+        planning_pr_number=(
+            int(approval["planning_pr_number"])
+            if isinstance(approval, dict) and approval.get("planning_pr_number")
+            else None
+        ),
+        planning_pr_merge_sha=(
+            str(approval["planning_pr_merge_sha"])
+            if isinstance(approval, dict) and approval.get("planning_pr_merge_sha")
+            else None
+        ),
+        approval_actor_login=(
+            str(approval["approval_actor_login"])
+            if isinstance(approval, dict) and approval.get("approval_actor_login")
+            else None
+        ),
+        approval_permission=(
+            str(approval["approval_permission"])
+            if isinstance(approval, dict) and approval.get("approval_permission")
+            else None
+        ),
     )
     trigger_hash = trigger.get("implementation_change_sha256")
     if trigger_hash is not None and trigger_hash != eligibility["change_sha256"]:
@@ -246,6 +374,18 @@ def build_implementation_packet(
             "implementation_change_hash_mismatch",
             "Implementation trigger does not match the accepted OpenSpec change.",
         )
+    eligibility.update(
+        {
+            key: approval.get(key)
+            for key in (
+                "planning_pr_number",
+                "planning_pr_merge_sha",
+                "approval_actor_login",
+                "approval_permission",
+            )
+            if key in approval
+        }
+    )
     if not eligibility["eligible"]:
         raise ControlPlaneError(
             "implementation_ineligible",
@@ -259,7 +399,7 @@ def build_implementation_packet(
         ("AGENTS.md", "repository_guidance"),
         ("tools/AGENTS.md", "repository_guidance"),
         (
-            "docs/decisions/0005-mode-aware-runner-kernel-and-immutable-capability-profiles.md",
+            "docs/decisions/0005-mode-aware-runner-kernel.md",
             "adr",
         ),
         ("docs/decisions/0006-github-native-countyforge-control-plane.md", "adr"),
@@ -329,7 +469,9 @@ def build_implementation_packet(
         "tasks": tasks,
         "policies": {
             "path_policy": "countyforge-implementation-paths.v1",
-            "network": "disabled",
+            # Repository commands are offline; only the model invocation has the
+            # selected-provider HTTPS proxy.
+            "network": "provider_only",
             "command_registry": "countyforge-implementation-commands.v1",
         },
         "non_goals": [
@@ -401,7 +543,15 @@ def validate_implementation_result(
 ) -> None:
     """Reject model claims that contain unsafe or undeclared paths."""
 
+    declaration_sets: dict[str, set[str]] = {}
     for field in ("files_created", "files_modified", "files_deleted"):
+        values = [str(value) for value in result.get(field, [])]
+        if len(values) != len(set(values)):
+            raise ControlPlaneError(
+                "implementation_bundle_invalid",
+                "Implementation result repeats a declared path.",
+            )
+        declaration_sets[field] = set(values)
         for raw in result.get(field, []):
             path = str(raw)
             if path.startswith("/") or ".." in Path(path).parts or path.startswith(".git"):
@@ -413,6 +563,47 @@ def validate_implementation_result(
                 raise ControlPlaneError(
                     "prohibited_change", "Implementation result declares a protected path."
                 )
+    if (
+        declaration_sets["files_created"] & declaration_sets["files_modified"]
+        or declaration_sets["files_created"] & declaration_sets["files_deleted"]
+        or declaration_sets["files_modified"] & declaration_sets["files_deleted"]
+    ):
+        raise ControlPlaneError(
+            "implementation_bundle_invalid",
+            "Implementation result overlaps file declarations.",
+        )
+    bundle = result.get("file_bundle")
+    if not isinstance(bundle, list):
+        raise ControlPlaneError(
+            "implementation_bundle_missing",
+            "Implementation result must include a declared file bundle.",
+        )
+    declared_paths = {
+        str(path)
+        for field in ("files_created", "files_modified", "files_deleted")
+        for path in result.get(field, [])
+    }
+    bundle_paths: set[str] = set()
+    for item in bundle:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("content"), str)
+        ):
+            raise ControlPlaneError(
+                "implementation_bundle_invalid", "Implementation file bundle is invalid."
+            )
+        path = str(item["path"])
+        if path in bundle_paths or path not in declared_paths:
+            raise ControlPlaneError(
+                "implementation_bundle_invalid",
+                "Implementation file bundle paths do not match declarations.",
+            )
+        bundle_paths.add(path)
+    if bundle_paths != declared_paths - {str(path) for path in result.get("files_deleted", [])}:
+        raise ControlPlaneError(
+            "implementation_bundle_invalid", "Implementation file bundle is incomplete."
+        )
     if result.get("publication_eligibility") == "eligible":
         raise ControlPlaneError(
             "model_cannot_authorize_publication",
@@ -497,6 +688,22 @@ def validate_implementation_artifact(
             "Implementation artifact provenance does not match the run.",
         )
     validate_implementation_result(result, workspace_root=workspace_root)
+    if (
+        result.get("run_id") != expected_run_id
+        or result.get("issue_number") != expected_issue_number
+        or result.get("openspec_change") != expected_change_name
+        or result.get("base_sha") != expected_base_sha
+    ):
+        raise ControlPlaneError(
+            "implementation_provenance_mismatch",
+            "Implementation result provenance does not match the run.",
+        )
+    profile = result.get("profile")
+    if not isinstance(profile, dict) or profile.get("id") != "implement.workspace-write.v1":
+        raise ControlPlaneError(
+            "implementation_provenance_mismatch",
+            "Implementation result profile does not match the executable profile.",
+        )
     declared = {
         str(path)
         for field in ("files_created", "files_modified", "files_deleted")
@@ -523,6 +730,24 @@ def validate_implementation_artifact(
     allowed_roots = tuple(
         str(item).rstrip("/") for item in (policy or {}).get("allowed_write_roots", ())
     )
+    prohibited_roots = tuple(str(item) for item in (policy or {}).get("prohibited_roots", ()))
+    max_files = int((policy or {}).get("max_files", 0))
+    max_total_bytes = int((policy or {}).get("max_total_bytes", 0))
+    max_file_bytes = int((policy or {}).get("max_file_bytes", 0))
+    if (policy or {}).get("symlinks") != "reject":
+        raise ControlPlaneError(
+            "implementation_policy_unavailable", "Symlink policy is not fail-closed."
+        )
+    if (policy or {}).get("binary_files") != "reject":
+        raise ControlPlaneError(
+            "implementation_policy_unavailable", "Binary-file policy is not fail-closed."
+        )
+    if (policy or {}).get("generated_files") != "allow_declared_only":
+        raise ControlPlaneError(
+            "implementation_policy_unavailable", "Generated-file policy is not fail-closed."
+        )
+    if max_files and len(rows) > max_files:
+        raise ControlPlaneError("implementation_limits_exceeded", "Too many implementation files.")
     total_bytes = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -531,6 +756,10 @@ def validate_implementation_artifact(
             )
         raw_path = str(row.get("path", ""))
         pure = PurePosixPath(raw_path)
+        if row.get("kind") not in {"created", "modified", "deleted"}:
+            raise ControlPlaneError(
+                "workspace_manifest_invalid", "Implementation artifact kind is invalid."
+            )
         if not raw_path or pure.is_absolute() or ".." in pure.parts or ".git" in pure.parts:
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact contains a prohibited path."
@@ -541,7 +770,43 @@ def validate_implementation_artifact(
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact is outside the approved path policy."
             )
-        candidate = (workspace_root / raw_path).resolve()
+        if any(
+            raw_path == pattern
+            or raw_path.startswith(f"{pattern}/")
+            or fnmatch(raw_path, pattern)
+            or fnmatch(pure.name, pattern)
+            for pattern in prohibited_roots
+        ):
+            raise ControlPlaneError(
+                "prohibited_change",
+                "Implementation artifact matches a prohibited path policy rule.",
+            )
+        if any(token in raw_path.casefold() for token in _HIGHER_RISK):
+            raise ControlPlaneError(
+                "higher_risk_change_not_approved",
+                "Higher-risk implementation paths require an explicit accepted approval.",
+            )
+        if raw_path == f"openspec/changes/{expected_change_name}/tasks.md":
+            baseline = policy_root / raw_path
+            candidate_tasks = workspace_root / raw_path
+            if (
+                row.get("kind") == "deleted"
+                or not baseline.is_file()
+                or not candidate_tasks.is_file()
+            ):
+                raise ControlPlaneError(
+                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
+                )
+            if baseline.read_bytes() != candidate_tasks.read_bytes():
+                raise ControlPlaneError(
+                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
+                )
+        raw_candidate = workspace_root / raw_path
+        if raw_candidate.is_symlink():
+            raise ControlPlaneError(
+                "prohibited_change", "Implementation artifact contains a symlink."
+            )
+        candidate = raw_candidate.resolve()
         if not candidate.is_relative_to(workspace_root.resolve()):
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact escapes the workspace."
@@ -558,6 +823,10 @@ def validate_implementation_artifact(
                 "implementation_artifact_mismatch", "Declared workspace file is unavailable."
             )
         raw = candidate.read_bytes()
+        if max_file_bytes and len(raw) > max_file_bytes:
+            raise ControlPlaneError(
+                "implementation_limits_exceeded", "An implementation file exceeds its size limit."
+            )
         try:
             _, redactions = redact_untrusted_text(raw.decode("utf-8"))
         except UnicodeDecodeError:
@@ -573,10 +842,152 @@ def validate_implementation_artifact(
                 "implementation_artifact_mismatch", "Workspace file checksum mismatch."
             )
         total_bytes += len(raw)
+    if max_total_bytes and total_bytes > max_total_bytes:
+        raise ControlPlaneError(
+            "implementation_limits_exceeded", "Implementation output exceeds its byte limit."
+        )
     if total_bytes != manifest.get("total_bytes"):
         raise ControlPlaneError(
             "implementation_artifact_mismatch", "Workspace byte count mismatch."
         )
+
+
+def freeze_implementation_artifact(
+    result: JsonObject,
+    *,
+    workspace_root: Path,
+    policy_root: Path,
+    output_root: Path,
+    expected_run_id: str,
+    expected_issue_number: int,
+    expected_change_name: str,
+    expected_base_sha: str,
+) -> JsonObject:
+    """Create a minimal declared-file bundle before any artifact upload.
+
+    The model-controlled workspace is inspected with Git's ignored-file view. Only declared,
+    policy-approved regular files are copied to ``output_root``; the complete workspace is
+    never archived or uploaded.
+    """
+
+    validate_implementation_result(result, workspace_root=workspace_root)
+    root = workspace_root.resolve(strict=True)
+    try:
+        lines = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        raise ControlPlaneError(
+            "workspace_manifest_invalid", "The implementation workspace cannot be inspected."
+        ) from None
+    changed: dict[str, str] = {}
+    for line in lines:
+        if len(line) < 4:
+            continue
+        state, raw_path = line[:2], line[3:]
+        if raw_path.startswith('"') or " -> " in raw_path or "R" in state or "C" in state:
+            raise ControlPlaneError(
+                "prohibited_change", "Renamed or copied paths are not permitted."
+            )
+        if state == "!!":
+            raise ControlPlaneError(
+                "prohibited_change", "Ignored implementation files cannot enter the artifact."
+            )
+        kind = (
+            "deleted"
+            if "D" in state
+            else ("created" if "?" in state or "A" in state else "modified")
+        )
+        changed[raw_path] = kind
+    declared = {
+        str(path)
+        for field in ("files_created", "files_modified", "files_deleted")
+        for path in result.get(field, [])
+    }
+    if set(changed) != declared:
+        raise ControlPlaneError(
+            "implementation_artifact_mismatch",
+            "The complete workspace diff does not match the declared implementation files.",
+        )
+    output_root.mkdir(parents=True, exist_ok=True)
+    rows: list[JsonObject] = []
+    total_bytes = 0
+    for relative in sorted(changed):
+        pure = PurePosixPath(relative)
+        raw_candidate = root / relative
+        if raw_candidate.is_symlink():
+            raise ControlPlaneError(
+                "prohibited_change", "Implementation artifact contains an unsafe symlink."
+            )
+        candidate = raw_candidate.resolve()
+        if pure.is_absolute() or ".." in pure.parts or ".git" in pure.parts:
+            raise ControlPlaneError(
+                "prohibited_change", "Implementation artifact contains a prohibited path."
+            )
+        if not candidate.is_relative_to(root) or candidate.is_symlink():
+            raise ControlPlaneError(
+                "prohibited_change", "Implementation artifact contains an unsafe path."
+            )
+        if changed[relative] == "deleted":
+            rows.append({"path": relative, "sha256": "0" * 64, "bytes": 0, "kind": "deleted"})
+            continue
+        if not candidate.is_file():
+            raise ControlPlaneError(
+                "implementation_artifact_mismatch", "Declared file is unavailable."
+            )
+        content = candidate.read_bytes()
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ControlPlaneError(
+                "prohibited_change", "Binary implementation artifacts are not permitted."
+            ) from None
+        destination = output_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(candidate, destination)
+        rows.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "bytes": len(content),
+                "kind": changed[relative],
+            }
+        )
+        total_bytes += len(content)
+    manifest: JsonObject = {
+        "contract_version": 1,
+        "run_id": expected_run_id,
+        "issue_number": expected_issue_number,
+        "change_name": expected_change_name,
+        "base_sha": expected_base_sha,
+        "files": rows,
+        "total_bytes": total_bytes,
+    }
+    manifest_path = output_root / "countyforge-workspace-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+    validate_implementation_artifact(
+        result,
+        manifest,
+        workspace_root=output_root,
+        policy_root=policy_root,
+        expected_run_id=expected_run_id,
+        expected_issue_number=expected_issue_number,
+        expected_change_name=expected_change_name,
+        expected_base_sha=expected_base_sha,
+    )
+    return manifest
 
 
 def implementation_branch(issue_number: int, change_name: str, revision: int) -> str:
@@ -598,9 +1009,25 @@ def publish_implementation(
     run_id: str,
     workspace: Path,
     evidence_url: str | None = None,
+    publication_preflight: Callable[[], JsonObject] | None = None,
+    implementation_result: JsonObject | None = None,
+    policy_root: Path | None = None,
 ) -> JsonObject:
     """Publish a trusted validated workspace bundle as a draft implementation PR."""
 
+    if publication_preflight is None:
+        raise ControlPlaneError(
+            "publication_preflight_required",
+            "A live lease preflight is required before implementation publication.",
+        )
+    # This callback rereads canonical state in the serialized target lane.  It must
+    # complete immediately before this function performs any Git data API mutation.
+    publication_preflight()
+    if implementation_result is None or policy_root is None:
+        raise ControlPlaneError(
+            "publication_artifact_required",
+            "Trusted publication requires the validated implementation artifact.",
+        )
     branch = implementation_branch(issue_number, change_name, revision)
     base_commit = github.get_git_commit(repository, base_sha)
     base_tree = base_commit.get("tree")
@@ -624,6 +1051,26 @@ def publish_implementation(
             raise ControlPlaneError(
                 "workspace_manifest_invalid", "Implementation workspace manifest is invalid."
             ) from None
+    if declared is None:
+        raise ControlPlaneError(
+            "workspace_manifest_invalid", "Implementation workspace manifest is required."
+        )
+    try:
+        manifest_document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ControlPlaneError(
+            "workspace_manifest_invalid", "Implementation workspace manifest is invalid."
+        ) from None
+    validate_implementation_artifact(
+        implementation_result,
+        manifest_document,
+        workspace_root=workspace,
+        policy_root=policy_root,
+        expected_run_id=run_id,
+        expected_issue_number=issue_number,
+        expected_change_name=change_name,
+        expected_base_sha=base_sha,
+    )
     entries: list[JsonObject] = []
     for path in sorted(workspace.rglob("*")):
         if not path.is_file() or ".git" in path.parts:
@@ -726,10 +1173,12 @@ def _implementation_pr_body(
 __all__ = [
     "build_implementation_packet",
     "evaluate_implementation_eligibility",
+    "freeze_implementation_artifact",
     "implementation_branch",
     "implementation_change_hash",
     "implementation_revision",
     "implementation_change_files",
+    "resolve_merged_planning_approval",
     "validate_implementation_artifact",
     "validate_implementation_result",
     "validate_implementation_tasks",

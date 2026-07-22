@@ -18,16 +18,20 @@ planning-agent output are not approval evidence.
 - `source_root`: immutable base repository content;
 - `workspace_root`: ephemeral writable copy supplied to the model.
 
-The model sees the frozen implementation packet, context manifest, task plan, workspace, and
-claimed output directory. It receives only the selected provider key during model invocation.
+The model receives the frozen implementation packet, context manifest, task plan, and a bounded
+workspace mount. The Codex process has no shell or unified-exec tool; it returns a strict UTF-8
+`file_bundle`, which trusted tooling materializes into the workspace after path confinement. It
+receives only the selected provider key during model invocation.
 It receives no GitHub write token, Git credentials, production credentials, Docker socket, host
 home, SSH agent, Tailscale socket, or production network.
 
 ## Commands and changes
 
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
-output limits, and offline network policy. The model must not use arbitrary shell payloads or
-install dependencies outside an approved registry allowlist. The path policy rejects workflows,
+output limits, and offline network policy for trusted validation. The model cannot start a
+process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a host-side
+allowlist proxy restricted to the selected provider endpoint; command execution remains offline.
+The path policy rejects workflows,
 CODEOWNERS, policies, providers, credentials, `.git`, infrastructure, data archives, and other
 sensitive roots. Trusted reconciliation compares the result's task/path claims with the
 workspace manifest and computes publication eligibility itself.

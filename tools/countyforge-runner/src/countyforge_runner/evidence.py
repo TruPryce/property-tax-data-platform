@@ -224,7 +224,12 @@ class EvidenceWriter:
             "image_digest": image_digest,
             "codex_cli_version": codex_cli_version,
             "enabled_tools": self.resolved.profile["model_tools"],
-            "disabled_tools": [] if self.resolved.profile["model_tools"] else all_disabled,
+            "disabled_tools": (
+                all_disabled
+                if not self.resolved.profile["model_tools"]
+                or "structured_file_bundle" in self.resolved.profile["model_tools"]
+                else []
+            ),
             "mounts": mounts,
             "network_policy": self.resolved.profile["network"]["policy"],
             "credential_names": credential_names,

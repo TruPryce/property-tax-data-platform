@@ -15,10 +15,10 @@ The executable profile SHALL provide the model only an ephemeral writable worksp
 - **THEN** the broker or artifact validator rejects the operation and records a sanitized policy violation
 
 ### Requirement: Governed command execution
-Implementation commands SHALL come from a versioned repository registry with exact executable/argument definitions, phase eligibility, bounded time/output, allowed environment, expected artifacts, and default-deny network. Arbitrary shell, interpreters, privilege escalation, Docker, SSH, and unapproved package/network access MUST fail closed.
+Implementation commands SHALL come from a versioned repository registry with exact executable/argument definitions, phase eligibility, bounded time/output, allowed environment, expected artifacts, and default-deny network. The model process SHALL expose no shell or unified-exec tool; it returns a bounded UTF-8 file bundle, while trusted validation starts only registry-defined commands. Arbitrary shell, interpreters, privilege escalation, Docker, SSH, and unapproved package/network access MUST fail closed. Provider HTTPS egress SHALL use a trusted allowlist proxy restricted to the selected provider endpoint.
 
 #### Scenario: Unregistered command is denied
-- **WHEN** an implementation request asks to execute a command not present in the active registry
+- **WHEN** trusted validation or an implementation request asks to execute a command not present in the active registry
 - **THEN** no process starts and a bounded command-policy event is emitted
 
 ### Requirement: Trusted implementation handoff

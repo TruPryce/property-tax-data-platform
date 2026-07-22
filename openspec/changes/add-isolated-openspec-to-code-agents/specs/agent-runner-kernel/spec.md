@@ -8,14 +8,14 @@ The kernel SHALL retain all accepted request-schema, immutable-reference, profil
 - **THEN** request resolution fails before provider credential loading or workspace execution
 
 ### Requirement: Fail-closed future profile execution
-The `plan`, `fix`, and `validate` profiles SHALL remain fully validatable but not executable in this change and SHALL return structured `profile_not_implemented` evidence without loading credentials or mounts. The `implement.workspace-write.v1` profile is the sole newly executable write-capable profile and MUST validate its packet, manifest, task plan, workspace, path policy, command policy, and repository binding before loading the selected provider credential. It MUST never grant implementation publication authority to the model.
+The executable profiles SHALL remain independently isolated: `plan.read-only.v1` remains executable under its accepted planning contract, while `fix.targeted-write.v1` and `validate.deterministic.v1` remain fully validatable but not executable in this change and SHALL return structured `profile_not_implemented` evidence without loading credentials or mounts. The `implement.workspace-write.v1` profile is the sole newly executable write-capable profile and MUST validate its packet, manifest, task plan, workspace, path policy, command policy, and repository binding before loading the selected provider credential. It MUST never grant implementation publication authority to the model.
 
 #### Scenario: Execute implementation only with trusted context
 - **WHEN** a complete, hash-bound implementation request resolves to the executable implementation profile
 - **THEN** the kernel invokes only its declared adapter with the isolated workspace and selected provider credential
 
 #### Scenario: Reject future write profiles
-- **WHEN** a plan, fix, or validate request is executed
+- **WHEN** a fix or validate request is executed
 - **THEN** the kernel emits `profile_not_implemented` and performs no provider, mount, or repository mutation
 
 ### Requirement: Separate mode-result contracts

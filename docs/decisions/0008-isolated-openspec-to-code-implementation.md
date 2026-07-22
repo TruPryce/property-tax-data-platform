@@ -18,8 +18,10 @@ repository credentials share one unsafe boundary.
 trusted default branch and its planning PR was merged by an authorized human maintainer.
 The model receives a frozen packet and an ephemeral workspace copied from the immutable base;
 it never receives a GitHub write token, Git credentials, production credentials, Docker socket,
-or production network. Versioned command and path policies constrain the workspace, with
-network denied by default.
+or production network. The model has no process-execution tools and emits a bounded file bundle;
+trusted tooling materializes it only after policy checks. Versioned command and path policies
+constrain trusted validation, with command network denied by default. Provider HTTPS traffic is
+restricted to an allowlist proxy for the selected model endpoint.
 
 Trusted code owns eligibility, task reconciliation, artifact validation, deterministic gates,
 Git data API publication, draft PR creation, and canonical state. The model's result is

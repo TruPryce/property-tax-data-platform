@@ -66,7 +66,7 @@ def test_implementation_dispatches_isolated_adapter_with_structured_result(
         + subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         + '","profile":{"id":"implement.workspace-write.v1","version":1,"provider":"openai",'
         '"model_ref":"openai.gpt-5.6","reasoning_effort":"high"},"completed_task_ids":[],'
-        '"incomplete_task_ids":["1.1"],"blocked_task_ids":[],"files_created":[],"files_modified":[],'
+        '"incomplete_task_ids":["1.1"],"blocked_task_ids":[],"files_created":[],"files_modified":[],"file_bundle":[],'
         '"files_deleted":[],"diff":{"files":0,"bytes_added":0,"bytes_deleted":0},"tests_run":[],'
         '"command_evidence":[],"validation_results":[],"deviations":[],"residual_risks":[],'
         '"dependency_changes":[],"migration_changes":[],"security_sensitive_changes":[],'
@@ -85,6 +85,36 @@ def test_implementation_dispatches_isolated_adapter_with_structured_result(
     assert document["ok"] is True
     assert document["mode"] == "implement"
     assert document["implementation"]["incomplete_task_ids"] == ["1.1"]
+
+
+def test_implementation_evidence_removes_provider_bearing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = tmp_path / "leaking-implementation-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'mkdir -p "$OUT_DIR"\n'
+        'printf "%s" "$OPENAI_API_KEY" > "$OUT_DIR/leaked-output.log"\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    secret = "implementation-output-fixture-secret"  # pragma: allowlist secret
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    kernel = Kernel()
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", implementation_adapter=adapter
+    ).run(kernel.resolve(request_factory("implement")))
+    assert exit_code == 5
+    run_dir = Path(document["run_dir"])
+    all_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in run_dir.iterdir() if path.is_file()
+    )
+    assert secret not in all_text
+    assert not (run_dir / "leaked-output.log").exists()
 
 
 def test_unimplemented_execution_has_no_global_credential_lookup() -> None:

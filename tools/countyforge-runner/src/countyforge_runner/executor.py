@@ -91,6 +91,29 @@ def _redacted_tail(text: str, environment: dict[str, str], limit: int = 4000) ->
     return redacted[-limit:]
 
 
+def _remove_secret_bearing_files(run_dir: Path, secret_values: tuple[str, ...]) -> bool:
+    """Remove every output file containing a provider value before evidence export."""
+
+    values = tuple(value.encode("utf-8") for value in secret_values if value)
+    leaked = False
+    if not values or not run_dir.is_dir():
+        return False
+    for path in sorted(run_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if any(value in data for value in values):
+            leaked = True
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return leaked
+
+
 class Runner:
     """Dispatch only implemented immutable profiles."""
 
@@ -360,9 +383,7 @@ class Runner:
         outcome = "succeeded" if code == 0 else "failed"
         secret_names = {"OPENAI_API_KEY", "SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"}
         secret_values = tuple(value for name, value in environment.items() if name in secret_names)
-        if result_path.is_file() and any(
-            value and value in result_path.read_text(encoding="utf-8") for value in secret_values
-        ):
+        if _remove_secret_bearing_files(run_dir, secret_values):
             disposition, outcome, code = "validation_failed", "failed", 5
             result_document = None
         writer = EvidenceWriter(
@@ -513,11 +534,18 @@ class Runner:
         outcome = "succeeded" if code == 0 else "failed"
         secret_names = {"OPENAI_API_KEY", "SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"}
         secret_values = tuple(value for name, value in environment.items() if name in secret_names)
-        if result_path.is_file() and any(
-            value and value in result_path.read_text(encoding="utf-8") for value in secret_values
-        ):
+        if _remove_secret_bearing_files(run_dir, secret_values):
             implementation = None
             disposition, outcome, code = "validation_failed", "failed", 5
+        legacy_provenance: JsonObject | None = None
+        provenance_path = run_dir / "container.provenance.json"
+        if provenance_path.is_file():
+            try:
+                legacy_provenance = load_json_object(
+                    provenance_path, kind="implementation container provenance"
+                )
+            except KernelError:
+                legacy_provenance = None
         writer = EvidenceWriter(
             self.kernel,
             resolved,
@@ -535,6 +563,7 @@ class Runner:
             input_bytes=_input_bytes(resolved),
             output_bytes=output_bytes,
             error_code=None if code == 0 else disposition,
+            legacy_provenance=legacy_provenance,
             extra_artifacts=tuple(
                 name
                 for name in (
@@ -622,14 +651,19 @@ class Runner:
                 "BITWARDEN_TOKEN",
                 "BWS_ACCESS_TOKEN",
             }
+            secret_values = tuple(
+                value for name, value in environment.items() if name in secret_names
+            )
+            if _remove_secret_bearing_files(run_dir, secret_values):
+                disposition = "validation_failed"
+                outcome = "failed"
+                exit_code = 5
             writer = EvidenceWriter(
                 self.kernel,
                 resolved,
                 run_dir,
                 owns_claim=False,
-                secret_values=tuple(
-                    value for name, value in environment.items() if name in secret_names
-                ),
+                secret_values=secret_values,
             )
             summary = writer.write(
                 started_at=started_at,

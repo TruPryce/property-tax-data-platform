@@ -24,6 +24,10 @@ class GitHubPort(Protocol):
 
     def pull_request(self, repository: str, number: int) -> JsonObject: ...
 
+    def issue_timeline(self, repository: str, issue_number: int) -> list[JsonObject]: ...
+
+    def pull_request_files(self, repository: str, number: int) -> list[JsonObject]: ...
+
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> JsonObject: ...
 
     def create_comment(self, repository: str, target_number: int, body: str) -> JsonObject: ...
@@ -169,6 +173,12 @@ class GitHubRestClient:
 
     def pull_request(self, repository: str, number: int) -> JsonObject:
         return cast(JsonObject, self._request("GET", f"/repos/{repository}/pulls/{number}"))
+
+    def issue_timeline(self, repository: str, issue_number: int) -> list[JsonObject]:
+        return self._list_pages(f"/repos/{repository}/issues/{issue_number}/timeline")
+
+    def pull_request_files(self, repository: str, number: int) -> list[JsonObject]:
+        return self._list_pages(f"/repos/{repository}/pulls/{number}/files")
 
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> JsonObject:
         return cast(

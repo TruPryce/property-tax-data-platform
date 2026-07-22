@@ -91,6 +91,17 @@
     "trusted_tool_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "planning_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "implementation_change_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "implementation_approval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["planning_pr_number", "planning_pr_merge_sha", "approval_actor_id", "approval_actor_login", "approval_permission"],
+      "properties": {
+        "planning_pr_number": {"type": "integer", "minimum": 1},
+        "planning_pr_merge_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "approval_actor_id": {"type": "integer", "minimum": 1},
+        "approval_actor_login": {"type": "string", "minLength": 1, "maxLength": 128},
+        "approval_permission": {"enum": ["admin", "maintain", "write"]}
+      }
+    },
     "workflow": {
       "type": "object",
       "additionalProperties": false,

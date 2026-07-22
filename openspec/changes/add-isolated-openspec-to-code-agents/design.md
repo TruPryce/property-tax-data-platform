@@ -4,7 +4,7 @@ The runner kernel and GitHub control plane are trusted developer tooling. Issue 
 
 ## Architecture
 
-`countyforge-github` resolves eligibility and builds an implementation packet and manifest. `countyforge-runner` resolves `implement.workspace-write.v1` and invokes a profile-specific adapter. The adapter mounts only the isolated workspace and claimed output, provides the selected provider credential at invocation time, and exposes a governed command broker rather than arbitrary host shell. A no-provider-secret validation job reconstructs the artifact from the trusted base and runs trusted gates. A short per-target publication transaction creates or updates a deterministic draft branch and PR, then updates canonical state.
+`countyforge-github` resolves eligibility and builds an implementation packet and manifest. `countyforge-runner` resolves `implement.workspace-write.v1` and invokes a profile-specific adapter. The adapter mounts only the isolated workspace and claimed output, provides the selected provider credential at invocation time, and exposes no model process-execution tool; the model returns a bounded file bundle. Trusted tooling materializes that bundle and uses the versioned command broker for validation rather than arbitrary host shell. A no-provider-secret validation job reconstructs the artifact from the trusted base and runs trusted gates. A short per-target publication transaction creates or updates a deterministic draft branch and PR, then updates canonical state.
 
 ## Eligibility and identity
 

@@ -13,6 +13,10 @@
     "change_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "trusted_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "planning_pr_merged": {"type": "boolean"},
+    "planning_pr_number": {"type": ["integer", "null"], "minimum": 1},
+    "planning_pr_merge_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "approval_actor_login": {"type": ["string", "null"], "maxLength": 128},
+    "approval_permission": {"enum": ["admin", "maintain", "write", null]},
     "approval_actor_id": {"type": ["integer", "null"], "minimum": 1},
     "blocking_reasons": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}
   }
