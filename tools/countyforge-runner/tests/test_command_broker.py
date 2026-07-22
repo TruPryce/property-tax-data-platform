@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -13,7 +12,6 @@ from countyforge_runner.contracts import load_json_object, validate_document
 from countyforge_runner.errors import KernelError
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_broker_runs_only_declared_command(tmp_path: Path) -> None:
     repo_root = Path.cwd().resolve()
     broker = CommandBroker(
@@ -52,7 +50,6 @@ def test_command_evidence_rejects_registry_bypass() -> None:
         )
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_broker_fails_closed_at_output_limit(tmp_path: Path) -> None:
     repo_root = Path.cwd().resolve()
     registry = tmp_path / "registry.json"
@@ -89,7 +86,6 @@ def test_broker_fails_closed_at_output_limit(tmp_path: Path) -> None:
         broker.run("test.output", workspace=tmp_path)
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_non_mutating_command_cannot_change_candidate_workspace(tmp_path: Path) -> None:
     repo_root = Path.cwd().resolve()
     registry = tmp_path / "registry.json"
@@ -129,7 +125,6 @@ def test_non_mutating_command_cannot_change_candidate_workspace(tmp_path: Path) 
         broker.run("test.mutates", workspace=tmp_path)
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_prepr_generated_review_artifacts_are_allowed_for_non_mutating_gate(
     tmp_path: Path,
 ) -> None:
@@ -174,7 +169,6 @@ def test_prepr_generated_review_artifacts_are_allowed_for_non_mutating_gate(
     assert result["exit_code"] == 0
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_broker_masks_host_temp_and_mounts_only_contract_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

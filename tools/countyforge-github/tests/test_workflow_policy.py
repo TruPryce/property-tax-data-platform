@@ -299,6 +299,8 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
         Path(__file__).parents[3] / ".ai/codex/09-run-countyforge-implement-docker.sh"
     ).read_text(encoding="utf-8")
     assert "provider_proxy.py" in adapter
+    assert re.search(r'PROXY_IMAGE="python:3\.12-alpine@sha256:[0-9a-f]{64}"', adapter)
+    assert re.search(r"(?m)^\s+python:3\.12-alpine\s*$", adapter) is None
     assert "docker network create --driver bridge --internal" in adapter
     assert "docker network connect bridge" in adapter
     assert '--network "$NETWORK_NAME"' in adapter

@@ -61,6 +61,9 @@ document = {
         "implementation_workspace:/workspace:read_write",
         "frozen_implementation_packet:/workspace/implementation-packet.json:read_only",
         "frozen_implementation_manifest:/workspace/implementation-manifest.json:read_only",
+        "frozen_implementation_task_plan:/workspace/implementation-task-plan.json:read_only",
+        "frozen_implementation_result_schema:/workspace/implementation-result.schema.json:read_only",
+        "frozen_implementation_command_policy:/workspace/implementation-commands.json:read_only",
         "claimed_output_directory:/out:read_write",
     ],
     "network_policy": "provider_only",
@@ -70,6 +73,7 @@ pathlib.Path(path).write_text(json.dumps(document, sort_keys=True) + "\n", encod
 PY
 NETWORK_NAME="countyforge-implement-${RANDOM}-$$"
 PROXY_NAME="${NETWORK_NAME}-proxy"
+PROXY_IMAGE="python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
 cleanup_network() {
   docker rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
@@ -88,7 +92,7 @@ docker run -d --name "$PROXY_NAME" \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
   --user 65532:65532 \
   -v "$(pwd)/tools/countyforge-runner/src/countyforge_runner/provider_proxy.py:/provider_proxy.py:ro" \
-  python:3.12-alpine \
+  "$PROXY_IMAGE" \
   python /provider_proxy.py --host 0.0.0.0 --port 45000 --allowed-host api.openai.com \
   >/dev/null
 docker network connect bridge "$PROXY_NAME"

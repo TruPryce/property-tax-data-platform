@@ -132,6 +132,7 @@ countyforge-profile-tests:
 		tools/countyforge-runner/tests/test_compatibility.py -q
 
 countyforge-runner-check:
+	@command -v bwrap >/dev/null 2>&1 || { echo "bubblewrap (bwrap) is required for CountyForge sandbox fixtures" >&2; exit 2; }
 	$(UV) run ruff format --check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
 	$(UV) run ruff check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
 	$(UV) run mypy -p countyforge_runner
@@ -178,6 +179,7 @@ countyforge-implement-check:
 	$(UV) run python -m json.tool .ai/schemas/countyforge-implementation-packet.schema.json >/dev/null
 
 countyforge-implement-fixtures:
+	@command -v bwrap >/dev/null 2>&1 || { echo "bubblewrap (bwrap) is required for CountyForge implementation fixtures" >&2; exit 2; }
 	$(UV) run pytest tools/countyforge-github/tests/test_implementation.py tools/countyforge-runner/tests/test_execution.py tools/countyforge-runner/tests/test_command_broker.py -q
 
 countyforge-implement-policy-tests:

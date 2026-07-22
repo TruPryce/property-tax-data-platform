@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from countyforge_github.cli import main as github_cli_main
@@ -49,6 +50,45 @@ def test_unmerged_plan_is_not_eligible(repo_root: Path) -> None:
     assert "planning_pr_not_merged" in decision["blocking_reasons"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("planning_pr_number", None),
+        ("planning_pr_number", 0),
+        ("planning_pr_merge_sha", None),
+        ("approval_actor_id", None),
+        ("approval_actor_id", 0),
+        ("approval_actor_login", None),
+        ("approval_actor_login", " "),
+        ("approval_permission", None),
+        ("approval_permission", "read"),
+    ],
+)
+def test_merged_plan_requires_complete_human_approval_evidence(
+    repo_root: Path, field: str, value: object
+) -> None:
+    _, _, sha = _facts()
+    facts: dict[str, Any] = {
+        "planning_pr_number": 123,
+        "planning_pr_merge_sha": sha,
+        "approval_actor_id": 42,
+        "approval_actor_type": "User",
+        "approval_actor_login": "maintainer",
+        "approval_permission": "write",
+    }
+    facts[field] = value
+    decision = evaluate_implementation_eligibility(
+        contract_root=repo_root,
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=7,
+        change_name="add-isolated-openspec-to-code-agents",
+        trusted_base_sha=sha,
+        planning_pr_merged=True,
+        **facts,
+    )
+    assert decision["eligible"] is False
+
+
 def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: Path) -> None:
     design = tmp_path / "design.md"
     design.write_text("decision: unresolved\n", encoding="utf-8")
@@ -64,7 +104,7 @@ def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: P
 
 
 def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> None:
-    trigger, issue, _ = _facts()
+    trigger, issue, sha = _facts()
     result = build_implementation_packet(
         trigger=trigger,
         issue=issue,
@@ -75,6 +115,10 @@ def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> No
         planning_pr_merged=True,
         approval_actor_id=42,
         approval_actor_type="User",
+        planning_pr_number=123,
+        planning_pr_merge_sha=sha,
+        approval_actor_login="maintainer",
+        approval_permission="write",
     )
     packet = load_json_object(Path(str(result["packet_path"])), kind="implementation packet")
     schema = load_json_object(
@@ -399,6 +443,10 @@ def test_trusted_context_cli_rejects_schema_invalid_task_plan(
         planning_pr_merged=True,
         approval_actor_id=42,
         approval_actor_type="User",
+        planning_pr_number=123,
+        planning_pr_merge_sha=_facts()[2],
+        approval_actor_login="maintainer",
+        approval_permission="write",
     )
     task_path = Path(str(result["task_plan_path"]))
     task = json.loads(task_path.read_text(encoding="utf-8"))

@@ -244,6 +244,42 @@ def test_plan_profile_mounts_match_adapter_and_provenance_contract() -> None:
     assert '"frozen_context_manifest:/workspace/manifest.json:read_only"' in adapter
 
 
+def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    mounts = {
+        (mount["source"], mount["target"], mount["access"])
+        for mount in profile["filesystem_mounts"]
+    }
+    expected = {
+        ("frozen_implementation_packet", "/workspace/implementation-packet.json", "read_only"),
+        ("frozen_implementation_manifest", "/workspace/implementation-manifest.json", "read_only"),
+        (
+            "frozen_implementation_task_plan",
+            "/workspace/implementation-task-plan.json",
+            "read_only",
+        ),
+        (
+            "frozen_implementation_result_schema",
+            "/workspace/implementation-result.schema.json",
+            "read_only",
+        ),
+        (
+            "frozen_implementation_command_policy",
+            "/workspace/implementation-commands.json",
+            "read_only",
+        ),
+        ("implementation_workspace", "/workspace", "read_write"),
+        ("claimed_output_directory", "/out", "read_write"),
+    }
+    assert mounts == expected
+    adapter = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    for source, target, access in expected:
+        assert f'"{source}:{target}:{access}"' in adapter
+    assert '"python:3.12-alpine@sha256:' in adapter
+
+
 def test_generic_metrics_are_low_cardinality(
     tmp_path: Path,
     request_factory: Callable[[str], JsonObject],

@@ -317,10 +317,22 @@ def evaluate_implementation_eligibility(
         reasons.append(error.code)
     if not planning_pr_merged:
         reasons.append("planning_pr_not_merged")
-    elif approval_actor_id is None:
-        reasons.append("approval_actor_missing")
-    elif approval_actor_type != "User":
-        reasons.append("approval_actor_not_human")
+    else:
+        if planning_pr_number is None or planning_pr_number < 1:
+            reasons.append("planning_pr_number_missing")
+        if (
+            planning_pr_merge_sha is None
+            or re.fullmatch(r"[0-9a-f]{40}", planning_pr_merge_sha) is None
+        ):
+            reasons.append("planning_pr_merge_sha_invalid")
+        if approval_actor_id is None or approval_actor_id < 1:
+            reasons.append("approval_actor_missing")
+        if approval_actor_login is None or not approval_actor_login.strip():
+            reasons.append("approval_actor_login_missing")
+        if approval_actor_type != "User":
+            reasons.append("approval_actor_not_human")
+        if approval_permission not in {"admin", "maintain", "write"}:
+            reasons.append("approval_permission_invalid")
     if not re.fullmatch(r"[0-9a-f]{40}", trusted_base_sha):
         reasons.append("trusted_base_sha_invalid")
     return {
@@ -446,6 +458,10 @@ def build_implementation_packet(
     planning_pr_merged: bool,
     approval_actor_id: int | None = None,
     approval_actor_type: str | None = None,
+    planning_pr_number: int | None = None,
+    planning_pr_merge_sha: str | None = None,
+    approval_actor_login: str | None = None,
+    approval_permission: str | None = None,
     comments: Iterable[JsonObject] = (),
 ) -> JsonObject:
     """Build an immutable packet, manifest, and task plan under ``output_dir``."""
@@ -486,22 +502,22 @@ def build_implementation_packet(
         planning_pr_number=(
             int(approval["planning_pr_number"])
             if isinstance(approval, dict) and approval.get("planning_pr_number")
-            else None
+            else planning_pr_number
         ),
         planning_pr_merge_sha=(
             str(approval["planning_pr_merge_sha"])
             if isinstance(approval, dict) and approval.get("planning_pr_merge_sha")
-            else None
+            else planning_pr_merge_sha
         ),
         approval_actor_login=(
             str(approval["approval_actor_login"])
             if isinstance(approval, dict) and approval.get("approval_actor_login")
-            else None
+            else approval_actor_login
         ),
         approval_permission=(
             str(approval["approval_permission"])
             if isinstance(approval, dict) and approval.get("approval_permission")
-            else None
+            else approval_permission
         ),
     )
     trigger_hash = trigger.get("implementation_change_sha256")
