@@ -374,16 +374,28 @@ def resolve_merged_planning_approval(
         if comparison.get("status") not in {"identical", "ahead"}:
             continue
         later_files = comparison.get("files", [])
+        if not isinstance(later_files, list):
+            # The compare API omits file evidence when it cannot provide a complete
+            # response.  Never infer approval from commit metadata alone.
+            continue
+        if comparison.get("files_complete") is False or len(later_files) >= 300:
+            # GitHub compare responses are capped at 300 files.  A capped response
+            # cannot prove that the accepted OpenSpec change stayed unchanged.
+            continue
+        if (
+            comparison.get("status") in {"ahead", "behind"}
+            and int(comparison.get("total_commits", 0)) > 0
+            and not later_files
+        ):
+            # A non-empty commit range with no file list is incomplete evidence, not
+            # proof that no OpenSpec files changed.
+            continue
         if isinstance(later_files, list) and any(
             isinstance(item, dict) and str(item.get("filename", "")).startswith(prefix)
             for item in later_files
         ):
             # The accepted planning content changed after its approval merge. Require a
             # fresh planning PR rather than silently implementing a different hash.
-            continue
-        if comparison.get("status") == "ahead" and not isinstance(later_files, list):
-            # GitHub did not provide a bounded changed-file list, so exact content binding
-            # cannot be proven safely.
             continue
         if int(comparison.get("total_commits", 0)) > 250:
             # Compare responses are bounded by GitHub; an unbounded history cannot prove
@@ -927,6 +939,21 @@ def validate_implementation_artifact(
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact contains a prohibited path."
             )
+        if raw_path == f"openspec/changes/{expected_change_name}/tasks.md":
+            baseline = policy_root / raw_path
+            candidate_tasks = workspace_root / raw_path
+            if (
+                row.get("kind") == "deleted"
+                or not baseline.is_file()
+                or not candidate_tasks.is_file()
+            ):
+                raise ControlPlaneError(
+                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
+                )
+            if baseline.read_bytes() != candidate_tasks.read_bytes():
+                raise ControlPlaneError(
+                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
+                )
         if allowed_roots and not any(
             raw_path == root or raw_path.startswith(f"{root}/") for root in allowed_roots
         ):
@@ -949,21 +976,6 @@ def validate_implementation_artifact(
                 "higher_risk_change_not_approved",
                 "Higher-risk implementation paths require an explicit accepted approval.",
             )
-        if raw_path == f"openspec/changes/{expected_change_name}/tasks.md":
-            baseline = policy_root / raw_path
-            candidate_tasks = workspace_root / raw_path
-            if (
-                row.get("kind") == "deleted"
-                or not baseline.is_file()
-                or not candidate_tasks.is_file()
-            ):
-                raise ControlPlaneError(
-                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
-                )
-            if baseline.read_bytes() != candidate_tasks.read_bytes():
-                raise ControlPlaneError(
-                    "openspec_tasks_mutation", "Accepted OpenSpec task files are immutable."
-                )
         raw_candidate = workspace_root / raw_path
         if raw_candidate.is_symlink():
             raise ControlPlaneError(
@@ -1200,10 +1212,41 @@ def publish_implementation(
             "Trusted publication requires the validated implementation artifact.",
         )
     branch = implementation_branch(issue_number, change_name, revision)
-    base_commit = github.get_git_commit(repository, base_sha)
-    base_tree = base_commit.get("tree")
-    if not isinstance(base_tree, dict) or not isinstance(base_tree.get("sha"), str):
-        raise ControlPlaneError("git_base_tree_unavailable", "Trusted base tree is unavailable.")
+    ref = f"refs/heads/{branch}"
+    existing_ref = github.get_git_ref(repository, ref)
+    # Detect a clearly divergent/human-owned branch before requiring the new
+    # workspace bundle.  This is a read-only conflict check; publication still
+    # validates the complete bundle before reusing a matching branch.
+    if existing_ref is not None:
+        existing_object = existing_ref.get("object")
+        existing_sha = (
+            str(existing_object.get("sha"))
+            if isinstance(existing_object, dict) and existing_object.get("sha")
+            else str(existing_ref.get("sha") or "")
+        )
+        if not re.fullmatch(r"[0-9a-f]{40}", existing_sha):
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The existing implementation branch has no verifiable commit.",
+            )
+        existing_commit = github.get_git_commit(repository, existing_sha)
+        parents = existing_commit.get("parents")
+        parent_sha = (
+            str(parents[0].get("sha"))
+            if isinstance(parents, list) and parents and isinstance(parents[0], dict)
+            else ""
+        )
+        expected_prefix = (
+            f"CountyForge implementation: {change_name} (issue #{issue_number}; run {run_id}; "
+            "bundle "
+        )
+        if parent_sha != base_sha or not str(existing_commit.get("message") or "").startswith(
+            expected_prefix
+        ):
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The deterministic implementation branch diverges from this run.",
+            )
     manifest_path = workspace / "countyforge-workspace-manifest.json"
     declared: set[str] | None = None
     deleted: set[str] = set()
@@ -1242,6 +1285,79 @@ def publish_implementation(
         expected_change_name=change_name,
         expected_base_sha=base_sha,
     )
+    manifest_sha256 = file_sha256(manifest_path)
+    commit_message = (
+        f"CountyForge implementation: {change_name} (issue #{issue_number}; run {run_id}; "
+        f"bundle {manifest_sha256[:12]})"
+    )
+    if existing_ref is not None:
+        existing_object = existing_ref.get("object")
+        existing_sha = (
+            str(existing_object.get("sha"))
+            if isinstance(existing_object, dict) and existing_object.get("sha")
+            else str(existing_ref.get("sha") or "")
+        )
+        if not re.fullmatch(r"[0-9a-f]{40}", existing_sha):
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The existing implementation branch has no verifiable commit.",
+            )
+        existing_commit = github.get_git_commit(repository, existing_sha)
+        parents = existing_commit.get("parents")
+        parent_sha = (
+            str(parents[0].get("sha"))
+            if isinstance(parents, list) and parents and isinstance(parents[0], dict)
+            else ""
+        )
+        if existing_commit.get("message") != commit_message or parent_sha != base_sha:
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The deterministic implementation branch diverges from this run.",
+            )
+        pulls = github.list_pull_requests(
+            repository, head=f"{repository.split('/', 1)[0]}:{branch}", base="main"
+        )
+        for pull in pulls:
+            body = str(pull.get("body") or "")
+            if (
+                f"Accepted OpenSpec change: `{change_name}`" not in body
+                or f"CountyForge run: `{run_id}`" not in body
+                or f"Base SHA: `{base_sha[:12]}`" not in body
+            ):
+                raise ControlPlaneError(
+                    "implementation_branch_conflict",
+                    "The existing implementation pull request was edited or diverged.",
+                )
+            return {
+                "branch": branch,
+                "commit_sha": existing_sha,
+                "pr_number": int(pull["number"]),
+                "run_id": run_id,
+                "change_name": change_name,
+            }
+        pr = github.create_pull_request(
+            repository,
+            {
+                "title": f"CountyForge implementation: {change_name}",
+                "head": branch,
+                "base": "main",
+                "body": _implementation_pr_body(
+                    issue_number, change_name, run_id, base_sha, evidence_url
+                ),
+                "draft": True,
+            },
+        )
+        return {
+            "branch": branch,
+            "commit_sha": existing_sha,
+            "pr_number": int(pr["number"]),
+            "run_id": run_id,
+            "change_name": change_name,
+        }
+    base_commit = github.get_git_commit(repository, base_sha)
+    base_tree = base_commit.get("tree")
+    if not isinstance(base_tree, dict) or not isinstance(base_tree.get("sha"), str):
+        raise ControlPlaneError("git_base_tree_unavailable", "Trusted base tree is unavailable.")
     entries: list[JsonObject] = []
     for path in sorted(workspace.rglob("*")):
         if not path.is_file() or ".git" in path.parts:
@@ -1269,13 +1385,7 @@ def publish_implementation(
             "empty_implementation_artifact", "No validated implementation files were produced."
         )
     tree_sha = github.create_git_tree(repository, str(base_tree["sha"]), entries)
-    commit_sha = github.create_git_commit(
-        repository,
-        f"CountyForge implementation: {change_name} (issue #{issue_number})",
-        tree_sha,
-        base_sha,
-    )
-    ref = f"refs/heads/{branch}"
+    commit_sha = github.create_git_commit(repository, commit_message, tree_sha, base_sha)
     try:
         github.create_git_ref(repository, ref, commit_sha)
     except ControlPlaneError as error:
@@ -1290,6 +1400,16 @@ def publish_implementation(
     )
     if pulls:
         pr_number = int(pulls[0]["number"])
+        body = str(pulls[0].get("body") or "")
+        if (
+            f"Accepted OpenSpec change: `{change_name}`" not in body
+            or f"CountyForge run: `{run_id}`" not in body
+            or f"Base SHA: `{base_sha[:12]}`" not in body
+        ):
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The existing implementation pull request was edited or diverged.",
+            )
         github.update_pull_request(
             repository,
             pr_number,

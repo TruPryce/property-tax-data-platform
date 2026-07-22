@@ -684,6 +684,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 or report.get("change_name") != args.change_name
                 or report.get("base_sha") != args.base_sha
                 or report.get("artifact_sha256") != file_sha256(args.implementation_result)
+                or report.get("workspace_manifest_sha256") != file_sha256(manifest_path)
                 or report.get("valid") is not True
                 or report.get("publication_eligible") is not True
             ):

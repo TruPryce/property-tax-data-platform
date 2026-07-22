@@ -35,15 +35,16 @@ metadata remains available only to trusted host tooling.
 ## Commands and changes
 
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
-output limits, and offline network policy for trusted validation. The model cannot start a
-process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
+output limits, and offline network policy for trusted validation. Non-mutating commands are
+snapshotted before and after execution; any candidate-tree change fails validation. The model
+cannot start a process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
 sidecar restricted to the selected provider endpoint; command execution remains offline.
 The broker uses a deny-by-default filesystem and masks host homes, temporary directories, `/run`,
 `/var/run`, and host sockets. OpenSpec is installed in a trusted no-secret step and exposed
 through the read-only contract mount so offline validation never performs a package fetch.
 The path policy rejects workflows,
-CODEOWNERS, policies, providers, credentials, `.git`, infrastructure, data archives, and other
-sensitive roots. Trusted reconciliation compares the result's task/path claims with the
+CODEOWNERS, OpenSpec contracts, policies, providers, credentials, `.git`, infrastructure, data
+archives, and other sensitive roots. Trusted reconciliation compares the result's task/path claims with the
 workspace manifest and computes publication eligibility itself.
 
 ## Validation and publication
@@ -52,8 +53,8 @@ The model artifact is a bounded file bundle plus strict result, task, command, w
 checksum evidence. A no-provider-secret validation job reconstructs a clean candidate worktree
 from the trusted base while keeping the trusted tooling checkout immutable, applies only
 declared files, enforces the path policy, runs repository gates, and emits a validation report.
-The report is itself schema-validated and binds the issue, accepted change, base SHA, and exact
-implementation-result checksum before publication.
+The report is itself schema-validated and binds the issue, accepted change, base SHA, exact
+implementation-result checksum, and workspace-manifest checksum before publication.
 Only then does the short per-target state-lane publisher derive
 `countyforge/implement/issue-<issue>-<change>-r<revision>`, create a commit, and open/update a
 draft PR. The PR always requires human review; no merge, deployment, or issue closure occurs.

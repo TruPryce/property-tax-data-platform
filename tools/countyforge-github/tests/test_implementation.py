@@ -423,7 +423,16 @@ def test_trusted_context_cli_rejects_schema_invalid_task_plan(
 
 
 @pytest.mark.parametrize(
-    "relative", ["docs/source.csv", "docs/private.pem", "pyproject.toml", "uv.lock"]
+    "relative",
+    [
+        "docs/source.csv",
+        "docs/private.pem",
+        "pyproject.toml",
+        "uv.lock",
+        "openspec/specs/unsafe/spec.md",
+        "openspec/changes/other-change/tasks.md",
+        "openspec/changes/safe-change/proposal.md",
+    ],
 )
 def test_artifact_policy_enforces_versioned_prohibited_globs(
     relative: str, tmp_path: Path, repo_root: Path
@@ -622,7 +631,7 @@ class _ApprovalGitHub:
         }
 
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, object]:
-        return {"status": "ahead", "files": []}
+        return {"status": "identical", "files": [], "total_commits": 0}
 
     def pull_request_files(self, repository: str, number: int) -> list[dict[str, object]]:
         return [{"filename": "openspec/changes/safe-change/proposal.md"}]
@@ -660,12 +669,32 @@ def test_bot_merged_planning_approval_is_refused() -> None:
     assert approval["eligible"] is False
 
 
+def test_incomplete_compare_file_evidence_is_refused() -> None:
+    class IncompleteCompareGitHub(_ApprovalGitHub):
+        def compare_commits(
+            self, repository: str, base_sha: str, head_sha: str
+        ) -> dict[str, object]:
+            return {"status": "ahead", "files": [], "total_commits": 1}
+
+    approval = resolve_merged_planning_approval(
+        IncompleteCompareGitHub(),
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=7,
+        change_name="safe-change",
+        trusted_base_sha="c" * 40,
+    )
+    assert approval["eligible"] is False
+
+
 class _PublicationGitHub:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
         return {"tree": {"sha": "d" * 40}}
+
+    def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
+        return None
 
     def create_git_blob(self, repository: str, content: str) -> str:
         self.calls.append("blob")
@@ -747,3 +776,97 @@ def test_publication_uses_validated_manifest_and_draft_only(tmp_path: Path) -> N
     )
     assert result["pr_number"] == 9
     assert preflight_calls == ["preflight"]
+
+
+def test_publication_reuses_matching_existing_branch_and_pr(tmp_path: Path) -> None:
+    content = "safe\n"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/generated.md").write_text(content, encoding="utf-8")
+    manifest = {
+        "contract_version": 1,
+        "run_id": "run",
+        "issue_number": 7,
+        "change_name": "safe-change",
+        "base_sha": "a" * 40,
+        "files": [
+            {
+                "path": "docs/generated.md",
+                "kind": "created",
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "bytes": len(content),
+            }
+        ],
+        "total_bytes": len(content),
+    }
+    manifest_path = tmp_path / "countyforge-workspace-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    class MatchingGitHub(_PublicationGitHub):
+        def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
+            return {"object": {"sha": "1" * 40}}
+
+        def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
+            if sha == "a" * 40:
+                return {"tree": {"sha": "d" * 40}}
+            return {
+                "message": (
+                    "CountyForge implementation: safe-change (issue #7; run run; "
+                    f"bundle {manifest_sha[:12]})"
+                ),
+                "parents": [{"sha": "a" * 40}],
+            }
+
+        def list_pull_requests(
+            self, repository: str, *, head: str, base: str
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "number": 9,
+                    "body": (
+                        "Accepted OpenSpec change: `safe-change`\n"
+                        "CountyForge run: `run`\n"
+                        "Base SHA: `aaaaaaaaaaaa`"
+                    ),
+                }
+            ]
+
+    result = publish_implementation(
+        MatchingGitHub(),
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=7,
+        change_name="safe-change",
+        revision=1,
+        base_sha="a" * 40,
+        run_id="run",
+        workspace=tmp_path,
+        publication_preflight=lambda: {},
+        implementation_result=_artifact_result("docs/generated.md", content),
+        policy_root=Path.cwd(),
+    )
+    assert result["pr_number"] == 9
+    assert result["commit_sha"] == "1" * 40
+
+
+def test_publication_refuses_divergent_existing_branch(tmp_path: Path) -> None:
+    class DivergentGitHub(_PublicationGitHub):
+        def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
+            return {"object": {"sha": "1" * 40}}
+
+        def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
+            return {"message": "human edit", "parents": [{"sha": "b" * 40}]}
+
+    with pytest.raises(ControlPlaneError, match="branch diverges"):
+        publish_implementation(
+            DivergentGitHub(),
+            repository="TruPryce/property-tax-data-platform",
+            issue_number=7,
+            change_name="safe-change",
+            revision=1,
+            base_sha="a" * 40,
+            run_id="run",
+            workspace=tmp_path,
+            publication_preflight=lambda: {},
+            implementation_result=_artifact_result(),
+            policy_root=Path.cwd(),
+        )

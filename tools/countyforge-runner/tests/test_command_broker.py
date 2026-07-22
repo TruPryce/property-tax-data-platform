@@ -77,6 +77,46 @@ def test_broker_fails_closed_at_output_limit(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_non_mutating_command_cannot_change_candidate_workspace(tmp_path: Path) -> None:
+    repo_root = Path.cwd().resolve()
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "policy_id": "countyforge-implementation-commands",
+                "version": 1,
+                "default_network": "disabled",
+                "commands": [
+                    {
+                        "id": "test.mutates",
+                        "executable": "python3",
+                        "arguments": [
+                            "-c",
+                            "open('/workspace/model-mutated.py', 'w').write('unsafe\\n')",
+                        ],
+                        "phase": "validate",
+                        "network": "disabled",
+                        "workspace_mutating": False,
+                        "timeout_seconds": 30,
+                        "max_output_bytes": 1024,
+                        "environment": ["PATH"],
+                        "artifact_paths": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    broker = CommandBroker(
+        registry,
+        repo_root / ".ai/schemas/countyforge-implementation-command-registry.schema.json",
+    )
+    with pytest.raises(KernelError, match="workspace"):
+        broker.run("test.mutates", workspace=tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_broker_masks_host_temp_and_mounts_only_contract_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

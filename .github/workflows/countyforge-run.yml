@@ -1164,7 +1164,7 @@ jobs:
             --workspace "$candidate_root" \
             --expected-revision "$(jq -er '.implementation_revision' "$packet_file")" \
             --command-events "$COMMAND_EVENTS_PATH"
-          printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","issue_number":'"$ISSUE_NUMBER"',"change_name":"'"$change_name"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
+          printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","issue_number":'"$ISSUE_NUMBER"',"change_name":"'"$change_name"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","workspace_manifest_sha256":"'"$(sha256sum "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
           uv run --package countyforge-github countyforge-github validate-implementation-report \
             --report "$RUNNER_TEMP/implementation-validation.json" >/dev/null
       - name: Upload trusted validation report

@@ -60,6 +60,8 @@ class GitHubPort(Protocol):
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
 
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None: ...
+
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
 
     def create_pull_request(self, repository: str, payload: JsonObject) -> JsonObject: ...
@@ -280,6 +282,21 @@ class GitHubRestClient:
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
         self._request("POST", f"/repos/{repository}/git/refs", {"ref": ref, "sha": sha})
+
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None:
+        try:
+            value = self._request("GET", f"/repos/{repository}/git/ref/{ref.removeprefix('refs/')}")
+        except ControlPlaneError as error:
+            if error.code == "github_api_error" and error.details.get("status") == 404:
+                return None
+            raise
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid ref response."
+            )
+        return value
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         self._request(

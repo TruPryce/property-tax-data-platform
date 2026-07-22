@@ -17,7 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from countyforge_runner.contracts import JsonObject, load_json_object, validate_document
+from countyforge_runner.contracts import (
+    JsonObject,
+    load_json_object,
+    validate_document,
+    workspace_sha256,
+)
 from countyforge_runner.errors import KernelError
 
 
@@ -148,6 +153,7 @@ class CommandBroker:
         )
         started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         limit = int(entry["max_output_bytes"])
+        workspace_before = workspace_sha256(root) if not bool(entry["workspace_mutating"]) else None
         try:
             process = subprocess.Popen(  # noqa: S603 - executable and argv are registry-owned
                 sandboxed_argv,
@@ -230,6 +236,11 @@ class CommandBroker:
             raise KernelError(
                 "command_output_limit_exceeded",
                 "Implementation command exceeded its output limit.",
+            )
+        if workspace_before is not None and workspace_sha256(root) != workspace_before:
+            raise KernelError(
+                "command_workspace_mutated",
+                "A non-mutating implementation command changed the candidate workspace.",
             )
         stdout = bytes(buffers["stdout"])
         stderr = bytes(buffers["stderr"])

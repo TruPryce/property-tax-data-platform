@@ -26,7 +26,7 @@ Implementation commands SHALL come from a versioned repository registry with exa
 - **THEN** the deny-by-default filesystem sandbox hides those paths and the command cannot establish network egress
 
 ### Requirement: Trusted implementation handoff
-The model SHALL produce a strict result, task evidence, workspace manifest, declared file bundle, and checksums bound to the run, issue, change hash, base SHA, profile, packet, and context manifest. Trusted validation SHALL reconstruct a clean worktree, apply only declared files, enforce path/size/secret policy, and determine publication eligibility.
+The model SHALL produce a strict result, task evidence, workspace manifest, declared file bundle, and checksums bound to the run, issue, change hash, base SHA, profile, packet, and context manifest. Trusted validation SHALL reconstruct a clean worktree, apply only declared files, enforce path/size/secret policy, snapshot non-mutating gate execution, and determine publication eligibility from a report bound to the exact implementation-result and workspace-manifest checksums.
 
 #### Scenario: Undeclared artifact is rejected
 - **WHEN** the handoff contains a file not in the declared manifest or a checksum/provenance mismatch
