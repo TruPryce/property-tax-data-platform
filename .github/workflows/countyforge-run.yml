@@ -1051,11 +1051,6 @@ jobs:
           # trusted checkout's helper bytes before any sudo action. Only the verified copy runs.
           COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
         run: |
-          if ! command -v bwrap >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --no-install-recommends --yes bubblewrap
-          fi
-          bwrap --version
           verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
           # Fail closed: the sudo-bearing helper is executed only from the immutable trusted
           # checkout (pinned to inputs.trusted_tool_sha). If it is absent, stop before any
@@ -1064,6 +1059,11 @@ jobs:
             echo "::error::Trusted Bubblewrap AppArmor helper is unavailable in the trusted checkout; refusing to run any privileged sandbox setup." >&2
             exit 2
           fi
+          if ! command -v bwrap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes bubblewrap
+          fi
+          bwrap --version
           install -m 0755 ./trusted/scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
           printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
           "$verified_helper"

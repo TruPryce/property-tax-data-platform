@@ -215,8 +215,9 @@ def test_ci_fails_closed_without_trusted_base_bwrap_helper() -> None:
 
     This proves the reviewer's blocker is closed: when the immutable trusted base does not
     contain the sudo-bearing helper (for example on the change that first introduces it),
-    the sandbox step must exit nonzero and must never install or execute the PR-workspace
-    copy. The helper can only be bootstrapped by first landing it on the base branch.
+    the sandbox step must exit nonzero before any sudo-bearing setup and must never install
+    or execute the PR-workspace copy. The helper can only be bootstrapped by first landing
+    it on the base branch.
     """
 
     workflow = _load("ci.yml")
@@ -229,10 +230,13 @@ def test_ci_fails_closed_without_trusted_base_bwrap_helper() -> None:
     assert 'if [ ! -f "$trusted_helper" ]; then' in sandbox_run
     guard_index = sandbox_run.index('if [ ! -f "$trusted_helper" ]; then')
     exit_index = sandbox_run.index("exit 2", guard_index)
+    apt_index = sandbox_run.index("sudo apt-get update")
     install_index = sandbox_run.index('install -m 0755 "$trusted_helper" "$verified_helper"')
+    verify_index = sandbox_run.index("sha256sum -c -")
     run_index = sandbox_run.rindex('"$verified_helper"')
-    # Fail-closed exit happens before the install and before the helper is executed.
-    assert guard_index < exit_index < install_index < run_index
+    # Fail-closed exit happens before sudo package setup, helper install, digest verification,
+    # and helper execution.
+    assert guard_index < exit_index < apt_index < install_index < verify_index < run_index
     # No conditional fallback branch remains that could execute a non-trusted-base copy.
     assert "else" not in sandbox_run
 
@@ -263,8 +267,10 @@ def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
     # trusted checkout and abort before any sudo action when it is absent.
     assert "if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh ]; then" in countyforge
     guard_index = countyforge.index("if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh")
+    exit_index = countyforge.index("exit 2", guard_index)
+    apt_index = countyforge.index("sudo apt-get update")
     install_index = countyforge.index(f'install -m 0755 {helper_reference} "$verified_helper"')
-    assert guard_index < install_index
+    assert guard_index < exit_index < apt_index < install_index
     # Only the verified copy is executed; the checkout copy is never run directly.
     assert '"$verified_helper"' in countyforge
     verify_index = countyforge.index("sha256sum -c -")

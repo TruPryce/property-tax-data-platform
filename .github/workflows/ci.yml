@@ -51,10 +51,6 @@ jobs:
           # review-gated workflow expects, so trusted-base drift also fails closed.
           COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
-          command -v bwrap
-          bwrap --version
           verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
           trusted_helper="trusted-base/scripts/ci/configure_bwrap_apparmor.sh"
           # Fail closed: never install or execute the PR-workspace copy of the sudo-bearing
@@ -63,6 +59,10 @@ jobs:
             echo "::error::Trusted base Bubblewrap AppArmor helper is unavailable at $trusted_helper. Bootstrap it onto the base branch through a review-gated or controlled administrative commit before this CI preflight runs; the PR workspace copy is never executed with sudo." >&2
             exit 2
           fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          command -v bwrap
+          bwrap --version
           install -m 0755 "$trusted_helper" "$verified_helper"
           printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
           "$verified_helper"
