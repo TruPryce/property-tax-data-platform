@@ -66,6 +66,13 @@ jobs:
           echo "readlink -f python3: $(readlink -f "$(command -v python3)")"
           echo "ls -l /usr/bin/python3*: "; ls -l /usr/bin/python3* 2>/dev/null || true
           uv run python scripts/dev-loop/diagnose-sandbox-executable.py || true
+          echo "--- namespace / apparmor state ---"
+          echo "bwrap version: $(bwrap --version 2>&1)"
+          echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+          echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+          bwrap --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true 2>&1; echo "  exit(unshare-net,true)=$?"
+          bwrap --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true 2>&1; echo "  exit(no-net,true)=$?"
 
       - name: Validate legacy and CountyForge runner contracts
         run: make runner-contract-tests
