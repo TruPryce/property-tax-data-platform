@@ -29,12 +29,13 @@ jobs:
       - name: Sync workspace
         run: uv sync --locked --all-packages --group dev
 
-      - name: Install Bubblewrap sandbox
+      - name: Install and configure Bubblewrap sandbox
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
           command -v bwrap
           bwrap --version
+          ./scripts/ci/configure_bwrap_apparmor.sh
 
       - name: Scan for secrets
         run: uv run pre-commit run detect-secrets --all-files --show-diff-on-failure
@@ -57,7 +58,12 @@ jobs:
         run: uv run python scripts/check_doc_links.py
 
       - name: Validate OpenSpec
-        run: npx --yes @fission-ai/openspec@1.6.0 validate --all --strict --no-interactive
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/openspec-ci-tool" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$RUNNER_TEMP/openspec-ci-tool/bin/openspec"
+          echo "$RUNNER_TEMP/openspec-ci-tool/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/openspec-ci-tool/bin/openspec" validate --all --strict --no-interactive
 
       - name: Validate legacy and CountyForge runner contracts
         run: make runner-contract-tests

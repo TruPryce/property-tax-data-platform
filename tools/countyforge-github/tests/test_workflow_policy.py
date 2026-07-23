@@ -59,7 +59,7 @@ def test_ci_provisions_bubblewrap_before_runner_contracts() -> None:
     workflow = _load("ci.yml")
     steps = workflow["jobs"]["checks"]["steps"]
     names = [str(step.get("name", "")) for step in steps]
-    install_index = names.index("Install Bubblewrap sandbox")
+    install_index = names.index("Install and configure Bubblewrap sandbox")
     sync_index = names.index("Sync workspace")
     contracts_index = names.index("Validate legacy and CountyForge runner contracts")
     assert sync_index < install_index < contracts_index
@@ -68,10 +68,84 @@ def test_ci_provisions_bubblewrap_before_runner_contracts() -> None:
     assert "sudo apt-get install -y --no-install-recommends bubblewrap" in install_run
     assert "command -v bwrap" in install_run
     assert "bwrap --version" in install_run
+    assert "./scripts/ci/configure_bwrap_apparmor.sh" in install_run
     assert "runner-contract-tests" in str(steps[contracts_index]["run"])
     ci_text = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
     assert "OPENAI_API_KEY" not in ci_text
     assert "SAKANA_API_KEY" not in ci_text
+
+
+def test_ci_provisions_persistent_openspec_before_contract_tests() -> None:
+    workflow = _load("ci.yml")
+    steps = workflow["jobs"]["checks"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
+    openspec_index = names.index("Validate OpenSpec")
+    contracts_index = names.index("Validate legacy and CountyForge runner contracts")
+    assert openspec_index < contracts_index
+    openspec_run = str(steps[openspec_index]["run"])
+    assert 'npm install --global --prefix "$RUNNER_TEMP/openspec-ci-tool"' in openspec_run
+    assert "--ignore-scripts --no-audit --no-fund" in openspec_run
+    assert '"@fission-ai/openspec@1.6.0"' in openspec_run
+    assert 'test -x "$RUNNER_TEMP/openspec-ci-tool/bin/openspec"' in openspec_run
+    assert 'echo "$RUNNER_TEMP/openspec-ci-tool/bin" >> "$GITHUB_PATH"' in openspec_run
+    assert (
+        '"$RUNNER_TEMP/openspec-ci-tool/bin/openspec" validate --all --strict --no-interactive'
+        in openspec_run
+    )
+    assert "npx --yes @fission-ai/openspec@1.6.0" not in openspec_run
+
+
+def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
+    repo_root = Path(__file__).parents[3]
+    script = (repo_root / "scripts/ci/configure_bwrap_apparmor.sh").read_text(encoding="utf-8")
+    broker = (
+        repo_root / "tools/countyforge-runner/src/countyforge_runner/command_broker.py"
+    ).read_text(encoding="utf-8")
+    ci = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
+    countyforge = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    command_broker_tests = (
+        repo_root / "tools/countyforge-runner/tests/test_command_broker.py"
+    ).read_text(encoding="utf-8")
+
+    assert "set -euo pipefail" in script
+    assert "BWRAP=/usr/bin/bwrap" in script
+    assert "PROFILE_PATH=/etc/apparmor.d/countyforge-bwrap" in script
+    profile_lines = [line.strip() for line in script.splitlines() if line.startswith("profile ")]
+    assert profile_lines == ["profile countyforge-bwrap /usr/bin/bwrap flags=(unconfined) {"]
+    assert "userns," in script
+    assert "apparmor_parser -r -W" in script
+    assert "kernel.apparmor_restrict_unprivileged_userns must remain" in script
+    assert "EXPECTED_RESTRICT_VALUE=1" in script
+    combined_policy_text = "\n".join((script, ci, countyforge))
+    assert "apparmor_restrict_unprivileged_userns=0" not in combined_policy_text
+    assert "sysctl" not in combined_policy_text
+    assert "ubuntu-22.04" not in combined_policy_text
+    assert "setuid" not in script.casefold()
+    assert "--privileged" not in combined_policy_text
+    assert "--share-net" not in combined_policy_text
+    assert "#   bwrap --unshare-net -- /usr/bin/true" in script
+    assert "PROBE_ARGS=(--unshare-net)" in script
+    assert "PROBE_ARGS+=(-- /usr/bin/true)" in script
+    assert 'PROBE_ARGS+=(--ro-bind "$runtime_root" "$runtime_root")' in script
+    assert "sudo $BWRAP" not in script
+    assert "sudo bwrap" not in script
+    assert "sudo install" in script
+    assert "sudo apparmor_parser" in script
+
+    assert '"--unshare-net"' in broker
+    assert "--share-net" not in broker
+    assert "pytest.skip" not in command_broker_tests
+    assert "@pytest.mark.skip" not in command_broker_tests
+    assert "xfail" not in command_broker_tests
+
+    assert "./scripts/ci/configure_bwrap_apparmor.sh" in ci
+    assert "./trusted/scripts/ci/configure_bwrap_apparmor.sh" in countyforge
+    ci_setup = ci.index("./scripts/ci/configure_bwrap_apparmor.sh")
+    ci_contracts = ci.index("make runner-contract-tests")
+    assert ci_setup < ci_contracts
+    validation_setup = countyforge.index("./trusted/scripts/ci/configure_bwrap_apparmor.sh")
+    broker_invocation = countyforge.index("run-implementation-command")
+    assert validation_setup < broker_invocation
 
 
 def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:
@@ -332,6 +406,7 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
     assert "apt-get install --no-install-recommends --yes bubblewrap" in validation
+    assert "./trusted/scripts/ci/configure_bwrap_apparmor.sh" in validation
     assert "Provision pinned OpenSpec validator for offline gates" in validation
     assert 'npm install --prefix "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec"' in validation
     assert "npx --yes @fission-ai/openspec@1.6.0" not in validation

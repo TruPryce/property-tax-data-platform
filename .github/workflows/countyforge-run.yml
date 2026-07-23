@@ -1052,6 +1052,7 @@ jobs:
             sudo apt-get install --no-install-recommends --yes bubblewrap
           fi
           bwrap --version
+          ./trusted/scripts/ci/configure_bwrap_apparmor.sh
       - name: Provision pinned OpenSpec validator for offline gates
         run: |
           npm install --prefix "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec" \

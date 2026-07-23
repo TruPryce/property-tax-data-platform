@@ -11,6 +11,7 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 
 
 RUNNER_SHELL_SCRIPTS := \
+	scripts/ci/configure_bwrap_apparmor.sh \
 	scripts/dev-loop/build-review-packet.sh \
 	scripts/dev-loop/check-runner-identity.sh \
 	scripts/dev-loop/prepr.sh \
