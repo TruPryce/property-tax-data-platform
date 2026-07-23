@@ -30,6 +30,100 @@ def _hash_output(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+# Fixed system runtime roots mounted read-only at identical paths inside the sandbox. These
+# are the only host roots (besides the trusted contract root and any explicitly declared
+# toolchain root) permitted to provide a command executable.
+_RUNTIME_ROOTS = ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/opt", "/etc")
+# Deterministic system fallback search directories appended after the inherited PATH so a
+# trusted system interpreter is preferred over a masked host-home installation.
+_SYSTEM_BIN_DIRS = (
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+)
+_CONTRACT_SANDBOX_ROOT = "/countyforge/contract"
+
+
+def _sandbox_join(sandbox_root: str, relative: Path) -> str:
+    """Map a host-relative path onto its sandbox-visible root without escaping it."""
+
+    base = sandbox_root.rstrip("/")
+    posix = relative.as_posix()
+    return base if posix in ("", ".") else f"{base}/{posix}"
+
+
+def _resolve_executable(
+    executable: str,
+    *,
+    approved_roots: tuple[tuple[Path, str], ...],
+    workspace_root: Path,
+) -> str:
+    """Resolve a registry executable to its sandbox-visible path in trusted host code.
+
+    The executable is resolved (including its full symlink chain) before Bubblewrap runs,
+    rather than relying on the sandbox ``PATH``. Only paths whose fully resolved target lives
+    beneath an explicitly mounted approved root (fixed system runtime roots, the trusted
+    contract root, or an explicitly declared toolchain root) are permitted; anything else --
+    including a masked host-home installation, the candidate workspace, or a symlink whose
+    target escapes those roots -- fails closed with a bounded error.
+    """
+
+    def classify(resolved: Path) -> str | None:
+        for host_root, sandbox_root in approved_roots:
+            if resolved == host_root or resolved.is_relative_to(host_root):
+                return _sandbox_join(sandbox_root, resolved.relative_to(host_root))
+        return None
+
+    candidates: list[Path] = []
+    if executable.startswith("/"):
+        candidates.append(Path(executable))
+    elif "/" in executable:
+        # A relative path is interpreted against the candidate workspace, which v1 rejects
+        # as an executable source. Resolve it so the workspace guard below can fail closed.
+        candidates.append(workspace_root / executable)
+    else:
+        search_dirs: list[str] = []
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if entry and entry not in search_dirs:
+                search_dirs.append(entry)
+        for fixed in _SYSTEM_BIN_DIRS:
+            if fixed not in search_dirs:
+                search_dirs.append(fixed)
+        candidates.extend(Path(directory) / executable for directory in search_dirs)
+
+    found_outside = False
+    for candidate in candidates:
+        try:
+            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        try:
+            if resolved.is_relative_to(workspace_root.resolve()):
+                # Candidate-workspace executables are never permitted in v1.
+                found_outside = True
+                continue
+        except OSError:
+            pass
+        mapped = classify(resolved)
+        if mapped is not None:
+            return mapped
+        found_outside = True
+    if found_outside:
+        raise KernelError(
+            "command_executable_outside_sandbox",
+            "The registry executable resolves outside the mounted trusted roots.",
+        )
+    raise KernelError(
+        "command_executable_unavailable",
+        "The registry executable is unavailable under any mounted trusted root.",
+    )
+
+
 class CommandBroker:
     """Execute only an exact command entry from a trusted registry."""
 
@@ -47,6 +141,7 @@ class CommandBroker:
         contract_root: Path | None = None,
         run_id: str = "local",
         workspace_revision: str | None = None,
+        toolchain_roots: tuple[Path, ...] = (),
     ) -> JsonObject:
         entry = self._commands.get(command_id)
         if entry is None:
@@ -55,7 +150,6 @@ class CommandBroker:
         if not root.is_dir():
             raise KernelError("workspace_unavailable", "Implementation workspace is unavailable.")
         executable = str(entry["executable"])
-        argv = [executable, *(str(value) for value in entry["arguments"])]
         network = str(entry["network"])
         if network != "disabled":
             raise KernelError(
@@ -68,7 +162,7 @@ class CommandBroker:
                 "network_sandbox_unavailable",
                 "The required no-network command sandbox is unavailable.",
             )
-        runtime_roots = ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/opt", "/etc")
+        runtime_roots = _RUNTIME_ROOTS
         sandboxed_argv = [
             sandbox,
             "--die-with-parent",
@@ -114,6 +208,15 @@ class CommandBroker:
                 "/workspace",
             ]
         )
+        # Approved executable roots, mapped to their sandbox-visible equivalent. Fixed system
+        # runtime roots are mounted identically; the contract root is remapped; explicitly
+        # declared toolchain roots (if any) are mounted read-only at their identical path.
+        approved_roots: list[tuple[Path, str]] = [
+            (Path(runtime_root), runtime_root)
+            for runtime_root in runtime_roots
+            if Path(runtime_root).exists()
+        ]
+        contract: Path | None = None
         if contract_root is not None:
             contract = contract_root.resolve(strict=True)
             if not contract.is_dir():
@@ -121,8 +224,24 @@ class CommandBroker:
                     "contract_root_unavailable", "Trusted contract root is unavailable."
                 )
             sandboxed_argv.extend(
-                ("--dir", "/countyforge", "--ro-bind", str(contract), "/countyforge/contract")
+                ("--dir", "/countyforge", "--ro-bind", str(contract), _CONTRACT_SANDBOX_ROOT)
             )
+            approved_roots.append((contract, _CONTRACT_SANDBOX_ROOT))
+        for declared in toolchain_roots:
+            toolchain = declared.resolve(strict=True)
+            if not toolchain.is_dir():
+                raise KernelError(
+                    "command_toolchain_root_invalid",
+                    "A declared trusted toolchain root is unavailable.",
+                )
+            sandboxed_argv.extend(("--ro-bind", str(toolchain), str(toolchain)))
+            approved_roots.append((toolchain, str(toolchain)))
+        resolved_executable = _resolve_executable(
+            executable,
+            approved_roots=tuple(approved_roots),
+            workspace_root=root,
+        )
+        argv = [resolved_executable, *(str(value) for value in entry["arguments"])]
         environment = {
             name: os.environ[name]
             for name in entry["environment"]
@@ -135,7 +254,7 @@ class CommandBroker:
             contract_host_path = str(contract)
             if "PATH" in environment:
                 environment["PATH"] = environment["PATH"].replace(
-                    contract_host_path, "/countyforge/contract"
+                    contract_host_path, _CONTRACT_SANDBOX_ROOT
                 )
             environment["PYTHONPATH"] = (
                 "/countyforge/contract/tools/countyforge-github/src:"

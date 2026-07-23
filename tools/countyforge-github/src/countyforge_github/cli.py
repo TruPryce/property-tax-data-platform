@@ -216,6 +216,17 @@ def build_parser() -> argparse.ArgumentParser:
     implementation_command.add_argument("--contract-root", type=Path)
     implementation_command.add_argument("--run-id", default="local")
     implementation_command.add_argument("--workspace-revision")
+    implementation_command.add_argument(
+        "--toolchain-root",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "An explicitly declared, trusted toolchain root mounted read-only for executable "
+            "resolution. May be repeated. Only exact declared roots are mounted; parent "
+            "directories are never discovered or mounted dynamically."
+        ),
+    )
 
     publish = subparsers.add_parser("publish-plan")
     _file(publish, "result")
@@ -754,6 +765,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 contract_root=args.contract_root,
                 run_id=args.run_id,
                 workspace_revision=args.workspace_revision,
+                toolchain_roots=tuple(args.toolchain_root),
             )
             _emit({"ok": int(evidence["exit_code"]) == 0, "evidence": evidence})
             return 0 if int(evidence["exit_code"]) == 0 else 5
