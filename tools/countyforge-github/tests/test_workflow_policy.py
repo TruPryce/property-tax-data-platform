@@ -55,6 +55,25 @@ def test_all_actions_are_pinned_to_full_commit_shas() -> None:
                     assert PINNED_ACTION.fullmatch(str(step["uses"])) is not None
 
 
+def test_ci_provisions_bubblewrap_before_runner_contracts() -> None:
+    workflow = _load("ci.yml")
+    steps = workflow["jobs"]["checks"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
+    install_index = names.index("Install Bubblewrap sandbox")
+    sync_index = names.index("Sync workspace")
+    contracts_index = names.index("Validate legacy and CountyForge runner contracts")
+    assert sync_index < install_index < contracts_index
+    install_run = str(steps[install_index]["run"])
+    assert "sudo apt-get update" in install_run
+    assert "sudo apt-get install -y --no-install-recommends bubblewrap" in install_run
+    assert "command -v bwrap" in install_run
+    assert "bwrap --version" in install_run
+    assert "runner-contract-tests" in str(steps[contracts_index]["run"])
+    ci_text = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY" not in ci_text
+    assert "SAKANA_API_KEY" not in ci_text
+
+
 def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:
     for name in COUNTYFORGE_WORKFLOWS:
         workflow = _load(name)

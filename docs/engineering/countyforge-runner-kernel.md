@@ -158,6 +158,16 @@ make countyforge-runner-check
 make runner-contract-tests
 ```
 
+The real Bubblewrap sandbox fixtures require a Linux developer environment with Bubblewrap
+installed. On Debian or Ubuntu, install the prerequisite once with:
+
+```bash
+sudo apt-get install bubblewrap
+```
+
+`countyforge-runner-check` and `countyforge-implement-fixtures` fail closed when `bwrap` is
+unavailable; they do not skip or mock the sandbox tests.
+
 Paid provider probes require a double opt-in and are never CI prerequisites:
 
 ```bash
