@@ -18,6 +18,7 @@ from countyforge_runner.contracts import (
     file_sha256,
     load_json_object,
     validate_document,
+    workspace_sha256,
 )
 from countyforge_runner.errors import KernelError
 from countyforge_runner.paths import find_repo_root
@@ -511,6 +512,11 @@ class Kernel:
             "packet_provenance_path",
             "context_manifest_path",
             "planning_packet_path",
+            "implementation_packet_path",
+            "implementation_manifest_path",
+            "implementation_task_plan_path",
+            "workspace_path",
+            "workspace_binding_path",
         )
         requested = {key: request["input"][key] for key in path_keys if key in request["input"]}
         if not requested:
@@ -554,6 +560,22 @@ class Kernel:
                 raise KernelError(
                     "input_not_found", "A declared input file is unavailable."
                 ) from None
+            if key == "workspace_path":
+                if not path.is_dir():
+                    raise KernelError(
+                        "workspace_not_directory",
+                        "The implementation workspace must be a directory.",
+                    )
+                canonical[key] = path
+                continue
+            if key == "workspace_binding_path":
+                if not stat.S_ISREG(mode):
+                    raise KernelError(
+                        "workspace_binding_invalid",
+                        "The implementation workspace binding must be a file.",
+                    )
+                canonical[key] = path
+                continue
             if not any(path.is_relative_to(root) for root in approved_roots):
                 raise KernelError(
                     "input_path_not_approved",
@@ -692,6 +714,131 @@ class Kernel:
                     "Planning context manifest does not agree with immutable request facts.",
                 )
             return
+        if request["mode"] == "implement":
+            packet = canonical_inputs.get("implementation_packet_path")
+            manifest = canonical_inputs.get("implementation_manifest_path")
+            task_plan = canonical_inputs.get("implementation_task_plan_path")
+            workspace = canonical_inputs.get("workspace_path")
+            binding = canonical_inputs.get("workspace_binding_path")
+            if (
+                packet is None
+                or manifest is None
+                or task_plan is None
+                or workspace is None
+                or binding is None
+            ):
+                raise KernelError(
+                    "implementation_context_required",
+                    "Implementation requires a frozen packet, manifest, task plan, and workspace.",
+                )
+            input_facts = request["input"]
+            for path, key in (
+                (packet, "implementation_packet_sha256"),
+                (manifest, "implementation_manifest_sha256"),
+                (task_plan, "implementation_task_plan_sha256"),
+                (binding, "workspace_binding_sha256"),
+            ):
+                if file_sha256(path) != input_facts[key]:
+                    raise KernelError(
+                        "implementation_input_hash_mismatch",
+                        "Implementation input hash does not match the request.",
+                    )
+            packet_document = load_json_object(packet, kind="implementation packet")
+            manifest_document = load_json_object(manifest, kind="implementation context manifest")
+            task_document = load_json_object(task_plan, kind="implementation task plan")
+            validate_document(
+                packet_document,
+                self._load_schema("countyforge-implementation-packet.schema.json"),
+                kind="implementation packet",
+            )
+            validate_document(
+                manifest_document,
+                self._load_schema("countyforge-implementation-context-manifest.schema.json"),
+                kind="implementation context manifest",
+            )
+            validate_document(
+                task_document,
+                self._load_schema("countyforge-implementation-task-plan.schema.json"),
+                kind="implementation task plan",
+            )
+            binding_document = load_json_object(binding, kind="implementation workspace binding")
+            validate_document(
+                binding_document,
+                self._load_schema("countyforge-implementation-workspace-binding.schema.json"),
+                kind="implementation workspace binding",
+            )
+            expected_issue = request["trigger"].get("issue_number")
+            packet_tasks = packet_document["tasks"]
+            task_plan_tasks = task_document["tasks"]
+
+            def task_projection(tasks: list[Any]) -> list[JsonObject]:
+                return [
+                    {
+                        "task_id": str(task["task_id"]),
+                        "description": str(task["description"]),
+                        "allowed_paths": list(task["allowed_paths"]),
+                        "required_checks": list(task["required_checks"]),
+                        "risk": str(task["risk"]),
+                    }
+                    for task in sorted(tasks, key=lambda item: str(item["task_id"]))
+                ]
+
+            if not isinstance(packet_tasks, list) or not isinstance(task_plan_tasks, list):
+                raise KernelError(
+                    "implementation_provenance_mismatch",
+                    "Implementation task inputs are malformed.",
+                )
+            task_plan_projection = task_projection(task_plan_tasks)
+            packet_projection = task_projection(packet_tasks)
+            if (
+                packet_document["run_id"] != str(request.get("run_id", ""))
+                or packet_document["repository"]["full_name"] != request["repository"]["full_name"]
+                or packet_document["trusted_base_sha"] != request["repository"]["base_sha"]
+                or packet_document["change"]["name"] != request["openspec_change"]
+                or (
+                    request["trigger"].get("implementation_change_sha256") is not None
+                    and packet_document["change"]["sha256"]
+                    != request["trigger"]["implementation_change_sha256"]
+                )
+                or (
+                    expected_issue is not None
+                    and packet_document["issue"]["number"] != expected_issue
+                )
+                or manifest_document["packet_sha256"] != file_sha256(packet)
+                or manifest_document["repository"] != request["repository"]["full_name"]
+                or (
+                    expected_issue is not None
+                    and manifest_document["issue_number"] != expected_issue
+                )
+                or manifest_document["change_name"] != request["openspec_change"]
+                or manifest_document["trusted_base_sha"] != request["repository"]["base_sha"]
+                or manifest_document["run_id"] != str(request.get("run_id", ""))
+                or task_document["run_id"] != str(request.get("run_id", ""))
+                or task_document["change_name"] != request["openspec_change"]
+                or task_plan_projection != packet_projection
+                or manifest_document["implementation_revision"]
+                != packet_document["implementation_revision"]
+                or binding_document["run_id"] != str(request.get("run_id", ""))
+                or binding_document["repository"] != request["repository"]["full_name"]
+                or binding_document["implementation_revision"]
+                != packet_document["implementation_revision"]
+                or binding_document["base_sha"] != request["repository"]["base_sha"]
+                or binding_document["git_head_sha"] != request["repository"]["head_sha"]
+                or binding_document["change_name"] != request["openspec_change"]
+                or binding_document["workspace_path"] != str(workspace)
+                or set(binding_document["model_mount_excludes"])
+                != {".git", ".github/workflows", ".ai/policies", ".env"}
+                or (
+                    expected_issue is not None
+                    and binding_document["issue_number"] != expected_issue
+                )
+                or binding_document["workspace_sha256"] != workspace_sha256(workspace)
+            ):
+                raise KernelError(
+                    "implementation_provenance_mismatch",
+                    "Implementation packet provenance does not agree with immutable request facts.",
+                )
+            return
         if request["mode"] != "review":
             return
         packet = canonical_inputs["packet_path"]
@@ -759,7 +906,7 @@ class Kernel:
 
     @staticmethod
     def _validate_input_budget(inputs: dict[str, Path], budgets: JsonObject) -> None:
-        total = sum(path.stat().st_size for path in inputs.values())
+        total = sum(path.stat().st_size for path in inputs.values() if path.is_file())
         if total > int(budgets["max_input_bytes"]):
             raise KernelError(
                 "input_budget_exceeded", "Input context exceeds the effective byte budget."

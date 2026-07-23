@@ -1,19 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-implementation-result.schema.json",
-  "title": "CountyForge Implementation Result",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["status", "tasks_attempted", "tasks_completed", "changed_paths", "checks_run", "deviations", "remaining_work", "publication_eligibility"],
+  "type": "object", "additionalProperties": false,
+  "required": ["contract_version", "status", "repository", "issue_number", "openspec_change", "run_id", "implementation_revision", "base_sha", "profile", "completed_task_ids", "incomplete_task_ids", "blocked_task_ids", "files_created", "files_modified", "files_deleted", "file_bundle", "diff", "tests_run", "command_evidence", "validation_results", "deviations", "residual_risks", "dependency_changes", "migration_changes", "security_sensitive_changes", "publication_eligibility", "blocked_reasons", "output_artifact_hashes"],
   "properties": {
-    "status": {"enum": ["completed", "partial", "blocked", "profile_not_implemented"]},
-    "tasks_attempted": {"$ref": "#/$defs/strings"},
-    "tasks_completed": {"$ref": "#/$defs/strings"},
-    "changed_paths": {"$ref": "#/$defs/strings"},
-    "checks_run": {"$ref": "#/$defs/strings"},
-    "deviations": {"$ref": "#/$defs/strings"},
-    "remaining_work": {"$ref": "#/$defs/strings"},
-    "publication_eligibility": {"enum": ["eligible", "ineligible", "not_evaluated"]}
-  },
-  "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}
+    "contract_version": {"const": 1}, "status": {"enum": ["completed", "partial", "blocked", "failed"]},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}, "issue_number": {"type": "integer", "minimum": 1}, "openspec_change": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}, "run_id": {"type": "string", "maxLength": 128}, "implementation_revision": {"type": "integer", "minimum": 1}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "profile": {"type": "object", "additionalProperties": false, "required": ["id", "version", "provider", "model_ref", "reasoning_effort"], "properties": {"id": {"type": "string", "maxLength": 128}, "version": {"type": "integer", "minimum": 1}, "provider": {"type": "string", "maxLength": 32}, "model_ref": {"type": "string", "maxLength": 128}, "reasoning_effort": {"enum": ["high", "xhigh"]}}},
+    "completed_task_ids": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}}, "incomplete_task_ids": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}}, "blocked_task_ids": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}},
+    "files_created": {"type": "array", "uniqueItems": true, "maxItems": 256, "items": {"type": "string", "maxLength": 512}}, "files_modified": {"type": "array", "uniqueItems": true, "maxItems": 256, "items": {"type": "string", "maxLength": 512}}, "files_deleted": {"type": "array", "uniqueItems": true, "maxItems": 256, "items": {"type": "string", "maxLength": 512}}, "file_bundle": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["path", "content"], "properties": {"path": {"type": "string", "maxLength": 512}, "content": {"type": "string", "maxLength": 500000}}}},
+    "diff": {"type": "object", "additionalProperties": false, "required": ["files", "bytes_added", "bytes_deleted"], "properties": {"files": {"type": "integer", "minimum": 0}, "bytes_added": {"type": "integer", "minimum": 0}, "bytes_deleted": {"type": "integer", "minimum": 0}}},
+    "tests_run": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 256}}, "command_evidence": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 256}}, "validation_results": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 512}}, "deviations": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 1024}}, "residual_risks": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 1024}}, "dependency_changes": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 512}}, "migration_changes": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 512}}, "security_sensitive_changes": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 512}},
+    "publication_eligibility": {"enum": ["ineligible", "not_evaluated", "trusted_validation_required"]}, "blocked_reasons": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 512}}, "output_artifact_hashes": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  }
 }

@@ -203,6 +203,14 @@ def advance_run(
     planning_pr_number: int | None = None,
     planning_context_sha256: str | None = None,
     planning_result_sha256: str | None = None,
+    implementation_change_name: str | None = None,
+    implementation_revision: int | None = None,
+    implementation_branch: str | None = None,
+    implementation_pr_number: int | None = None,
+    implementation_completed_task_count: int | None = None,
+    implementation_incomplete_task_count: int | None = None,
+    implementation_blocked_task_count: int | None = None,
+    implementation_eligible: bool | None = None,
 ) -> JsonObject:
     """Advance an owned workflow stage and publish only sanitized state."""
 
@@ -256,6 +264,22 @@ def advance_run(
         updated["planning_context_sha256"] = planning_context_sha256
     if planning_result_sha256 is not None:
         updated["planning_result_sha256"] = planning_result_sha256
+    if implementation_change_name is not None:
+        updated["implementation_change_name"] = implementation_change_name
+    if implementation_revision is not None:
+        updated["implementation_revision"] = implementation_revision
+    if implementation_branch is not None:
+        updated["implementation_branch"] = implementation_branch
+    if implementation_pr_number is not None:
+        updated["implementation_pr_number"] = implementation_pr_number
+    if implementation_completed_task_count is not None:
+        updated["implementation_completed_task_count"] = implementation_completed_task_count
+    if implementation_incomplete_task_count is not None:
+        updated["implementation_incomplete_task_count"] = implementation_incomplete_task_count
+    if implementation_blocked_task_count is not None:
+        updated["implementation_blocked_task_count"] = implementation_blocked_task_count
+    if implementation_eligible is not None:
+        updated["implementation_eligible"] = implementation_eligible
     ControlContracts().validate("state", updated)
     publish_canonical_state(
         github,

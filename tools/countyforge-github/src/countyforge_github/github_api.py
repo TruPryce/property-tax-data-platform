@@ -24,6 +24,10 @@ class GitHubPort(Protocol):
 
     def pull_request(self, repository: str, number: int) -> JsonObject: ...
 
+    def issue_timeline(self, repository: str, issue_number: int) -> list[JsonObject]: ...
+
+    def pull_request_files(self, repository: str, number: int) -> list[JsonObject]: ...
+
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> JsonObject: ...
 
     def create_comment(self, repository: str, target_number: int, body: str) -> JsonObject: ...
@@ -55,6 +59,8 @@ class GitHubPort(Protocol):
     ) -> str: ...
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
+
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None: ...
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None: ...
 
@@ -170,6 +176,12 @@ class GitHubRestClient:
     def pull_request(self, repository: str, number: int) -> JsonObject:
         return cast(JsonObject, self._request("GET", f"/repos/{repository}/pulls/{number}"))
 
+    def issue_timeline(self, repository: str, issue_number: int) -> list[JsonObject]:
+        return self._list_pages(f"/repos/{repository}/issues/{issue_number}/timeline")
+
+    def pull_request_files(self, repository: str, number: int) -> list[JsonObject]:
+        return self._list_pages(f"/repos/{repository}/pulls/{number}/files")
+
     def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> JsonObject:
         return cast(
             JsonObject,
@@ -270,6 +282,21 @@ class GitHubRestClient:
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
         self._request("POST", f"/repos/{repository}/git/refs", {"ref": ref, "sha": sha})
+
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None:
+        try:
+            value = self._request("GET", f"/repos/{repository}/git/ref/{ref.removeprefix('refs/')}")
+        except ControlPlaneError as error:
+            if error.code == "github_api_error" and error.details.get("status") == 404:
+                return None
+            raise
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid ref response."
+            )
+        return value
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         self._request(

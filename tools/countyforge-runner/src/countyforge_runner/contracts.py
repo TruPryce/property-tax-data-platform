@@ -107,3 +107,62 @@ def file_sha256(path: Path) -> str:
             {"name": path.name},
         ) from None
     return digest.hexdigest()
+
+
+def workspace_sha256(root: Path) -> str:
+    """Hash a workspace's regular files without including Git metadata.
+
+    The implementation workspace is bound before provider credentials are selected.  Git
+    metadata is deliberately excluded because it is kept outside the model mount and can
+    change as trusted tooling performs checkout/configuration.  Known interpreter/tool
+    caches are also excluded because deterministic gates create them as normal runtime
+    state; all publishable source files remain part of the hash. Symlinks and non-regular
+    files fail closed rather than becoming ambiguous input.
+    """
+
+    try:
+        resolved = root.resolve(strict=True)
+    except OSError:
+        raise KernelError(
+            "workspace_unavailable", "The implementation workspace is unavailable."
+        ) from None
+    if not resolved.is_dir():
+        raise KernelError("workspace_unavailable", "The implementation workspace is unavailable.")
+    volatile_parts = {
+        ".git",
+        ".venv",
+        ".cache",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+    }
+    volatile_files = {
+        Path(".ai/reviews/review-packet.md"),
+        Path(".ai/reviews/review-packet.provenance.json"),
+    }
+    entries: list[JsonObject] = []
+    for path in sorted(resolved.rglob("*")):
+        relative = path.relative_to(resolved)
+        if any(part in volatile_parts for part in relative.parts):
+            continue
+        if relative in volatile_files:
+            continue
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise KernelError(
+                "workspace_binding_invalid",
+                "The implementation workspace contains unsafe metadata.",
+            )
+        if path.is_dir():
+            continue
+        if not path.exists():
+            continue
+        raw = path.read_bytes()
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+            }
+        )
+    return hashlib.sha256(canonical_bytes({"files": entries})).hexdigest()

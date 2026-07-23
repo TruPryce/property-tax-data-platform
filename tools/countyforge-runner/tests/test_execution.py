@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
 from countyforge_runner.resolver import Kernel
 
 
-@pytest.mark.parametrize("mode", ["implement", "fix", "validate"])
+@pytest.mark.parametrize("mode", ["fix", "validate"])
 def test_unimplemented_profiles_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -33,6 +34,87 @@ def test_unimplemented_profiles_fail_closed(
     run_dir = tmp_path / "evidence" / mode / f"fixture-{mode}"
     all_text = "\n".join(path.read_text(encoding="utf-8") for path in run_dir.iterdir())
     assert sentinel not in all_text
+
+
+def test_implemented_profile_requires_frozen_context_before_provider_execution(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    kernel = Kernel()
+    request = request_factory("implement")
+    request["input"].pop("implementation_packet_path")
+    with pytest.raises(KernelError, match="schema_validation_failed"):
+        kernel.resolve(request)
+
+
+def test_implementation_dispatches_isolated_adapter_with_structured_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = tmp_path / "implementation-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'test -n "${OPENAI_API_KEY:-}"\n'
+        'test -z "${SAKANA_API_KEY:-}"\n'
+        'mkdir -p "$OUT_DIR"\n'
+        "cat > \"$OUT_DIR/countyforge-implementation-result.json\" <<'JSON'\n"
+        '{"contract_version":1,"status":"partial","repository":"TruPryce/property-tax-data-platform",'
+        '"issue_number":1,"openspec_change":"build-mode-aware-runner-kernel",'
+        '"run_id":"fixture-implement","implementation_revision":1,"base_sha":"'
+        + subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        + '","profile":{"id":"implement.workspace-write.v1","version":1,"provider":"openai",'
+        '"model_ref":"openai.gpt-5.6","reasoning_effort":"high"},"completed_task_ids":[],'
+        '"incomplete_task_ids":["1.1"],"blocked_task_ids":[],"files_created":[],"files_modified":[],"file_bundle":[],'
+        '"files_deleted":[],"diff":{"files":0,"bytes_added":0,"bytes_deleted":0},"tests_run":[],'
+        '"command_evidence":[],"validation_results":[],"deviations":[],"residual_risks":[],'
+        '"dependency_changes":[],"migration_changes":[],"security_sensitive_changes":[],'
+        '"publication_eligibility":"trusted_validation_required","blocked_reasons":[],"output_artifact_hashes":{}}\n'
+        "JSON\n",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    monkeypatch.setenv("OPENAI_API_KEY", "implementation-fixture-secret")
+    kernel = Kernel()
+    resolved = kernel.resolve(request_factory("implement"))
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", implementation_adapter=adapter
+    ).run(resolved)
+    assert exit_code == 0
+    assert document["ok"] is True
+    assert document["mode"] == "implement"
+    assert document["implementation"]["incomplete_task_ids"] == ["1.1"]
+
+
+def test_implementation_evidence_removes_provider_bearing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = tmp_path / "leaking-implementation-adapter.sh"
+    adapter.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'mkdir -p "$OUT_DIR"\n'
+        'printf "%s" "$OPENAI_API_KEY" > "$OUT_DIR/leaked-output.log"\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    secret = "implementation-output-fixture-secret"  # pragma: allowlist secret
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    kernel = Kernel()
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", implementation_adapter=adapter
+    ).run(kernel.resolve(request_factory("implement")))
+    assert exit_code == 5
+    run_dir = Path(document["run_dir"])
+    all_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in run_dir.iterdir() if path.is_file()
+    )
+    assert secret not in all_text
+    assert not (run_dir / "leaked-output.log").exists()
 
 
 def test_unimplemented_execution_has_no_global_credential_lookup() -> None:
@@ -160,6 +242,42 @@ def test_plan_profile_mounts_match_adapter_and_provenance_contract() -> None:
     assert '-v "$MANIFEST_PATH:/workspace/manifest.json:ro"' in adapter
     assert '"frozen_planning_packet:/workspace/packet.json:read_only"' in adapter
     assert '"frozen_context_manifest:/workspace/manifest.json:read_only"' in adapter
+
+
+def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    mounts = {
+        (mount["source"], mount["target"], mount["access"])
+        for mount in profile["filesystem_mounts"]
+    }
+    expected = {
+        ("frozen_implementation_packet", "/workspace/implementation-packet.json", "read_only"),
+        ("frozen_implementation_manifest", "/workspace/implementation-manifest.json", "read_only"),
+        (
+            "frozen_implementation_task_plan",
+            "/workspace/implementation-task-plan.json",
+            "read_only",
+        ),
+        (
+            "frozen_implementation_result_schema",
+            "/workspace/implementation-result.schema.json",
+            "read_only",
+        ),
+        (
+            "frozen_implementation_command_policy",
+            "/workspace/implementation-commands.json",
+            "read_only",
+        ),
+        ("implementation_workspace", "/workspace", "read_write"),
+        ("claimed_output_directory", "/out", "read_write"),
+    }
+    assert mounts == expected
+    adapter = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    for source, target, access in expected:
+        assert f'"{source}:{target}:{access}"' in adapter
+    assert '"python:3.12-alpine@sha256:' in adapter
 
 
 def test_generic_metrics_are_low_cardinality(

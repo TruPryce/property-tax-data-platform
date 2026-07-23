@@ -96,7 +96,7 @@
         "type": "object", "additionalProperties": false,
         "required": ["source", "target", "access"],
         "properties": {
-          "source": {"enum": ["schema_directory", "frozen_planning_packet", "frozen_context_manifest", "claimed_output_directory", "repository"]},
+          "source": {"enum": ["schema_directory", "frozen_planning_packet", "frozen_context_manifest", "frozen_implementation_packet", "frozen_implementation_manifest", "frozen_implementation_task_plan", "frozen_implementation_result_schema", "frozen_implementation_command_policy", "implementation_workspace", "claimed_output_directory", "repository"]},
           "target": {"type": "string", "pattern": "^/"},
           "access": {"enum": ["read_only", "read_write"]}
         }
@@ -109,7 +109,7 @@
     },
     "model_tools": {
       "type": "array", "uniqueItems": true,
-      "items": {"enum": ["shell_tool", "unified_exec"]}
+      "items": {"enum": ["shell_tool", "unified_exec", "structured_file_bundle"]}
     },
     "deterministic_commands": {
       "type": "array", "uniqueItems": true,

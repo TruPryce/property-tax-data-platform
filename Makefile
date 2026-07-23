@@ -6,9 +6,12 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
 	countyforge-request-fixtures countyforge-github-check countyforge-command-fixtures \
 	countyforge-workflow-policy-tests countyforge-plan-check countyforge-plan-fixtures \
-	countyforge-plan-policy-tests countyforge-plan-image codex-image-openai codex-smoke-openai
+	countyforge-plan-policy-tests countyforge-plan-image countyforge-implement-check \
+	countyforge-implement-fixtures countyforge-implement-policy-tests codex-image-openai codex-smoke-openai
+
 
 RUNNER_SHELL_SCRIPTS := \
+	scripts/ci/configure_bwrap_apparmor.sh \
 	scripts/dev-loop/build-review-packet.sh \
 	scripts/dev-loop/check-runner-identity.sh \
 	scripts/dev-loop/prepr.sh \
@@ -25,7 +28,9 @@ RUNNER_SHELL_SCRIPTS := \
 	.ai/codex/05-test-observability-export-fixtures.sh \
 	.ai/codex/06-qa-observability.sh \
 	.ai/codex/07-build-countyforge-plan-image.sh \
-	.ai/codex/08-run-countyforge-plan-docker.sh
+	.ai/codex/08-run-countyforge-plan-docker.sh \
+	.ai/codex/09-run-countyforge-implement-docker.sh \
+	.ai/codex/10-build-countyforge-implement-image.sh
 
 sync:
 	$(UV) sync --all-packages --group dev
@@ -128,6 +133,7 @@ countyforge-profile-tests:
 		tools/countyforge-runner/tests/test_compatibility.py -q
 
 countyforge-runner-check:
+	@command -v bwrap >/dev/null 2>&1 || { echo "bubblewrap (bwrap) is required for CountyForge sandbox fixtures" >&2; exit 2; }
 	$(UV) run ruff format --check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
 	$(UV) run ruff check tools/countyforge-runner scripts/dev-loop/build-countyforge-review-request.py scripts/dev-loop/build-review-packet-provenance.py
 	$(UV) run mypy -p countyforge_runner
@@ -166,10 +172,25 @@ countyforge-plan-policy-tests:
 countyforge-plan-image:
 	./.ai/codex/07-build-countyforge-plan-image.sh
 
+countyforge-implement-check:
+	$(UV) run ruff format --check tools/countyforge-github/src/countyforge_github/implementation.py tools/countyforge-github/tests/test_implementation.py tools/countyforge-runner/src/countyforge_runner/command_broker.py tools/countyforge-runner/tests/test_command_broker.py
+	$(UV) run ruff check tools/countyforge-github/src/countyforge_github/implementation.py tools/countyforge-github/tests/test_implementation.py tools/countyforge-runner/src/countyforge_runner/command_broker.py tools/countyforge-runner/tests/test_command_broker.py
+	$(UV) run mypy tools/countyforge-github/src/countyforge_github/implementation.py tools/countyforge-runner/src/countyforge_runner/command_broker.py
+	$(UV) run python -m json.tool .ai/schemas/countyforge-implementation-result.schema.json >/dev/null
+	$(UV) run python -m json.tool .ai/schemas/countyforge-implementation-packet.schema.json >/dev/null
+
+countyforge-implement-fixtures:
+	@command -v bwrap >/dev/null 2>&1 || { echo "bubblewrap (bwrap) is required for CountyForge implementation fixtures" >&2; exit 2; }
+	$(UV) run pytest tools/countyforge-github/tests/test_implementation.py tools/countyforge-runner/tests/test_execution.py tools/countyforge-runner/tests/test_command_broker.py -q
+
+countyforge-implement-policy-tests:
+	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py tools/countyforge-github/tests/test_requests.py -q
+
 # Free and deterministic: no Docker, provider, secret-manager, or collector call.
 runner-contract-tests: countyforge-runner-check countyforge-github-check \
 	countyforge-command-fixtures countyforge-workflow-policy-tests countyforge-plan-check \
-	countyforge-plan-fixtures countyforge-plan-policy-tests
+	countyforge-plan-fixtures countyforge-plan-policy-tests countyforge-implement-check \
+	countyforge-implement-fixtures countyforge-implement-policy-tests
 	bash -n $(RUNNER_SHELL_SCRIPTS)
 	@for schema in .ai/schemas/*.json .ai/profiles/*.json .ai/providers/*.json .ai/policies/*.json; do \
 		python3 -m json.tool "$$schema" >/dev/null || exit 1; \

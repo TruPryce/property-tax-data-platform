@@ -139,3 +139,32 @@ def test_future_mode_keeps_structured_not_implemented_disposition(tmp_path: Path
         "state": "not_implemented",
         "disposition": "profile_not_implemented",
     }
+
+
+def test_completed_implementation_requires_structured_result_and_zero_exit(tmp_path: Path) -> None:
+    result = _write(
+        tmp_path / "implementation.json",
+        '{"ok":true,"mode":"implement","disposition":"completed",'
+        '"summary":{"disposition":"completed","exit_code":0},"implementation":{}}',
+    )
+    zero = _write(tmp_path / "zero", "0\n")
+    assert resolve_terminal_result(
+        command="implement", result_path=result, exit_code_path=zero
+    ) == {
+        "ok": True,
+        "state": "succeeded",
+        "disposition": "completed",
+    }
+    missing = resolve_terminal_result(command="implement", result_path=result, exit_code_path=None)
+    assert missing["disposition"] == "runner_exit_code_missing"
+
+
+def test_implementation_completed_without_payload_fails_closed(tmp_path: Path) -> None:
+    result = _write(
+        tmp_path / "implementation.json",
+        '{"ok":true,"mode":"implement","disposition":"completed",'
+        '"summary":{"disposition":"completed","exit_code":0}}',
+    )
+    zero = _write(tmp_path / "zero", "0\n")
+    resolved = resolve_terminal_result(command="implement", result_path=result, exit_code_path=zero)
+    assert resolved["disposition"] == "invalid_result_evidence"

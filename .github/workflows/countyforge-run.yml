@@ -418,7 +418,7 @@ jobs:
 
   future-mode:
     name: Invoke fail-closed future profile
-    if: inputs.command != 'review' && inputs.command != 'plan'
+    if: inputs.command != 'review' && inputs.command != 'plan' && inputs.command != 'implement'
     needs: [claim, prepare, mark-running]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -814,6 +814,573 @@ jobs:
           retention-days: 14
           include-hidden-files: true
 
+  implementation-packet:
+    name: Build implementation packet without provider secrets
+    if: inputs.command == 'implement'
+    needs: [claim, prepare, mark-running]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install trusted CountyForge packages
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Provision trusted OpenSpec validator
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/openspec-packet-tool" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$RUNNER_TEMP/openspec-packet-tool/bin/openspec"
+          echo "$RUNNER_TEMP/openspec-packet-tool/bin" >> "$GITHUB_PATH"
+      - name: Build accepted implementation packet
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRIGGER_B64: ${{ inputs.trigger }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          TARGET_NUMBER: ${{ inputs.target_number }}
+          TRUSTED_SHA: ${{ inputs.trusted_tool_sha }}
+        run: |
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/countyforge-trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
+          change_name="$(jq -er '.command.arguments.openspec_change' "$RUNNER_TEMP/countyforge-trigger.json")"
+          approval_actor_id="$(jq -er '.implementation_approval.approval_actor_id' "$RUNNER_TEMP/countyforge-trigger.json")"
+          jq -e \
+            '.implementation_approval.planning_pr_number > 0 and
+             (.implementation_approval.planning_pr_merge_sha | test("^[0-9a-f]{40}$")) and
+             (.implementation_approval.approval_permission | IN("admin"; "maintain"; "write"))' \
+            "$RUNNER_TEMP/countyforge-trigger.json" >/dev/null
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-implementation-packet \
+            --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
+            --issue "$RUNNER_TEMP/countyforge-issue.json" \
+            --change-name "$change_name" \
+            --planning-pr-merged \
+            --approval-actor-id "$approval_actor_id" \
+            --output-dir "$RUNNER_TEMP/countyforge-implementation"
+      - name: Upload frozen implementation packet
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-packet-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-implementation
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: true
+
+  implementation-openai:
+    name: Isolated OpenAI implementation workspace
+    if: inputs.command == 'implement' && needs.claim.outputs.provider == 'openai'
+    needs: [claim, prepare, mark-running, implementation-packet]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download target and implementation packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+      - name: Download implementation packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-packet-${{ inputs.run_id }}
+          path: prepared/implementation
+      - name: Install trusted CountyForge packages
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Provision isolated workspace and resolve request
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          TARGET_HEAD_SHA: ${{ needs.claim.outputs.head_sha }}
+        run: |
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/countyforge-trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          git clone --no-checkout \
+            --config core.hooksPath=/dev/null \
+            --config core.fsmonitor=false \
+            --config credential.helper= \
+            --config protocol.ext.allow=never \
+            prepared/target.git "$RUNNER_TEMP/countyforge-workspace"
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.hooksPath /dev/null
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.fsmonitor false
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local credential.helper ""
+          git -C "$RUNNER_TEMP/countyforge-workspace" checkout --detach "$TARGET_HEAD_SHA"
+          mkdir -p "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID"
+          cp prepared/implementation/countyforge-implementation-*.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          change_name="$(jq -er '.command.arguments.openspec_change' "$RUNNER_TEMP/countyforge-trigger.json")"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --implementation-packet ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-packet.json" \
+            --implementation-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-context-manifest.json" \
+            --implementation-task-plan ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-task-plan.json" \
+            --workspace "$RUNNER_TEMP/countyforge-workspace" \
+            --workspace-binding "$RUNNER_TEMP/countyforge-workspace-binding.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+          export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
+          import hashlib, json, sys
+          document = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          payload = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+          print(hashlib.sha256(payload).hexdigest())
+          PY
+          )"
+          ./.ai/codex/10-build-countyforge-implement-image.sh
+      - name: Invoke implementation model with selected provider only
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cd trusted
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" \
+            --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+      - name: Freeze only the trusted, declared implementation bundle
+        id: freeze
+        continue-on-error: true
+        env:
+          WORKSPACE_DIR: ${{ runner.temp }}/countyforge-workspace
+          RUN_ID: ${{ inputs.run_id }}
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          BASE_SHA: ${{ needs.claim.outputs.base_sha }}
+        run: |
+          result_file="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          bundle="$RUNNER_TEMP/countyforge-safe-implementation"
+          test -n "$result_file"
+          change_name="$(jq -er '.openspec_change' "$result_file")"
+          test -f "$result_file"
+          cd trusted
+          uv run --package countyforge-github countyforge-github freeze-implementation-artifact \
+            --result "$result_file" --workspace "$WORKSPACE_DIR" --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --output "$bundle" --run-id "$RUN_ID" --issue-number "$ISSUE_NUMBER" \
+            --change-name "$change_name" --base-sha "$BASE_SHA"
+          tar --sort=name -czf "$RUNNER_TEMP/countyforge-workspace.tar.gz" -C "$bundle" .
+      - name: Upload implementation execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-result-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-result.json
+            ${{ runner.temp }}/countyforge-exit-code
+            trusted/.ai/reviews/countyforge/implement
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+      - name: Upload frozen implementation bundle
+        if: steps.freeze.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/countyforge-workspace.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  implementation-validation:
+    name: Trusted implementation validation
+    if: always() && inputs.command == 'implement' && needs.claim.result == 'success'
+    needs: [claim, implementation-packet, implementation-openai]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download implementation artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-result-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-result
+      - name: Download frozen implementation bundle
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-result
+      - name: Download frozen implementation packet
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-packet-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-packet
+      - name: Install trusted CountyForge packages
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Provision the no-network command sandbox
+        env:
+          # Trust boundary: pinned in this review-gated workflow file and verified against the
+          # trusted checkout's helper bytes before any sudo action. Only the verified copy runs.
+          COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
+        run: |
+          verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
+          # Fail closed: the sudo-bearing helper is executed only from the immutable trusted
+          # checkout (pinned to inputs.trusted_tool_sha). If it is absent, stop before any
+          # privileged action rather than falling back to any other copy.
+          if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh ]; then
+            echo "::error::Trusted Bubblewrap AppArmor helper is unavailable in the trusted checkout; refusing to run any privileged sandbox setup." >&2
+            exit 2
+          fi
+          if ! command -v bwrap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes bubblewrap
+          fi
+          bwrap --version
+          install -m 0755 ./trusted/scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
+          printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
+          "$verified_helper"
+      - name: Provision pinned OpenSpec validator for offline gates
+        run: |
+          npm install --prefix "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$GITHUB_WORKSPACE/trusted/.ai/tools/openspec/node_modules/.bin/openspec"
+      - name: Validate artifact and trusted gates
+        env:
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          BASE_SHA: ${{ needs.claim.outputs.base_sha }}
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          COMMAND_EVENTS_PATH: ${{ runner.temp }}/implementation-command-events.ndjson
+        run: |
+          result_file="$RUNNER_TEMP/implementation-result/countyforge-result.json"
+          test -f "$result_file"
+          implementation_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit || true)"
+          test -n "$implementation_file"
+          workspace_archive="$RUNNER_TEMP/implementation-result/countyforge-workspace.tar.gz"
+          test -f "$workspace_archive"
+          change_name="$(jq -er '.implementation.openspec_change' "$result_file")"
+          mkdir -p "$RUNNER_TEMP/implementation-workspace"
+          tar -xzf "$workspace_archive" -C "$RUNNER_TEMP/implementation-workspace"
+          packet_file="$(find "$RUNNER_TEMP/implementation-packet" -name countyforge-implementation-packet.json -type f -print -quit || true)"
+          manifest_file="$(find "$RUNNER_TEMP/implementation-packet" -name countyforge-implementation-context-manifest.json -type f -print -quit || true)"
+          task_file="$(find "$RUNNER_TEMP/implementation-packet" -name countyforge-implementation-task-plan.json -type f -print -quit || true)"
+          test -n "$packet_file" && test -n "$manifest_file" && test -n "$task_file"
+          cd trusted
+          uv sync --frozen --all-packages --group dev
+          uv run --package countyforge-github countyforge-github validate-implementation-context \
+            --packet "$packet_file" --manifest "$manifest_file" --task-plan "$task_file"
+          python3 - "$packet_file" "$manifest_file" "$task_file" "$result_file" "$COUNTYFORGE_RUN_ID" "$BASE_SHA" <<'PY'
+          import hashlib, json, pathlib, sys
+          packet_path, manifest_path, task_path, result_path, run_id, base_sha = sys.argv[1:]
+          packet = json.loads(pathlib.Path(packet_path).read_text(encoding="utf-8"))
+          manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+          task_plan = json.loads(pathlib.Path(task_path).read_text(encoding="utf-8"))
+          runner = json.loads(pathlib.Path(result_path).read_text(encoding="utf-8"))
+          implementation = runner["implementation"]
+          change_name = implementation["openspec_change"]
+          if packet["run_id"] != run_id or packet["trusted_base_sha"] != base_sha or packet["change"]["name"] != change_name:
+              raise SystemExit("implementation packet provenance mismatch")
+          if implementation["implementation_revision"] != packet["implementation_revision"]:
+              raise SystemExit("implementation revision mismatch")
+          if manifest["packet_sha256"] != hashlib.sha256(pathlib.Path(packet_path).read_bytes()).hexdigest():
+              raise SystemExit("implementation packet hash mismatch")
+          if manifest["run_id"] != run_id or manifest["trusted_base_sha"] != base_sha or task_plan["run_id"] != run_id or task_plan["change_name"] != change_name:
+              raise SystemExit("implementation manifest provenance mismatch")
+          PY
+          uv run --package countyforge-github countyforge-github validate-implementation-artifact \
+            --result "$implementation_file" \
+            --manifest "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" \
+            --workspace "$RUNNER_TEMP/implementation-workspace" \
+            --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --run-id "$COUNTYFORGE_RUN_ID" --issue-number "$ISSUE_NUMBER" \
+            --change-name "$change_name" --base-sha "$BASE_SHA"
+          candidate_root="$RUNNER_TEMP/implementation-candidate"
+          git clone --quiet --no-local --no-hardlinks \
+            --config core.hooksPath=/dev/null \
+            --config core.fsmonitor=false \
+            --config credential.helper= \
+            "$GITHUB_WORKSPACE/trusted" "$candidate_root"
+          git -C "$candidate_root" config --local core.hooksPath /dev/null
+          git -C "$candidate_root" config --local core.fsmonitor false
+          git -C "$candidate_root" config --local credential.helper ""
+          test "$(git -C "$candidate_root" rev-parse HEAD)" = "$BASE_SHA"
+          # Reuse only trusted, pre-provisioned developer tooling; never overlay model
+          # files onto the trusted checkout that runs the validators.
+          if [ -d "$GITHUB_WORKSPACE/trusted/.venv" ]; then
+            cp -a "$GITHUB_WORKSPACE/trusted/.venv" "$candidate_root/.venv"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/trusted/.cache" ]; then
+            cp -a "$GITHUB_WORKSPACE/trusted/.cache" "$candidate_root/.cache"
+          fi
+          python3 - "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" "$RUNNER_TEMP/implementation-workspace" "$candidate_root" <<'PY'
+          import json, pathlib, shutil, sys
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          source_root = pathlib.Path(sys.argv[2]).resolve()
+          target_root = pathlib.Path(sys.argv[3]).resolve()
+          for row in manifest["files"]:
+              relative = pathlib.PurePosixPath(row["path"])
+              source = (source_root / relative).resolve()
+              target = (target_root / relative).resolve()
+              if not source.is_relative_to(source_root) or not target.is_relative_to(target_root):
+                  raise SystemExit("implementation artifact escaped its approved root")
+              if row["kind"] == "deleted":
+                  if target.exists():
+                      target.unlink()
+                  continue
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source, target)
+          PY
+          export PATH="$GITHUB_WORKSPACE/trusted/.ai/tools/openspec/node_modules/.bin:$PATH"
+          command_registry="$GITHUB_WORKSPACE/trusted/.ai/policies/countyforge-implementation-commands.v1.json"
+          command_schema="$GITHUB_WORKSPACE/trusted/.ai/schemas/countyforge-implementation-command-registry.schema.json"
+          run_registered() {
+            evidence="$(uv run --package countyforge-github countyforge-github run-implementation-command \
+              --command-id "$1" --registry "$command_registry" --schema "$command_schema" \
+              --workspace "$candidate_root" --contract-root "$GITHUB_WORKSPACE/trusted" \
+              --run-id "$COUNTYFORGE_RUN_ID")"
+            jq -e '.ok == true and (.evidence | type == "object")' <<<"$evidence" >/dev/null
+            jq -c '.evidence' <<<"$evidence" >> "$COMMAND_EVENTS_PATH"
+          }
+          : > "$COMMAND_EVENTS_PATH"
+          run_registered artifacts.check
+          run_registered docs.links
+          run_registered repo.check
+          run_registered repo.runner-contract
+          run_registered repo.prepr-no-ai
+          uv run --package countyforge-github countyforge-github validate-implementation-result \
+            --result "$implementation_file" --task-plan "$task_file" \
+            --workspace "$candidate_root" \
+            --expected-revision "$(jq -er '.implementation_revision' "$packet_file")" \
+            --command-events "$COMMAND_EVENTS_PATH"
+          printf '%s\n' '{"contract_version":1,"run_id":"'"$COUNTYFORGE_RUN_ID"'","issue_number":'"$ISSUE_NUMBER"',"change_name":"'"$change_name"'","valid":true,"publication_eligible":true,"base_sha":"'"$BASE_SHA"'","artifact_sha256":"'"$(sha256sum "$implementation_file" | cut -d" " -f1)"'","workspace_manifest_sha256":"'"$(sha256sum "$RUNNER_TEMP/implementation-workspace/countyforge-workspace-manifest.json" | cut -d" " -f1)"'","gates":[{"name":"trusted-artifact-policy","status":"passed"},{"name":"repository-check","status":"passed"}],"failures":[],"warnings":[]}' > "$RUNNER_TEMP/implementation-validation.json"
+          uv run --package countyforge-github countyforge-github validate-implementation-report \
+            --report "$RUNNER_TEMP/implementation-validation.json" >/dev/null
+      - name: Upload trusted validation report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-validation-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/implementation-validation.json
+            ${{ runner.temp }}/implementation-command-events.ndjson
+          if-no-files-found: error
+          retention-days: 14
+
+  implementation-publish:
+    name: Publish implementation draft and terminal state
+    if: always() && inputs.command == 'implement' && needs.claim.result == 'success'
+    needs: [claim, mark-running, implementation-openai, implementation-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: countyforge-state-${{ github.repository_id }}-${{ inputs.target_type }}-${{ inputs.target_number }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      checks: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download implementation artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-result-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-result
+      - name: Download frozen implementation bundle
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-result
+      - name: Download trusted validation report
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-validation-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/implementation-validation
+      - name: Install trusted CountyForge packages
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Resolve implementation terminal evidence
+        id: terminal
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          result_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-result.json -type f -print -quit 2>/dev/null || true)"
+          exit_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-exit-code -type f -print -quit 2>/dev/null || true)"
+          arguments=(resolve-terminal-result --command "$COMMAND")
+          if [ -n "$result_file" ]; then arguments+=(--result "$result_file"); fi
+          if [ -n "$exit_file" ]; then arguments+=(--exit-code "$exit_file"); fi
+          cd trusted
+          uv run --package countyforge-github countyforge-github "${arguments[@]}" \
+            > "$RUNNER_TEMP/countyforge-terminal.json"
+          echo "state=$(jq -r .state "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+          echo "disposition=$(jq -r .disposition "$RUNNER_TEMP/countyforge-terminal.json")" >> "$GITHUB_OUTPUT"
+      - name: Verify trusted validation eligibility
+        id: validation
+        env:
+          EXPECTED_RUN_ID: ${{ inputs.run_id }}
+          EXPECTED_BASE_SHA: ${{ needs.claim.outputs.base_sha }}
+        if: steps.terminal.outputs.state == 'succeeded' && steps.terminal.outputs.disposition == 'completed'
+        run: |
+          report="$RUNNER_TEMP/implementation-validation/implementation-validation.json"
+          test -f "$report"
+          jq -e --arg run_id "$EXPECTED_RUN_ID" --arg base_sha "$EXPECTED_BASE_SHA" \
+            '.valid == true and .publication_eligible == true and .run_id == $run_id and .base_sha == $base_sha' \
+            "$report" >/dev/null
+      - name: Verify live implementation publication lease
+        id: verify-publication
+        if: steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' && steps.validation.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+        run: |
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github verify-publication \
+            --repository "$TARGET_REPOSITORY" --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" \
+            --run-id "$COUNTYFORGE_RUN_ID" --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" \
+            --nonce "$LEASE_NONCE" --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+      - name: Publish validated implementation draft
+        id: implementation-publication
+        if: steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' && steps.validation.outcome == 'success' && steps.verify-publication.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          CHANGE_NAME: ${{ inputs.command }}
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          TARGET_SHA: ${{ needs.claim.outputs.base_sha }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+        run: |
+          implementation_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit)"
+          change_name="$(jq -er '.openspec_change' "$implementation_file")"
+          mkdir -p "$RUNNER_TEMP/implementation-workspace"
+          tar -xzf "$RUNNER_TEMP/implementation-result/countyforge-workspace.tar.gz" -C "$RUNNER_TEMP/implementation-workspace"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          publication="$({ uv run --package countyforge-github countyforge-github publish-implementation \
+            --repository "$TARGET_REPOSITORY" --issue-number "$ISSUE_NUMBER" --change-name "$change_name" \
+            --revision "$(jq -er '.implementation_revision' "$implementation_file")" \
+            --base-sha "$TARGET_SHA" --run-id "$COUNTYFORGE_RUN_ID" \
+            --workspace "$RUNNER_TEMP/implementation-workspace" \
+            --evidence-url "$EVIDENCE_URL" --status-comment-id "${STATUS_COMMENT_ID}" \
+            --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" --nonce "$LEASE_NONCE" \
+            --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --implementation-result "$implementation_file" --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --validation-report "$RUNNER_TEMP/implementation-validation/implementation-validation.json"; })"
+          printf '%s\n' "$publication"
+          echo "branch=$(jq -r '.branch' <<<"$publication")" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(jq -r '.pr_number' <<<"$publication")" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(jq -r '.commit_sha' <<<"$publication")" >> "$GITHUB_OUTPUT"
+          echo "change_name=$(jq -r '.change_name // .openspec_change // empty' <<<"$publication")" >> "$GITHUB_OUTPUT"
+      - name: Finalize canonical implementation state
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          TARGET_REPOSITORY: ${{ needs.claim.outputs.repository }}
+          STATUS_COMMENT_ID: ${{ inputs.status_comment_id }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          EXECUTION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          LEASE_NONCE: ${{ needs.claim.outputs.nonce }}
+          TERMINAL_STATE: ${{ steps.terminal.outputs.state }}
+          TERMINAL_DISPOSITION: ${{ steps.terminal.outputs.disposition }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          IMPLEMENTATION_BRANCH: ${{ steps.implementation-publication.outputs.branch }}
+          IMPLEMENTATION_PR_NUMBER: ${{ steps.implementation-publication.outputs.pr_number }}
+          IMPLEMENTATION_CHANGE_NAME: ${{ steps.implementation-publication.outputs.change_name }}
+          IMPLEMENTATION_ELIGIBLE: ${{ steps.validation.outcome == 'success' && steps.terminal.outputs.state == 'succeeded' && needs.implementation-validation.result == 'success' }}
+          IMPLEMENTATION_VALIDATION_RESULT: ${{ needs.implementation-validation.result }}
+          VALIDATION_OUTCOME: ${{ steps.validation.outcome }}
+          VERIFY_PUBLICATION_OUTCOME: ${{ steps.verify-publication.outcome }}
+          PUBLICATION_OUTCOME: ${{ steps.implementation-publication.outcome }}
+        run: |
+          cd trusted
+          final_state="$TERMINAL_STATE"
+          final_disposition="$TERMINAL_DISPOSITION"
+          if [ "$TERMINAL_STATE" = "succeeded" ]; then
+            if [ "$IMPLEMENTATION_VALIDATION_RESULT" != "success" ] || \
+               [ "$VALIDATION_OUTCOME" != "success" ]; then
+              final_state="failed"
+              final_disposition="implementation_validation_failed"
+            elif [ "$VERIFY_PUBLICATION_OUTCOME" != "success" ] || \
+                 [ "$PUBLICATION_OUTCOME" != "success" ]; then
+              final_state="failed"
+              final_disposition="implementation_publication_failed"
+            fi
+          fi
+          implementation_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          implementation_args=()
+          if [ -n "$IMPLEMENTATION_CHANGE_NAME" ]; then implementation_args+=(--implementation-change-name "$IMPLEMENTATION_CHANGE_NAME"); fi
+          if [ -n "$IMPLEMENTATION_BRANCH" ]; then implementation_args+=(--implementation-branch "$IMPLEMENTATION_BRANCH"); fi
+          if [ -n "$IMPLEMENTATION_PR_NUMBER" ] && [ "$IMPLEMENTATION_PR_NUMBER" != "null" ]; then implementation_args+=(--implementation-pr-number "$IMPLEMENTATION_PR_NUMBER"); fi
+          if [ -n "$implementation_file" ]; then
+            implementation_args+=(--implementation-revision "$(jq -r '.implementation_revision // 1' "$implementation_file")")
+            implementation_args+=(--implementation-completed-task-count "$(jq -r '.completed_task_ids | length' "$implementation_file")")
+            implementation_args+=(--implementation-incomplete-task-count "$(jq -r '.incomplete_task_ids | length' "$implementation_file")")
+            implementation_args+=(--implementation-blocked-task-count "$(jq -r '.blocked_task_ids | length' "$implementation_file")")
+          fi
+          implementation_args+=(--implementation-eligible "$IMPLEMENTATION_ELIGIBLE")
+          uv run --package countyforge-github countyforge-github advance-run \
+            --repository "$TARGET_REPOSITORY" --status-comment-id "$STATUS_COMMENT_ID" \
+            --trusted-bot-id 41898282 --idempotency-key "$IDEMPOTENCY_KEY" --run-id "$COUNTYFORGE_RUN_ID" \
+            --workflow-run-id "$EXECUTION_WORKFLOW_RUN_ID" --nonce "$LEASE_NONCE" \
+            --target-state "$final_state" --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --disposition "$final_disposition" \
+            --evidence-url "$EVIDENCE_URL" \
+            "${implementation_args[@]}"
+
   plan-validation:
     name: Materialize and validate planning draft
     if: always() && inputs.command == 'plan' && needs.claim.result == 'success'
@@ -1066,7 +1633,7 @@ jobs:
 
   publish:
     name: Publish non-planning terminal state
-    if: always() && inputs.command != 'plan' && needs.claim.result == 'success'
+    if: always() && inputs.command != 'plan' && inputs.command != 'implement' && needs.claim.result == 'success'
     needs: [claim, prepare, mark-running, future-mode, review-sakana, review-openai]
     runs-on: ubuntu-latest
     timeout-minutes: 10
