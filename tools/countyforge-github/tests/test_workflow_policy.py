@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -116,6 +117,8 @@ def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
     assert "apparmor_parser -r -W" in script
     assert "kernel.apparmor_restrict_unprivileged_userns must remain" in script
     assert "EXPECTED_RESTRICT_VALUE=1" in script
+    # The profile stays reproducible: no machine-local include can widen it out of band.
+    assert "include if exists <local/countyforge-bwrap>" not in script
     combined_policy_text = "\n".join((script, ci, countyforge))
     assert "apparmor_restrict_unprivileged_userns=0" not in combined_policy_text
     assert "sysctl" not in combined_policy_text
@@ -146,6 +149,45 @@ def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
     validation_setup = countyforge.index("./trusted/scripts/ci/configure_bwrap_apparmor.sh")
     broker_invocation = countyforge.index("run-implementation-command")
     assert validation_setup < broker_invocation
+
+
+def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
+    """The sudo-bearing helper must run only after a pinned-digest check.
+
+    ``ci.yml`` runs on ``pull_request`` and checks out the PR workspace, so executing the
+    helper directly would let a PR gain root on the runner by editing an ungated
+    ``scripts/`` file. The privileged bytes are therefore anchored to a SHA-256 digest that
+    lives in the review-gated workflow files: CI copies the helper into an isolated path,
+    verifies it against the pin, and executes only that verified copy. Tampering changes the
+    digest and fails closed unless the gated pin is also edited.
+    """
+
+    repo_root = Path(__file__).parents[3]
+    helper_path = repo_root / "scripts/ci/configure_bwrap_apparmor.sh"
+    expected_digest = hashlib.sha256(helper_path.read_bytes()).hexdigest()
+
+    ci = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
+    countyforge = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+
+    for workflow_text, helper_reference in (
+        (ci, "./scripts/ci/configure_bwrap_apparmor.sh"),
+        (countyforge, "./trusted/scripts/ci/configure_bwrap_apparmor.sh"),
+    ):
+        # The pinned digest must match the committed helper exactly.
+        assert f"COUNTYFORGE_BWRAP_HELPER_SHA256: {expected_digest}" in workflow_text
+        # The helper is copied into an isolated verified path and checked before it runs.
+        assert f'install -m 0755 {helper_reference} "$verified_helper"' in workflow_text
+        assert (
+            'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
+            "| sha256sum -c -"
+        ) in workflow_text
+        # Only the verified copy is executed; the workspace copy is never run directly.
+        assert '"$verified_helper"' in workflow_text
+        verify_index = workflow_text.index("sha256sum -c -")
+        run_index = workflow_text.rindex('"$verified_helper"')
+        assert verify_index < run_index
+        # The privileged helper is never invoked straight from its checkout path.
+        assert f"          {helper_reference}\n" not in workflow_text
 
 
 def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:

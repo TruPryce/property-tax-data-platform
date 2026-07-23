@@ -30,12 +30,22 @@ jobs:
         run: uv sync --locked --all-packages --group dev
 
       - name: Install and configure Bubblewrap sandbox
+        env:
+          # Trust boundary: this digest is pinned in the review-gated workflow file and must
+          # equal scripts/ci/configure_bwrap_apparmor.sh. The privileged helper (sudo) is
+          # never executed from the PR workspace directly; CI verifies the workspace bytes
+          # against this pin, copies the verified bytes into an isolated path, and runs only
+          # that copy. Changing what runs as root therefore requires editing this gated pin.
+          COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap
           command -v bwrap
           bwrap --version
-          ./scripts/ci/configure_bwrap_apparmor.sh
+          verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
+          install -m 0755 ./scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
+          printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
+          "$verified_helper"
 
       - name: Scan for secrets
         run: uv run pre-commit run detect-secrets --all-files --show-diff-on-failure

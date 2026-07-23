@@ -71,8 +71,6 @@ include <tunables/global>
 
 profile countyforge-bwrap /usr/bin/bwrap flags=(unconfined) {
   userns,
-
-  include if exists <local/countyforge-bwrap>
 }
 PROFILE
 
