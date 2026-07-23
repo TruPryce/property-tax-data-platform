@@ -1,0 +1,32 @@
+# CODEOWNERS makes the privileged CI trust boundary independently review-gated.
+#
+# GitHub requires a review from a listed owner before these paths can change on a
+# branch-protected default branch. Combined with the workflows sourcing the privileged
+# Bubblewrap helper from the immutable trusted base checkout, this ensures a pull request
+# cannot alter what runs as root in CI (the helper, its pinned digest, the workflow logic,
+# or this ownership rule itself) without an owner's review.
+#
+# Owners must be valid GitHub code owners: a user or a team with write access to the repo,
+# never a bare organization handle (an org name is not a valid code owner and GitHub
+# silently ignores it). "@mikegtech" is an admin collaborator on this repository.
+#
+# NOTE: this file only declares intent in-repository. Enforcement additionally requires an
+# administrator to enable branch protection on the default branch with "Require a pull
+# request before merging" and "Require review from Code Owners". Until that protection is
+# configured, CODEOWNERS does not by itself block changes to the privileged CI surface.
+
+# Default ownership for everything not matched below.
+*                                        @mikegtech
+
+# Privileged CI surface: workflows and the sudo-bearing sandbox helper.
+/.github/workflows/                      @mikegtech
+/.github/CODEOWNERS                      @mikegtech
+/scripts/ci/                             @mikegtech
+/scripts/ci/configure_bwrap_apparmor.sh  @mikegtech
+
+# Immutable capability policy and adapters that gate agent execution.
+/.ai/profiles/                           @mikegtech
+/.ai/policies/                           @mikegtech
+/.ai/providers/                          @mikegtech
+/.ai/schemas/                            @mikegtech
+/.ai/codex/                              @mikegtech
