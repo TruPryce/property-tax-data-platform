@@ -1057,6 +1057,13 @@ jobs:
           fi
           bwrap --version
           verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
+          # Fail closed: the sudo-bearing helper is executed only from the immutable trusted
+          # checkout (pinned to inputs.trusted_tool_sha). If it is absent, stop before any
+          # privileged action rather than falling back to any other copy.
+          if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh ]; then
+            echo "::error::Trusted Bubblewrap AppArmor helper is unavailable in the trusted checkout; refusing to run any privileged sandbox setup." >&2
+            exit 2
+          fi
           install -m 0755 ./trusted/scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
           printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
           "$verified_helper"

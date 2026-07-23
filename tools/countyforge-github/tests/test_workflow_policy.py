@@ -69,7 +69,11 @@ def test_ci_provisions_bubblewrap_before_runner_contracts() -> None:
     assert "sudo apt-get install -y --no-install-recommends bubblewrap" in install_run
     assert "command -v bwrap" in install_run
     assert "bwrap --version" in install_run
-    assert "./scripts/ci/configure_bwrap_apparmor.sh" in install_run
+    # The privileged helper is sourced from the immutable trusted-base checkout only; the
+    # PR-workspace copy is never installed or executed under sudo.
+    assert "trusted-base/scripts/ci/configure_bwrap_apparmor.sh" in install_run
+    assert 'install -m 0755 "$trusted_helper" "$verified_helper"' in install_run
+    assert '"$verified_helper"' in install_run
     assert "runner-contract-tests" in str(steps[contracts_index]["run"])
     ci_text = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
     assert "OPENAI_API_KEY" not in ci_text
@@ -141,9 +145,10 @@ def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
     assert "@pytest.mark.skip" not in command_broker_tests
     assert "xfail" not in command_broker_tests
 
-    assert "./scripts/ci/configure_bwrap_apparmor.sh" in ci
+    # CI runs only the trusted-base copy of the helper; the PR-workspace path is never used.
+    assert "trusted-base/scripts/ci/configure_bwrap_apparmor.sh" in ci
     assert "./trusted/scripts/ci/configure_bwrap_apparmor.sh" in countyforge
-    ci_setup = ci.index("./scripts/ci/configure_bwrap_apparmor.sh")
+    ci_setup = ci.index("trusted-base/scripts/ci/configure_bwrap_apparmor.sh")
     ci_contracts = ci.index("make runner-contract-tests")
     assert ci_setup < ci_contracts
     validation_setup = countyforge.index("./trusted/scripts/ci/configure_bwrap_apparmor.sh")
@@ -156,10 +161,11 @@ def test_privileged_bwrap_helper_comes_from_trusted_base_in_ci() -> None:
 
     ``ci.yml`` runs on ``pull_request``. If the helper, its digest pin, and the policy
     test all came from the PR checkout, a PR could edit them together and still pass. So
-    the privileged helper is obtained from a separate trusted-base checkout pinned to the
-    already-merged base commit (``pull_request.base.sha``) or the pushed commit, and only
-    that copy is executed. A gated-digest fallback exists solely for the one-time bootstrap
-    where the trusted base predates the helper.
+    the privileged helper is obtained only from a separate trusted-base checkout pinned to
+    the already-merged base commit (``pull_request.base.sha``) or the pushed commit, and
+    only that copy is executed. There is no PR-workspace fallback: if the trusted base does
+    not yet contain the helper, CI fails closed before any privileged action (see
+    ``test_ci_fails_closed_without_trusted_base_bwrap_helper``).
     """
 
     repo_root = Path(__file__).parents[3]
@@ -184,11 +190,11 @@ def test_privileged_bwrap_helper_comes_from_trusted_base_in_ci() -> None:
     assert base_step["with"]["persist-credentials"] in (False, "false")
 
     sandbox_run = str(steps[sandbox_index]["run"])
-    # Steady state runs only the trusted-base copy.
+    # Only the trusted-base copy is ever installed and executed.
     assert 'trusted_helper="trusted-base/scripts/ci/configure_bwrap_apparmor.sh"' in sandbox_run
     assert 'install -m 0755 "$trusted_helper" "$verified_helper"' in sandbox_run
-    # Bootstrap fallback is gated by the pinned digest before it may run. The digest lives in
-    # the review-gated step env; the verification runs inside the sandbox step.
+    # The digest additionally proves the trusted-base helper bytes are what this
+    # review-gated workflow expects. The digest lives in the review-gated step env.
     assert steps[sandbox_index]["env"]["COUNTYFORGE_BWRAP_HELPER_SHA256"] == expected_digest
     assert (
         'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
@@ -199,6 +205,36 @@ def test_privileged_bwrap_helper_comes_from_trusted_base_in_ci() -> None:
     assert sandbox_run.index("install -m 0755") < run_index
     assert "          ./scripts/ci/configure_bwrap_apparmor.sh\n" not in sandbox_run
     assert "          trusted-base/scripts/ci/configure_bwrap_apparmor.sh\n" not in sandbox_run
+    # There must be no PR-workspace fallback that installs or executes the PR copy.
+    assert "./scripts/ci/configure_bwrap_apparmor.sh" not in sandbox_run
+    assert "install -m 0755 ./scripts/ci/configure_bwrap_apparmor.sh" not in sandbox_run
+
+
+def test_ci_fails_closed_without_trusted_base_bwrap_helper() -> None:
+    """A missing trusted-base helper must abort CI before any privileged action.
+
+    This proves the reviewer's blocker is closed: when the immutable trusted base does not
+    contain the sudo-bearing helper (for example on the change that first introduces it),
+    the sandbox step must exit nonzero and must never install or execute the PR-workspace
+    copy. The helper can only be bootstrapped by first landing it on the base branch.
+    """
+
+    workflow = _load("ci.yml")
+    steps = workflow["jobs"]["checks"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
+    sandbox_run = str(steps[names.index("Install and configure Bubblewrap sandbox")]["run"])
+
+    # The step guards on the trusted-base helper's presence and exits before doing anything
+    # privileged when it is absent.
+    assert 'if [ ! -f "$trusted_helper" ]; then' in sandbox_run
+    guard_index = sandbox_run.index('if [ ! -f "$trusted_helper" ]; then')
+    exit_index = sandbox_run.index("exit 2", guard_index)
+    install_index = sandbox_run.index('install -m 0755 "$trusted_helper" "$verified_helper"')
+    run_index = sandbox_run.rindex('"$verified_helper"')
+    # Fail-closed exit happens before the install and before the helper is executed.
+    assert guard_index < exit_index < install_index < run_index
+    # No conditional fallback branch remains that could execute a non-trusted-base copy.
+    assert "else" not in sandbox_run
 
 
 def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
@@ -223,6 +259,12 @@ def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
         'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
         "| sha256sum -c -"
     ) in countyforge
+    # Fail closed: the privileged helper must be guarded on its presence in the immutable
+    # trusted checkout and abort before any sudo action when it is absent.
+    assert "if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh ]; then" in countyforge
+    guard_index = countyforge.index("if [ ! -f ./trusted/scripts/ci/configure_bwrap_apparmor.sh")
+    install_index = countyforge.index(f'install -m 0755 {helper_reference} "$verified_helper"')
+    assert guard_index < install_index
     # Only the verified copy is executed; the checkout copy is never run directly.
     assert '"$verified_helper"' in countyforge
     verify_index = countyforge.index("sha256sum -c -")
@@ -248,6 +290,23 @@ def test_codeowners_gates_privileged_ci_surface() -> None:
         parts = rule.split()
         assert len(parts) >= 2
         assert all(owner.startswith("@") for owner in parts[1:])
+    # Owners must be valid GitHub code owners: a user (``@name``) or a team
+    # (``@org/team``). A bare organization handle is silently ignored by GitHub and never
+    # gates review, so it must never appear as an owner. ``@TruPryce`` is the organization
+    # that owns this repository, so it is specifically forbidden as an owner here.
+    owners = {owner for rule in owned for owner in rule.split()[1:]}
+    for owner in owners:
+        handle = owner[1:]
+        assert handle, f"empty owner handle in rule set: {owner!r}"
+        # A user handle has no slash; a team handle is exactly ``org/team``.
+        assert handle.count("/") in (0, 1)
+        if "/" in handle:
+            org, _, team = handle.partition("/")
+            assert org and team
+    assert "@TruPryce" not in owners, (
+        "@TruPryce is the organization handle, which is not a valid code owner; use a user "
+        "or an @TruPryce/<team> team handle instead"
+    )
     # The privileged surface and the ownership file itself must be owned.
     required_patterns = (
         "/.github/workflows/",
