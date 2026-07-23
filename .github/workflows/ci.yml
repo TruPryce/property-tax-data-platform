@@ -29,13 +29,25 @@ jobs:
       - name: Sync workspace
         run: uv sync --locked --all-packages --group dev
 
+      - name: Check out trusted base tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Immutable base commit of the PR target branch (already-merged, review-gated code)
+          # on pull_request, or the pushed commit on push. Never the PR head, so a PR cannot
+          # influence the privileged helper obtained from here.
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted-base
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Install and configure Bubblewrap sandbox
         env:
-          # Trust boundary: this digest is pinned in the review-gated workflow file and must
-          # equal scripts/ci/configure_bwrap_apparmor.sh. The privileged helper (sudo) is
-          # never executed from the PR workspace directly; CI verifies the workspace bytes
-          # against this pin, copies the verified bytes into an isolated path, and runs only
-          # that copy. Changing what runs as root therefore requires editing this gated pin.
+          # Trust boundary: the privileged helper (sudo) is taken from the immutable trusted
+          # base checkout, never from the PR workspace. The base copy is trusted by provenance
+          # (already merged and review-gated), so it is executed directly. The pinned digest
+          # gates only the one-time bootstrap fallback used when the helper does not yet exist
+          # on the trusted base (the change that first introduces it); that fallback also
+          # requires editing this digest in the review-gated workflow file.
           COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
         run: |
           sudo apt-get update
@@ -43,8 +55,16 @@ jobs:
           command -v bwrap
           bwrap --version
           verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
-          install -m 0755 ./scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
-          printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
+          trusted_helper="trusted-base/scripts/ci/configure_bwrap_apparmor.sh"
+          if [ -f "$trusted_helper" ]; then
+            # Steady state: run only the trusted base copy; the PR workspace copy is ignored.
+            install -m 0755 "$trusted_helper" "$verified_helper"
+          else
+            # Bootstrap only: the trusted base predates this helper. Fall back to the PR
+            # workspace copy, but execute it only after it matches the gated digest pin.
+            install -m 0755 ./scripts/ci/configure_bwrap_apparmor.sh "$verified_helper"
+            printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
+          fi
           "$verified_helper"
 
       - name: Scan for secrets

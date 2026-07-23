@@ -151,43 +151,113 @@ def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
     assert validation_setup < broker_invocation
 
 
-def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
-    """The sudo-bearing helper must run only after a pinned-digest check.
+def test_privileged_bwrap_helper_comes_from_trusted_base_in_ci() -> None:
+    """The sudo-bearing helper must be sourced from an immutable trusted checkout.
 
-    ``ci.yml`` runs on ``pull_request`` and checks out the PR workspace, so executing the
-    helper directly would let a PR gain root on the runner by editing an ungated
-    ``scripts/`` file. The privileged bytes are therefore anchored to a SHA-256 digest that
-    lives in the review-gated workflow files: CI copies the helper into an isolated path,
-    verifies it against the pin, and executes only that verified copy. Tampering changes the
-    digest and fails closed unless the gated pin is also edited.
+    ``ci.yml`` runs on ``pull_request``. If the helper, its digest pin, and the policy
+    test all came from the PR checkout, a PR could edit them together and still pass. So
+    the privileged helper is obtained from a separate trusted-base checkout pinned to the
+    already-merged base commit (``pull_request.base.sha``) or the pushed commit, and only
+    that copy is executed. A gated-digest fallback exists solely for the one-time bootstrap
+    where the trusted base predates the helper.
     """
 
     repo_root = Path(__file__).parents[3]
     helper_path = repo_root / "scripts/ci/configure_bwrap_apparmor.sh"
     expected_digest = hashlib.sha256(helper_path.read_bytes()).hexdigest()
 
-    ci = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
-    countyforge = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    workflow = _load("ci.yml")
+    steps = workflow["jobs"]["checks"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
 
-    for workflow_text, helper_reference in (
-        (ci, "./scripts/ci/configure_bwrap_apparmor.sh"),
-        (countyforge, "./trusted/scripts/ci/configure_bwrap_apparmor.sh"),
-    ):
-        # The pinned digest must match the committed helper exactly.
-        assert f"COUNTYFORGE_BWRAP_HELPER_SHA256: {expected_digest}" in workflow_text
-        # The helper is copied into an isolated verified path and checked before it runs.
-        assert f'install -m 0755 {helper_reference} "$verified_helper"' in workflow_text
-        assert (
-            'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
-            "| sha256sum -c -"
-        ) in workflow_text
-        # Only the verified copy is executed; the workspace copy is never run directly.
-        assert '"$verified_helper"' in workflow_text
-        verify_index = workflow_text.index("sha256sum -c -")
-        run_index = workflow_text.rindex('"$verified_helper"')
-        assert verify_index < run_index
-        # The privileged helper is never invoked straight from its checkout path.
-        assert f"          {helper_reference}\n" not in workflow_text
+    # A dedicated trusted-base checkout exists and is pinned to an immutable, non-PR-head ref.
+    base_index = names.index("Check out trusted base tooling")
+    sandbox_index = names.index("Install and configure Bubblewrap sandbox")
+    assert base_index < sandbox_index
+    base_step = steps[base_index]
+    assert PINNED_ACTION.fullmatch(str(base_step["uses"])) is not None
+    base_ref = str(base_step["with"]["ref"])
+    assert "github.event.pull_request.base.sha" in base_ref
+    assert "github.sha" in base_ref
+    assert "pull_request.head" not in base_ref
+    assert str(base_step["with"]["path"]) == "trusted-base"
+    assert base_step["with"]["persist-credentials"] in (False, "false")
+
+    sandbox_run = str(steps[sandbox_index]["run"])
+    # Steady state runs only the trusted-base copy.
+    assert 'trusted_helper="trusted-base/scripts/ci/configure_bwrap_apparmor.sh"' in sandbox_run
+    assert 'install -m 0755 "$trusted_helper" "$verified_helper"' in sandbox_run
+    # Bootstrap fallback is gated by the pinned digest before it may run. The digest lives in
+    # the review-gated step env; the verification runs inside the sandbox step.
+    assert steps[sandbox_index]["env"]["COUNTYFORGE_BWRAP_HELPER_SHA256"] == expected_digest
+    assert (
+        'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
+        "| sha256sum -c -"
+    ) in sandbox_run
+    # Only the verified copy is executed; neither checkout path is executed directly.
+    run_index = sandbox_run.rindex('"$verified_helper"')
+    assert sandbox_run.index("install -m 0755") < run_index
+    assert "          ./scripts/ci/configure_bwrap_apparmor.sh\n" not in sandbox_run
+    assert "          trusted-base/scripts/ci/configure_bwrap_apparmor.sh\n" not in sandbox_run
+
+
+def test_privileged_bwrap_helper_is_digest_verified_before_execution() -> None:
+    """The trusted-run sandbox helper runs only after a pinned-digest check.
+
+    ``countyforge-run.yml`` sources the helper from the immutable ``trusted`` checkout and
+    still verifies it against the gated digest before executing only the verified copy.
+    """
+
+    repo_root = Path(__file__).parents[3]
+    helper_path = repo_root / "scripts/ci/configure_bwrap_apparmor.sh"
+    expected_digest = hashlib.sha256(helper_path.read_bytes()).hexdigest()
+
+    countyforge = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    helper_reference = "./trusted/scripts/ci/configure_bwrap_apparmor.sh"
+
+    # The pinned digest must match the committed helper exactly.
+    assert f"COUNTYFORGE_BWRAP_HELPER_SHA256: {expected_digest}" in countyforge
+    # The helper is copied into an isolated verified path and checked before it runs.
+    assert f'install -m 0755 {helper_reference} "$verified_helper"' in countyforge
+    assert (
+        'printf \'%s  %s\\n\' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" '
+        "| sha256sum -c -"
+    ) in countyforge
+    # Only the verified copy is executed; the checkout copy is never run directly.
+    assert '"$verified_helper"' in countyforge
+    verify_index = countyforge.index("sha256sum -c -")
+    run_index = countyforge.rindex('"$verified_helper"')
+    assert verify_index < run_index
+    assert f"          {helper_reference}\n" not in countyforge
+
+
+def test_codeowners_gates_privileged_ci_surface() -> None:
+    """CODEOWNERS makes the privileged CI trust boundary an independent review gate."""
+
+    repo_root = Path(__file__).parents[3]
+    codeowners_path = repo_root / ".github/CODEOWNERS"
+    assert codeowners_path.is_file()
+    codeowners = codeowners_path.read_text(encoding="utf-8")
+    owned = [
+        line.strip()
+        for line in codeowners.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    # Every ownership rule must name at least one owner.
+    for rule in owned:
+        parts = rule.split()
+        assert len(parts) >= 2
+        assert all(owner.startswith("@") for owner in parts[1:])
+    # The privileged surface and the ownership file itself must be owned.
+    required_patterns = (
+        "/.github/workflows/",
+        "/.github/CODEOWNERS",
+        "/scripts/ci/",
+        "/scripts/ci/configure_bwrap_apparmor.sh",
+    )
+    patterns = {rule.split()[0] for rule in owned}
+    for pattern in required_patterns:
+        assert pattern in patterns
 
 
 def test_shell_scripts_never_interpolate_github_expressions_directly() -> None:
