@@ -16,9 +16,7 @@ def _tunnel(left: socket.socket, right: socket.socket) -> None:
     sockets = [left, right]
     try:
         while True:
-            readable, _, _ = select.select(sockets, [], [], 30)
-            if not readable:
-                return
+            readable, _, _ = select.select(sockets, [], [])
             for source in readable:
                 data = source.recv(65536)
                 if not data:
@@ -42,6 +40,7 @@ def serve(host: str, port: int, allowed_host: str) -> None:
 
 
 def _handle(client: socket.socket, allowed_host: str) -> None:
+    upstream: socket.socket | None = None
     try:
         request = client.recv(8192)
         first = request.split(b"\r\n", 1)[0].decode("ascii", errors="ignore")
@@ -51,6 +50,9 @@ def _handle(client: socket.socket, allowed_host: str) -> None:
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
         upstream = socket.create_connection((allowed_host, 443), timeout=15)
+        # The timeout is only for establishing the upstream connection.  Long-lived provider
+        # responses may legitimately be idle while the model reasons between streamed chunks.
+        upstream.settimeout(None)
         client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         _tunnel(client, upstream)
     except (OSError, ValueError):
@@ -58,7 +60,12 @@ def _handle(client: socket.socket, allowed_host: str) -> None:
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         except OSError:
             pass
-        client.close()
+    finally:
+        try:
+            client.close()
+        finally:
+            if upstream is not None:
+                upstream.close()
 
 
 def main() -> int:

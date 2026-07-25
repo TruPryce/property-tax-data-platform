@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,7 @@ def _entry(
     *,
     environment: list[str] | None = None,
     workspace_mutating: bool = False,
+    mutation_allowlist: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "id": command_id,
@@ -59,6 +61,7 @@ def _entry(
         "phase": "validate",
         "network": "disabled",
         "workspace_mutating": workspace_mutating,
+        "mutation_allowlist": mutation_allowlist or [],
         "timeout_seconds": 30,
         "max_output_bytes": 4096,
         "environment": environment if environment is not None else ["PATH"],
@@ -175,8 +178,9 @@ def test_non_mutating_command_cannot_change_candidate_workspace(tmp_path: Path) 
         registry,
         repo_root / ".ai/schemas/countyforge-implementation-command-registry.schema.json",
     )
-    with pytest.raises(KernelError, match="workspace"):
-        broker.run("test.mutates", workspace=tmp_path)
+    evidence = broker.run("test.mutates", workspace=tmp_path)
+    assert evidence["exit_code"] != 0
+    assert not (tmp_path / "model-mutated.py").exists()
 
 
 def test_prepr_generated_review_artifacts_are_allowed_for_non_mutating_gate(
@@ -197,14 +201,12 @@ def test_prepr_generated_review_artifacts_are_allowed_for_non_mutating_gate(
                         "executable": "python3",
                         "arguments": [
                             "-c",
-                            (
-                                "import os;os.makedirs('/workspace/.ai/reviews');"
-                                "open('/workspace/.ai/reviews/review-packet.md','w').write('x')"
-                            ),
+                            ("open('/workspace/.ai/reviews/review-packet.md','w').write('x')"),
                         ],
                         "phase": "validate",
                         "network": "disabled",
                         "workspace_mutating": False,
+                        "mutation_allowlist": [".ai/reviews/review-packet.md"],
                         "timeout_seconds": 30,
                         "max_output_bytes": 1024,
                         "environment": ["PATH"],
@@ -221,6 +223,43 @@ def test_prepr_generated_review_artifacts_are_allowed_for_non_mutating_gate(
     )
     result = broker.run("test.prepr-artifacts", workspace=tmp_path)
     assert result["exit_code"] == 0
+
+
+def test_mutation_allowlist_rejects_writes_outside_declared_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    broker = _broker(
+        tmp_path,
+        _entry(
+            "test.allowlisted-write",
+            "python3",
+            [
+                "-c",
+                "open('/workspace/allowed.txt','w').write('ok');"
+                "open('/workspace/unauthorized.txt','w').write('no')",
+            ],
+            mutation_allowlist=["allowed.txt"],
+        ),
+    )
+    evidence = broker.run("test.allowlisted-write", workspace=workspace)
+    assert evidence["exit_code"] != 0
+    assert (workspace / "allowed.txt").read_text(encoding="utf-8") == "ok"
+    assert not (workspace / "unauthorized.txt").exists()
+
+    conflicting_broker = _broker(
+        tmp_path,
+        _entry(
+            "test.allowlisted-mutating-write",
+            "python3",
+            ["-c", "open('/workspace/allowed.txt','w').write('ok')"],
+            workspace_mutating=True,
+            mutation_allowlist=["allowed.txt"],
+        ),
+    )
+    conflicting_workspace = tmp_path / "allowed-workspace"
+    conflicting_workspace.mkdir()
+    with pytest.raises(KernelError, match="either workspace_mutating or mutation_allowlist"):
+        conflicting_broker.run("test.allowlisted-mutating-write", workspace=conflicting_workspace)
 
 
 def test_broker_masks_host_temp_and_mounts_only_contract_root(
@@ -308,6 +347,17 @@ def test_broker_masks_host_temp_and_mounts_only_contract_root(
     assert socket_evidence["exit_code"] == 0
 
 
+def test_broker_uses_private_pid_and_process_group_cleanup() -> None:
+    source = Path("tools/countyforge-runner/src/countyforge_runner/command_broker.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"--unshare-pid"' in source
+    assert '"--unshare-ipc"' in source
+    assert '"--unshare-uts"' in source
+    assert "start_new_session=True" in source
+    assert "os.killpg" in source
+
+
 def test_system_executable_under_usr_succeeds(tmp_path: Path) -> None:
     """A registry executable resolvable under a mounted /usr runtime root succeeds."""
 
@@ -317,6 +367,26 @@ def test_system_executable_under_usr_succeeds(tmp_path: Path) -> None:
     evidence = broker.run("test.usr", workspace=workspace)
     assert evidence["exit_code"] == 0
     assert evidence["stdout_sha256"] == hashlib.sha256(b"ok\n").hexdigest()
+
+
+def test_candidate_package_sources_override_trusted_editable_environment(
+    tmp_path: Path,
+) -> None:
+    """Validation imports the candidate package tree, not a trusted checkout path."""
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "tools" / "sentinel" / "src" / "sentinel"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    broker = _broker(
+        tmp_path,
+        _entry(
+            "test.candidate-import", "python3", ["-c", "import sentinel; print(sentinel.VALUE)"]
+        ),
+    )
+    evidence = broker.run("test.candidate-import", workspace=workspace)
+    assert evidence["exit_code"] == 0
+    assert evidence["stdout_sha256"] == hashlib.sha256(b"candidate\n").hexdigest()
 
 
 def test_interpreter_with_hidden_initial_path_entry_resolves_to_runtime_root(
@@ -456,6 +526,8 @@ def test_host_temp_home_sockets_and_network_remain_inaccessible(
     workspace.mkdir()
     marker = tmp_path / "host-secret-marker"
     marker.write_text("hidden\n", encoding="utf-8")
+    host_pid = str(os.getpid())
+    monkeypatch.setenv("COUNTYFORGE_HOST_PID", host_pid)
     monkeypatch.setenv("COUNTYFORGE_HOST_MARKER", str(marker))
     # The probe is written into the bound workspace so each registry argument stays within the
     # strict 128-byte contract limit; it reports True if any host surface is reachable.
@@ -465,13 +537,14 @@ def test_host_temp_home_sockets_and_network_remain_inaccessible(
         "hidden = os.path.exists(os.environ['COUNTYFORGE_HOST_MARKER'])\n"
         "home = os.path.exists('/home/runner') or os.path.exists('/root/.ssh')\n"
         "sock = os.path.exists('/var/run/docker.sock') or os.path.exists('/run/user')\n"
+        "host_pid = os.path.exists('/proc/' + os.environ['COUNTYFORGE_HOST_PID'])\n"
         "net = False\n"
         "try:\n"
         "    socket.create_connection(('1.1.1.1', 53), timeout=2)\n"
         "    net = True\n"
         "except OSError:\n"
         "    net = False\n"
-        "sys.stdout.write(str(hidden or home or sock or net))\n",
+        "sys.stdout.write(str(hidden or home or sock or host_pid or net))\n",
         encoding="utf-8",
     )
     broker = _broker(
@@ -480,7 +553,7 @@ def test_host_temp_home_sockets_and_network_remain_inaccessible(
             "test.isolation",
             "python3",
             ["/workspace/isolation_probe.py"],
-            environment=["COUNTYFORGE_HOST_MARKER", "PATH"],
+            environment=["COUNTYFORGE_HOST_MARKER", "COUNTYFORGE_HOST_PID", "PATH"],
         ),
     )
     evidence = broker.run("test.isolation", workspace=workspace)

@@ -10,6 +10,7 @@ set -euo pipefail
 : "${IMPLEMENTATION_TASK_PLAN_PATH:?IMPLEMENTATION_TASK_PLAN_PATH is required}"
 : "${IMPLEMENTATION_SCHEMA_PATH:?IMPLEMENTATION_SCHEMA_PATH is required}"
 : "${IMPLEMENTATION_COMMAND_POLICY_PATH:?IMPLEMENTATION_COMMAND_POLICY_PATH is required}"
+: "${PROMPT_PATH:?PROMPT_PATH is required}"
 : "${OUT_DIR:?OUT_DIR is required}"
 : "${CODEX_IMAGE:?CODEX_IMAGE is required}"
 
@@ -51,6 +52,14 @@ document = {
     "model_ref": model_ref,
     "reasoning_effort": reasoning_effort,
     "codex_cli_version": codex_version,
+    "model_input": {
+        "mode": "bounded_stdin",
+        "prompt_path": ".ai/prompts/countyforge-implement.v1.md",
+        "workspace_snapshot_max_bytes": 4 * 1024 * 1024,
+        "contract_inputs": [
+            "packet", "manifest", "task_plan", "result_schema", "command_policy", "source_snapshot"
+        ],
+    },
     "credential_names": ["OPENAI_API_KEY"],
     "enabled_tools": ["structured_file_bundle"],
     "disabled_tools": [
@@ -58,7 +67,7 @@ document = {
         "image_generation", "web_search",
     ],
     "mounts": [
-        "implementation_workspace:/workspace:read_write",
+        "implementation_model_workspace:/workspace:read_write",
         "frozen_implementation_packet:/workspace/implementation-packet.json:read_only",
         "frozen_implementation_manifest:/workspace/implementation-manifest.json:read_only",
         "frozen_implementation_task_plan:/workspace/implementation-task-plan.json:read_only",
@@ -71,6 +80,86 @@ document = {
 }
 pathlib.Path(path).write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
 PY
+
+# The implementation profile intentionally exposes no shell or file-reading tool.  Build a
+# bounded, explicit prompt context from the frozen contracts and a source snapshot so the
+# model has a tested input path instead of relying on undeclared filesystem capabilities.
+MODEL_WORKSPACE="$OUT_DIR/model-workspace"
+MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"
+python3 - "$PROMPT_PATH" "$IMPLEMENTATION_PACKET_PATH" "$IMPLEMENTATION_MANIFEST_PATH" \
+  "$IMPLEMENTATION_TASK_PLAN_PATH" "$IMPLEMENTATION_SCHEMA_PATH" "$IMPLEMENTATION_COMMAND_POLICY_PATH" \
+  "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" <<'PY'
+import json
+import pathlib
+import shutil
+import sys
+
+(
+    prompt_path,
+    packet_path,
+    manifest_path,
+    task_path,
+    schema_path,
+    command_policy_path,
+    workspace_path,
+    model_root,
+    output,
+) = sys.argv[1:]
+source = pathlib.Path(workspace_path).resolve(strict=True)
+model = pathlib.Path(model_root).resolve()
+if model.exists():
+    shutil.rmtree(model)
+model.mkdir(parents=True)
+excluded = {".git", ".env", ".ai/policies", ".github/workflows"}
+max_bytes = 4 * 1024 * 1024
+used = 0
+files: list[tuple[str, str]] = []
+for path in sorted(source.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    relative = path.relative_to(source).as_posix()
+    if any(relative == item or relative.startswith(item + "/") for item in excluded):
+        continue
+    if any(part in {".venv", ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"} for part in path.relative_to(source).parts):
+        continue
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        continue
+    if used + len(raw) > max_bytes:
+        continue
+    used += len(raw)
+    files.append((relative, text))
+    target = model / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+
+sections = [pathlib.Path(prompt_path).read_text(encoding="utf-8")]
+for title, path in (
+    ("IMPLEMENTATION PACKET", packet_path),
+    ("IMPLEMENTATION CONTEXT MANIFEST", manifest_path),
+    ("IMPLEMENTATION TASK PLAN", task_path),
+    ("IMPLEMENTATION RESULT SCHEMA", schema_path),
+    ("IMPLEMENTATION COMMAND POLICY", command_policy_path),
+):
+    sections.append(f"\n\n===== {title} =====\n{pathlib.Path(path).read_text(encoding='utf-8')}")
+sections.append("\n\n===== SOURCE WORKSPACE SNAPSHOT (TRUSTED READ-ONLY CONTEXT) =====")
+for relative, text in files:
+    sections.append(f"\n\n--- {relative} ---\n{text}")
+sections.append(
+    "\n\nThe dynamic context above is the complete bounded input to this run. "
+    "Use only the declared file_bundle output; do not claim commands or tests that are not "
+    "represented by trusted evidence."
+)
+prompt = "".join(sections)
+if len(prompt.encode("utf-8")) > 10 * 1024 * 1024:
+    raise SystemExit("implementation prompt exceeds the profile input budget")
+pathlib.Path(output).write_text(prompt, encoding="utf-8")
+PY
+
+# The model receives a de-Git workspace copy.  Trusted Git metadata remains in WORKSPACE_PATH
+# for host-side binding, diffing, freezing, and publication only.
 NETWORK_NAME="countyforge-implement-${RANDOM}-$$"
 PROXY_NAME="${NETWORK_NAME}-proxy"
 PROXY_IMAGE="python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
@@ -109,11 +198,7 @@ docker run --rm \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \
   --tmpfs /tmp/codex-home:rw,nosuid,nodev,size=256m \
   --user "$(id -u):$(id -g)" \
-  -v "$WORKSPACE_PATH:/workspace:rw" \
-  --tmpfs /workspace/.git:rw,noexec,nosuid,nodev,size=16m \
-  --tmpfs /workspace/.github/workflows:ro,noexec,nosuid,nodev,size=16m \
-  --tmpfs /workspace/.ai/policies:ro,noexec,nosuid,nodev,size=16m \
-  --tmpfs /workspace/.env:ro,noexec,nosuid,nodev,size=16m \
+  -v "$MODEL_WORKSPACE:/workspace:rw" \
   -v "$IMPLEMENTATION_PACKET_PATH:/workspace/implementation-packet.json:ro" \
   -v "$IMPLEMENTATION_MANIFEST_PATH:/workspace/implementation-manifest.json:ro" \
   -v "$IMPLEMENTATION_TASK_PLAN_PATH:/workspace/implementation-task-plan.json:ro" \
@@ -132,8 +217,8 @@ docker run --rm \
     --model "$CODEX_MODEL" -c "model_reasoning_effort=$CODEX_REASONING_EFFORT" \
     --output-schema /workspace/implementation-result.schema.json \
     --output-last-message /out/countyforge-implementation-result.json \
-    "$(cat "$PROMPT_PATH")" \
-  > "$OUT_DIR/countyforge-implementation-model-events.ndjson"
+    - \
+  > "$OUT_DIR/countyforge-implementation-model-events.ndjson" < "$MODEL_PROMPT"
 
 # The model emits a bounded structured file bundle because no process-execution tool is
 # available inside the container. Trusted host-side materialization is limited to relative

@@ -49,6 +49,19 @@
         "path": {"type": "string", "pattern": "^\\.ai/prompts/[A-Za-z0-9._-]+\\.md$"}
       }
     },
+    "model_input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "prompt_path", "workspace_snapshot_max_bytes", "contract_inputs"],
+      "properties": {
+        "mode": {"const": "bounded_stdin"},
+        "prompt_path": {"type": "string", "pattern": "^\\.ai/prompts/[A-Za-z0-9._-]+\\.md$"},
+        "workspace_snapshot_max_bytes": {"type": "integer", "minimum": 1, "maximum": 10485760},
+        "contract_inputs": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"enum": ["packet", "manifest", "task_plan", "result_schema", "command_policy", "source_snapshot"]}
+        }
+      }
+    },
     "output_schema": {"type": "string", "pattern": "^[A-Za-z0-9._-]+\\.schema\\.json$"},
     "allowed_artifacts": {
       "type": "array", "minItems": 1, "uniqueItems": true,
@@ -96,7 +109,7 @@
         "type": "object", "additionalProperties": false,
         "required": ["source", "target", "access"],
         "properties": {
-          "source": {"enum": ["schema_directory", "frozen_planning_packet", "frozen_context_manifest", "frozen_implementation_packet", "frozen_implementation_manifest", "frozen_implementation_task_plan", "frozen_implementation_result_schema", "frozen_implementation_command_policy", "implementation_workspace", "claimed_output_directory", "repository"]},
+          "source": {"enum": ["schema_directory", "frozen_planning_packet", "frozen_context_manifest", "frozen_implementation_packet", "frozen_implementation_manifest", "frozen_implementation_task_plan", "frozen_implementation_result_schema", "frozen_implementation_command_policy", "implementation_workspace", "implementation_model_workspace", "claimed_output_directory", "repository"]},
           "target": {"type": "string", "pattern": "^/"},
           "access": {"enum": ["read_only", "read_write"]}
         }

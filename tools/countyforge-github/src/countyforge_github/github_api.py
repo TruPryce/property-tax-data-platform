@@ -52,6 +52,8 @@ class GitHubPort(Protocol):
 
     def get_git_commit(self, repository: str, sha: str) -> JsonObject: ...
 
+    def get_git_tree(self, repository: str, sha: str) -> JsonObject: ...
+
     def create_git_tree(self, repository: str, base_sha: str, entries: list[JsonObject]) -> str: ...
 
     def create_git_commit(
@@ -253,6 +255,14 @@ class GitHubRestClient:
         if not isinstance(value, dict):
             raise ControlPlaneError(
                 "github_api_invalid_response", "GitHub API returned an invalid commit response."
+            )
+        return value
+
+    def get_git_tree(self, repository: str, sha: str) -> JsonObject:
+        value = self._request("GET", f"/repos/{repository}/git/trees/{sha}?recursive=1")
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub API returned an invalid tree response."
             )
         return value
 

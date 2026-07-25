@@ -20,29 +20,44 @@ planning-agent output are not approval evidence.
 - `source_root`: immutable base repository content;
 - `workspace_root`: ephemeral writable copy supplied to the model.
 
-The model receives the frozen implementation packet, context manifest, task plan, and a bounded
-workspace mount. The Codex process has no shell or unified-exec tool; it returns a strict UTF-8
-`file_bundle`, which trusted tooling materializes into the workspace after path confinement. It
-receives only the selected provider key during model invocation.
+The model receives a de-Git workspace snapshot plus the frozen implementation packet, context
+manifest, task plan, result schema, command policy, prompt, and bounded source snapshot through
+the profile's explicit `bounded_stdin` input contract. The Codex process has no shell, unified-exec,
+or undeclared file-reading tool; it returns a strict UTF-8 `file_bundle`, which trusted tooling
+materializes into the host-side workspace after path confinement. It receives only the selected
+provider key during model invocation.
 It receives no GitHub write token, Git credentials, production credentials, Docker socket, host
 home, SSH agent, Tailscale socket, or production network.
 
 Before provider selection, trusted tooling writes and hashes a strict workspace-binding
 manifest containing the repository, issue, accepted change, run, immutable base/head, Git hook
 and credential-helper settings, implementation revision, exact protected mount exclusions, and
-workspace content hash. The model mount masks `.git`, `.github/workflows`, `.ai/policies`, and
-`.env`; Git metadata remains available only to trusted host tooling.
+workspace content hash. The model mount contains no `.git`, `.github/workflows`, `.ai/policies`,
+or `.env`; Git metadata remains available only to trusted host tooling.
 
 ## Commands and changes
 
+Planning-generated `tasks.md` entries carry a trusted `countyforge-task` metadata comment with
+the allowed paths, required validation checks, risk, and prerequisites. Intake refuses a change
+with no unchecked tasks, and refuses unchecked tasks whose metadata is absent or names a command
+outside the five implementation validation gates (`artifacts.check`, `docs.links`, `repo.check`,
+`repo.runner-contract`, and `repo.prepr-no-ai`). Older unannotated changes must be re-planned
+before implementation; accepted task checkboxes remain immutable.
+
 The versioned command registry under `.ai/policies/` defines exact commands, phases, time and
 output limits, and offline network policy for trusted validation. Non-mutating commands are
-snapshotted before and after execution; only the two expected `prepr-no-ai` review packet files
-are ignored as generated output, and any other candidate-tree change fails validation. The model
+mounted read-only and snapshotted before and after execution; `prepr-no-ai` explicitly declares
+only its two expected review packet files as a bounded mutation allowlist, and any other
+candidate-tree change fails validation. The model
 cannot start a process or use arbitrary shell payloads. Provider HTTPS egress is mediated by a trusted proxy
 sidecar restricted to the selected provider endpoint; command execution remains offline.
-The broker uses a deny-by-default filesystem and masks host homes, temporary directories, `/run`,
-`/var/run`, and host sockets. OpenSpec is installed in a trusted no-secret step and exposed
+Registry entries must choose either full-workspace `workspace_mutating` access or a
+`mutation_allowlist`; combining both modes is rejected by the broker.
+The broker uses a deny-by-default filesystem plus private PID/IPC/UTS namespaces, masks host
+homes, temporary directories, `/run`, `/var/run`, and host sockets, mounts non-mutating candidates
+read-only, and reaps descendant processes on timeout or output-limit failure. Candidate package
+`src` roots are mapped explicitly at `/workspace` so stale editable virtualenv paths cannot select
+trusted checkout code. OpenSpec is installed in a trusted no-secret step and exposed
 through the read-only contract mount so offline validation never performs a package fetch.
 The path policy rejects workflows,
 CODEOWNERS, OpenSpec contracts, policies, providers, credentials, `.git`, infrastructure, data

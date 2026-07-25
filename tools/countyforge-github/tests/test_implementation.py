@@ -12,8 +12,11 @@ import pytest
 from countyforge_github.cli import main as github_cli_main
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.implementation import (
+    _FORBIDDEN,
+    _HIGHER_RISK,
     _has_unresolved_blocking_decision,
-    build_implementation_packet,
+    _path_matches_rule,
+    _tasks_from_text,
     evaluate_implementation_eligibility,
     freeze_implementation_artifact,
     implementation_branch,
@@ -34,6 +37,30 @@ def _facts() -> tuple[dict[str, object], dict[str, object], str]:
     }
     issue = {"number": 7, "title": "Feature implementation", "body": "Feature acceptance criteria"}
     return trigger, issue, sha
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/CODEOWNERS",
+        "services/ingest/migrations/001_add.sql",
+        "libs/auth/authentication.py",
+        "libs/crypto/cryptography.py",
+        "libs/core/secrets.py",
+        "tools/countyforge-github/pyproject.toml",
+    ],
+)
+def test_sensitive_path_rules_match_nested_directories_and_keywords(path: str) -> None:
+    assert any(_path_matches_rule(path, rule) for rule in _FORBIDDEN + _HIGHER_RISK)
+
+
+@pytest.mark.parametrize("path", ["docs/data/notes.md", "docs/data/examples/sample.csv"])
+def test_root_data_rule_does_not_classify_documentation_as_source_data(path: str) -> None:
+    assert not _path_matches_rule(path, "data/")
+
+
+def test_root_data_rule_still_classifies_repository_data() -> None:
+    assert _path_matches_rule("data/source.csv", "data/")
 
 
 def test_unmerged_plan_is_not_eligible(repo_root: Path) -> None:
@@ -103,15 +130,14 @@ def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: P
     assert _has_unresolved_blocking_decision([design]) is False
 
 
-def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> None:
+def test_packet_is_bounded_and_hash_bound(repo_root: Path) -> None:
     trigger, issue, sha = _facts()
-    result = build_implementation_packet(
-        trigger=trigger,
-        issue=issue,
+    decision = evaluate_implementation_eligibility(
         contract_root=repo_root,
-        output_dir=tmp_path,
-        run_id="fixture-implementation",
+        repository=str(trigger["repository"]["full_name"]),
+        issue_number=int(issue["number"]),
         change_name="add-isolated-openspec-to-code-agents",
+        trusted_base_sha=sha,
         planning_pr_merged=True,
         approval_actor_id=42,
         approval_actor_type="User",
@@ -120,34 +146,17 @@ def test_packet_is_bounded_and_hash_bound(tmp_path: Path, repo_root: Path) -> No
         approval_actor_login="maintainer",
         approval_permission="write",
     )
-    packet = load_json_object(Path(str(result["packet_path"])), kind="implementation packet")
-    schema = load_json_object(
-        repo_root / ".ai/schemas/countyforge-implementation-packet.schema.json", kind="schema"
+    assert decision["eligible"] is False
+    assert "tasks_complete" in decision["blocking_reasons"]
+
+
+def test_task_metadata_rejects_unregistered_validation_checks() -> None:
+    tasks = _tasks_from_text(
+        "<!-- countyforge-task: 1.1 paths=tools checks=test.pytest risk=normal "
+        "prerequisites=- -->\n"
+        "- [ ] 1.1 Add implementation tests\n"
     )
-    validate_document(packet, schema, kind="implementation packet")
-    assert packet["eligibility"]["eligible"] is True
-    assert packet["implementation_revision"] >= 1
-    assert packet["sources"][-1]["trust_class"] == "untrusted_evidence"
-    assert (
-        hashlib.sha256(Path(str(result["packet_path"])).read_bytes()).hexdigest()
-        == result["packet_sha256"]
-    )
-    assert (
-        github_cli_main(
-            [
-                "--contract-root",
-                str(repo_root),
-                "validate-implementation-context",
-                "--packet",
-                str(result["packet_path"]),
-                "--manifest",
-                str(result["manifest_path"]),
-                "--task-plan",
-                str(result["task_plan_path"]),
-            ]
-        )
-        == 0
-    )
+    assert tasks[0]["metadata_complete"] is False
 
 
 @pytest.mark.parametrize(
@@ -166,7 +175,15 @@ def test_model_paths_fail_closed(path: str) -> None:
 
 def test_completed_task_requires_trusted_command_evidence() -> None:
     task_plan = {
-        "tasks": [{"task_id": "1.1", "required_checks": ["repo.check"], "allowed_paths": ["docs"]}]
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "required_checks": ["repo.check"],
+                "allowed_paths": ["docs"],
+                "metadata_complete": True,
+                "accepted_status": "incomplete",
+            }
+        ]
     }
     result = {
         "completed_task_ids": ["1.1"],
@@ -217,6 +234,8 @@ def test_task_reconciliation_accepts_versioned_tools_and_tests_roots() -> None:
                 "task_id": "1.1",
                 "required_checks": [],
                 "allowed_paths": ["tools", "tests"],
+                "metadata_complete": True,
+                "accepted_status": "incomplete",
             }
         ]
     }
@@ -230,6 +249,28 @@ def test_task_reconciliation_accepts_versioned_tools_and_tests_roots() -> None:
         trusted_command_events=[{"command_id": "repo.check", "exit_code": 0, "truncated": False}],
         changed_paths=["tools/generated.py", "tests/test_generated.py"],
     )
+
+
+def test_completed_open_spec_task_cannot_be_claimed_again() -> None:
+    task_plan = {
+        "tasks": [
+            {
+                "task_id": "1.1",
+                "accepted_status": "complete",
+                "required_checks": [],
+                "allowed_paths": ["docs"],
+            }
+        ]
+    }
+    with pytest.raises(ControlPlaneError, match="account for every"):
+        validate_implementation_tasks(
+            {
+                "completed_task_ids": ["1.1"],
+                "incomplete_task_ids": [],
+                "blocked_task_ids": [],
+            },
+            task_plan,
+        )
 
 
 def test_incomplete_or_blocked_tasks_never_publish() -> None:
@@ -432,42 +473,35 @@ def test_trusted_artifact_cli_rejects_custom_valid_schema_invalid_result(
 def test_trusted_context_cli_rejects_schema_invalid_task_plan(
     tmp_path: Path, repo_root: Path
 ) -> None:
-    trigger, issue, _ = _facts()
-    result = build_implementation_packet(
-        trigger=trigger,
-        issue=issue,
-        contract_root=repo_root,
-        output_dir=tmp_path,
-        run_id="fixture-context-invalid",
-        change_name="add-isolated-openspec-to-code-agents",
-        planning_pr_merged=True,
-        approval_actor_id=42,
-        approval_actor_type="User",
-        planning_pr_number=123,
-        planning_pr_merge_sha=_facts()[2],
-        approval_actor_login="maintainer",
-        approval_permission="write",
+    task_path = tmp_path / "task-plan.json"
+    task_path.write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "run_id": "fixture-context-invalid",
+                "change_name": "safe-change",
+                "tasks": [
+                    {
+                        "task_id": "1.1",
+                        "description": "missing explicit metadata",
+                        "allowed_paths": ["docs"],
+                        "required_checks": ["repo.check"],
+                        "prerequisites": [],
+                        "risk": "normal",
+                        "status": "incomplete",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
-    task_path = Path(str(result["task_plan_path"]))
-    task = json.loads(task_path.read_text(encoding="utf-8"))
-    task["unexpected"] = True
-    task_path.write_text(json.dumps(task), encoding="utf-8")
-    assert (
-        github_cli_main(
-            [
-                "--contract-root",
-                str(repo_root),
-                "validate-implementation-context",
-                "--packet",
-                str(result["packet_path"]),
-                "--manifest",
-                str(result["manifest_path"]),
-                "--task-plan",
-                str(task_path),
-            ]
+    schema = load_json_object(
+        repo_root / ".ai/schemas/countyforge-implementation-task-plan.schema.json", kind="schema"
+    )
+    with pytest.raises(Exception, match="strict contract"):
+        validate_document(
+            json.loads(task_path.read_text(encoding="utf-8")), schema, kind="task plan"
         )
-        == 2
-    )
 
 
 @pytest.mark.parametrize(
@@ -761,6 +795,9 @@ class _PublicationGitHub:
     def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
         return None
 
+    def get_git_tree(self, repository: str, sha: str) -> dict[str, object]:
+        return {"truncated": False, "tree": []}
+
     def create_git_blob(self, repository: str, content: str) -> str:
         self.calls.append("blob")
         return "e" * 40
@@ -840,7 +877,7 @@ def test_publication_uses_validated_manifest_and_draft_only(tmp_path: Path) -> N
         policy_root=Path.cwd(),
     )
     assert result["pr_number"] == 9
-    assert preflight_calls == ["preflight"]
+    assert preflight_calls == ["preflight"] * 4
 
 
 def test_publication_reuses_matching_existing_branch_and_pr(tmp_path: Path) -> None:
@@ -880,6 +917,22 @@ def test_publication_reuses_matching_existing_branch_and_pr(tmp_path: Path) -> N
                     f"bundle {manifest_sha[:12]})"
                 ),
                 "parents": [{"sha": "a" * 40}],
+                "tree": {"sha": "e" * 40},
+            }
+
+        def get_git_tree(self, repository: str, sha: str) -> dict[str, object]:
+            if sha == "d" * 40:
+                return {"truncated": False, "tree": []}
+            return {
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": "docs/generated.md",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": hashlib.sha1(b"blob 5\0safe\n").hexdigest(),
+                    }
+                ],
             }
 
         def list_pull_requests(
@@ -935,3 +988,57 @@ def test_publication_refuses_divergent_existing_branch(tmp_path: Path) -> None:
             implementation_result=_artifact_result(),
             policy_root=Path.cwd(),
         )
+
+
+def test_publication_journals_commit_before_draft_pr_failure(tmp_path: Path) -> None:
+    content = "safe\n"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/generated.md").write_text(content, encoding="utf-8")
+    (tmp_path / "countyforge-workspace-manifest.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "run_id": "run",
+                "issue_number": 7,
+                "change_name": "safe-change",
+                "base_sha": "a" * 40,
+                "files": [
+                    {
+                        "path": "docs/generated.md",
+                        "kind": "created",
+                        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                        "bytes": len(content),
+                    }
+                ],
+                "total_bytes": len(content),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FailingPullRequestGitHub(_PublicationGitHub):
+        def create_pull_request(
+            self, repository: str, payload: dict[str, object]
+        ) -> dict[str, object]:
+            raise ControlPlaneError("github_error", "draft PR unavailable")
+
+    with pytest.raises(ControlPlaneError, match="draft PR unavailable"):
+        publish_implementation(
+            FailingPullRequestGitHub(),
+            repository="TruPryce/property-tax-data-platform",
+            issue_number=7,
+            change_name="safe-change",
+            revision=1,
+            base_sha="a" * 40,
+            run_id="run",
+            workspace=tmp_path,
+            publication_preflight=lambda: {},
+            implementation_result=_artifact_result("docs/generated.md", content),
+            policy_root=Path.cwd(),
+        )
+    journal = json.loads(
+        (tmp_path / ".countyforge-publication-journal.json").read_text(encoding="utf-8")
+    )
+    assert journal["branch"] == "countyforge/implement/issue-7-safe-change-r1"
+    assert journal["commit_sha"] == "1" * 40
+    assert journal["pr_number"] is None

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
 
 WORKFLOW_ROOT = Path(".github/workflows")
 COUNTYFORGE_WORKFLOWS = (
@@ -45,6 +46,13 @@ def test_comment_workflow_subscribes_only_to_created_comments() -> None:
     assert "pull_request_target" not in text
     assert "edited" not in text
     assert "deleted" not in text
+
+
+def test_implementation_validator_install_uses_parser_compatible_matching() -> None:
+    text = (WORKFLOW_ROOT / "countyforge-command.yml").read_text(encoding="utf-8")
+    assert "contains(github.event.comment.body, '/countyforge implement')" not in text
+    assert 're.compile(r"^/countyforge[ \\t]+implement' in text
+    assert "re.IGNORECASE" in text
 
 
 def test_all_actions_are_pinned_to_full_commit_shas() -> None:
@@ -98,6 +106,27 @@ def test_ci_provisions_persistent_openspec_before_contract_tests() -> None:
         in openspec_run
     )
     assert "npx --yes @fission-ai/openspec@1.6.0" not in openspec_run
+
+
+def test_implementation_validation_gate_lists_are_identical() -> None:
+    """Keep the profile, registry, trusted validator, and workflow in lockstep."""
+
+    repo_root = Path(__file__).parents[3]
+    profile = json.loads(
+        (repo_root / ".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    registry = json.loads(
+        (repo_root / ".ai/policies/countyforge-implementation-commands.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    registry_ids = {str(command["id"]) for command in registry["commands"]}
+    workflow = (WORKFLOW_ROOT / "countyforge-run.yml").read_text(encoding="utf-8")
+    workflow_ids = set(re.findall(r"run_registered ([a-z0-9.-]+)", workflow))
+    expected = {str(command) for command in profile["deterministic_commands"]}
+    assert expected == set(_IMPLEMENTATION_VALIDATION_CHECKS)
+    assert workflow_ids == expected
+    assert expected <= registry_ids
 
 
 def test_bwrap_apparmor_policy_is_narrow_and_shared() -> None:
@@ -442,6 +471,7 @@ def test_only_preparation_checks_out_untrusted_target() -> None:
         "publish",
         "plan-publish",
         "implementation-publish",
+        "implementation-publication-prep",
     ):
         text = str(jobs[name])
         assert "path': 'target" not in text
@@ -514,6 +544,7 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         "plan-publish",
         "implementation-packet",
         "implementation-validation",
+        "implementation-publication-prep",
         "implementation-publish",
     ):
         text = str(jobs[name])
@@ -577,9 +608,9 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "HTTPS_PROXY=http://${PROXY_NAME}:45000" in adapter
     assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
-    assert "--tmpfs /workspace/.github/workflows:ro" in adapter
-    assert "--tmpfs /workspace/.ai/policies:ro" in adapter
-    assert "--tmpfs /workspace/.env:ro" in adapter
+    assert 'MODEL_WORKSPACE="$OUT_DIR/model-workspace"' in adapter
+    assert 'excluded = {".git", ".env", ".ai/policies", ".github/workflows"}' in adapter
+    assert ' < "$MODEL_PROMPT"' in adapter
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
     assert "apt-get install --no-install-recommends --yes bubblewrap" in validation
@@ -591,7 +622,14 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert '--workspace "$candidate_root"' in validation
     assert '"$GITHUB_WORKSPACE/trusted" "$candidate_root"' in validation
     assert 'git -C "$candidate_root" rev-parse HEAD' in validation
+    assert 'cp "$(command -v uv)" "$GITHUB_WORKSPACE/trusted/.ai/tools/uv-runtime/uv"' in validation
+    assert '--toolchain-root "$GITHUB_WORKSPACE/trusted/.ai/tools/uv-runtime"' in validation
+    assert "PYTHONPATH" not in validation
     assert "validate-implementation-context" in validation
+    assert "Ensure failed validation evidence exists" in validation
+    assert "implementation_validation_setup_failed" in validation
+    assert '--argjson gates "$gates_json"' in validation
+    assert "gates:$gates" in validation
     packet = str(jobs["implementation-packet"])
     assert "Provision trusted OpenSpec validator" in packet
     assert "openspec-packet-tool" in packet
@@ -608,15 +646,29 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "'name': 'Upload frozen implementation bundle'" in implementation_model
     assert "countyforge-implementation-bundle-" in implementation_model
     assert "--workspace-binding" in implementation_model
+    assert "Prepare sanitized implementation evidence" in implementation_model
+    assert "file_bundle" in implementation_model
     publish = str(jobs["implementation-publish"])
-    assert "countyforge-implementation-bundle-" in publish
-    assert "Download frozen implementation bundle" in publish
+    assert "countyforge-implementation-publication-prep-" in publish
     assert "countyforge-workspace.tar.gz" in publish
+    assert 'terminal_file="$RUNNER_TEMP/implementation-result/countyforge-terminal.json"' in publish
+    assert (
+        'report="$RUNNER_TEMP/implementation-result/implementation-validation/implementation-validation.json"'
+        in publish
+    )
+    assert (
+        '--validation-report "$RUNNER_TEMP/implementation-result/implementation-validation/'
+        'implementation-validation.json"' in publish
+    )
+    assert "arguments=(resolve-terminal-result" not in publish
     assert "Verify live implementation publication lease" in publish
     assert "steps.verify-publication.outcome == 'success'" in publish
     assert 'final_state="failed"' in publish
     assert 'final_disposition="implementation_validation_failed"' in publish
     assert 'final_disposition="implementation_publication_failed"' in publish
+    prep = str(jobs["implementation-publication-prep"])
+    assert "countyforge-implementation-bundle-" in prep
+    assert "countyforge-implementation-validation-" in prep
 
 
 def test_result_artifacts_include_explicit_hidden_evidence_paths() -> None:

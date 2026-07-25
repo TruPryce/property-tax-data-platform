@@ -31,6 +31,11 @@ from countyforge_github.redaction import redact_untrusted_text
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TASK = re.compile(r"^- \[([ xX])\] ([0-9]+\.[0-9]+)\s+(.+?)\s*$")
+_TASK_META = re.compile(
+    r"^\s*<!--\s*countyforge-task:\s*([0-9]+\.[0-9]+)\s+"
+    r"paths=([^\s]+)\s+checks=([^\s]+)\s+risk=(normal|higher_risk)"
+    r"(?:\s+prerequisites=([^\s]+))?\s*-->\s*$"
+)
 _FORBIDDEN = (
     ".github/workflows/",
     "codeowners",
@@ -54,6 +59,39 @@ _HIGHER_RISK = (
     "cryptography",
     "secret",
 )
+_IMPLEMENTATION_VALIDATION_CHECKS = frozenset(
+    {"artifacts.check", "docs.links", "repo.check", "repo.runner-contract", "repo.prepr-no-ai"}
+)
+
+
+def _path_matches_rule(path: str, rule: str) -> bool:
+    """Match policy paths by directory boundaries, filename keywords, or globs.
+
+    Rules ending in ``/`` describe directories and may occur at any component boundary.
+    The root ``data/`` rule is intentionally limited to the repository root so that
+    documentation such as ``docs/data/`` is not treated as a source-data archive.  Other
+    non-directory rules are filename/keyword guards and match a token within any path
+    component (for example ``secret`` matches ``secrets.py``).
+    """
+
+    normalized_path = PurePosixPath(path.casefold().strip("/"))
+    raw_rule = rule.casefold().strip()
+    is_directory_rule = raw_rule.endswith("/")
+    normalized_rule = raw_rule.strip("/")
+    if not normalized_rule:
+        return False
+    if "*" in normalized_rule or "?" in normalized_rule:
+        return fnmatch(normalized_path.as_posix(), normalized_rule) or fnmatch(
+            normalized_path.name, normalized_rule
+        )
+    rule_path = PurePosixPath(normalized_rule)
+    if is_directory_rule:
+        if normalized_rule == "data":
+            return normalized_path.parts[: len(rule_path.parts)] == rule_path.parts
+        parts = normalized_path.parts
+        width = len(rule_path.parts)
+        return any(parts[index : index + width] == rule_path.parts for index in range(len(parts)))
+    return any(normalized_rule in component for component in normalized_path.parts)
 
 
 def _has_unresolved_blocking_decision(files: Iterable[Path]) -> bool:
@@ -204,20 +242,41 @@ def _change_hash(files: Iterable[Path], root: Path) -> str:
 
 def _tasks_from_text(text: str, *, allowed_paths: Iterable[str] | None = None) -> list[JsonObject]:
     task_paths = list(allowed_paths or ("libs", "services", "dags", "docs", "openspec"))
+    metadata: dict[str, JsonObject] = {}
+    for line in text.splitlines():
+        match = _TASK_META.match(line)
+        if match is None:
+            continue
+        task_id, paths, checks, risk, prerequisites = match.groups()
+        metadata[task_id] = {
+            "allowed_paths": [item for item in paths.split(",") if item],
+            "required_checks": [item for item in checks.split(",") if item],
+            "risk": risk,
+            "prerequisites": []
+            if not prerequisites or prerequisites == "-"
+            else prerequisites.split(","),
+        }
     tasks: list[JsonObject] = []
     for line in text.splitlines():
         match = _TASK.match(line.strip())
         if match is None:
             continue
-        _, task_id, description = match.groups()
+        marker, task_id, description = match.groups()
+        details = metadata.get(task_id)
+        metadata_complete = details is not None and set(details["required_checks"]).issubset(
+            _IMPLEMENTATION_VALIDATION_CHECKS
+        )
         tasks.append(
             {
                 "task_id": task_id,
                 "description": description[:1024],
                 "status": "incomplete",
-                "allowed_paths": task_paths,
-                "required_checks": ["repo.check"],
-                "risk": "normal",
+                "accepted_status": "incomplete" if marker == " " else "complete",
+                "metadata_complete": metadata_complete,
+                "allowed_paths": details["allowed_paths"] if details else task_paths,
+                "required_checks": details["required_checks"] if details else ["repo.check"],
+                "risk": details["risk"] if details else "normal",
+                "prerequisites": details["prerequisites"] if details else [],
             }
         )
     return tasks
@@ -309,8 +368,16 @@ def evaluate_implementation_eligibility(
         tasks = (contract_root / "openspec" / "changes" / change_name / "tasks.md").read_text(
             encoding="utf-8"
         )
-        if not _tasks_from_text(tasks):
+        parsed_tasks = _tasks_from_text(tasks)
+        if not parsed_tasks:
             reasons.append("tasks_missing")
+        elif not any(task["accepted_status"] == "incomplete" for task in parsed_tasks):
+            reasons.append("tasks_complete")
+        elif any(
+            task["accepted_status"] == "incomplete" and not task["metadata_complete"]
+            for task in parsed_tasks
+        ):
+            reasons.append("task_metadata_missing")
         if _has_unresolved_blocking_decision(files):
             reasons.append("blocking_decision_unresolved")
     except ControlPlaneError as error:
@@ -612,8 +679,17 @@ def build_implementation_packet(
         allowed_paths=[str(path) for path in path_policy["allowed_write_roots"]],
     )
     if not tasks:
+        raise ControlPlaneError("implementation_tasks_missing", "The accepted change has no tasks.")
+    planned_tasks = [task for task in tasks if task.get("accepted_status") != "complete"]
+    if not planned_tasks:
         raise ControlPlaneError(
-            "implementation_tasks_missing", "The accepted change has no incomplete tasks."
+            "implementation_tasks_complete",
+            "The accepted change has no incomplete tasks.",
+        )
+    if any(task.get("metadata_complete") is not True for task in planned_tasks):
+        raise ControlPlaneError(
+            "implementation_task_metadata_missing",
+            "Every incomplete task must have explicit path and check metadata.",
         )
     change_sha = str(eligibility["change_sha256"])
     packet: JsonObject = {
@@ -688,7 +764,7 @@ def build_implementation_packet(
         "contract_version": 1,
         "run_id": run_id,
         "change_name": change_name,
-        "tasks": [{**task, "prerequisites": []} for task in tasks],
+        "tasks": tasks,
     }
     task_path = output_dir / "countyforge-implementation-task-plan.json"
     task_path.write_text(json.dumps(task_plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -726,8 +802,7 @@ def validate_implementation_result(
                 raise ControlPlaneError(
                     "prohibited_change", "Implementation result declares a prohibited path."
                 )
-            normalized = path.casefold()
-            if any(token in normalized for token in _FORBIDDEN):
+            if any(_path_matches_rule(path, token) for token in _FORBIDDEN):
                 raise ControlPlaneError(
                     "prohibited_change", "Implementation result declares a protected path."
                 )
@@ -805,10 +880,15 @@ def validate_implementation_tasks(
     with its required checks observed as successful broker events.
     """
 
-    planned_tasks = {
+    all_tasks = {
         str(task["task_id"]): task
         for task in task_plan.get("tasks", [])
         if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+    }
+    planned_tasks = {
+        task_id: task
+        for task_id, task in all_tasks.items()
+        if task.get("accepted_status", "incomplete") != "complete"
     }
     planned = set(planned_tasks)
     completed = {str(value) for value in result.get("completed_task_ids", [])}
@@ -858,6 +938,11 @@ def validate_implementation_tasks(
             )
     for task_id in completed:
         task = planned_tasks[task_id]
+        if task.get("metadata_complete") is not True:
+            raise ControlPlaneError(
+                "implementation_task_metadata_missing",
+                "An implementation task lacks explicit path/check metadata.",
+            )
         required = {str(check) for check in task.get("required_checks", [])}
         if not required.issubset(successful_commands):
             raise ControlPlaneError(
@@ -992,7 +1077,7 @@ def validate_implementation_artifact(
                 "prohibited_change",
                 "Implementation artifact matches a prohibited path policy rule.",
             )
-        if any(token in raw_path.casefold() for token in _HIGHER_RISK):
+        if any(_path_matches_rule(raw_path, token) for token in _HIGHER_RISK):
             raise ControlPlaneError(
                 "higher_risk_change_not_approved",
                 "Higher-risk implementation paths require an explicit accepted approval.",
@@ -1035,7 +1120,8 @@ def validate_implementation_artifact(
             ) from None
         if redactions:
             raise ControlPlaneError(
-                "secret_detected", "Implementation artifact contains a credential-like literal."
+                "secret_detected",
+                f"Implementation artifact contains a credential-like literal in {raw_path}.",
             )
         if len(raw) != row.get("bytes") or hashlib.sha256(raw).hexdigest() != row.get("sha256"):
             raise ControlPlaneError(
@@ -1202,6 +1288,58 @@ def implementation_branch(issue_number: int, change_name: str, revision: int) ->
     return f"countyforge/implement/issue-{issue_number}-{change_name}-r{revision}"
 
 
+def _git_blob_sha(content: bytes) -> str:
+    header = f"blob {len(content)}\0".encode("ascii")
+    return hashlib.sha1(header + content).hexdigest()  # noqa: S324 - Git blob identity
+
+
+def _tree_files(github: GitHubPort, repository: str, tree_sha: str) -> dict[str, tuple[str, str]]:
+    document = github.get_git_tree(repository, tree_sha)
+    if document.get("truncated") is True or not isinstance(document.get("tree"), list):
+        raise ControlPlaneError(
+            "implementation_tree_incomplete",
+            "GitHub did not return a complete implementation tree.",
+        )
+    files: dict[str, tuple[str, str]] = {}
+    for row in document["tree"]:
+        if not isinstance(row, dict) or row.get("type") != "blob":
+            continue
+        path = str(row.get("path") or "")
+        sha = str(row.get("sha") or "")
+        mode = str(row.get("mode") or "100644")
+        if not path or ".." in PurePosixPath(path).parts or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ControlPlaneError(
+                "implementation_tree_invalid", "GitHub returned an invalid implementation tree."
+            )
+        files[path] = (mode, sha)
+    return files
+
+
+def _validated_tree_matches(
+    github: GitHubPort,
+    *,
+    repository: str,
+    base_tree_sha: str,
+    existing_tree_sha: str,
+    workspace: Path,
+    manifest: JsonObject,
+) -> bool:
+    expected = _tree_files(github, repository, base_tree_sha)
+    for row in manifest.get("files", []):
+        if not isinstance(row, dict):
+            return False
+        path = str(row.get("path") or "")
+        if row.get("kind") == "deleted":
+            expected.pop(path, None)
+            continue
+        candidate = workspace / path
+        if not candidate.is_file() or candidate.is_symlink():
+            return False
+        expected[path] = ("100644", _git_blob_sha(candidate.read_bytes()))
+    actual = _tree_files(github, repository, existing_tree_sha)
+    return actual == expected
+
+
 def publish_implementation(
     github: GitHubPort,
     *,
@@ -1234,10 +1372,31 @@ def publish_implementation(
         )
     branch = implementation_branch(issue_number, change_name, revision)
     ref = f"refs/heads/{branch}"
+    journal_path = workspace / ".countyforge-publication-journal.json"
+
+    def write_journal(*, commit_sha: str, pr_number: int | None = None) -> None:
+        # The journal is trusted, bounded recovery evidence. It is written only after the
+        # validated artifact has been checked and is never included in the Git tree.
+        journal_path.write_text(
+            json.dumps(
+                {
+                    "contract_version": 1,
+                    "run_id": run_id,
+                    "issue_number": issue_number,
+                    "change_name": change_name,
+                    "revision": revision,
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                    "pr_number": pr_number,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     existing_ref = github.get_git_ref(repository, ref)
-    # Detect a clearly divergent/human-owned branch before requiring the new
-    # workspace bundle.  This is a read-only conflict check; publication still
-    # validates the complete bundle before reusing a matching branch.
+    existing_commit_precheck: tuple[str, JsonObject] | None = None
     if existing_ref is not None:
         existing_object = existing_ref.get("object")
         existing_sha = (
@@ -1257,17 +1416,14 @@ def publish_implementation(
             if isinstance(parents, list) and parents and isinstance(parents[0], dict)
             else ""
         )
-        expected_prefix = (
-            f"CountyForge implementation: {change_name} (issue #{issue_number}; run {run_id}; "
-            "bundle "
-        )
         if parent_sha != base_sha or not str(existing_commit.get("message") or "").startswith(
-            expected_prefix
+            f"CountyForge implementation: {change_name} (issue #{issue_number}; run "
         ):
             raise ControlPlaneError(
                 "implementation_branch_conflict",
                 "The deterministic implementation branch diverges from this run.",
             )
+        existing_commit_precheck = (existing_sha, existing_commit)
     manifest_path = workspace / "countyforge-workspace-manifest.json"
     declared: set[str] | None = None
     deleted: set[str] = set()
@@ -1323,17 +1479,48 @@ def publish_implementation(
                 "implementation_branch_conflict",
                 "The existing implementation branch has no verifiable commit.",
             )
-        existing_commit = github.get_git_commit(repository, existing_sha)
+        existing_commit = (
+            existing_commit_precheck[1]
+            if existing_commit_precheck
+            else github.get_git_commit(repository, existing_sha)
+        )
         parents = existing_commit.get("parents")
         parent_sha = (
             str(parents[0].get("sha"))
             if isinstance(parents, list) and parents and isinstance(parents[0], dict)
             else ""
         )
-        if existing_commit.get("message") != commit_message or parent_sha != base_sha:
+        if (
+            parent_sha != base_sha
+            or not str(existing_commit.get("message") or "").startswith(
+                f"CountyForge implementation: {change_name} (issue #{issue_number}; run "
+            )
+            or f"bundle {manifest_sha256[:12]}" not in str(existing_commit.get("message") or "")
+        ):
             raise ControlPlaneError(
                 "implementation_branch_conflict",
                 "The deterministic implementation branch diverges from this run.",
+            )
+        base_commit = github.get_git_commit(repository, base_sha)
+        base_tree = base_commit.get("tree")
+        existing_tree = existing_commit.get("tree")
+        if (
+            not isinstance(base_tree, dict)
+            or not isinstance(existing_tree, dict)
+            or not isinstance(base_tree.get("sha"), str)
+            or not isinstance(existing_tree.get("sha"), str)
+            or not _validated_tree_matches(
+                github,
+                repository=repository,
+                base_tree_sha=str(base_tree["sha"]),
+                existing_tree_sha=str(existing_tree["sha"]),
+                workspace=workspace,
+                manifest=manifest_document,
+            )
+        ):
+            raise ControlPlaneError(
+                "implementation_branch_conflict",
+                "The existing implementation branch does not match the validated artifact.",
             )
         pulls = github.list_pull_requests(
             repository, head=f"{repository.split('/', 1)[0]}:{branch}", base="main"
@@ -1342,13 +1529,13 @@ def publish_implementation(
             body = str(pull.get("body") or "")
             if (
                 f"Accepted OpenSpec change: `{change_name}`" not in body
-                or f"CountyForge run: `{run_id}`" not in body
                 or f"Base SHA: `{base_sha[:12]}`" not in body
             ):
                 raise ControlPlaneError(
                     "implementation_branch_conflict",
                     "The existing implementation pull request was edited or diverged.",
                 )
+            write_journal(commit_sha=existing_sha, pr_number=int(pull["number"]))
             return {
                 "branch": branch,
                 "commit_sha": existing_sha,
@@ -1356,6 +1543,8 @@ def publish_implementation(
                 "run_id": run_id,
                 "change_name": change_name,
             }
+        write_journal(commit_sha=existing_sha)
+        publication_preflight()
         pr = github.create_pull_request(
             repository,
             {
@@ -1368,6 +1557,7 @@ def publish_implementation(
                 "draft": True,
             },
         )
+        write_journal(commit_sha=existing_sha, pr_number=int(pr["number"]))
         return {
             "branch": branch,
             "commit_sha": existing_sha,
@@ -1380,6 +1570,10 @@ def publish_implementation(
     if not isinstance(base_tree, dict) or not isinstance(base_tree.get("sha"), str):
         raise ControlPlaneError("git_base_tree_unavailable", "Trusted base tree is unavailable.")
     entries: list[JsonObject] = []
+    # Re-read canonical state after every local validation/read and immediately before the
+    # first Git data API mutation.  The initial preflight protects stale callers; this one
+    # closes the cancellation/lease-expiry race during validation.
+    publication_preflight()
     for path in sorted(workspace.rglob("*")):
         if not path.is_file() or ".git" in path.parts:
             continue
@@ -1392,7 +1586,7 @@ def publish_implementation(
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact contains protected files."
             )
-        if any(token in relative.casefold() for token in _FORBIDDEN):
+        if any(_path_matches_rule(relative, token) for token in _FORBIDDEN):
             raise ControlPlaneError(
                 "prohibited_change", "Implementation artifact contains protected paths."
             )
@@ -1407,6 +1601,8 @@ def publish_implementation(
         )
     tree_sha = github.create_git_tree(repository, str(base_tree["sha"]), entries)
     commit_sha = github.create_git_commit(repository, commit_message, tree_sha, base_sha)
+    write_journal(commit_sha=commit_sha)
+    publication_preflight()
     try:
         github.create_git_ref(repository, ref, commit_sha)
     except ControlPlaneError as error:
@@ -1424,13 +1620,13 @@ def publish_implementation(
         body = str(pulls[0].get("body") or "")
         if (
             f"Accepted OpenSpec change: `{change_name}`" not in body
-            or f"CountyForge run: `{run_id}`" not in body
             or f"Base SHA: `{base_sha[:12]}`" not in body
         ):
             raise ControlPlaneError(
                 "implementation_branch_conflict",
                 "The existing implementation pull request was edited or diverged.",
             )
+        publication_preflight()
         github.update_pull_request(
             repository,
             pr_number,
@@ -1441,7 +1637,9 @@ def publish_implementation(
                 ),
             },
         )
+        write_journal(commit_sha=commit_sha, pr_number=pr_number)
     else:
+        publication_preflight()
         pr = github.create_pull_request(
             repository,
             {
@@ -1455,6 +1653,7 @@ def publish_implementation(
             },
         )
         pr_number = int(pr["number"])
+        write_journal(commit_sha=commit_sha, pr_number=pr_number)
     return {
         "branch": branch,
         "commit_sha": commit_sha,

@@ -8,7 +8,7 @@ The control plane SHALL allow `implement <change>` only when the exact change ex
 - **THEN** intake returns a sanitized ineligible disposition before provider credentials, target preparation, or workflow dispatch
 
 ### Requirement: Isolated implementation workspace
-The executable profile SHALL provide the model only an ephemeral writable workspace derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible.
+The executable profile SHALL provide the model only an ephemeral writable, de-Git workspace snapshot derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible. Trusted code MUST serialize the bounded packet, manifest, task plan, prompt, and size-limited source snapshot into the model input through the declared `bounded_stdin` contract; the model MUST NOT rely on undeclared filesystem-reading capabilities. Git metadata remains available only to trusted host tooling.
 
 #### Scenario: Workspace escape is blocked
 - **WHEN** the model attempts to write outside the workspace or access `.git`, credentials, workflows, policies, production data, or host sockets
@@ -26,7 +26,7 @@ Implementation commands SHALL come from a versioned repository registry with exa
 - **THEN** the deny-by-default filesystem sandbox hides those paths and the command cannot establish network egress
 
 ### Requirement: Trusted implementation handoff
-The model SHALL produce a strict result, task evidence, workspace manifest, declared file bundle, and checksums bound to the run, issue, change hash, base SHA, profile, packet, and context manifest. Trusted validation SHALL reconstruct a clean worktree, apply only declared files, enforce path/size/secret policy, snapshot non-mutating gate execution, and determine publication eligibility from a report bound to the exact implementation-result and workspace-manifest checksums.
+The model SHALL produce a strict result, task evidence, workspace manifest, declared file bundle, and checksums bound to the run, issue, change hash, base SHA, profile, packet, and context manifest. Trusted validation SHALL reconstruct a clean worktree, apply only declared files, enforce path/size/secret policy, snapshot non-mutating gate execution in a deny-by-default filesystem and PID namespace, and determine publication eligibility from a report bound to the exact implementation-result and workspace-manifest checksums. Candidate files MUST NOT replace the trusted tooling root used to run validators; candidate imports MUST resolve from the candidate worktree and immutable trusted runtime only.
 
 #### Scenario: Undeclared artifact is rejected
 - **WHEN** the handoff contains a file not in the declared manifest or a checksum/provenance mismatch
@@ -37,14 +37,18 @@ The model SHALL produce a strict result, task evidence, workspace manifest, decl
 - **THEN** generic sanitized runner result and exit evidence are uploaded independently, while no unsafe workspace bundle is uploaded or published
 
 ### Requirement: Deterministic task reconciliation
-Trusted code SHALL derive task slices from accepted OpenSpec tasks and require bounded diff and required-check evidence for completion. Model prose alone MUST NOT mark a task complete, and accepted OpenSpec task checkboxes MUST NOT be rewritten automatically.
+Trusted code SHALL derive task slices from unchecked accepted OpenSpec tasks whose entries carry
+explicit path, required-check, risk, and prerequisite metadata. Metadata checks MUST name only
+the implementation validation gates. Changes with no unchecked tasks, missing metadata, or
+unsupported checks MUST be refused before provider execution. Model prose alone MUST NOT mark a
+task complete, and accepted OpenSpec task checkboxes MUST NOT be rewritten automatically.
 
 #### Scenario: Missing required check blocks publication
 - **WHEN** a claimed completed task lacks its required trusted check or changes an undeclared path
 - **THEN** the result is blocked and publication eligibility is false
 
 ### Requirement: Trusted draft publication
-Only a no-provider-secret trusted publisher with a live per-target lease MAY create or update the deterministic implementation branch and draft PR. It MUST derive the branch from issue/change/revision facts, never write the default branch, preserve human edits, and update canonical state after successful Git mutation.
+Only a no-provider-secret trusted publisher with a live per-target lease MAY create or update the deterministic implementation branch and draft PR. It MUST derive the branch from issue/change/revision facts, never write the default branch, preserve human edits, and update canonical state after successful Git mutation. Reusing an existing CountyForge branch is permitted only when its complete Git tree exactly matches the currently validated manifest applied to the captured base; otherwise publication MUST refuse or supersede without overwriting the branch.
 
 #### Scenario: Cancellation wins before publication
 - **WHEN** canonical state is cancelled, stale, terminal, or lease-expired at the final preflight

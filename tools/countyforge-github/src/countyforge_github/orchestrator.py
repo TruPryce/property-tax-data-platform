@@ -20,6 +20,7 @@ from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
 from countyforge_github.identity import build_trigger, iso_now, semantic_idempotency_key
 from countyforge_github.implementation import (
+    evaluate_implementation_eligibility,
     implementation_change_hash,
     resolve_merged_planning_approval,
 )
@@ -66,6 +67,10 @@ _REFUSAL_MESSAGES = {
     "planning_pr_approval_not_found": (
         "CountyForge implement refused: the approved planning change is not present "
         "on the trusted branch."
+    ),
+    "implementation_ineligible": (
+        "CountyForge implement refused: the accepted OpenSpec change is not eligible "
+        "for implementation."
     ),
     "insufficient_issue_intake": (
         "CountyForge plan refused: the issue needs a supported type, problem statement, "
@@ -552,7 +557,7 @@ def process_intake(
                 change_name=str(change_name),
                 trusted_base_sha=str(target["base_sha"]),
             )
-        except (ControlPlaneError, AttributeError):
+        except ControlPlaneError:
             implementation_approval = {"eligible": False}
         if not implementation_approval.get("eligible"):
             return _refused_result(
@@ -561,6 +566,30 @@ def process_intake(
                 target_number=target_number,
                 trusted_bot_id=trusted_bot_id,
                 reason_code="planning_pr_approval_not_found",
+                events=events,
+                authorization=decision,
+            )
+        eligibility = evaluate_implementation_eligibility(
+            contract_root=resolved.contract_root,
+            repository=repository,
+            issue_number=target_number,
+            change_name=str(change_name),
+            trusted_base_sha=str(target["base_sha"]),
+            planning_pr_merged=True,
+            planning_pr_number=int(implementation_approval["planning_pr_number"]),
+            planning_pr_merge_sha=str(implementation_approval["planning_pr_merge_sha"]),
+            approval_actor_id=int(implementation_approval["approval_actor_id"]),
+            approval_actor_type=str(implementation_approval["approval_actor_type"]),
+            approval_actor_login=str(implementation_approval["approval_actor_login"]),
+            approval_permission=str(implementation_approval["approval_permission"]),
+        )
+        if not eligibility["eligible"]:
+            return _refused_result(
+                github,
+                repository=repository,
+                target_number=target_number,
+                trusted_bot_id=trusted_bot_id,
+                reason_code="implementation_ineligible",
                 events=events,
                 authorization=decision,
             )

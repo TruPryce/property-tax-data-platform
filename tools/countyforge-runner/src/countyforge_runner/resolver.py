@@ -143,6 +143,7 @@ class ResolvedRun:
             "repository_access": self.profile["repository_access"],
             "writable_paths": self.profile["writable_paths"],
             "model_tools": self.profile["model_tools"],
+            "model_input": self.profile.get("model_input"),
             "deterministic_commands": self.profile["deterministic_commands"],
             "network": self.profile["network"],
             "input_policy": self.profile["input_policy"],
@@ -778,7 +779,10 @@ class Kernel:
                         "description": str(task["description"]),
                         "allowed_paths": list(task["allowed_paths"]),
                         "required_checks": list(task["required_checks"]),
+                        "prerequisites": list(task.get("prerequisites", [])),
                         "risk": str(task["risk"]),
+                        "accepted_status": str(task.get("accepted_status", "incomplete")),
+                        "metadata_complete": bool(task.get("metadata_complete", False)),
                     }
                     for task in sorted(tasks, key=lambda item: str(item["task_id"]))
                 ]

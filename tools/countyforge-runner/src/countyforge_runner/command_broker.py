@@ -11,10 +11,11 @@ import hashlib
 import os
 import selectors
 import shutil
+import signal
 import subprocess
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from countyforge_runner.contracts import (
@@ -124,6 +125,27 @@ def _resolve_executable(
     )
 
 
+def _candidate_source_paths(root: Path) -> list[str]:
+    """Return candidate package source roots in their sandbox-visible locations.
+
+    The validation environment may contain a trusted pre-provisioned virtualenv.  Its editable
+    ``.pth`` files are deliberately not trusted for package selection because they can point at
+    the checkout that provisioned the environment.  Explicit candidate ``src`` roots make the
+    import boundary deterministic while keeping trusted contract sources out of ``PYTHONPATH``.
+    """
+
+    paths: list[str] = []
+    for parent_name in ("libs", "services", "tools"):
+        parent = root / parent_name
+        if not parent.is_dir():
+            continue
+        for package in sorted(parent.iterdir()):
+            source = package / "src"
+            if source.is_dir() and not source.is_symlink():
+                paths.append(f"/workspace/{source.relative_to(root).as_posix()}")
+    return paths
+
+
 class CommandBroker:
     """Execute only an exact command entry from a trusted registry."""
 
@@ -149,6 +171,16 @@ class CommandBroker:
         root = workspace.resolve(strict=True)
         if not root.is_dir():
             raise KernelError("workspace_unavailable", "Implementation workspace is unavailable.")
+        # Bubblewrap cannot mount a tmpfs over a path hidden by a read-only bind. Create the
+        # bounded cache mount points in the candidate first; these paths are excluded from the
+        # source manifest by the workspace hash contract.
+        for cache_path in (".cache", ".ruff_cache", ".mypy_cache", ".pytest_cache"):
+            try:
+                (root / cache_path).mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise KernelError(
+                    "workspace_unavailable", "The implementation workspace is unavailable."
+                ) from error
         executable = str(entry["executable"])
         network = str(entry["network"])
         if network != "disabled":
@@ -167,12 +199,52 @@ class CommandBroker:
             sandbox,
             "--die-with-parent",
             "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
             "--new-session",
             "--clearenv",
         ]
         for runtime_root in runtime_roots:
             if Path(runtime_root).exists():
                 sandboxed_argv.extend(("--ro-bind", runtime_root, runtime_root))
+        mutation_allowlist = tuple(str(path) for path in entry.get("mutation_allowlist", []))
+        if mutation_allowlist and bool(entry["workspace_mutating"]):
+            raise KernelError(
+                "command_mutation_policy_invalid",
+                "A command must use either workspace_mutating or mutation_allowlist, not both.",
+            )
+        mutation_mounts: list[tuple[Path, str]] = []
+        for raw_path in mutation_allowlist:
+            relative = PurePosixPath(raw_path)
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                raise KernelError(
+                    "command_mutation_policy_invalid",
+                    "A command mutation allowlist contains an unsafe path.",
+                )
+            host_path = root.joinpath(*relative.parts)
+            try:
+                if host_path.is_symlink() or (
+                    host_path.exists() and not host_path.is_file() and not host_path.is_dir()
+                ):
+                    raise OSError
+                if not host_path.exists():
+                    host_path.parent.mkdir(parents=True, exist_ok=True)
+                    if raw_path.endswith("/"):
+                        host_path.mkdir()
+                    else:
+                        host_path.touch()
+            except OSError as error:
+                raise KernelError(
+                    "command_mutation_policy_invalid",
+                    "A command mutation allowlist path is unavailable.",
+                ) from error
+            mutation_mounts.append((host_path, f"/workspace/{relative.as_posix()}"))
+        workspace_mount = (
+            "--ro-bind"
+            if mutation_allowlist
+            else ("--bind" if bool(entry["workspace_mutating"]) else "--ro-bind")
+        )
         sandboxed_argv.extend(
             [
                 "--tmpfs",
@@ -203,11 +275,24 @@ class CommandBroker:
                 "/proc",
                 "--dir",
                 "/workspace",
-                "--bind",
+                workspace_mount,
                 str(root),
                 "/workspace",
             ]
         )
+        for host_path, sandbox_path in mutation_mounts:
+            sandboxed_argv.extend(("--bind", str(host_path), sandbox_path))
+        # Non-mutating commands get a read-only candidate tree, with only the
+        # standard tool caches mounted as ephemeral tmpfs.  This prevents a
+        # test or hook from changing the tree that a later gate will inspect.
+        if not bool(entry["workspace_mutating"]) or mutation_allowlist:
+            for cache_path in (
+                "/workspace/.cache",
+                "/workspace/.ruff_cache",
+                "/workspace/.mypy_cache",
+                "/workspace/.pytest_cache",
+            ):
+                sandboxed_argv.extend(("--tmpfs", cache_path))
         # Approved executable roots, mapped to their sandbox-visible equivalent. Fixed system
         # runtime roots are mounted identically; the contract root is remapped; explicitly
         # declared toolchain roots (if any) are mounted read-only at their identical path.
@@ -248,18 +333,25 @@ class CommandBroker:
             if name in os.environ and name not in {"OPENAI_API_KEY", "SAKANA_API_KEY"}
         }
         environment["PWD"] = "/workspace"
-        environment["HOME"] = "/workspace/.home"
+        environment["HOME"] = "/tmp"
         environment["TMPDIR"] = "/tmp"
+        # Never inherit a host cache path: the sandbox masks this path with an ephemeral
+        # mount, and all offline ``uv run`` commands must resolve it there.
+        environment["UV_CACHE_DIR"] = "/workspace/.cache/uv"
         if contract_root is not None:
             contract_host_path = str(contract)
             if "PATH" in environment:
                 environment["PATH"] = environment["PATH"].replace(
                     contract_host_path, _CONTRACT_SANDBOX_ROOT
                 )
-            environment["PYTHONPATH"] = (
-                "/countyforge/contract/tools/countyforge-github/src:"
-                "/countyforge/contract/tools/countyforge-runner/src"
-            )
+        # Do not inject trusted CountyForge source into candidate commands.  Instead make the
+        # candidate checkout's own workspace packages importable at the sandbox-visible path;
+        # this also overrides stale editable .pth paths from any pre-provisioned virtualenv.
+        candidate_sources = _candidate_source_paths(root)
+        if candidate_sources:
+            environment["PYTHONPATH"] = os.pathsep.join(candidate_sources)
+        else:
+            environment.pop("PYTHONPATH", None)
         for name, value in environment.items():
             sandboxed_argv.extend(("--setenv", name, value))
         sandboxed_argv.extend(
@@ -272,7 +364,15 @@ class CommandBroker:
         )
         started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         limit = int(entry["max_output_bytes"])
-        workspace_before = workspace_sha256(root) if not bool(entry["workspace_mutating"]) else None
+        workspace_before = (
+            workspace_sha256(
+                root,
+                excluded_paths=mutation_allowlist,
+                include_volatile=bool(mutation_allowlist),
+            )
+            if not bool(entry["workspace_mutating"]) or mutation_allowlist
+            else None
+        )
         try:
             process = subprocess.Popen(  # noqa: S603 - executable and argv are registry-owned
                 sandboxed_argv,
@@ -281,6 +381,7 @@ class CommandBroker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
+                start_new_session=True,
             )
         except OSError as error:
             raise KernelError(
@@ -302,7 +403,7 @@ class CommandBroker:
                 if remaining <= 0:
                     timed_out = True
                     try:
-                        process.kill()
+                        os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
                     break
@@ -327,7 +428,7 @@ class CommandBroker:
                             output_bytes += room
                         if first_excess:
                             try:
-                                process.kill()
+                                os.killpg(process.pid, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
                     elif not output_exceeded:
@@ -337,7 +438,7 @@ class CommandBroker:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 process.wait()
@@ -345,7 +446,7 @@ class CommandBroker:
             selector.close()
             if process.poll() is None:
                 try:
-                    process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 process.wait()
@@ -356,10 +457,18 @@ class CommandBroker:
                 "command_output_limit_exceeded",
                 "Implementation command exceeded its output limit.",
             )
-        if workspace_before is not None and workspace_sha256(root) != workspace_before:
+        if (
+            workspace_before is not None
+            and workspace_sha256(
+                root,
+                excluded_paths=mutation_allowlist,
+                include_volatile=bool(mutation_allowlist),
+            )
+            != workspace_before
+        ):
             raise KernelError(
                 "command_workspace_mutated",
-                "A non-mutating implementation command changed the candidate workspace.",
+                "An implementation command changed paths outside its declared mutation policy.",
             )
         stdout = bytes(buffers["stdout"])
         stderr = bytes(buffers["stderr"])

@@ -48,6 +48,17 @@ _ALLOWED_FILES = {
     "tasks.md",
     "spec.md",
 }
+_IMPLEMENTATION_TASK_PATHS = (
+    "libs",
+    "services",
+    "dags",
+    "docs",
+    "tools",
+    "tests",
+    "README.md",
+    "CONTRIBUTING.md",
+)
+_IMPLEMENTATION_TASK_CHECK = "repo.check"
 MAX_PLANNING_COMMENTS = 16
 DEFAULT_TRUSTED_BOT_ID = 41898282
 _TRUSTED_COUNTYFORGE_MARKERS = (
@@ -613,10 +624,16 @@ def materialize_plan(
         for citation in result["evidence_citations"]
     )
     design = f"""## Current-state evidence\n\n{citation_lines or "- See the bound planning packet."}\n\n## Proposed architecture\n\n{result["desired_outcome"]}\n\n## Dependency direction\n\nThe implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.\n\n## Trust boundaries\n\nIssue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.\n\n## Data and contract changes\n\nThe planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.\n\n## Alternatives considered\n\nNo alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.\n\n## Decisions and assumptions\n\n{chr(10).join(f"- {item}" for item in result["assumptions"]) or "- None recorded."}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Risks and compatibility\n\n{chr(10).join(f"- {item}" for item in result["risks"])}\n{chr(10).join(f"- {item}" for item in result["migration_compatibility_concerns"])}\n\n## Rollout and failure recovery\n\nValidation commands: {", ".join(result["validation_commands"])}. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.\n\n## Testing strategy\n\nRun the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.\n"""
+    task_paths = ",".join(_IMPLEMENTATION_TASK_PATHS)
     tasks = (
         "## Tasks\n\n"
         + "\n".join(
-            f"- [ ] 1.{index} {task}" for index, task in enumerate(result["task_slices"], 1)
+            (
+                f"<!-- countyforge-task: 1.{index} paths={task_paths} "
+                f"checks={_IMPLEMENTATION_TASK_CHECK} risk=normal prerequisites=- -->\n"
+                f"- [ ] 1.{index} {str(task).replace(chr(10), ' ').replace(chr(13), ' ')[:1024]}"
+            )
+            for index, task in enumerate(result["task_slices"], 1)
         )
         + "\n"
     )

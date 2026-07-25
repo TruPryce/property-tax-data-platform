@@ -205,8 +205,11 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                         "description": "Implement the fixture task",
                         "status": "incomplete",
                         "allowed_paths": ["tools"],
-                        "required_checks": ["make check"],
+                        "required_checks": ["repo.check"],
                         "risk": "normal",
+                        "prerequisites": [],
+                        "accepted_status": "incomplete",
+                        "metadata_complete": True,
                     }
                 ],
                 "policies": {
@@ -253,10 +256,12 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                         "task_id": "1.1",
                         "description": "Implement the fixture task",
                         "allowed_paths": ["tools"],
-                        "required_checks": ["make check"],
+                        "required_checks": ["repo.check"],
                         "prerequisites": [],
                         "risk": "normal",
                         "status": "incomplete",
+                        "accepted_status": "incomplete",
+                        "metadata_complete": True,
                     }
                 ],
             },

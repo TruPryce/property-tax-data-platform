@@ -90,13 +90,14 @@ The provider job receives a bounded bare target repository so it can validate im
 | `implementation-packet` | Verify merged-plan eligibility and build bounded packet/context/task artifacts | None |
 | `implementation-openai` | Run the implementation model in an ephemeral workspace with no publication permission | `OPENAI_API_KEY` only on invocation |
 | `implementation-validation` | Reconstruct a clean trusted worktree, enforce artifact/path policy, and run deterministic gates | None |
+| `implementation-publication-prep` | Resolve terminal evidence and package the validated implementation artifacts outside the state lane | None |
 | `implementation-publish` | Verify validation and live lease, create/update a deterministic draft implementation PR, and finalize state | None |
 | `publish` | Map sanitized non-planning result to canonical comment/check and release terminal lease | None |
 | `countyforge-maintenance.yml` | Read-only discovery of expired leases; never mutate or dispatch | None |
 
 All external actions are pinned to full commit SHAs. Jobs run on GitHub-hosted ephemeral runners. No workflow uses `pull_request_target`, a self-hosted runner, target-controlled shell expressions, or a repository-write credential in model/preparation jobs. Result uploads explicitly include only the declared hidden `.ai/reviews` evidence paths plus bounded non-hidden result files; workflow-policy tests lock that behavior. Only the trusted planning `plan-publish` job may use `contents: write`, and it receives no provider secret. Planning materialization and validation run in the separate read-only `plan-validation` job outside the state lane; the write-capable lane performs only the live lease check, deterministic Git data API mutation, and canonical finalization.
 
-The read-only `plan-validation` job runs the pinned OpenSpec package from the trusted checkout. The `implementation-validation` job installs that exact package before entering the no-network command sandbox, then runs it from a clean candidate worktree; no provider secret is present. Candidate files are never overlaid onto the immutable trusted tooling checkout. The write-capable publication jobs perform only live-lease checks, deterministic Git data API mutation, and canonical finalization. Any future validator upgrade must retain the pre-provisioned, no-secret, trusted-tooling boundary.
+The read-only `plan-validation` job runs the pinned OpenSpec package from the trusted checkout. The `implementation-validation` job installs that exact package before entering the no-network command sandbox, then runs it from a clean candidate worktree; no provider secret is present. Candidate files are never overlaid onto the immutable trusted tooling checkout. Implementation publication preparation downloads and packages evidence outside the state lane; the write-capable publication job performs only the final live-lease checks, deterministic Git data API mutation, and canonical finalization. Any future validator upgrade must retain the pre-provisioned, no-secret, trusted-tooling boundary.
 
 ## Trigger and State Contracts
 

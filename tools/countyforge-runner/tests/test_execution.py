@@ -270,7 +270,7 @@ def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -
             "/workspace/implementation-commands.json",
             "read_only",
         ),
-        ("implementation_workspace", "/workspace", "read_write"),
+        ("implementation_model_workspace", "/workspace", "read_write"),
         ("claimed_output_directory", "/out", "read_write"),
     }
     assert mounts == expected
@@ -278,6 +278,25 @@ def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -
     for source, target, access in expected:
         assert f'"{source}:{target}:{access}"' in adapter
     assert '"python:3.12-alpine@sha256:' in adapter
+    assert 'MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"' in adapter
+    assert "pathlib.Path(prompt_path).read_text" in adapter
+    assert '"IMPLEMENTATION RESULT SCHEMA"' in adapter
+    assert '"IMPLEMENTATION COMMAND POLICY"' in adapter
+    assert ' < "$MODEL_PROMPT"' in adapter
+    assert 'excluded = {".git", ".env", ".ai/policies", ".github/workflows"}' in adapter
+    assert profile["model_input"] == {
+        "mode": "bounded_stdin",
+        "prompt_path": ".ai/prompts/countyforge-implement.v1.md",
+        "workspace_snapshot_max_bytes": 4 * 1024 * 1024,
+        "contract_inputs": [
+            "packet",
+            "manifest",
+            "task_plan",
+            "result_schema",
+            "command_policy",
+            "source_snapshot",
+        ],
+    }
 
 
 def test_generic_metrics_are_low_cardinality(
