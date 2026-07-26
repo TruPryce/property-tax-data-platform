@@ -24,6 +24,8 @@ def build_trigger(
     workflow_run_attempt: int,
     delivery_id: str | None = None,
     planning_context_sha256: str | None = None,
+    implementation_change_sha256: str | None = None,
+    implementation_approval: JsonObject | None = None,
     timestamp: str | None = None,
     contracts: ControlContracts | None = None,
 ) -> JsonObject:
@@ -77,6 +79,21 @@ def build_trigger(
     }
     if planning_context_sha256 is not None:
         trigger["planning_context_sha256"] = planning_context_sha256
+    if implementation_change_sha256 is not None:
+        trigger["implementation_change_sha256"] = implementation_change_sha256
+    if implementation_approval is not None:
+        trigger["implementation_approval"] = {
+            key: implementation_approval[key]
+            for key in (
+                "planning_pr_number",
+                "planning_pr_merge_sha",
+                "approval_actor_id",
+                "approval_actor_type",
+                "approval_actor_login",
+                "approval_permission",
+            )
+            if key in implementation_approval
+        }
     issue = event.get("issue")
     if isinstance(issue, dict):
         metadata: JsonObject = {}
@@ -122,6 +139,8 @@ def semantic_idempotency_key(
     }
     if command == "plan" and "planning_context_sha256" in trigger:
         facts["planning_context_sha256"] = trigger["planning_context_sha256"]
+    if command == "implement" and "implementation_change_sha256" in trigger:
+        facts["implementation_change_sha256"] = trigger["implementation_change_sha256"]
     return hashlib.sha256(canonical_bytes(facts)).hexdigest()
 
 

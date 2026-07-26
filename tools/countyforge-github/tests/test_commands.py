@@ -17,6 +17,7 @@ from countyforge_github.contracts import ControlContracts, JsonObject
         ("context\n/countyforge validate\nmore context", "validate"),
         ("/countyforge fix --openspec-change add-github-run-control-plane", "fix"),
         ("/countyforge implement --openspec-change=add-github-run-control-plane", "implement"),
+        ("/countyforge implement add-github-run-control-plane", "implement"),
     ],
 )
 def test_parse_one_top_level_command(

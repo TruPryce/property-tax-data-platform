@@ -113,6 +113,14 @@
     "planning_predecessor_run_id": {"type": ["string", "null"], "maxLength": 128},
     "planning_context_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
     "planning_result_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-    "implementation_eligible": {"const": false}
+    "implementation_eligible": {"type": "boolean"},
+    "implementation_change_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "implementation_revision": {"type": ["integer", "null"], "minimum": 1},
+    "implementation_change_name": {"type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128},
+    "implementation_branch": {"type": ["string", "null"], "pattern": "^countyforge/implement/issue-[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*-r[0-9]+$", "maxLength": 200},
+    "implementation_pr_number": {"type": ["integer", "null"], "minimum": 1},
+    "implementation_completed_task_count": {"type": "integer", "minimum": 0},
+    "implementation_incomplete_task_count": {"type": "integer", "minimum": 0},
+    "implementation_blocked_task_count": {"type": "integer", "minimum": 0}
   }
 }

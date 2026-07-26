@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -107,3 +108,77 @@ def file_sha256(path: Path) -> str:
             {"name": path.name},
         ) from None
     return digest.hexdigest()
+
+
+def workspace_sha256(
+    root: Path,
+    *,
+    excluded_paths: Iterable[str] = (),
+    include_volatile: bool = False,
+) -> str:
+    """Hash a workspace's regular files without including Git metadata.
+
+    The implementation workspace is bound before provider credentials are selected.  Git
+    metadata is deliberately excluded because it is kept outside the model mount and can
+    change as trusted tooling performs checkout/configuration. Known interpreter/tool caches
+    are excluded by default because deterministic gates create them as normal runtime state;
+    callers auditing an explicit mutation allowlist can request that volatile state be included.
+    Symlinks and non-regular files fail closed rather than becoming ambiguous input.
+    """
+
+    try:
+        resolved = root.resolve(strict=True)
+    except OSError:
+        raise KernelError(
+            "workspace_unavailable", "The implementation workspace is unavailable."
+        ) from None
+    if not resolved.is_dir():
+        raise KernelError("workspace_unavailable", "The implementation workspace is unavailable.")
+    volatile_parts = {
+        ".git",
+        ".venv",
+        ".cache",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+    }
+    volatile_files = {
+        Path(".ai/reviews/review-packet.md"),
+        Path(".ai/reviews/review-packet.provenance.json"),
+    }
+    excluded = {
+        PurePosixPath(str(item).strip("/")) for item in excluded_paths if str(item).strip("/")
+    }
+    entries: list[JsonObject] = []
+    for path in sorted(resolved.rglob("*")):
+        relative = path.relative_to(resolved)
+        relative_posix = PurePosixPath(relative.as_posix())
+        # Git metadata is never a publishable workspace file and remains outside the model
+        # bundle even when volatile runtime state is included for mutation auditing.
+        if ".git" in relative.parts:
+            continue
+        if not include_volatile and any(part in volatile_parts for part in relative.parts):
+            continue
+        if not include_volatile and relative in volatile_files:
+            continue
+        if any(item == relative_posix or item in relative_posix.parents for item in excluded):
+            continue
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise KernelError(
+                "workspace_binding_invalid",
+                "The implementation workspace contains unsafe metadata.",
+            )
+        if path.is_dir():
+            continue
+        if not path.exists():
+            continue
+        raw = path.read_bytes()
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+            }
+        )
+    return hashlib.sha256(canonical_bytes({"files": entries})).hexdigest()

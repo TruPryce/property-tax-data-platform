@@ -51,6 +51,27 @@ jobs:
       - name: Install trusted CountyForge packages
         run: uv sync --frozen --package countyforge-github
 
+      - name: Install trusted OpenSpec validator for implementation eligibility
+        run: |
+          if python3 - "$GITHUB_EVENT_PATH" <<'PY'
+          import json
+          import re
+          import sys
+
+          event = json.load(open(sys.argv[1], encoding="utf-8"))
+          body = str(event.get("comment", {}).get("body", ""))
+          command = re.compile(r"^/countyforge[ \t]+implement(?:[ \t]+.*)?$", re.IGNORECASE)
+          raise SystemExit(0 if any(command.fullmatch(line.strip()) for line in body.splitlines()) else 1)
+          PY
+          then
+            npm install --global --prefix "$RUNNER_TEMP/openspec-intake-tool" \
+              --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+            test -x "$RUNNER_TEMP/openspec-intake-tool/bin/openspec"
+            echo "$RUNNER_TEMP/openspec-intake-tool/bin" >> "$GITHUB_PATH"
+          else
+            echo "No implementation command; trusted OpenSpec installation is not required."
+          fi
+
       - name: Process the created comment
         env:
           GITHUB_TOKEN: ${{ github.token }}

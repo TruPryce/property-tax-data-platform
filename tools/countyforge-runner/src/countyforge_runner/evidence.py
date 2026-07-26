@@ -7,7 +7,12 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from countyforge_runner.contracts import JsonObject, file_sha256, validate_document
+from countyforge_runner.contracts import (
+    JsonObject,
+    file_sha256,
+    validate_document,
+    workspace_sha256,
+)
 from countyforge_runner.errors import KernelError
 from countyforge_runner.resolver import Kernel, ResolvedRun
 
@@ -43,6 +48,17 @@ def _write_json(path: Path, document: JsonObject, secret_values: tuple[str, ...]
 
 def _input_fact(path_value: str) -> JsonObject:
     path = Path(path_value)
+    if path.is_dir():
+        bytes_total = sum(
+            child.stat().st_size
+            for child in path.rglob("*")
+            if child.is_file() and ".git" not in child.parts
+        )
+        return {
+            "name": path.name,
+            "bytes": bytes_total,
+            "sha256": workspace_sha256(path),
+        }
     return {
         "name": path.name,
         "bytes": path.stat().st_size,
@@ -62,6 +78,10 @@ def sanitized_request(resolved: ResolvedRun) -> JsonObject:
         "packet_provenance_sha256",
         "planning_packet_sha256",
         "context_manifest_sha256",
+        "implementation_packet_sha256",
+        "implementation_manifest_sha256",
+        "implementation_task_plan_sha256",
+        "workspace_binding_sha256",
         "selected_finding_ids",
         "expected_head_sha",
     ):
@@ -221,7 +241,12 @@ class EvidenceWriter:
             "image_digest": image_digest,
             "codex_cli_version": codex_cli_version,
             "enabled_tools": self.resolved.profile["model_tools"],
-            "disabled_tools": [] if self.resolved.profile["model_tools"] else all_disabled,
+            "disabled_tools": (
+                all_disabled
+                if not self.resolved.profile["model_tools"]
+                or "structured_file_bundle" in self.resolved.profile["model_tools"]
+                else []
+            ),
             "mounts": mounts,
             "network_policy": self.resolved.profile["network"]["policy"],
             "credential_names": credential_names,

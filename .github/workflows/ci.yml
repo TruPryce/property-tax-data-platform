@@ -29,6 +29,44 @@ jobs:
       - name: Sync workspace
         run: uv sync --locked --all-packages --group dev
 
+      - name: Check out trusted base tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Immutable base commit of the PR target branch (already-merged, review-gated code)
+          # on pull_request, or the pushed commit on push. Never the PR head, so a PR cannot
+          # influence the privileged helper obtained from here.
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted-base
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install and configure Bubblewrap sandbox
+        env:
+          # Trust boundary: the privileged helper (sudo) is executed only from the immutable
+          # trusted-base checkout (already-merged, review-gated code), never from the PR
+          # workspace. If the trusted base does not yet contain the helper, this step fails
+          # closed and no privileged action runs; the helper must first land on the base
+          # branch through a review-gated or controlled administrative commit. The pinned
+          # digest additionally proves the trusted-base helper bytes match what this
+          # review-gated workflow expects, so trusted-base drift also fails closed.
+          COUNTYFORGE_BWRAP_HELPER_SHA256: f23b37dd7af48cf398af37be80c7fefa3b78285ffa6c138c9de2ca1a3d7a2e52 # pragma: allowlist secret
+        run: |
+          verified_helper="$RUNNER_TEMP/configure_bwrap_apparmor.verified.sh"
+          trusted_helper="trusted-base/scripts/ci/configure_bwrap_apparmor.sh"
+          # Fail closed: never install or execute the PR-workspace copy of the sudo-bearing
+          # helper. If the immutable trusted base lacks it, stop before any privileged action.
+          if [ ! -f "$trusted_helper" ]; then
+            echo "::error::Trusted base Bubblewrap AppArmor helper is unavailable at $trusted_helper. Bootstrap it onto the base branch through a review-gated or controlled administrative commit before this CI preflight runs; the PR workspace copy is never executed with sudo." >&2
+            exit 2
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          command -v bwrap
+          bwrap --version
+          install -m 0755 "$trusted_helper" "$verified_helper"
+          printf '%s  %s\n' "$COUNTYFORGE_BWRAP_HELPER_SHA256" "$verified_helper" | sha256sum -c -
+          "$verified_helper"
+
       - name: Scan for secrets
         run: uv run pre-commit run detect-secrets --all-files --show-diff-on-failure
 
@@ -50,7 +88,12 @@ jobs:
         run: uv run python scripts/check_doc_links.py
 
       - name: Validate OpenSpec
-        run: npx --yes @fission-ai/openspec@1.6.0 validate --all --strict --no-interactive
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/openspec-ci-tool" \
+            --ignore-scripts --no-audit --no-fund "@fission-ai/openspec@1.6.0"
+          test -x "$RUNNER_TEMP/openspec-ci-tool/bin/openspec"
+          echo "$RUNNER_TEMP/openspec-ci-tool/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/openspec-ci-tool/bin/openspec" validate --all --strict --no-interactive
 
       - name: Validate legacy and CountyForge runner contracts
         run: make runner-contract-tests

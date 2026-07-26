@@ -2,16 +2,17 @@
 
 `countyforge-github` is the Python 3.12 GitHub control-plane adapter for CountyForge. It parses bounded `/countyforge` comments, applies repository-permission authorization, creates immutable triggers and runner requests, derives semantic identities, enforces lifecycle/lease/cancel/retry policy, renders one canonical status comment, and isolates GitHub REST access behind typed ports. Its planning adapter builds bounded issue context, validates strict plan results, and publishes only deterministic OpenSpec draft files.
 
-It depends on `countyforge-runner`. The runner kernel does not depend on this package or import GitHub workflow concepts.
+It depends on `countyforge-runner`. The runner kernel does not depend on this package or import GitHub workflow concepts. For Issue #7, it also builds accepted-plan implementation packets, validates isolated workspace artifacts, and publishes only trusted draft implementation PRs.
 
 ## Trust Boundary
 
 - package code, profiles, policies, schemas, prompts, and adapters load from one trusted default-branch `contract_root` SHA;
 - target issue or pull-request content is immutable untrusted data under a separate `target_root`; fork source identity and the ancestor merge base are explicit trigger facts;
 - packet preparation has no provider secret and executes no target code;
-- provider execution has no target worktree; and
-- `review.packet-only.v1` and `plan.read-only.v1` execute; implement/fix/validate remain
-  fail-closed.
+- provider execution has no target worktree for review/plan; implementation receives only an
+  ephemeral workspace; and
+- `review.packet-only.v1`, `plan.read-only.v1`, and `implement.workspace-write.v1` execute only
+  through their profile-specific boundaries; fix/validate remain fail-closed.
 
 ## Commands
 
@@ -27,6 +28,10 @@ uv run --package countyforge-github countyforge-github transition \
 uv run --package countyforge-github countyforge-github render-status --state state.json
 uv run --package countyforge-github countyforge-github build-planning-packet \
   --trigger trigger.json --issue issue.json --output-dir "$RUNNER_TEMP/planning"
+uv run --package countyforge-github countyforge-github build-implementation-packet \
+  --trigger trigger.json --issue issue.json --change-name accepted-change \
+  --planning-pr-merged --approval-actor-id 42 --output-dir "$RUNNER_TEMP/implementation"
+# The GitHub command surface also accepts: /countyforge implement <approved-change>
 uv run --package countyforge-github countyforge-github check
 ```
 
@@ -40,6 +45,9 @@ make countyforge-plan-check
 make countyforge-plan-fixtures
 make countyforge-command-fixtures
 make countyforge-workflow-policy-tests
+make countyforge-implement-check
+make countyforge-implement-fixtures
+make countyforge-implement-policy-tests
 make runner-contract-tests
 ```
 

@@ -24,6 +24,10 @@ MODEL_OUTPUT_ARTIFACTS = (
     "countyforge-plan-result.json",
     "countyforge-plan-events.ndjson",
     "countyforge-plan.stderr",
+    "countyforge-implementation-result.json",
+    "countyforge-implementation-task-evidence.ndjson",
+    "countyforge-implementation-workspace-manifest.json",
+    "countyforge-implementation-model-events.ndjson",
 )
 
 
@@ -64,6 +68,29 @@ def _redacted_tail(text: str, environment: dict[str, str], limit: int = 4000) ->
     return redacted[-limit:]
 
 
+def _remove_secret_bearing_files(run_dir: Path, secret_values: tuple[str, ...]) -> bool:
+    """Remove every output file containing a provider value before evidence export."""
+
+    values = tuple(value.encode("utf-8") for value in secret_values if value)
+    leaked = False
+    if not values or not run_dir.is_dir():
+        return False
+    for path in sorted(run_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if any(value in data for value in values):
+            leaked = True
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return leaked
+
+
 class Runner:
     """Dispatch only implemented immutable profiles."""
 
@@ -74,6 +101,7 @@ class Runner:
         evidence_root: Path | None = None,
         review_adapter: Path | None = None,
         plan_adapter: Path | None = None,
+        implementation_adapter: Path | None = None,
     ) -> None:
         self.kernel = kernel
         self.evidence_root = evidence_root
@@ -83,6 +111,9 @@ class Runner:
         self.plan_adapter = plan_adapter or (
             kernel.contract_root / ".ai" / "codex" / "08-run-countyforge-plan-docker.sh"
         )
+        self.implementation_adapter = implementation_adapter or (
+            kernel.contract_root / ".ai" / "codex" / "09-run-countyforge-implement-docker.sh"
+        )
 
     def run(self, resolved: ResolvedRun) -> tuple[JsonObject, int]:
         """Execute review or emit a fail-closed unimplemented disposition."""
@@ -91,6 +122,13 @@ class Runner:
             return self._not_implemented(resolved)
         if resolved.request["mode"] == "plan":
             return self._run_plan(resolved)
+        if resolved.request["mode"] == "implement":
+            if "implementation_packet_path" not in resolved.canonical_input_paths:
+                raise KernelError(
+                    "implementation_context_required",
+                    "Implementation requires a frozen packet, manifest, task plan, and workspace.",
+                )
+            return self._run_implementation(resolved)
         if resolved.request["mode"] != "review":
             raise KernelError(
                 "executor_not_available",
@@ -197,7 +235,7 @@ class Runner:
                     "EXPECTED_PACKET_SHA256": str(resolved.request["input"]["packet_sha256"]),
                 }
             )
-        else:
+        elif resolved.request["mode"] == "plan":
             environment.update(
                 {
                     "PLANNING_PACKET_PATH": resolved.canonical_input_paths["planning_packet_path"],
@@ -215,6 +253,44 @@ class Runner:
                     ),
                     "EXPECTED_CONTEXT_MANIFEST_SHA256": str(
                         resolved.request["input"]["context_manifest_sha256"]
+                    ),
+                }
+            )
+        else:
+            environment.update(
+                {
+                    "IMPLEMENTATION_PACKET_PATH": resolved.canonical_input_paths[
+                        "implementation_packet_path"
+                    ],
+                    "IMPLEMENTATION_MANIFEST_PATH": resolved.canonical_input_paths[
+                        "implementation_manifest_path"
+                    ],
+                    "IMPLEMENTATION_TASK_PLAN_PATH": resolved.canonical_input_paths[
+                        "implementation_task_plan_path"
+                    ],
+                    "WORKSPACE_PATH": str(resolved.request["input"]["workspace_path"]),
+                    "EXPECTED_IMPLEMENTATION_PACKET_SHA256": str(
+                        resolved.request["input"]["implementation_packet_sha256"]
+                    ),
+                    "EXPECTED_IMPLEMENTATION_MANIFEST_SHA256": str(
+                        resolved.request["input"]["implementation_manifest_sha256"]
+                    ),
+                    "EXPECTED_IMPLEMENTATION_TASK_PLAN_SHA256": str(
+                        resolved.request["input"]["implementation_task_plan_sha256"]
+                    ),
+                    "IMPLEMENTATION_SCHEMA_PATH": str(
+                        self.kernel.schema_root / "countyforge-implementation-result.schema.json"
+                    ),
+                    "PROMPT_PATH": str(
+                        self.kernel.contract_root / str(resolved.profile["prompt"]["path"])
+                    ),
+                    "IMPLEMENTATION_COMMAND_POLICY_PATH": str(
+                        self.kernel.contract_root
+                        / ".ai/policies/countyforge-implementation-commands.v1.json"
+                    ),
+                    "IMPLEMENTATION_PATH_POLICY_PATH": str(
+                        self.kernel.contract_root
+                        / ".ai/policies/countyforge-implementation-paths.v1.json"
                     ),
                 }
             )
@@ -284,9 +360,7 @@ class Runner:
         outcome = "succeeded" if code == 0 else "failed"
         secret_names = {"OPENAI_API_KEY", "SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"}
         secret_values = tuple(value for name, value in environment.items() if name in secret_names)
-        if result_path.is_file() and any(
-            value and value in result_path.read_text(encoding="utf-8") for value in secret_values
-        ):
+        if _remove_secret_bearing_files(run_dir, secret_values):
             disposition, outcome, code = "validation_failed", "failed", 5
             result_document = None
         writer = EvidenceWriter(
@@ -332,6 +406,156 @@ class Runner:
         }
         if result_document is not None:
             result["plan"] = result_document
+        if code != 0 and adapter_stderr:
+            result["adapter_stderr_tail"] = _redacted_tail(adapter_stderr, environment)
+        return result, code
+
+    def _run_implementation(self, resolved: ResolvedRun) -> tuple[JsonObject, int]:
+        """Invoke the workspace-writing adapter under the executable profile."""
+
+        run_dir = self._generic_run_dir(resolved)
+        if run_dir.is_dir() and any(run_dir.iterdir()):
+            raise KernelError(
+                "run_directory_collision",
+                "The implementation run directory already contains evidence.",
+            )
+        workspace = Path(str(resolved.request["input"]["workspace_path"])).resolve()
+        if not workspace.is_dir():
+            raise KernelError(
+                "workspace_unavailable", "The isolated implementation workspace is unavailable."
+            )
+        started_at = _iso_now()
+        started = time.monotonic()
+        self.kernel.revalidate_execution_context(resolved)
+        environment = self._scoped_environment(resolved, run_dir)
+        process = subprocess.Popen(
+            [str(self.implementation_adapter)],
+            cwd=self.kernel.contract_root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        timed_out = False
+        adapter_stderr = ""
+        try:
+            _, adapter_stderr = process.communicate(
+                timeout=float(resolved.effective_budgets["wall_clock_seconds"])
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                _, adapter_stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                _, adapter_stderr = process.communicate()
+        duration = max(time.monotonic() - started, 0.0)
+        raw_code = int(process.returncode or 0)
+        code = 5 if timed_out else (128 + abs(raw_code) if raw_code < 0 else raw_code)
+        result_path = run_dir / "countyforge-implementation-result.json"
+        disposition = "timed_out" if timed_out else ("completed" if code == 0 else "adapter_failed")
+        implementation: JsonObject | None = None
+        if code == 0 and result_path.is_file():
+            try:
+                implementation = load_json_object(result_path, kind="implementation result")
+                validate_document(
+                    implementation,
+                    self.kernel._load_schema("countyforge-implementation-result.schema.json"),
+                    kind="implementation result",
+                )
+                if implementation.get("security_sensitive_changes"):
+                    raise KernelError(
+                        "higher_risk_change_not_approved",
+                        "Security-sensitive implementation changes require explicit approval.",
+                    )
+                for field in ("files_created", "files_modified", "files_deleted"):
+                    for value in implementation[field]:
+                        path = Path(str(value))
+                        lowered = str(value).casefold()
+                        if (
+                            path.is_absolute()
+                            or ".." in path.parts
+                            or any(
+                                token in lowered
+                                for token in (
+                                    ".git",
+                                    ".env",
+                                    ".github/workflows",
+                                    ".ai/policies",
+                                    ".ai/providers",
+                                    "codeowners",
+                                )
+                            )
+                        ):
+                            raise KernelError(
+                                "prohibited_change",
+                                "Implementation result declares a prohibited path.",
+                            )
+            except (KernelError, OSError, UnicodeError):
+                implementation = None
+                disposition, code = "validation_failed", 5
+        elif code == 0:
+            disposition, code = "validation_failed", 5
+        output_bytes = _output_bytes(run_dir) if run_dir.is_dir() else 0
+        if output_bytes > int(resolved.effective_budgets["max_output_bytes"]):
+            disposition, code = "budget_exceeded", 5
+        outcome = "succeeded" if code == 0 else "failed"
+        secret_names = {"OPENAI_API_KEY", "SAKANA_API_KEY", "BITWARDEN_TOKEN", "BWS_ACCESS_TOKEN"}
+        secret_values = tuple(value for name, value in environment.items() if name in secret_names)
+        if _remove_secret_bearing_files(run_dir, secret_values):
+            implementation = None
+            disposition, outcome, code = "validation_failed", "failed", 5
+        legacy_provenance: JsonObject | None = None
+        provenance_path = run_dir / "container.provenance.json"
+        if provenance_path.is_file():
+            try:
+                legacy_provenance = load_json_object(
+                    provenance_path, kind="implementation container provenance"
+                )
+            except KernelError:
+                legacy_provenance = None
+        writer = EvidenceWriter(
+            self.kernel,
+            resolved,
+            run_dir,
+            owns_claim=False,
+            secret_values=secret_values,
+        )
+        summary = writer.write(
+            started_at=started_at,
+            duration_seconds=duration,
+            outcome=outcome,
+            disposition=disposition,
+            exit_code=code,
+            attempts=1,
+            input_bytes=_input_bytes(resolved),
+            output_bytes=output_bytes,
+            error_code=None if code == 0 else disposition,
+            legacy_provenance=legacy_provenance,
+            extra_artifacts=tuple(
+                name
+                for name in (
+                    "countyforge-implementation-result.json",
+                    "countyforge-implementation-task-evidence.ndjson",
+                    "countyforge-implementation-workspace-manifest.json",
+                    "countyforge-implementation-model-events.ndjson",
+                )
+                if (run_dir / name).is_file()
+            ),
+        )
+        result: JsonObject = {
+            "ok": code == 0,
+            "disposition": disposition,
+            "run_id": resolved.run_id,
+            "mode": "implement",
+            "profile_id": resolved.profile["profile_id"],
+            "run_dir": str(run_dir),
+            "summary": summary,
+        }
+        if implementation is not None:
+            result["implementation"] = implementation
         if code != 0 and adapter_stderr:
             result["adapter_stderr_tail"] = _redacted_tail(adapter_stderr, environment)
         return result, code
@@ -397,14 +621,19 @@ class Runner:
                 "BITWARDEN_TOKEN",
                 "BWS_ACCESS_TOKEN",
             }
+            secret_values = tuple(
+                value for name, value in environment.items() if name in secret_names
+            )
+            if _remove_secret_bearing_files(run_dir, secret_values):
+                disposition = "validation_failed"
+                outcome = "failed"
+                exit_code = 5
             writer = EvidenceWriter(
                 self.kernel,
                 resolved,
                 run_dir,
                 owns_claim=False,
-                secret_values=tuple(
-                    value for name, value in environment.items() if name in secret_names
-                ),
+                secret_values=secret_values,
             )
             summary = writer.write(
                 started_at=started_at,

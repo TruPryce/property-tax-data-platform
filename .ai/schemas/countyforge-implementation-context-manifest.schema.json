@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-implementation-context-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "repository", "issue_number", "change_name", "trusted_base_sha", "run_id", "implementation_revision", "packet_sha256", "sources", "excluded_candidates"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "trusted_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "implementation_revision": {"type": "integer", "minimum": 1},
+    "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sources": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/source"}},
+    "excluded_candidates": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["path", "reason_code"], "properties": {"path": {"type": "string", "maxLength": 512}, "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}}}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "path", "sha256", "category", "bytes", "truncated", "selection_reason", "trust_class"],
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+        "path": {"type": "string", "maxLength": 512},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "category": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "selection_reason": {"type": "string", "maxLength": 256},
+        "trust_class": {"enum": ["trusted_contract", "untrusted_evidence"]}
+      }
+    }
+  }
+}

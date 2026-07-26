@@ -374,9 +374,10 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
         .read_text(encoding="utf-8")
         .startswith("## ADDED Requirements")
     )
-    assert "- [ ] 1.1 Add strict contracts" in (change_root / "tasks.md").read_text(
-        encoding="utf-8"
-    )
+    tasks_text = (change_root / "tasks.md").read_text(encoding="utf-8")
+    assert "- [ ] 1.1 Add strict contracts" in tasks_text
+    assert "<!-- countyforge-task: 1.1" in tasks_text
+    assert "checks=repo.check" in tasks_text
     # OpenSpec CLI validation runs in the trusted workflow, not this free,
     # offline-safe fixture suite. The generated structure is checked above.
     assert not (tmp_path / "property_tax_application" / "generated.py").exists()
