@@ -721,6 +721,23 @@ def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> No
     assert "steps.terminal.outputs.disposition == 'completed'" in publication_step["if"]
 
 
+def test_planning_materialization_reports_upstream_provider_failure() -> None:
+    steps = _jobs("countyforge-run.yml")["plan-validation"]["steps"]
+    materialize = next(
+        step for step in steps if step.get("name") == "Materialize the validated planning draft"
+    )
+    run = str(materialize["run"])
+    result_lookup = run.index("-name countyforge-result.json")
+    disposition_check = run.index('.ok == true and .disposition == "completed"')
+    plan_lookup = run.index("-name countyforge-plan-result.json")
+    assert result_lookup < disposition_check < plan_lookup
+    assert "Planning provider result evidence is missing" in run
+    assert "Planning provider failed before materialization:" in run
+    assert "disposition=$disposition error_code=$error_code" in run
+    assert "Planning provider completed without countyforge-plan-result.json" in run
+    assert 'test -n "$plan_file"' not in run
+
+
 def test_claim_failure_recovery_has_no_provider_or_target_access() -> None:
     recovery = _jobs("countyforge-run.yml")["recover-claim-failure"]
     text = str(recovery)
