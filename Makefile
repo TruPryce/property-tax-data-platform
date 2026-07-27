@@ -6,7 +6,8 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
 	countyforge-request-fixtures countyforge-github-check countyforge-command-fixtures \
 	countyforge-workflow-policy-tests countyforge-plan-check countyforge-plan-fixtures \
-	countyforge-plan-policy-tests countyforge-plan-image countyforge-implement-check \
+	countyforge-plan-policy-tests countyforge-plan-image countyforge-plan-image-compatibility \
+	countyforge-implement-check \
 	countyforge-implement-fixtures countyforge-implement-policy-tests codex-image-openai codex-smoke-openai
 
 
@@ -30,7 +31,8 @@ RUNNER_SHELL_SCRIPTS := \
 	.ai/codex/07-build-countyforge-plan-image.sh \
 	.ai/codex/08-run-countyforge-plan-docker.sh \
 	.ai/codex/09-run-countyforge-implement-docker.sh \
-	.ai/codex/10-build-countyforge-implement-image.sh
+	.ai/codex/10-build-countyforge-implement-image.sh \
+	.ai/codex/11-test-countyforge-plan-image-compatibility.sh
 
 sync:
 	$(UV) sync --all-packages --group dev
@@ -171,6 +173,9 @@ countyforge-plan-policy-tests:
 
 countyforge-plan-image:
 	./.ai/codex/07-build-countyforge-plan-image.sh
+
+countyforge-plan-image-compatibility:
+	./.ai/codex/11-test-countyforge-plan-image-compatibility.sh
 
 countyforge-implement-check:
 	$(UV) run ruff format --check tools/countyforge-github/src/countyforge_github/implementation.py tools/countyforge-github/tests/test_implementation.py tools/countyforge-runner/src/countyforge_runner/command_broker.py tools/countyforge-runner/tests/test_command_broker.py

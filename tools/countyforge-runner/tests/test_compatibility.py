@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,6 +15,76 @@ from countyforge_runner.resolver import Kernel
 
 def version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
+
+
+def _capture_plan_image_build(
+    tmp_path: Path, provider: str
+) -> tuple[dict[str, object], JsonObject, str]:
+    fixture_root = tmp_path / provider
+    fake_bin = fixture_root / "bin"
+    capture = fixture_root / "capture"
+    fake_bin.mkdir(parents=True)
+    capture.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'test "$1" = "build"\n'
+        'context="${!#}"\n'
+        'cp "$context/config.toml" "$COUNTYFORGE_DOCKER_CAPTURE/config.toml"\n'
+        'cp "$context/fugu.json" "$COUNTYFORGE_DOCKER_CAPTURE/fugu.json"\n'
+        'cat > "$COUNTYFORGE_DOCKER_CAPTURE/Dockerfile"\n'
+        'printf "%s\\n" "$@" > "$COUNTYFORGE_DOCKER_CAPTURE/arguments"\n',
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "CODEX_IMAGE": f"countyforge-plan-{provider}:fixture",
+        "CODEX_PROVIDER": provider,
+        "COUNTYFORGE_DOCKER_CAPTURE": str(capture),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+    subprocess.run(
+        [".ai/codex/07-build-countyforge-plan-image.sh"],
+        check=True,
+        cwd=Path.cwd(),
+        env=env,
+    )
+    config = tomllib.loads((capture / "config.toml").read_text(encoding="utf-8"))
+    catalog = json.loads((capture / "fugu.json").read_text(encoding="utf-8"))
+    dockerfile = (capture / "Dockerfile").read_text(encoding="utf-8")
+    return config, catalog, dockerfile
+
+
+def test_sakana_plan_image_selects_provider_and_installed_model_catalog(
+    tmp_path: Path,
+) -> None:
+    config, catalog, dockerfile = _capture_plan_image_build(tmp_path, "sakana")
+    assert config["model"] == "fugu-ultra"
+    assert config["model_provider"] == "sakana"
+    assert config["model_catalog_json"] == "/opt/countyforge/fugu.json"
+    assert config["model"] in {model["slug"] for model in catalog["models"]}
+    provider = config["model_providers"]["sakana"]
+    assert provider == {
+        "name": "Sakana API",
+        "base_url": "https://api.sakana.ai/v1",
+        "env_key": "SAKANA_API_KEY",
+        "wire_api": "responses",
+        "stream_idle_timeout_ms": 7_200_000,
+        "stream_max_retries": 5,
+        "request_max_retries": 4,
+    }
+    assert "COPY fugu.json /opt/countyforge/fugu.json" in dockerfile
+
+
+def test_openai_plan_image_does_not_select_sakana(tmp_path: Path) -> None:
+    config, _, dockerfile = _capture_plan_image_build(tmp_path, "openai")
+    assert config["model"] == "gpt-5.6"
+    assert "model_provider" not in config
+    assert "model_catalog_json" not in config
+    assert "model_providers" not in config
+    assert "COPY fugu.json /opt/countyforge/fugu.json" in dockerfile
 
 
 def test_codex_pin_and_catalog_version_gates_agree() -> None:
