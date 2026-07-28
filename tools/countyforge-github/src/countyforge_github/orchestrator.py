@@ -720,6 +720,13 @@ def process_intake(
             "command": state["command"],
             "arguments": state["command_arguments"],
         }
+        if state["command"] == "plan" and state.get("planning_context_sha256") is not None:
+            retry_trigger["planning_context_sha256"] = state["planning_context_sha256"]
+        if (
+            state["command"] == "implement"
+            and state.get("implementation_change_sha256") is not None
+        ):
+            retry_trigger["implementation_change_sha256"] = state["implementation_change_sha256"]
         retry_trigger["retry"] = {
             "original_idempotency_key": state["original_idempotency_key"],
             "original_run_id": previous_run_id,

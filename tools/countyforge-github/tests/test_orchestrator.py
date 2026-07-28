@@ -245,6 +245,54 @@ def test_planning_context_change_creates_new_identity_after_terminal_run(
     assert second["idempotency_key"] != first["idempotency_key"]
 
 
+def test_plan_retry_preserves_context_identity_and_rejects_tampering(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    plan_event = event_factory("/countyforge plan")
+    plan_event["issue"].pop("pull_request")
+    plan_event["issue"]["title"] = "Feature: bounded planning"
+    plan_event["issue"]["body"] = "Problem: one. Outcome: plan one."
+    _intake(github, plan_event, head_sha)
+    comment_id, state = _canonical(github)
+    failed = transition_state(
+        state,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": "planning_fixture_failure",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    encoded_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
+    raw_trigger = base64.urlsafe_b64decode(encoded_trigger + "=" * (-len(encoded_trigger) % 4))
+    retry_trigger: JsonObject = json.loads(raw_trigger)
+
+    assert retry_trigger["planning_context_sha256"] == state["planning_context_sha256"]
+    assert (
+        effective_idempotency_key(retry_trigger, ControlContracts().execution_policy)
+        == retried["idempotency_key"]
+    )
+
+    missing = copy.deepcopy(retry_trigger)
+    missing.pop("planning_context_sha256")
+    with pytest.raises(ControlPlaneError) as missing_error:
+        effective_idempotency_key(missing, ControlContracts().execution_policy)
+    assert missing_error.value.code == "retry_identity_mismatch"
+
+    tampered = copy.deepcopy(retry_trigger)
+    tampered["planning_context_sha256"] = "0" * 64
+    with pytest.raises(ControlPlaneError) as tampered_error:
+        effective_idempotency_key(tampered, ControlContracts().execution_policy)
+    assert tampered_error.value.code == "retry_identity_mismatch"
+
+
 def test_check_creation_failure_makes_published_queue_retryable(
     event_factory: Callable[[str, str, str], JsonObject], head_sha: str
 ) -> None:
@@ -515,6 +563,62 @@ def test_approved_implementation_issue_dispatches_before_provider_execution(
     trigger = json.loads(base64.urlsafe_b64decode(encoded_trigger).decode("utf-8"))
     assert trigger["command"]["arguments"]["openspec_change"] == (
         "add-isolated-openspec-to-code-agents"
+    )
+
+
+def test_implementation_retry_preserves_change_identity(
+    event_factory: Callable[[str, str, str], JsonObject],
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github = FakeGitHub(head_sha)
+    implementation_event = event_factory(
+        "/countyforge implement add-isolated-openspec-to-code-agents"
+    )
+    implementation_event["issue"].pop("pull_request")
+    implementation_event["issue"]["number"] = 7
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.resolve_merged_planning_approval",
+        lambda *args, **kwargs: {
+            "eligible": True,
+            "planning_pr_number": 123,
+            "planning_pr_merge_sha": head_sha,
+            "approval_actor_id": 42,
+            "approval_actor_type": "User",
+            "approval_actor_login": "maintainer",
+            "approval_permission": "write",
+        },
+    )
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.evaluate_implementation_eligibility",
+        lambda **_: {"eligible": True, "change_sha256": "a" * 64},
+    )
+    _intake(github, implementation_event, head_sha)
+    comment_id, state = _canonical(github)
+    failed = transition_state(
+        state,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": "implementation_fixture_failure",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["issue"]["number"] = 7
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    encoded_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
+    raw_trigger = base64.urlsafe_b64decode(encoded_trigger + "=" * (-len(encoded_trigger) % 4))
+    retry_trigger: JsonObject = json.loads(raw_trigger)
+
+    assert retry_trigger["implementation_change_sha256"] == state["implementation_change_sha256"]
+    assert (
+        effective_idempotency_key(retry_trigger, ControlContracts().execution_policy)
+        == retried["idempotency_key"]
     )
 
 

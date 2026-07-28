@@ -748,6 +748,20 @@ def test_claim_failure_recovery_has_no_provider_or_target_access() -> None:
     assert "path': 'target" not in text
 
 
+def test_claim_reports_immutable_trigger_identity_disposition() -> None:
+    claim = _jobs("countyforge-run.yml")["claim"]
+    step = next(
+        item
+        for item in claim["steps"]
+        if item.get("name") == "Decode and validate immutable trigger"
+    )
+    run = str(step["run"])
+    assert "if ! uv run --package countyforge-github countyforge-github idempotency-key" in run
+    assert '.disposition // "identity_validation_failed"' in run
+    assert "Immutable trigger identity validation failed: disposition=$disposition" in run
+    assert "exit 2" in run
+
+
 def test_maintenance_never_dispatches_work() -> None:
     job = str(_jobs("countyforge-maintenance.yml")["reconcile"])
     assert "countyforge-github maintain" in job
