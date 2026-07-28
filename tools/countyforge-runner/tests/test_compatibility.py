@@ -75,6 +75,8 @@ def test_sakana_plan_image_selects_provider_and_installed_model_catalog(
         "stream_max_retries": 5,
         "request_max_retries": 4,
     }
+    assert "apt-get install -y --no-install-recommends ca-certificates" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
     assert "COPY fugu.json /opt/countyforge/fugu.json" in dockerfile
 
 
@@ -84,6 +86,8 @@ def test_openai_plan_image_does_not_select_sakana(tmp_path: Path) -> None:
     assert "model_provider" not in config
     assert "model_catalog_json" not in config
     assert "model_providers" not in config
+    assert "apt-get install -y --no-install-recommends ca-certificates" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
     assert "COPY fugu.json /opt/countyforge/fugu.json" in dockerfile
 
 

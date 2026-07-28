@@ -92,6 +92,10 @@ docker build --pull \
   -t "$IMAGE" -f - "$CTX" <<'DOCKERFILE'
 FROM node:22-bookworm-slim
 ARG CODEX_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g "@openai/codex@${CODEX_VERSION}"
 LABEL dev.trupryce.property-tax-data-platform.codex-cli-version="${CODEX_VERSION}"
 COPY fugu.json /opt/countyforge/fugu.json

@@ -18,6 +18,8 @@ CODEX_PROVIDER=openai CODEX_IMAGE="$OPENAI_IMAGE" \
 
 for image in "$SAKANA_IMAGE" "$OPENAI_IMAGE"; do
   test "$(docker run --rm --entrypoint codex "$image" --version)" = "codex-cli 0.144.6"
+  docker run --rm --network none --entrypoint /bin/sh "$image" \
+    -c 'test -s /etc/ssl/certs/ca-certificates.crt'
   test "$(
     docker image inspect "$image" \
       --format '{{ index .Config.Labels "dev.trupryce.property-tax-data-platform.codex-cli-version" }}'

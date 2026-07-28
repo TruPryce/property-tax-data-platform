@@ -1593,8 +1593,22 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.target_number }}
           COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
         run: |
+          result_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-result.json -type f -print -quit 2>/dev/null || true)"
+          if [ -z "$result_file" ]; then
+            echo "::error::Planning provider result evidence is missing" >&2
+            exit 2
+          fi
+          if ! jq -e '.ok == true and .disposition == "completed"' "$result_file" >/dev/null; then
+            disposition="$(jq -r '.disposition // "unknown"' "$result_file" 2>/dev/null || printf 'invalid_result')"
+            error_code="$(jq -r '.summary.error_code // "unknown"' "$result_file" 2>/dev/null || printf 'invalid_result')"
+            echo "::error::Planning provider failed before materialization: disposition=$disposition error_code=$error_code" >&2
+            exit 2
+          fi
           plan_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-plan-result.json -type f -print -quit 2>/dev/null || true)"
-          test -n "$plan_file"
+          if [ -z "$plan_file" ]; then
+            echo "::error::Planning provider completed without countyforge-plan-result.json" >&2
+            exit 2
+          fi
           cd trusted
           uv sync --frozen --package countyforge-github
           uv run --package countyforge-github countyforge-github materialize-plan \
