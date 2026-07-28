@@ -18,7 +18,13 @@ from countyforge_github.control import (
 )
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.github_api import GitHubPort
-from countyforge_github.identity import build_trigger, iso_now, semantic_idempotency_key
+from countyforge_github.identity import (
+    build_trigger,
+    implementation_approval_envelope,
+    implementation_approval_fingerprint,
+    iso_now,
+    semantic_idempotency_key,
+)
 from countyforge_github.implementation import (
     evaluate_implementation_eligibility,
     implementation_change_hash,
@@ -68,9 +74,24 @@ _REFUSAL_MESSAGES = {
         "CountyForge implement refused: the approved planning change is not present "
         "on the trusted branch."
     ),
+    "openspec_change_not_found": (
+        "CountyForge implement refused: the accepted OpenSpec change is unavailable."
+    ),
     "implementation_ineligible": (
         "CountyForge implement refused: the accepted OpenSpec change is not eligible "
         "for implementation."
+    ),
+    "implementation_retry_provenance_missing": (
+        "CountyForge implementation retry refused: canonical approval provenance is unavailable; "
+        "issue a new implement command."
+    ),
+    "implementation_change_changed": (
+        "CountyForge implementation retry refused: the accepted OpenSpec change no longer matches "
+        "the original run."
+    ),
+    "implementation_approval_changed": (
+        "CountyForge implementation retry refused: the merged planning approval changed; "
+        "issue a new implement command."
     ),
     "insufficient_issue_intake": (
         "CountyForge plan refused: the issue needs a supported type, problem statement, "
@@ -84,6 +105,79 @@ def _commit_sha(value: object) -> str:
     if _COMMIT_SHA.fullmatch(sha) is None:
         raise ControlPlaneError("invalid_target", "GitHub target commit facts are invalid.")
     return sha
+
+
+def _implementation_execution_facts(
+    github: GitHubPort,
+    *,
+    contracts: ControlContracts,
+    repository: str,
+    target_number: int,
+    target: JsonObject,
+    change_name: str,
+    expected_change_sha256: str | None = None,
+    expected_approval_sha256: str | None = None,
+) -> tuple[str, JsonObject]:
+    try:
+        change_sha256 = implementation_change_hash(contracts.contract_root, change_name)
+    except ControlPlaneError:
+        raise ControlPlaneError(
+            "openspec_change_not_found", "The accepted OpenSpec change is unavailable."
+        ) from None
+    if expected_change_sha256 is not None and change_sha256 != expected_change_sha256:
+        raise ControlPlaneError(
+            "implementation_change_changed",
+            "The accepted OpenSpec change no longer matches the original run.",
+        )
+    try:
+        resolved_approval = resolve_merged_planning_approval(
+            github,
+            repository=repository,
+            issue_number=target_number,
+            change_name=change_name,
+            trusted_base_sha=str(target["base_sha"]),
+        )
+    except ControlPlaneError:
+        resolved_approval = {"eligible": False}
+    if not resolved_approval.get("eligible"):
+        raise ControlPlaneError(
+            "planning_pr_approval_not_found",
+            "The approved planning change is not present on the trusted branch.",
+        )
+    approval = implementation_approval_envelope(resolved_approval)
+    eligibility = evaluate_implementation_eligibility(
+        contract_root=contracts.contract_root,
+        repository=repository,
+        issue_number=target_number,
+        change_name=change_name,
+        trusted_base_sha=str(target["base_sha"]),
+        planning_pr_merged=True,
+        planning_pr_number=int(approval["planning_pr_number"]),
+        planning_pr_merge_sha=str(approval["planning_pr_merge_sha"]),
+        approval_actor_id=int(approval["approval_actor_id"]),
+        approval_actor_type=str(approval["approval_actor_type"]),
+        approval_actor_login=str(approval["approval_actor_login"]),
+        approval_permission=str(approval["approval_permission"]),
+    )
+    if not eligibility["eligible"]:
+        raise ControlPlaneError(
+            "implementation_ineligible",
+            "The accepted OpenSpec change is not implementation-eligible.",
+        )
+    if eligibility["change_sha256"] != change_sha256:
+        raise ControlPlaneError(
+            "implementation_change_changed",
+            "The accepted OpenSpec change changed during eligibility validation.",
+        )
+    if (
+        expected_approval_sha256 is not None
+        and implementation_approval_fingerprint(approval) != expected_approval_sha256
+    ):
+        raise ControlPlaneError(
+            "implementation_approval_changed",
+            "The merged planning approval changed after the original run.",
+        )
+    return change_sha256, approval
 
 
 def _target_facts(
@@ -534,62 +628,25 @@ def process_intake(
         )
     target = _target_facts(event, github, repository, trusted_tool_sha)
     if operation == "implement":
-        change_name = command["arguments"].get("openspec_change")
+        change_name = str(command["arguments"].get("openspec_change"))
         try:
-            implementation_change_sha256 = implementation_change_hash(
-                resolved.contract_root, str(change_name)
+            implementation_change_sha256, implementation_approval = _implementation_execution_facts(
+                github,
+                contracts=resolved,
+                repository=repository,
+                target_number=target_number,
+                target=target,
+                change_name=change_name,
             )
-        except ControlPlaneError:
+        except ControlPlaneError as error:
+            if error.code not in _REFUSAL_MESSAGES:
+                raise
             return _refused_result(
                 github,
                 repository=repository,
                 target_number=target_number,
                 trusted_bot_id=trusted_bot_id,
-                reason_code="openspec_change_not_found",
-                events=events,
-                authorization=decision,
-            )
-        try:
-            implementation_approval = resolve_merged_planning_approval(
-                github,
-                repository=repository,
-                issue_number=target_number,
-                change_name=str(change_name),
-                trusted_base_sha=str(target["base_sha"]),
-            )
-        except ControlPlaneError:
-            implementation_approval = {"eligible": False}
-        if not implementation_approval.get("eligible"):
-            return _refused_result(
-                github,
-                repository=repository,
-                target_number=target_number,
-                trusted_bot_id=trusted_bot_id,
-                reason_code="planning_pr_approval_not_found",
-                events=events,
-                authorization=decision,
-            )
-        eligibility = evaluate_implementation_eligibility(
-            contract_root=resolved.contract_root,
-            repository=repository,
-            issue_number=target_number,
-            change_name=str(change_name),
-            trusted_base_sha=str(target["base_sha"]),
-            planning_pr_merged=True,
-            planning_pr_number=int(implementation_approval["planning_pr_number"]),
-            planning_pr_merge_sha=str(implementation_approval["planning_pr_merge_sha"]),
-            approval_actor_id=int(implementation_approval["approval_actor_id"]),
-            approval_actor_type=str(implementation_approval["approval_actor_type"]),
-            approval_actor_login=str(implementation_approval["approval_actor_login"]),
-            approval_permission=str(implementation_approval["approval_permission"]),
-        )
-        if not eligibility["eligible"]:
-            return _refused_result(
-                github,
-                repository=repository,
-                target_number=target_number,
-                trusted_bot_id=trusted_bot_id,
-                reason_code="implementation_ineligible",
+                reason_code=error.code,
                 events=events,
                 authorization=decision,
             )
@@ -714,6 +771,52 @@ def process_intake(
                 events=events,
                 authorization=decision,
             )
+        retry_implementation_change_sha256: str | None = None
+        retry_implementation_approval: JsonObject | None = None
+        if state["command"] == "implement":
+            stored_change_sha256 = state.get("implementation_change_sha256")
+            stored_approval_sha256 = state.get("implementation_approval_sha256")
+            change_name = state["command_arguments"].get("openspec_change")
+            if (
+                not isinstance(stored_change_sha256, str)
+                or not isinstance(stored_approval_sha256, str)
+                or not isinstance(change_name, str)
+            ):
+                return _refused_result(
+                    github,
+                    repository=repository,
+                    target_number=target_number,
+                    trusted_bot_id=trusted_bot_id,
+                    reason_code="implementation_retry_provenance_missing",
+                    events=events,
+                    authorization=decision,
+                )
+            try:
+                (
+                    retry_implementation_change_sha256,
+                    retry_implementation_approval,
+                ) = _implementation_execution_facts(
+                    github,
+                    contracts=resolved,
+                    repository=repository,
+                    target_number=target_number,
+                    target=target,
+                    change_name=change_name,
+                    expected_change_sha256=stored_change_sha256,
+                    expected_approval_sha256=stored_approval_sha256,
+                )
+            except ControlPlaneError as error:
+                if error.code not in _REFUSAL_MESSAGES:
+                    raise
+                return _refused_result(
+                    github,
+                    repository=repository,
+                    target_number=target_number,
+                    trusted_bot_id=trusted_bot_id,
+                    reason_code=error.code,
+                    events=events,
+                    authorization=decision,
+                )
         retry_trigger = copy.deepcopy(trigger)
         retry_trigger["command"] = {
             "contract_version": 1,
@@ -724,9 +827,11 @@ def process_intake(
             retry_trigger["planning_context_sha256"] = state["planning_context_sha256"]
         if (
             state["command"] == "implement"
-            and state.get("implementation_change_sha256") is not None
+            and retry_implementation_change_sha256 is not None
+            and retry_implementation_approval is not None
         ):
-            retry_trigger["implementation_change_sha256"] = state["implementation_change_sha256"]
+            retry_trigger["implementation_change_sha256"] = retry_implementation_change_sha256
+            retry_trigger["implementation_approval"] = retry_implementation_approval
         retry_trigger["retry"] = {
             "original_idempotency_key": state["original_idempotency_key"],
             "original_run_id": previous_run_id,

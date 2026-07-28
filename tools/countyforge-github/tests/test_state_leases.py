@@ -133,6 +133,7 @@ def test_legacy_state_without_planning_metadata_remains_readable(
         "planning_context_sha256",
         "planning_result_sha256",
         "implementation_eligible",
+        "implementation_approval_sha256",
     ):
         state.pop(field, None)
     body = render_status(state)

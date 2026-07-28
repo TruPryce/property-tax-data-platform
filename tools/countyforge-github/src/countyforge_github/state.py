@@ -13,7 +13,7 @@ from countyforge_runner.errors import KernelError
 
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
-from countyforge_github.identity import retry_idempotency_key
+from countyforge_github.identity import implementation_approval_fingerprint, retry_idempotency_key
 from countyforge_github.implementation import implementation_revision
 
 MARKER_PREFIX: Final = "<!-- countyforge-status:v1:"
@@ -153,6 +153,11 @@ def initial_state(
         "implementation_change_sha256": (
             str(trigger.get("implementation_change_sha256"))
             if command == "implement" and trigger.get("implementation_change_sha256")
+            else None
+        ),
+        "implementation_approval_sha256": (
+            implementation_approval_fingerprint(trigger["implementation_approval"])
+            if command == "implement" and isinstance(trigger.get("implementation_approval"), dict)
             else None
         ),
         "implementation_revision": (

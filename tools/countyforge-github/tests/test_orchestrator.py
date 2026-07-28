@@ -7,11 +7,16 @@ import copy
 import json
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.identity import effective_idempotency_key
+from countyforge_github.implementation import (
+    build_implementation_packet,
+    implementation_change_hash,
+)
 from countyforge_github.leases import acquire_lease
 from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.orchestrator import process_intake
@@ -172,6 +177,47 @@ def _assert_authorization(result: JsonObject, outcome: str) -> None:
     serialized_metrics = "\n".join(result["metrics"])
     assert str(authorization["actor"]["id"]) not in serialized_metrics
     assert authorization["actor"]["login"] not in serialized_metrics
+
+
+def _implementation_approval(
+    head_sha: str, *, planning_pr_number: int = 123, permission: str = "write"
+) -> JsonObject:
+    return {
+        "eligible": True,
+        "planning_pr_number": planning_pr_number,
+        "planning_pr_merge_sha": head_sha,
+        "approval_actor_id": 42,
+        "approval_actor_type": "User",
+        "approval_actor_login": "maintainer",
+        "approval_permission": permission,
+    }
+
+
+def _eligible_implementation(**facts: object) -> JsonObject:
+    contract_root = facts["contract_root"]
+    change_name = facts["change_name"]
+    assert isinstance(contract_root, Path)
+    assert isinstance(change_name, str)
+    return {
+        "eligible": True,
+        "change_sha256": implementation_change_hash(contract_root, change_name),
+    }
+
+
+def _fail_canonical_run(github: FakeGitHub, *, reason: str) -> JsonObject:
+    comment_id, state = _canonical(github)
+    failed = transition_state(
+        state,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": reason,
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+    return failed
 
 
 def test_unauthorized_actor_never_dispatches_or_creates_check(
@@ -536,21 +582,13 @@ def test_approved_implementation_issue_dispatches_before_provider_execution(
     event["issue"]["number"] = 7
     monkeypatch.setattr(
         "countyforge_github.orchestrator.resolve_merged_planning_approval",
-        lambda *args, **kwargs: {
-            "eligible": True,
-            "planning_pr_number": 123,
-            "planning_pr_merge_sha": head_sha,
-            "approval_actor_id": 42,
-            "approval_actor_type": "User",
-            "approval_actor_login": "maintainer",
-            "approval_permission": "write",
-        },
+        lambda *args, **kwargs: _implementation_approval(head_sha),
     )
     # The repository's active implementation change is itself fully checked off; stub the
     # trusted eligibility result here so this fixture exercises dispatch serialization only.
     monkeypatch.setattr(
         "countyforge_github.orchestrator.evaluate_implementation_eligibility",
-        lambda **_: {"eligible": True, "change_sha256": "a" * 64},
+        _eligible_implementation,
     )
     result = _intake(github, event, head_sha)
     assert result["status"] == "dispatched"
@@ -570,6 +608,8 @@ def test_implementation_retry_preserves_change_identity(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
     implementation_event = event_factory(
@@ -579,19 +619,11 @@ def test_implementation_retry_preserves_change_identity(
     implementation_event["issue"]["number"] = 7
     monkeypatch.setattr(
         "countyforge_github.orchestrator.resolve_merged_planning_approval",
-        lambda *args, **kwargs: {
-            "eligible": True,
-            "planning_pr_number": 123,
-            "planning_pr_merge_sha": head_sha,
-            "approval_actor_id": 42,
-            "approval_actor_type": "User",
-            "approval_actor_login": "maintainer",
-            "approval_permission": "write",
-        },
+        lambda *args, **kwargs: _implementation_approval(head_sha),
     )
     monkeypatch.setattr(
         "countyforge_github.orchestrator.evaluate_implementation_eligibility",
-        lambda **_: {"eligible": True, "change_sha256": "a" * 64},
+        _eligible_implementation,
     )
     _intake(github, implementation_event, head_sha)
     comment_id, state = _canonical(github)
@@ -616,10 +648,172 @@ def test_implementation_retry_preserves_change_identity(
     retry_trigger: JsonObject = json.loads(raw_trigger)
 
     assert retry_trigger["implementation_change_sha256"] == state["implementation_change_sha256"]
+    expected_approval = _implementation_approval(head_sha)
+    expected_approval.pop("eligible")
+    assert retry_trigger["implementation_approval"] == expected_approval
     assert (
         effective_idempotency_key(retry_trigger, ControlContracts().execution_policy)
         == retried["idempotency_key"]
     )
+
+    def packet_eligibility(**facts: object) -> JsonObject:
+        return {
+            "contract_version": 1,
+            "eligible": True,
+            "repository": facts["repository"],
+            "issue_number": facts["issue_number"],
+            "change_name": facts["change_name"],
+            "change_sha256": retry_trigger["implementation_change_sha256"],
+            "trusted_base_sha": facts["trusted_base_sha"],
+            "planning_pr_merged": facts["planning_pr_merged"],
+            "approval_actor_id": facts["approval_actor_id"],
+            "approval_actor_type": facts["approval_actor_type"],
+            "planning_pr_number": facts["planning_pr_number"],
+            "planning_pr_merge_sha": facts["planning_pr_merge_sha"],
+            "approval_actor_login": facts["approval_actor_login"],
+            "approval_permission": facts["approval_permission"],
+            "blocking_reasons": [],
+        }
+
+    monkeypatch.setattr(
+        "countyforge_github.implementation.evaluate_implementation_eligibility",
+        packet_eligibility,
+    )
+    monkeypatch.setattr(
+        "countyforge_github.implementation._tasks_from_text",
+        lambda *args, **kwargs: [
+            {
+                "task_id": "1.1",
+                "description": "Exercise implementation retry packet construction",
+                "status": "incomplete",
+                "accepted_status": "incomplete",
+                "metadata_complete": True,
+                "allowed_paths": ["tools"],
+                "required_checks": ["repo.check"],
+                "risk": "normal",
+                "prerequisites": [],
+            }
+        ],
+    )
+    packet_result = build_implementation_packet(
+        trigger=retry_trigger,
+        issue={
+            "number": 7,
+            "title": "Implementation retry",
+            "body": "Build the accepted implementation packet.",
+        },
+        contract_root=repo_root,
+        output_dir=tmp_path / "implementation-packet",
+        run_id=str(retried["run_id"]),
+        change_name="add-isolated-openspec-to-code-agents",
+        planning_pr_merged=True,
+        approval_actor_id=int(retry_trigger["implementation_approval"]["approval_actor_id"]),
+    )
+    packet = json.loads(Path(str(packet_result["packet_path"])).read_text(encoding="utf-8"))
+    assert packet["eligibility"]["planning_pr_number"] == 123
+    assert packet["eligibility"]["planning_pr_merge_sha"] == head_sha
+
+
+@pytest.mark.parametrize(
+    ("retry_condition", "expected_disposition"),
+    [
+        ("approval_disappeared", "planning_pr_approval_not_found"),
+        ("approval_changed", "implementation_approval_changed"),
+        ("implementation_ineligible", "implementation_ineligible"),
+    ],
+)
+def test_implementation_retry_revalidates_current_approval(
+    event_factory: Callable[[str, str, str], JsonObject],
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_condition: str,
+    expected_disposition: str,
+) -> None:
+    github = FakeGitHub(head_sha)
+    approval_calls = 0
+    eligibility_calls = 0
+
+    def resolve_approval(*args: object, **kwargs: object) -> JsonObject:
+        nonlocal approval_calls
+        approval_calls += 1
+        if approval_calls == 1:
+            return _implementation_approval(head_sha)
+        if retry_condition == "approval_disappeared":
+            return {"eligible": False, "reason": "planning_pr_approval_not_found"}
+        if retry_condition == "approval_changed":
+            return _implementation_approval(head_sha, planning_pr_number=124)
+        return _implementation_approval(head_sha)
+
+    def evaluate_eligibility(**facts: object) -> JsonObject:
+        nonlocal eligibility_calls
+        eligibility_calls += 1
+        decision = _eligible_implementation(**facts)
+        if retry_condition == "implementation_ineligible" and eligibility_calls == 2:
+            decision["eligible"] = False
+        return decision
+
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.resolve_merged_planning_approval",
+        resolve_approval,
+    )
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.evaluate_implementation_eligibility",
+        evaluate_eligibility,
+    )
+    implementation_event = event_factory(
+        "/countyforge implement add-isolated-openspec-to-code-agents"
+    )
+    implementation_event["issue"].pop("pull_request")
+    implementation_event["issue"]["number"] = 7
+    _intake(github, implementation_event, head_sha)
+    _fail_canonical_run(github, reason="implementation_fixture_failure")
+
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["issue"]["number"] = 7
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+
+    assert retried["status"] == "refused"
+    assert retried["disposition"] == expected_disposition
+    assert len(github.dispatches) == 1
+
+
+def test_implementation_retry_rejects_changed_openspec_hash(
+    event_factory: Callable[[str, str, str], JsonObject],
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github = FakeGitHub(head_sha)
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.resolve_merged_planning_approval",
+        lambda *args, **kwargs: _implementation_approval(head_sha),
+    )
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.evaluate_implementation_eligibility",
+        _eligible_implementation,
+    )
+    implementation_event = event_factory(
+        "/countyforge implement add-isolated-openspec-to-code-agents"
+    )
+    implementation_event["issue"].pop("pull_request")
+    implementation_event["issue"]["number"] = 7
+    _intake(github, implementation_event, head_sha)
+    _fail_canonical_run(github, reason="implementation_fixture_failure")
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.implementation_change_hash",
+        lambda *args, **kwargs: "0" * 64,
+    )
+
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["issue"]["number"] = 7
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+
+    assert retried["status"] == "refused"
+    assert retried["disposition"] == "implementation_change_changed"
+    assert len(github.dispatches) == 1
 
 
 def test_all_checked_implementation_change_is_refused_before_dispatch(
@@ -633,15 +827,7 @@ def test_all_checked_implementation_change_is_refused_before_dispatch(
     event["issue"]["number"] = 7
     monkeypatch.setattr(
         "countyforge_github.orchestrator.resolve_merged_planning_approval",
-        lambda *args, **kwargs: {
-            "eligible": True,
-            "planning_pr_number": 123,
-            "planning_pr_merge_sha": head_sha,
-            "approval_actor_id": 42,
-            "approval_actor_type": "User",
-            "approval_actor_login": "maintainer",
-            "approval_permission": "write",
-        },
+        lambda *args, **kwargs: _implementation_approval(head_sha),
     )
     result = _intake(github, event, head_sha)
     assert result["status"] == "refused"
