@@ -85,12 +85,19 @@ def test_retry_identity_is_bound_to_original_command_and_attempt(
     trigger["retry"] = {
         "original_idempotency_key": original,
         "original_run_id": f"gh-{original[:24]}-a1",
+        "original_comment_id": trigger["comment"]["id"],
         "attempt": 2,
     }
     contracts.validate("trigger", trigger)
     expected = retry_idempotency_key(original, 2)
     assert effective_idempotency_key(trigger, contracts.execution_policy) == expected
     assert execution_run_id(trigger, contracts.execution_policy) == f"gh-{expected[:24]}-a2"
+
+    missing_comment_provenance = copy.deepcopy(trigger)
+    missing_comment_provenance["retry"].pop("original_comment_id")
+    with pytest.raises(KernelError) as missing_comment:
+        contracts.validate("trigger", missing_comment_provenance)
+    assert missing_comment.value.code == "schema_validation_failed"
 
     trigger["retry"]["original_idempotency_key"] = "a" * 64
     with pytest.raises(ControlPlaneError) as raised:

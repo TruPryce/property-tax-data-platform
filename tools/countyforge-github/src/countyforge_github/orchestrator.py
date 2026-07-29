@@ -675,6 +675,7 @@ def process_intake(
             issue_document,
             planning_comments,
             trigger_comment_id=trigger_comment_id,
+            comment_id_upper_bound=trigger_comment_id,
             trusted_bot_id=trusted_bot_id,
         )
         labels = [
@@ -835,6 +836,7 @@ def process_intake(
         retry_trigger["retry"] = {
             "original_idempotency_key": state["original_idempotency_key"],
             "original_run_id": previous_run_id,
+            "original_comment_id": state["original_comment_id"],
             "attempt": state["attempt"],
         }
         resolved.validate("trigger", retry_trigger)

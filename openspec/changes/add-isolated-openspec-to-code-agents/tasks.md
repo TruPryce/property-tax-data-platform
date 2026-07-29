@@ -35,3 +35,10 @@
 - [x] 6.2 Persist implementation approval provenance and attach the freshly resolved approval envelope to eligible retries.
 - [x] 6.3 Add current and legacy plan/implementation retry fixtures, packet-precondition coverage, and sanitized workflow claim diagnostics.
 - [x] 6.4 Run the deterministic CountyForge, workflow-policy, OpenSpec, documentation, repository, and `prepr-no-ai` gates.
+
+## 7. Planning retry context correction
+
+- [x] 7.1 Bind original intake and retry provenance to the plan-command ID and define the immutable planning discussion cutoff.
+- [x] 7.2 Reconstruct planning packets at that cutoff while rejecting edits or deletion within the selected original context.
+- [x] 7.3 Add end-to-end retry packet fixtures and run the deterministic CountyForge, workflow-policy, OpenSpec, documentation, and `prepr-no-ai` gates.
+- [x] 7.4 Reconcile the 16-comment selection contract and cover selected, older unselected, and post-cutoff mutations.

@@ -104,9 +104,10 @@ def select_planning_comments(
     comments: Iterable[JsonObject],
     *,
     trigger_comment_id: int | None = None,
+    comment_id_upper_bound: int | None = None,
     trusted_bot_id: int | None = DEFAULT_TRUSTED_BOT_ID,
 ) -> list[JsonObject]:
-    """Return a stable newest-first window, retaining the triggering comment when present."""
+    """Return a stable bounded window at or before an optional immutable comment boundary."""
 
     unique: dict[int, JsonObject] = {}
     no_id: list[JsonObject] = []
@@ -118,8 +119,10 @@ def select_planning_comments(
         except (TypeError, ValueError):
             comment_id = 0
         if comment_id > 0:
+            if comment_id_upper_bound is not None and comment_id > comment_id_upper_bound:
+                continue
             unique[comment_id] = comment
-        else:
+        elif comment_id_upper_bound is None:
             no_id.append(comment)
     ordered = sorted([*unique.values(), *no_id], key=_comment_sort_key, reverse=True)
     window = ordered[:MAX_PLANNING_COMMENTS]
@@ -155,6 +158,7 @@ def planning_context_fingerprint(
     limits: ContextLimits | None = None,
     *,
     trigger_comment_id: int | None = None,
+    comment_id_upper_bound: int | None = None,
     trusted_bot_id: int | None = DEFAULT_TRUSTED_BOT_ID,
 ) -> str:
     """Hash the bounded, redacted issue discussion before execution deduplication."""
@@ -181,6 +185,7 @@ def planning_context_fingerprint(
     for comment in select_planning_comments(
         comments,
         trigger_comment_id=trigger_comment_id,
+        comment_id_upper_bound=comment_id_upper_bound,
         trusted_bot_id=trusted_bot_id,
     ):
         raw_comment = str(comment.get("body", ""))[:4000]
@@ -330,16 +335,23 @@ def build_planning_packet(
         if isinstance(trigger_comment, dict) and trigger_comment.get("id") is not None
         else None
     )
+    context_trigger_comment_id = trigger_comment_id
+    retry = trigger.get("retry")
+    if isinstance(retry, dict):
+        context_trigger_comment_id = int(retry["original_comment_id"])
+    comment_id_upper_bound = context_trigger_comment_id
     comment_records = select_planning_comments(
         comments,
-        trigger_comment_id=trigger_comment_id,
+        trigger_comment_id=context_trigger_comment_id,
+        comment_id_upper_bound=comment_id_upper_bound,
         trusted_bot_id=trusted_bot_id,
     )
     computed_context_sha256 = planning_context_fingerprint(
         issue,
         comment_records,
         limits,
-        trigger_comment_id=trigger_comment_id,
+        trigger_comment_id=context_trigger_comment_id,
+        comment_id_upper_bound=comment_id_upper_bound,
         trusted_bot_id=trusted_bot_id,
     )
     supplied_context_sha256 = trigger.get("planning_context_sha256")

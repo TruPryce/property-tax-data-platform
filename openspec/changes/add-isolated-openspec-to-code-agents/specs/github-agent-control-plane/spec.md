@@ -26,7 +26,7 @@ Every workflow job SHALL retain least-privilege permissions. Packet preparation 
 - **THEN** only the dedicated publication job has code-write permission and the model job cannot publish a branch, commit, or PR
 
 ### Requirement: Immutable retry attempts
-`/countyforge retry` SHALL require authorization, select the latest retry-eligible terminal run, preserve its trigger provenance and evidence, increment attempt, create a new run ID and retry-derived semantic key, and require the current target head SHA to equal the original head. It MUST reject active, successful, or stale-head retry unless a later accepted policy explicitly permits it, and it MUST never mutate or overwrite the original run. A current planning retry SHALL restore the stored planning-context fingerprint before reconstructing the original semantic identity; a schema-valid legacy planning run without that fingerprint SHALL retain its legacy identity and remain retryable. Every new implementation run SHALL store the accepted-change hash and a SHA-256 fingerprint of exactly `planning_pr_number`, `planning_pr_merge_sha`, `approval_actor_id`, `approval_actor_type`, `approval_actor_login`, and `approval_permission`. Before dispatching an implementation retry, the control plane MUST re-resolve those approval facts from GitHub, rerun implementation eligibility, require the current accepted-change hash and complete approval fingerprint to equal the stored values, and attach the freshly resolved bounded approval envelope to the retry trigger.
+`/countyforge retry` SHALL require authorization, select the latest retry-eligible terminal run, preserve its trigger provenance and evidence, increment attempt, create a new run ID and retry-derived semantic key, and require the current target head SHA to equal the original head. Initial planning intake and packet construction MUST bound the discussion fingerprint at the immutable plan-command comment ID. The retry envelope MUST retain that original trigger-comment ID in addition to the original semantic key, run ID, and incremented attempt. It MUST reject active, successful, or stale-head retry unless a later accepted policy explicitly permits it, and it MUST never mutate or overwrite the original run. A current planning retry SHALL restore the stored planning-context fingerprint and rebuild the same selected bounded discussion from comments whose immutable IDs are at or before the original trigger-comment ID; the retry command, later comments, and older pre-cutoff comments outside the selected window MUST NOT alter that frozen context. Edits or deletion within the issue evidence or selected original comment window MUST still fail closed with `planning_context_mismatch`. A schema-valid legacy planning run without a context fingerprint SHALL retain its legacy identity and remain retryable. Every new implementation run SHALL store the accepted-change hash and a SHA-256 fingerprint of exactly `planning_pr_number`, `planning_pr_merge_sha`, `approval_actor_id`, `approval_actor_type`, `approval_actor_login`, and `approval_permission`. Before dispatching an implementation retry, the control plane MUST re-resolve those approval facts from GitHub, rerun implementation eligibility, require the current accepted-change hash and complete approval fingerprint to equal the stored values, and attach the freshly resolved bounded approval envelope to the retry trigger.
 
 #### Scenario: Retry a failed unchanged target
 - **WHEN** an authorized retry targets the latest failed, cancelled, timed-out, stale, or not-implemented run and the immutable head is unchanged
@@ -34,7 +34,15 @@ Every workflow job SHALL retain least-privilege permissions. Packet preparation 
 
 #### Scenario: Preserve current and legacy planning identity
 - **WHEN** an authorized planning retry targets an unchanged head
-- **THEN** the retry restores the stored planning-context fingerprint when present, or reconstructs the original legacy semantic identity when that optional fingerprint is absent
+- **THEN** the retry restores the stored planning-context fingerprint and original trigger-comment cutoff when present, excludes the retry command and later discussion from packet reconstruction, or reconstructs the original legacy semantic identity when that optional fingerprint is absent
+
+#### Scenario: Freeze original planning discussion
+- **WHEN** a higher-ID comment is visible while an original plan command is accepted or its packet is prepared
+- **THEN** both stages exclude that post-command comment and derive the same planning-context fingerprint used by a later retry
+
+#### Scenario: Refuse mutation inside frozen planning context
+- **WHEN** issue evidence or a comment selected into the original bounded window changes or disappears before retry packet construction
+- **THEN** packet construction fails closed with `planning_context_mismatch` before provider access
 
 #### Scenario: Revalidate an implementation retry
 - **WHEN** an authorized implementation retry has complete stored change and approval fingerprints and the freshly resolved approval remains eligible and byte-equivalent across all six bounded facts

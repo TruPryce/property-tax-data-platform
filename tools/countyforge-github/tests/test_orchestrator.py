@@ -20,6 +20,7 @@ from countyforge_github.implementation import (
 from countyforge_github.leases import acquire_lease
 from countyforge_github.maintenance import audit_expired_leases
 from countyforge_github.orchestrator import process_intake
+from countyforge_github.planning import build_planning_packet
 from countyforge_github.state import decode_marker, render_status, transition_state
 from countyforge_github.workflow_control import (
     advance_run,
@@ -292,15 +293,44 @@ def test_planning_context_change_creates_new_identity_after_terminal_run(
 
 
 def test_plan_retry_preserves_context_identity_and_rejects_tampering(
-    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str, tmp_path: Path
 ) -> None:
     github = FakeGitHub(head_sha)
     plan_event = event_factory("/countyforge plan")
     plan_event["issue"].pop("pull_request")
     plan_event["issue"]["title"] = "Feature: bounded planning"
     plan_event["issue"]["body"] = "Problem: one. Outcome: plan one."
+    later_comment = {
+        "id": 123458,
+        "body": "A later decision belongs to a fresh plan command.",
+        "user": {"login": "maintainer", "id": 42, "type": "User"},
+    }
+    github.comments.append(copy.deepcopy(later_comment))
     _intake(github, plan_event, head_sha)
     comment_id, state = _canonical(github)
+    encoded_plan_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
+    raw_plan_trigger = base64.urlsafe_b64decode(
+        encoded_plan_trigger + "=" * (-len(encoded_plan_trigger) % 4)
+    )
+    plan_trigger: JsonObject = json.loads(raw_plan_trigger)
+    original_packet_info = build_planning_packet(
+        trigger=plan_trigger,
+        issue=plan_event["issue"],
+        contract_root=Path.cwd(),
+        output_dir=tmp_path / "original-packet",
+        run_id=str(state["run_id"]),
+        comments=[plan_event["comment"], later_comment],
+    )
+    original_packet = json.loads(
+        Path(original_packet_info["packet_path"]).read_text(encoding="utf-8")
+    )
+    assert original_packet["planning_context_sha256"] == state["planning_context_sha256"]
+    original_comment_sources = [
+        source for source in original_packet["sources"] if source["category"] == "comment"
+    ]
+    assert [source["path"] for source in original_comment_sources] == [
+        f"github://issue/11/comment/{plan_event['comment']['id']}"
+    ]
     failed = transition_state(
         state,
         {
@@ -314,17 +344,56 @@ def test_plan_retry_preserves_context_identity_and_rejects_tampering(
     github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
     retry_event = event_factory("/countyforge retry")
     retry_event["issue"].pop("pull_request")
-    retry_event["comment"]["id"] = 999
+    retry_event["comment"]["id"] = 123457
     retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
     encoded_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
     raw_trigger = base64.urlsafe_b64decode(encoded_trigger + "=" * (-len(encoded_trigger) % 4))
     retry_trigger: JsonObject = json.loads(raw_trigger)
 
     assert retry_trigger["planning_context_sha256"] == state["planning_context_sha256"]
+    assert retry_trigger["retry"]["original_comment_id"] == plan_event["comment"]["id"]
     assert (
         effective_idempotency_key(retry_trigger, ControlContracts().execution_policy)
         == retried["idempotency_key"]
     )
+    packet_info = build_planning_packet(
+        trigger=retry_trigger,
+        issue=plan_event["issue"],
+        contract_root=Path.cwd(),
+        output_dir=tmp_path / "retry-packet",
+        run_id=str(retried["run_id"]),
+        comments=[plan_event["comment"], retry_event["comment"], later_comment],
+    )
+    packet = json.loads(Path(packet_info["packet_path"]).read_text(encoding="utf-8"))
+    assert packet["planning_context_sha256"] == state["planning_context_sha256"]
+    comment_sources = [source for source in packet["sources"] if source["category"] == "comment"]
+    assert [source["path"] for source in comment_sources] == [
+        f"github://issue/11/comment/{plan_event['comment']['id']}"
+    ]
+
+    edited_original = copy.deepcopy(plan_event["comment"])
+    edited_original["body"] = "/countyforge plan\nUse changed planning context."
+    with pytest.raises(ControlPlaneError) as changed_context:
+        build_planning_packet(
+            trigger=retry_trigger,
+            issue=plan_event["issue"],
+            contract_root=Path.cwd(),
+            output_dir=tmp_path / "changed-context",
+            run_id=str(retried["run_id"]),
+            comments=[edited_original, retry_event["comment"], later_comment],
+        )
+    assert changed_context.value.code == "planning_context_mismatch"
+
+    with pytest.raises(ControlPlaneError) as deleted_context:
+        build_planning_packet(
+            trigger=retry_trigger,
+            issue=plan_event["issue"],
+            contract_root=Path.cwd(),
+            output_dir=tmp_path / "deleted-context",
+            run_id=str(retried["run_id"]),
+            comments=[retry_event["comment"], later_comment],
+        )
+    assert deleted_context.value.code == "planning_context_mismatch"
 
     missing = copy.deepcopy(retry_trigger)
     missing.pop("planning_context_sha256")

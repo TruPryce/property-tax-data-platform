@@ -209,6 +209,70 @@ def test_planning_context_uses_newest_window_after_bounded_pagination() -> None:
     )
 
 
+def test_packet_freezes_selected_comment_window_at_trigger_boundary(tmp_path: Path) -> None:
+    root = Path.cwd()
+    issue = {
+        "number": 6,
+        "title": "Feature work",
+        "body": "Problem: bounded planning. Outcome: create a plan.",
+        "labels": [],
+    }
+    comments = [{"id": index, "body": f"Context {index}"} for index in range(1, 22)]
+    trigger = _trigger(root)
+    trigger["comment"] = {"id": 20}
+    trigger["planning_context_sha256"] = planning_context_fingerprint(
+        issue,
+        comments,
+        trigger_comment_id=20,
+        comment_id_upper_bound=20,
+    )
+    initial = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=tmp_path / "initial",
+        run_id="bounded-window-initial",
+        comments=comments,
+    )
+    initial_packet = json.loads(Path(initial["packet_path"]).read_text(encoding="utf-8"))
+    selected_comment_paths = [
+        source["path"] for source in initial_packet["sources"] if source["category"] == "comment"
+    ]
+    assert selected_comment_paths == [
+        f"github://issue/6/comment/{comment_id}" for comment_id in range(20, 4, -1)
+    ]
+
+    changed_selected = [
+        {**comment, "body": "Changed selected context"} if comment["id"] == 19 else comment
+        for comment in comments
+    ]
+    with pytest.raises(ControlPlaneError) as changed_context:
+        build_planning_packet(
+            trigger=trigger,
+            issue=issue,
+            contract_root=root,
+            output_dir=tmp_path / "changed-selected",
+            run_id="bounded-window-changed",
+            comments=changed_selected,
+        )
+    assert changed_context.value.code == "planning_context_mismatch"
+
+    changed_unselected = [
+        {**comment, "body": "Changed excluded context"} if comment["id"] in {1, 21} else comment
+        for comment in comments
+    ]
+    unchanged = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=tmp_path / "changed-unselected",
+        run_id="bounded-window-unchanged",
+        comments=changed_unselected,
+    )
+    unchanged_packet = json.loads(Path(unchanged["packet_path"]).read_text(encoding="utf-8"))
+    assert unchanged_packet["planning_context_sha256"] == initial_packet["planning_context_sha256"]
+
+
 def test_trusted_countyforge_comments_are_excluded_but_user_forgery_is_evidence() -> None:
     comments = [
         {
