@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.errors import ControlPlaneError
-from countyforge_github.identity import effective_idempotency_key
+from countyforge_github.identity import effective_idempotency_key, semantic_idempotency_key
 from countyforge_github.implementation import (
     build_implementation_packet,
     implementation_change_hash,
@@ -337,6 +337,55 @@ def test_plan_retry_preserves_context_identity_and_rejects_tampering(
     with pytest.raises(ControlPlaneError) as tampered_error:
         effective_idempotency_key(tampered, ControlContracts().execution_policy)
     assert tampered_error.value.code == "retry_identity_mismatch"
+
+
+def test_legacy_plan_retry_without_context_fingerprint_preserves_legacy_identity(
+    event_factory: Callable[[str, str, str], JsonObject], head_sha: str
+) -> None:
+    github = FakeGitHub(head_sha)
+    plan_event = event_factory("/countyforge plan")
+    plan_event["issue"].pop("pull_request")
+    plan_event["issue"]["title"] = "Feature: legacy bounded planning"
+    plan_event["issue"]["body"] = "Problem: legacy identity. Outcome: retry safely."
+    _intake(github, plan_event, head_sha)
+    encoded_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
+    raw_trigger = base64.urlsafe_b64decode(encoded_trigger + "=" * (-len(encoded_trigger) % 4))
+    legacy_trigger: JsonObject = json.loads(raw_trigger)
+    legacy_trigger.pop("planning_context_sha256")
+    legacy_key = semantic_idempotency_key(legacy_trigger, ControlContracts().execution_policy)
+
+    comment_id, legacy_state = _canonical(github)
+    legacy_state.pop("planning_context_sha256")
+    legacy_state["run_id"] = f"gh-{legacy_key[:24]}-a1"
+    legacy_state["idempotency_key"] = legacy_key
+    legacy_state["original_idempotency_key"] = legacy_key
+    failed = transition_state(
+        legacy_state,
+        {
+            "contract_version": 1,
+            "from": "queued",
+            "to": "failed",
+            "at": "2026-07-19T12:01:00Z",
+            "reason_code": "legacy_planning_fixture_failure",
+        },
+    )
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(failed))
+
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    encoded_retry = str(github.dispatches[-1]["inputs"]["trigger"])
+    raw_retry = base64.urlsafe_b64decode(encoded_retry + "=" * (-len(encoded_retry) % 4))
+    retry_trigger: JsonObject = json.loads(raw_retry)
+
+    assert retried["status"] == "dispatched"
+    assert "planning_context_sha256" not in retry_trigger
+    assert retry_trigger["retry"]["original_idempotency_key"] == legacy_key
+    assert (
+        effective_idempotency_key(retry_trigger, ControlContracts().execution_policy)
+        == retried["idempotency_key"]
+    )
 
 
 def test_check_creation_failure_makes_published_queue_retryable(

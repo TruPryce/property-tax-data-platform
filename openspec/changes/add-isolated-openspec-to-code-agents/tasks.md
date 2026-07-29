@@ -28,3 +28,10 @@
 - [x] 5.2 Add validation/publication, cancellation race, resume/supersession, and workflow permission tests.
 - [x] 5.3 Add implement Make targets, CI policy checks, ADR, engineering guide, operations/runbook, and contributor updates.
 - [x] 5.4 Run all deterministic gates and document the controlled post-merge implementation smoke; do not run paid provider calls automatically.
+
+## 6. Retry provenance correction
+
+- [x] 6.1 Define the bounded implementation-approval fingerprint, fresh eligibility revalidation, stable refusal dispositions, and legacy-state behavior.
+- [x] 6.2 Persist implementation approval provenance and attach the freshly resolved approval envelope to eligible retries.
+- [x] 6.3 Add current and legacy plan/implementation retry fixtures, packet-precondition coverage, and sanitized workflow claim diagnostics.
+- [x] 6.4 Run the deterministic CountyForge, workflow-policy, OpenSpec, documentation, repository, and `prepr-no-ai` gates.
