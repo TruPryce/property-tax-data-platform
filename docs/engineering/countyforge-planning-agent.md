@@ -13,10 +13,12 @@ repository documentation and contract roots with symlink confinement, regular-fi
 stable ordering, per-file/aggregate limits, hashes, and truncation metadata. External URLs are
 references only.
 
-The planning model receives a frozen planning packet, context manifest, trusted prompt, and
-output schema. It has no writable repository, GitHub token, Git credential, production
-credential, arbitrary tool, or ungoverned network. Only the selected provider key is attached
-to the model invocation. The review profile remains packet-only and is not broadened.
+The planning model receives a frozen planning packet, context manifest, trusted prompt, and a
+provider-compatible generation schema. Trusted runner code then validates the generated document
+against the stricter authoritative result schema and planning policy before materialization. The
+model has no writable repository, GitHub token, Git credential, production credential, arbitrary
+tool, or ungoverned network. Only the selected provider key is attached to the model invocation.
+The review profile remains packet-only and is not broadened.
 
 ## Contracts
 
@@ -24,12 +26,15 @@ to the model invocation. The review profile remains packet-only and is not broad
 |---|---|
 | `countyforge-planning-packet.schema.json` | bounded issue/context evidence |
 | `countyforge-planning-context-manifest.schema.json` | source hashes and selection provenance |
+| `countyforge-plan-generation.schema.json` | provider-compatible generation shape |
 | `countyforge-plan-result.schema.json` | strict model output and eligibility gate |
 | `countyforge-planning-publication-manifest.schema.json` | rendered OpenSpec files and validation |
 | `countyforge-planning-revision.schema.json` | deduplication/supersession lineage |
 
 The runner request binds packet and manifest hashes to one issue, repository, immutable target
-SHA, and run ID. The plan profile is read-only and writes only run evidence.
+SHA, and run ID. The plan profile binds both schema names and hashes. Its generation schema does
+not replace or weaken authoritative post-generation validation. The profile is read-only and
+writes only run evidence.
 
 ## Materialization and publication
 

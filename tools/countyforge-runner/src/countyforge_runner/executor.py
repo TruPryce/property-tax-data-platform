@@ -29,6 +29,7 @@ MODEL_OUTPUT_ARTIFACTS = (
     "countyforge-implementation-workspace-manifest.json",
     "countyforge-implementation-model-events.ndjson",
 )
+_PROVIDER_GENERATION_FAILURE_SENTINELS = frozenset({"Error generating response"})
 
 
 def _iso_now() -> str:
@@ -51,6 +52,16 @@ def _output_bytes(run_dir: Path) -> int:
     return sum(
         path.stat().st_size for name in MODEL_OUTPUT_ARTIFACTS if (path := run_dir / name).is_file()
     )
+
+
+def _is_provider_generation_failure(path: Path) -> bool:
+    try:
+        return (
+            path.read_text(encoding="utf-8").rstrip("\r\n")
+            in _PROVIDER_GENERATION_FAILURE_SENTINELS
+        )
+    except (OSError, UnicodeError):
+        return False
 
 
 def _redacted_tail(text: str, environment: dict[str, str], limit: int = 4000) -> str:
@@ -236,15 +247,19 @@ class Runner:
                 }
             )
         elif resolved.request["mode"] == "plan":
+            generation_schema = str(
+                resolved.profile.get("generation_schema", resolved.profile["output_schema"])
+            )
             environment.update(
                 {
                     "PLANNING_PACKET_PATH": resolved.canonical_input_paths["planning_packet_path"],
                     "CONTEXT_MANIFEST_PATH": resolved.canonical_input_paths[
                         "context_manifest_path"
                     ],
-                    "SCHEMA_PATH": str(
-                        self.kernel.schema_root / str(resolved.profile["output_schema"])
-                    ),
+                    "GENERATION_SCHEMA_PATH": str(self.kernel.schema_root / generation_schema),
+                    "RESULT_SCHEMA_NAME": str(resolved.profile["output_schema"]),
+                    "EXPECTED_GENERATION_SCHEMA_SHA256": resolved.generation_schema_sha256,
+                    "EXPECTED_OUTPUT_SCHEMA_SHA256": resolved.output_schema_sha256,
                     "PROMPT_PATH": str(
                         self.kernel.contract_root / str(resolved.profile["prompt"]["path"])
                     ),
@@ -340,17 +355,22 @@ class Runner:
         disposition = "timed_out" if timed_out else ("completed" if code == 0 else "adapter_failed")
         result_document: JsonObject | None = None
         if code == 0 and result_path.is_file():
-            try:
-                result_document = load_json_object(result_path, kind="planning result")
-                validate_document(
-                    result_document,
-                    self.kernel._load_schema("countyforge-plan-result.schema.json"),
-                    kind="planning result",
-                )
-                validate_planning_payload(result_document)
-            except KernelError:
-                disposition = "validation_failed"
+            if _is_provider_generation_failure(result_path):
+                disposition = "provider_generation_failed"
                 code = 5
+            else:
+                try:
+                    result_document = load_json_object(result_path, kind="planning result")
+                    validate_document(
+                        result_document,
+                        self.kernel._load_schema(str(resolved.profile["output_schema"])),
+                        kind="planning result",
+                    )
+                    validate_planning_payload(result_document)
+                except KernelError:
+                    disposition = "validation_failed"
+                    code = 5
+                    result_document = None
         elif code == 0:
             disposition = "validation_failed"
             code = 5

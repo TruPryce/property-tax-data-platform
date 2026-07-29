@@ -46,7 +46,10 @@ Local commands may continue to use `--repo-root <path>`. GitHub execution suppli
 The compatibility root defaults both to the current repository; an explicit contract root cannot
 be combined with the compatibility option.
 
-`validate-request`, `resolve-profile`, and `explain` validate schema, profile identity/version, mode, prompt, provider/model, Codex version, reasoning effort, budgets, canonical input files, repository identity and commits, packet provenance, output schema, and requested artifacts. They never read provider credentials.
+`validate-request`, `resolve-profile`, and `explain` validate schema, profile identity/version,
+mode, prompt, provider/model, Codex version, reasoning effort, budgets, canonical input files,
+repository identity and commits, packet provenance, generation and output schemas, and requested
+artifacts. They never read provider credentials.
 
 ## Versioned Contracts
 
@@ -59,6 +62,7 @@ be combined with the compatibility option.
 | Generic event | [countyforge-run-event.schema.json](../../.ai/schemas/countyforge-run-event.schema.json) |
 | Generic summary | [countyforge-run-summary.schema.json](../../.ai/schemas/countyforge-run-summary.schema.json) |
 | Review result | [codex-prepr-review.schema.json](../../.ai/schemas/codex-prepr-review.schema.json) |
+| Plan generation | [countyforge-plan-generation.schema.json](../../.ai/schemas/countyforge-plan-generation.schema.json) |
 | Plan result | [countyforge-plan-result.schema.json](../../.ai/schemas/countyforge-plan-result.schema.json) |
 | Implementation result | [countyforge-implementation-result.schema.json](../../.ai/schemas/countyforge-implementation-result.schema.json) |
 | Fix result | [countyforge-fix-result.schema.json](../../.ai/schemas/countyforge-fix-result.schema.json) |
@@ -83,6 +87,12 @@ Fix requests require selected finding IDs and an expected head SHA matching the 
 Profiles are strict JSON documents under `.ai/profiles/`. Canonical compact JSON with sorted keys is SHA-256 hashed. Tools, mounts, network, credential names, writable paths, image identity, budgets, or any other posture change therefore creates a different capability hash.
 
 Fix and validate profiles describe future capability boundaries and remain fail-closed. The implementation profile is executable only with a trusted accepted-plan packet, isolated workspace, and the Issue #7 publication workflow; a runtime flag cannot expand its policy.
+
+Profiles may declare a separate generation schema for provider structured output. When omitted,
+it defaults to the authoritative output schema. The plan profile uses the provider-compatible
+generation schema while the runner always applies the authoritative plan-result schema and
+planning policy after generation. Resolution, profile snapshots, and container provenance bind
+both schema identities and hashes.
 
 ## Provider and Model Compatibility
 
@@ -113,6 +123,10 @@ Generic-only future-mode attempts use:
 ```
 
 The kernel atomically claims that directory and refuses existing evidence. A `profile_not_implemented` run writes sanitized request/profile provenance plus a failed generic event and summary before returning non-zero.
+
+An exact provider result of `Error generating response` is recorded as
+`provider_generation_failed`. Other malformed or policy-invalid planning documents remain
+`validation_failed`, and no invalid plan payload is returned as a usable result.
 
 Review runs retain the version-1 directory from PR #1:
 

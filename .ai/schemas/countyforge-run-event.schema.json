@@ -28,7 +28,7 @@
     "execution_state": {"enum": ["not_started", "running", "finished"]},
     "lifecycle_stage": {"enum": ["validated", "resolved", "dispatch", "completed", "failed"]},
     "outcome": {"enum": ["succeeded", "failed", "not_executed"]},
-    "disposition": {"enum": ["completed", "adapter_failed", "timed_out", "budget_exceeded", "profile_not_implemented", "validation_failed"]},
+    "disposition": {"enum": ["completed", "adapter_failed", "timed_out", "budget_exceeded", "profile_not_implemented", "provider_generation_failed", "validation_failed"]},
     "started_at": {"type": "string", "format": "date-time"},
     "finished_at": {"type": "string", "format": "date-time"},
     "duration_seconds": {"type": "number", "minimum": 0},

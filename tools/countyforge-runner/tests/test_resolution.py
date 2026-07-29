@@ -312,6 +312,22 @@ def test_each_mode_resolves_its_schema(
     assert kernel.resolve(request_factory(mode)).profile["output_schema"] == schema
 
 
+def test_plan_resolves_distinct_generation_and_result_schemas(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    resolved = kernel.resolve(request_factory("plan"))
+    document = resolved.as_document()
+    assert document["generation_schema"] == "countyforge-plan-generation.schema.json"
+    assert document["output_schema"] == "countyforge-plan-result.schema.json"
+    assert document["generation_schema_sha256"] == file_sha256(
+        Path(".ai/schemas/countyforge-plan-generation.schema.json")
+    )
+    assert document["output_schema_sha256"] == file_sha256(
+        Path(".ai/schemas/countyforge-plan-result.schema.json")
+    )
+    assert document["generation_schema_sha256"] != document["output_schema_sha256"]
+
+
 def test_mode_cannot_change_after_profile_selection(
     kernel: Kernel, request_factory: Callable[[str], JsonObject]
 ) -> None:

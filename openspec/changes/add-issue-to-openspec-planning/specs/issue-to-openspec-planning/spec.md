@@ -16,11 +16,15 @@ The planning adapter SHALL classify structured issues and construct a strict pac
 - **THEN** the comment is excluded from both fingerprints and the packet, while an identical marker authored by a user remains selected as untrusted evidence
 
 ### Requirement: Strict planning result
-The planning result SHALL use a versioned schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail validation.
+The planning result SHALL use a versioned authoritative schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. A separate provider-generation schema MAY omit unsupported constraint keywords only to shape structured generation; it MUST preserve the complete required field and object structure and MUST NOT replace authoritative trusted validation. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail trusted validation.
 
 #### Scenario: Materialize only OpenSpec files
 - **WHEN** a schema-valid plan is published
 - **THEN** trusted code renders only the OpenSpec change files and leaves source, workflow, policy, provider, and infrastructure paths untouched
+
+#### Scenario: Reject generation-only validity
+- **WHEN** provider output satisfies the generation schema but violates a bound, path rule, constant, or policy in the authoritative result contract
+- **THEN** trusted validation fails closed before materialization and publication
 
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.
