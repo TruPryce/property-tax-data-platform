@@ -126,8 +126,19 @@ jobs:
           raw = base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4))
           pathlib.Path(sys.argv[2]).write_bytes(raw)
           PY
-          uv run --package countyforge-github countyforge-github idempotency-key \
-            --trigger "$RUNNER_TEMP/countyforge/trigger.json" > "$RUNNER_TEMP/countyforge/identity.json"
+          if ! uv run --package countyforge-github countyforge-github idempotency-key \
+            --trigger "$RUNNER_TEMP/countyforge/trigger.json" \
+            > "$RUNNER_TEMP/countyforge/identity.json"; then
+            disposition="$(
+              jq -er '.disposition | select(type == "string" and length > 0)' \
+                "$RUNNER_TEMP/countyforge/identity.json" 2>/dev/null || true
+            )"
+            if [ -z "$disposition" ]; then
+              disposition="identity_validation_failed"
+            fi
+            echo "::error::Immutable trigger identity validation failed: disposition=$disposition" >&2
+            exit 2
+          fi
           test "$(jq -r .idempotency_key "$RUNNER_TEMP/countyforge/identity.json")" = \
             "$EXPECTED_IDEMPOTENCY_KEY"
           test "$(jq -r .run_id "$RUNNER_TEMP/countyforge/identity.json")" = "$COUNTYFORGE_RUN_ID"

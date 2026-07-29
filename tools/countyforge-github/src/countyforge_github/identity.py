@@ -8,9 +8,30 @@ from datetime import UTC, datetime
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
 
+_IMPLEMENTATION_APPROVAL_FIELDS = (
+    "planning_pr_number",
+    "planning_pr_merge_sha",
+    "approval_actor_id",
+    "approval_actor_type",
+    "approval_actor_login",
+    "approval_permission",
+)
+
 
 def iso_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def implementation_approval_envelope(approval: JsonObject) -> JsonObject:
+    """Return the strict credential-free approval facts carried by a trigger."""
+
+    return {key: approval[key] for key in _IMPLEMENTATION_APPROVAL_FIELDS if key in approval}
+
+
+def implementation_approval_fingerprint(approval: JsonObject) -> str:
+    """Bind canonical state to one bounded implementation approval envelope."""
+
+    return hashlib.sha256(canonical_bytes(implementation_approval_envelope(approval))).hexdigest()
 
 
 def build_trigger(
@@ -82,18 +103,9 @@ def build_trigger(
     if implementation_change_sha256 is not None:
         trigger["implementation_change_sha256"] = implementation_change_sha256
     if implementation_approval is not None:
-        trigger["implementation_approval"] = {
-            key: implementation_approval[key]
-            for key in (
-                "planning_pr_number",
-                "planning_pr_merge_sha",
-                "approval_actor_id",
-                "approval_actor_type",
-                "approval_actor_login",
-                "approval_permission",
-            )
-            if key in implementation_approval
-        }
+        trigger["implementation_approval"] = implementation_approval_envelope(
+            implementation_approval
+        )
     issue = event.get("issue")
     if isinstance(issue, dict):
         metadata: JsonObject = {}
