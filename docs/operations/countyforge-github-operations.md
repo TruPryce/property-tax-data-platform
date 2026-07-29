@@ -94,7 +94,7 @@ Use:
 /countyforge retry
 ```
 
-Retry requires the latest run to be failed, cancelled, timed out, stale, or not implemented. The target head must equal the original head. A retry increments attempt, derives a new semantic key, and preserves prior evidence. Planning retries preserve their original context-bound or legacy semantic identity. Implementation retries freshly re-resolve merged planning approval and eligibility and refuse changed or missing canonical provenance; issue a new `/countyforge implement <change>` command when instructed. If the head changed, issue a fresh execution command; do not retry stale review provenance.
+Retry requires the latest run to be failed, cancelled, timed out, stale, or not implemented. The target head must equal the original head. A retry increments attempt, derives a new semantic key, and preserves prior evidence. Initial planning intake and packet preparation include a newest-first window of at most 16 comments through the plan-command comment. Planning retries preserve that context-bound or legacy semantic identity by rebuilding the same selected window; later comments, including the retry command, and older comments outside the window are not added to that attempt, while edits to issue evidence or selected original comments fail closed. Implementation retries freshly re-resolve merged planning approval and eligibility and refuse changed or missing canonical provenance; issue a new `/countyforge implement <change>` command when instructed. If the head changed, issue a fresh execution command; do not retry stale review provenance.
 
 Successful or active runs are not retry-eligible in the initial policy.
 

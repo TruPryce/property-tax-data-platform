@@ -25,4 +25,4 @@ This change implements GitHub Issue #7 under parent program Issue #2. Implementa
 - **ADDED** `openspec-to-code-implementation`: eligibility, isolated workspace execution, command and path policy, task reconciliation, trusted validation, draft publication, cancellation, and supersession.
 - **MODIFIED** `agent-runner-kernel`: make the implementation profile executable with bound implementation inputs and strict result/provenance handling.
 - **MODIFIED** `github-agent-control-plane`: add implementation eligibility, packet/validation/publication stages, implementation state metadata, and deterministic revision identity while preserving existing state lanes and permissions.
-- **MODIFIED** `issue-to-openspec-planning`: expose accepted-plan provenance required by the implementation eligibility gate without changing planning approval semantics.
+- **MODIFIED** `issue-to-openspec-planning`: expose accepted-plan provenance required by the implementation eligibility gate and freeze the bounded planning-discussion window at the original plan command without changing planning approval semantics.

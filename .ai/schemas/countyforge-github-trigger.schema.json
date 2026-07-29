@@ -115,10 +115,11 @@
     "retry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["original_idempotency_key", "original_run_id", "attempt"],
+      "required": ["original_idempotency_key", "original_run_id", "original_comment_id", "attempt"],
       "properties": {
         "original_idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "original_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "original_comment_id": {"type": "integer", "minimum": 1},
         "attempt": {"type": "integer", "minimum": 2}
       }
     },
