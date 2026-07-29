@@ -6,7 +6,7 @@ Issue #6 needs a safe first planning executor. The existing control plane can au
 
 - Promote `plan.read-only.v1` to an executable, provider-policy-driven profile without changing the packet-only review boundary.
 - Add bounded, provenance-bound planning packet and context-manifest contracts assembled from trusted repository material and untrusted issue evidence.
-- Add a strict planning-result contract and deterministic materializer that can write only an OpenSpec planning change.
+- Add a provider-compatible generation schema, retain a separate strict planning-result contract, and deterministically materialize only an OpenSpec planning change.
 - Add trusted validation and draft-PR publication orchestration with deterministic branch identity, revision/supersession metadata, and human approval gating.
 - Preserve fail-closed behavior for implementation, fix, and validation profiles and preserve the existing review path.
 
@@ -23,5 +23,5 @@ This change implements GitHub Issue #6 under parent program Issue #2. A generate
 ## Capabilities
 
 - **ADDED** `issue-to-openspec-planning`: bounded issue intake, planning packets, strict results, trusted materialization, and draft publication.
-- **MODIFIED** `agent-runner-kernel`: make `plan.read-only.v1` executable with bound planning inputs, resolved provider/model/effort facts, and planning-result provenance.
+- **MODIFIED** `agent-runner-kernel`: make `plan.read-only.v1` executable with bound planning inputs, resolved provider/model/effort facts, separate generation/result schema provenance, and planning-result validation.
 - **MODIFIED** `github-agent-control-plane`: add the trusted no-secret planning packet stage, the narrowly scoped planning publication permission, optional planning state metadata, and live lease/finalization checks.

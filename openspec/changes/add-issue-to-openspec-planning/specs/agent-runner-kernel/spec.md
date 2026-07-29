@@ -2,12 +2,22 @@
 
 ### Requirement: Planning provider and model binding
 
-The runner SHALL execute `plan.read-only.v1` only after validating a strict planning packet and context manifest against the trusted contract root. The adapter MUST receive the resolved logical model reference, configured model identifier, and reasoning effort selected by the profile/provider catalog; image labels and runtime configuration MUST agree with those facts.
+The runner SHALL execute `plan.read-only.v1` only after validating a strict planning packet and context manifest against the trusted contract root. The adapter MUST receive the resolved logical model reference, configured model identifier, reasoning effort, and provider-generation schema selected by the profile/provider catalog; image labels and runtime configuration MUST agree with those facts. The generation schema MUST use only the provider-compatible structured-output subset and MUST be distinct from the authoritative strict planning-result schema when provider compatibility requires it. The runner MUST bind both schema identities and MUST validate every generated document against the authoritative result schema and planning policy before reporting success.
 
 #### Scenario: Model and effort are bound to the image
 
 - **WHEN** a planning request resolves `sakana.fugu` with `high` effort
 - **THEN** the trusted image build and invocation use that exact model reference and effort, and a mismatch fails before provider credentials are loaded.
+
+#### Scenario: Provider generation cannot weaken trusted validation
+
+- **WHEN** the provider returns a document accepted by the generation schema but rejected by the authoritative planning-result schema or planning policy
+- **THEN** the runner reports a sanitized validation failure and no materialization or publication begins.
+
+#### Scenario: Provider generation sentinel is distinct
+
+- **WHEN** the provider adapter exits successfully but writes the exact bounded `Error generating response` sentinel instead of JSON
+- **THEN** the runner reports `provider_generation_failed`, preserves sanitized evidence, and does not classify the provider failure as malformed planning intent.
 
 ### Requirement: Planning read-only profile isolation
 

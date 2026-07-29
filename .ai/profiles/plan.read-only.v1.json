@@ -14,6 +14,7 @@
   "minimum_codex_cli_version": "0.144.0",
   "prompt": {"id": "countyforge-plan", "version": 1, "path": ".ai/prompts/countyforge-plan.v1.md"},
   "output_schema": "countyforge-plan-result.schema.json",
+  "generation_schema": "countyforge-plan-generation.schema.json",
   "allowed_artifacts": ["countyforge-plan-result.json", "countyforge-plan-events.ndjson", "countyforge-plan.stderr", "container.provenance.json", "countyforge-planning-packet.json", "countyforge-context-manifest.json", "countyforge-request.provenance.json", "countyforge-profile.snapshot.json", "countyforge-run-event.ndjson", "countyforge-run-summary.json", "countyforge-run-metrics.prom"],
   "input_policy": {"approved_roots": [".ai/contexts"], "resolve_symlinks": true, "require_regular_files": true, "packet_provenance_schema": "countyforge-planning-context-manifest.schema.json"},
   "repository_policy": {"expected_full_name": "TruPryce/property-tax-data-platform", "remote_name": "origin", "verify_head": true, "base_policy": "ancestor_of_head"},

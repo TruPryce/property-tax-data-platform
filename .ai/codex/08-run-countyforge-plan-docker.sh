@@ -12,7 +12,8 @@ case "$PROVIDER" in
 esac
 PACKET_PATH="${PLANNING_PACKET_PATH:?PLANNING_PACKET_PATH is required}"
 MANIFEST_PATH="${CONTEXT_MANIFEST_PATH:?CONTEXT_MANIFEST_PATH is required}"
-SCHEMA_PATH="${SCHEMA_PATH:?SCHEMA_PATH is required}"
+GENERATION_SCHEMA_PATH="${GENERATION_SCHEMA_PATH:?GENERATION_SCHEMA_PATH is required}"
+RESULT_SCHEMA_NAME="${RESULT_SCHEMA_NAME:?RESULT_SCHEMA_NAME is required}"
 PROMPT_PATH="${PROMPT_PATH:?PROMPT_PATH is required}"
 RUN_DIR="${OUT_DIR:?OUT_DIR is required}"
 IMAGE="${CODEX_IMAGE:-$DEFAULT_IMAGE}"
@@ -61,16 +62,25 @@ if [ -e "$CLAIM" ] || { [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/nul
 fi
 mkdir "$CLAIM"
 trap 'rmdir "$CLAIM" 2>/dev/null || true' EXIT
-test -f "$PACKET_PATH" && test -f "$MANIFEST_PATH" && test -f "$SCHEMA_PATH" && test -f "$PROMPT_PATH"
+SCHEMA_DIR="$(dirname "$GENERATION_SCHEMA_PATH")"
+RESULT_SCHEMA_PATH="$SCHEMA_DIR/$RESULT_SCHEMA_NAME"
+test -f "$PACKET_PATH" && test -f "$MANIFEST_PATH" && \
+  test -f "$GENERATION_SCHEMA_PATH" && test -f "$RESULT_SCHEMA_PATH" && test -f "$PROMPT_PATH"
 test "$(sha256sum "$PACKET_PATH" | cut -d' ' -f1)" = "${EXPECTED_PLANNING_PACKET_SHA256:?}"
 test "$(sha256sum "$MANIFEST_PATH" | cut -d' ' -f1)" = "${EXPECTED_CONTEXT_MANIFEST_SHA256:?}"
+test "$(sha256sum "$GENERATION_SCHEMA_PATH" | cut -d' ' -f1)" = "${EXPECTED_GENERATION_SCHEMA_SHA256:?}"
+test "$(sha256sum "$RESULT_SCHEMA_PATH" | cut -d' ' -f1)" = "${EXPECTED_OUTPUT_SCHEMA_SHA256:?}"
 IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
-python3 - "$RUN_DIR/container.provenance.json" "$IMAGE" "$IMAGE_ID" "$PROVIDER" "$CREDENTIAL" "$EXPECTED_PROFILE_SHA" "$EXPECTED_CODEX_VERSION" "$EXPECTED_MODEL_REF" "$EXPECTED_REASONING_EFFORT" <<'PY'
+python3 - "$RUN_DIR/container.provenance.json" "$IMAGE" "$IMAGE_ID" "$PROVIDER" "$CREDENTIAL" "$EXPECTED_PROFILE_SHA" "$EXPECTED_CODEX_VERSION" "$EXPECTED_MODEL_REF" "$EXPECTED_REASONING_EFFORT" "$(basename "$GENERATION_SCHEMA_PATH")" "$EXPECTED_GENERATION_SCHEMA_SHA256" "$RESULT_SCHEMA_NAME" "$EXPECTED_OUTPUT_SCHEMA_SHA256" <<'PY'
 import json
 import pathlib
 import sys
 
-path, image, image_id, provider, credential, profile_sha, codex_version, model_ref, reasoning_effort = sys.argv[1:]
+(
+    path, image, image_id, provider, credential, profile_sha, codex_version,
+    model_ref, reasoning_effort, generation_schema, generation_schema_sha,
+    result_schema, result_schema_sha,
+) = sys.argv[1:]
 document = {
     "contract_version": 1,
     "profile_id": "plan.read-only.v1",
@@ -81,6 +91,10 @@ document = {
     "model_ref": model_ref,
     "reasoning_effort": reasoning_effort,
     "codex_cli_version": codex_version,
+    "generation_schema": generation_schema,
+    "generation_schema_sha256": generation_schema_sha,
+    "result_schema": result_schema,
+    "result_schema_sha256": result_schema_sha,
     "credential_names": [credential],
     "enabled_tools": [],
     "disabled_tools": [
@@ -99,12 +113,11 @@ document = {
 pathlib.Path(path).write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
-SCHEMA_DIR="$(dirname "$SCHEMA_PATH")"
-CONTAINER_SCHEMA="/workspace/.ai/schemas/$(basename "$SCHEMA_PATH")"
+CONTAINER_GENERATION_SCHEMA="/workspace/.ai/schemas/$(basename "$GENERATION_SCHEMA_PATH")"
 DISABLED_TOOLS=(shell_tool unified_exec browser_use browser_use_external browser_use_full_cdp_access computer_use in_app_browser apps image_generation)
 ARGS=(exec --ephemeral --ignore-rules --skip-git-repo-check --sandbox danger-full-access --json)
 for tool in "${DISABLED_TOOLS[@]}"; do ARGS+=(--disable "$tool"); done
-ARGS+=(-c tools.web_search=false --output-schema "$CONTAINER_SCHEMA" --output-last-message /out/countyforge-plan-result.json -)
+ARGS+=(-c tools.web_search=false --output-schema "$CONTAINER_GENERATION_SCHEMA" --output-last-message /out/countyforge-plan-result.json -)
 PROMPT="$(cat "$PROMPT_PATH")"
 { printf '%s\n\n' "$PROMPT"; printf 'FROZEN PLANNING PACKET:\n'; cat "$PACKET_PATH"; printf '\nFROZEN CONTEXT MANIFEST:\n'; cat "$MANIFEST_PATH"; } |
   docker run --rm -i \

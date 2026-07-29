@@ -45,3 +45,10 @@
 - [x] 5.17 Exclude trusted CountyForge status/feedback comments from planning identity while retaining user-authored marker text.
 - [x] 5.18 Replace unsupported comment sorting with bounded pagination aligned with the intake adapter and cover 100+ comments.
 - [x] 5.19 Render the current run separately from five sanitized newest-first prior history rows and require complete immutable display facts for new history entries.
+
+## 6. Provider generation compatibility correction
+
+- [x] 6.1 Separate the provider-generation schema from the authoritative planning-result schema and bind both through the profile and runner.
+- [x] 6.2 Preserve full trusted result/policy validation and classify the exact provider generation sentinel distinctly.
+- [x] 6.3 Add deterministic schema-subset, provenance, sentinel, and fail-closed validation fixtures.
+- [x] 6.4 Update planning engineering/operations documentation and run the no-cost planning, runner, workflow-policy, OpenSpec, documentation, and `prepr-no-ai` gates.

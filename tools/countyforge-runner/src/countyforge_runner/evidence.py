@@ -259,6 +259,8 @@ class EvidenceWriter:
         request_provenance = sanitized_request(self.resolved)
         profile_snapshot: JsonObject = {
             "profile_sha256": self.resolved.profile_sha256,
+            "output_schema_sha256": self.resolved.output_schema_sha256,
+            "generation_schema_sha256": self.resolved.generation_schema_sha256,
             "profile": self.resolved.profile,
         }
         artifacts = {name: True for name in (*GENERIC_ARTIFACTS, *extra_artifacts)}

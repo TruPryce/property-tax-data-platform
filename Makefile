@@ -163,6 +163,7 @@ countyforge-plan-check:
 	$(UV) run ruff format --check tools/countyforge-github/src/countyforge_github/planning.py tools/countyforge-github/tests/test_planning.py
 	$(UV) run ruff check tools/countyforge-github/src/countyforge_github/planning.py tools/countyforge-github/tests/test_planning.py
 	$(UV) run mypy tools/countyforge-github/src/countyforge_github/planning.py
+	$(UV) run python3 -m json.tool .ai/schemas/countyforge-plan-generation.schema.json >/dev/null
 	$(UV) run python3 -m json.tool .ai/schemas/countyforge-plan-result.schema.json >/dev/null
 
 countyforge-plan-fixtures:

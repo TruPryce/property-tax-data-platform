@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "status", "originating_issue", "proposed_change_name",
+    "issue_classification", "problem_statement", "desired_outcome", "assumptions",
+    "unresolved_decisions", "affected_capabilities", "files_to_create", "files_to_modify",
+    "proposed_files", "task_slices", "acceptance_criteria", "risks",
+    "security_privacy_considerations", "migration_compatibility_concerns",
+    "validation_commands", "non_goals", "implementation_eligibility", "blocked_reasons",
+    "evidence_citations"
+  ],
+  "properties": {
+    "contract_version": {"type": "integer"},
+    "status": {"type": "string", "enum": ["planned", "blocked", "profile_not_implemented"]},
+    "originating_issue": {"type": "integer"},
+    "proposed_change_name": {"type": "string"},
+    "issue_classification": {"type": "string", "enum": ["source_onboarding", "feature_work", "defect", "architecture_decision"]},
+    "problem_statement": {"type": "string"},
+    "desired_outcome": {"type": "string"},
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "unresolved_decisions": {"type": "array", "items": {"type": "string"}},
+    "affected_capabilities": {"type": "array", "items": {"type": "string"}},
+    "files_to_create": {"type": "array", "items": {"type": "string"}},
+    "files_to_modify": {"type": "array", "items": {"type": "string"}},
+    "proposed_files": {"type": "array", "items": {"type": "string"}},
+    "task_slices": {"type": "array", "items": {"type": "string"}},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "security_privacy_considerations": {"type": "array", "items": {"type": "string"}},
+    "migration_compatibility_concerns": {"type": "array", "items": {"type": "string"}},
+    "validation_commands": {"type": "array", "items": {"type": "string"}},
+    "non_goals": {"type": "array", "items": {"type": "string"}},
+    "implementation_eligibility": {"type": "boolean"},
+    "blocked_reasons": {"type": "array", "items": {"type": "string"}},
+    "evidence_citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id", "excerpt"],
+        "properties": {
+          "source_id": {"type": "string"},
+          "excerpt": {"type": "string"}
+        }
+      }
+    }
+  }
+}

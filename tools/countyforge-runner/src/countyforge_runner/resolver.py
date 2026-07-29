@@ -133,6 +133,7 @@ class ResolvedRun:
     profile_sha256: str
     prompt_sha256: str
     output_schema_sha256: str
+    generation_schema_sha256: str
     execution_eligible: bool
 
     def as_document(self) -> JsonObject:
@@ -174,6 +175,10 @@ class ResolvedRun:
             "effective_budgets": self.effective_budgets,
             "output_schema": self.profile["output_schema"],
             "output_schema_sha256": self.output_schema_sha256,
+            "generation_schema": self.profile.get(
+                "generation_schema", self.profile["output_schema"]
+            ),
+            "generation_schema_sha256": self.generation_schema_sha256,
             "prompt": {
                 **self.profile["prompt"],
                 "sha256": self.prompt_sha256,
@@ -304,8 +309,15 @@ class Kernel:
                     "A profile reasoning-effort policy is inconsistent.",
                 )
             output_schema = self.schema_root / str(profile["output_schema"])
+            generation_schema = self.schema_root / str(
+                profile.get("generation_schema", profile["output_schema"])
+            )
             prompt_path = self.contract_root / str(profile["prompt"]["path"])
-            if not output_schema.is_file() or not prompt_path.is_file():
+            if (
+                not output_schema.is_file()
+                or not generation_schema.is_file()
+                or not prompt_path.is_file()
+            ):
                 raise KernelError(
                     "contract_file_missing", "A profile contract file is unavailable."
                 )
@@ -348,6 +360,7 @@ class Kernel:
                 "execution_eligible": profile["enabled"]
                 and profile["implementation_state"] == "implemented",
                 "output_schema": profile["output_schema"],
+                "generation_schema": profile.get("generation_schema", profile["output_schema"]),
             }
             for profile in sorted(
                 self.profiles.values(),
@@ -414,6 +427,9 @@ class Kernel:
             seed = str(request["idempotency_seed"]).encode("utf-8")
             run_id = "seed-" + hashlib.sha256(seed).hexdigest()[:24]
         output_schema_path = self.schema_root / str(profile["output_schema"])
+        generation_schema_path = self.schema_root / str(
+            profile.get("generation_schema", profile["output_schema"])
+        )
         prompt_path = self.contract_root / str(profile["prompt"]["path"])
         return ResolvedRun(
             request=request,
@@ -426,6 +442,7 @@ class Kernel:
             profile_sha256=document_sha256(profile),
             prompt_sha256=file_sha256(prompt_path),
             output_schema_sha256=file_sha256(output_schema_path),
+            generation_schema_sha256=file_sha256(generation_schema_path),
             execution_eligible=profile["implementation_state"] == "implemented",
         )
 

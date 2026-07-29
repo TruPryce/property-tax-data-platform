@@ -20,7 +20,7 @@
     "profile_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "execution_eligible": {"type": "boolean"},
     "outcome": {"enum": ["succeeded", "failed", "not_executed"]},
-    "disposition": {"enum": ["completed", "adapter_failed", "timed_out", "budget_exceeded", "profile_not_implemented", "validation_failed"]},
+    "disposition": {"enum": ["completed", "adapter_failed", "timed_out", "budget_exceeded", "profile_not_implemented", "provider_generation_failed", "validation_failed"]},
     "exit_code": {"type": "integer", "minimum": 0},
     "error_code": {"type": ["string", "null"]},
     "started_at": {"type": "string", "format": "date-time"},

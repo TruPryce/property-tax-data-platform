@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 from collections.abc import Callable
@@ -9,10 +10,151 @@ from pathlib import Path
 
 import pytest
 from countyforge_runner.cli import main
-from countyforge_runner.contracts import JsonObject
+from countyforge_runner.contracts import JsonObject, validate_document
 from countyforge_runner.errors import KernelError
 from countyforge_runner.executor import Runner, _output_bytes, _safe_branch
 from countyforge_runner.resolver import Kernel
+
+
+def _valid_plan_document() -> JsonObject:
+    return {
+        "contract_version": 1,
+        "status": "planned",
+        "originating_issue": 1,
+        "proposed_change_name": "safe-plan",
+        "issue_classification": "feature_work",
+        "problem_statement": "A bounded problem.",
+        "desired_outcome": "A plan.",
+        "assumptions": ["Trusted contracts"],
+        "unresolved_decisions": [],
+        "affected_capabilities": ["runner"],
+        "files_to_create": ["openspec/changes/safe-plan/proposal.md"],
+        "files_to_modify": [],
+        "proposed_files": ["openspec/changes/safe-plan/proposal.md"],
+        "task_slices": ["Write contracts"],
+        "acceptance_criteria": ["It validates"],
+        "risks": ["Injection"],
+        "security_privacy_considerations": ["Read-only"],
+        "migration_compatibility_concerns": ["None"],
+        "validation_commands": ["openspec validate"],
+        "non_goals": ["Implementation"],
+        "implementation_eligibility": False,
+        "blocked_reasons": [],
+        "evidence_citations": [{"source_id": "s", "excerpt": "evidence"}],
+    }
+
+
+def _write_plan_adapter(path: Path, result: JsonObject | str) -> Path:
+    body = result if isinstance(result, str) else json.dumps(result, sort_keys=True)
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'mkdir -p "$OUT_DIR"\n'
+        "cat > \"$OUT_DIR/countyforge-plan-result.json\" <<'EOF'\n"
+        f"{body}\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def _json_type(value: object) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    if value is None:
+        return "null"
+    raise AssertionError(f"unsupported JSON value type: {type(value).__name__}")
+
+
+def _resolve_schema_reference(schema: JsonObject, root: JsonObject) -> JsonObject:
+    reference = schema.get("$ref")
+    if reference is None:
+        return schema
+    assert isinstance(reference, str) and reference.startswith("#/$defs/")
+    resolved: object = root
+    for component in reference.removeprefix("#/").split("/"):
+        assert isinstance(resolved, dict)
+        resolved = resolved[component]
+    assert isinstance(resolved, dict)
+    return resolved
+
+
+def _effective_schema_type(schema: JsonObject) -> str:
+    declared_type = schema.get("type")
+    if declared_type is not None:
+        assert isinstance(declared_type, str)
+        return declared_type
+    if "const" in schema:
+        return _json_type(schema["const"])
+    enum = schema.get("enum")
+    assert isinstance(enum, list) and enum
+    enum_types = {_json_type(value) for value in enum}
+    assert len(enum_types) == 1
+    return enum_types.pop()
+
+
+def _assert_generation_structure(
+    generation: JsonObject,
+    authoritative: JsonObject,
+    *,
+    authoritative_root: JsonObject,
+    path: str = "$",
+) -> None:
+    authoritative = _resolve_schema_reference(authoritative, authoritative_root)
+    expected_type = _effective_schema_type(authoritative)
+    assert generation.get("type") == expected_type, f"{path}: type drift"
+    if "enum" in authoritative:
+        assert generation.get("enum") == authoritative["enum"], f"{path}: enum drift"
+    else:
+        assert "enum" not in generation, f"{path}: unexpected enum"
+
+    if expected_type == "object":
+        assert generation.get("additionalProperties") == authoritative.get(
+            "additionalProperties"
+        ), f"{path}: closed-object posture drift"
+        generation_properties = generation.get("properties")
+        authoritative_properties = authoritative.get("properties")
+        assert isinstance(generation_properties, dict)
+        assert isinstance(authoritative_properties, dict)
+        assert set(generation_properties) == set(authoritative_properties), (
+            f"{path}: property drift"
+        )
+        assert set(generation.get("required", [])) == set(authoritative.get("required", [])), (
+            f"{path}: required-field drift"
+        )
+        for name in sorted(authoritative_properties):
+            generation_child = generation_properties[name]
+            authoritative_child = authoritative_properties[name]
+            assert isinstance(generation_child, dict)
+            assert isinstance(authoritative_child, dict)
+            _assert_generation_structure(
+                generation_child,
+                authoritative_child,
+                authoritative_root=authoritative_root,
+                path=f"{path}.{name}",
+            )
+    elif expected_type == "array":
+        generation_items = generation.get("items")
+        authoritative_items = authoritative.get("items")
+        assert isinstance(generation_items, dict)
+        assert isinstance(authoritative_items, dict)
+        _assert_generation_structure(
+            generation_items,
+            authoritative_items,
+            authoritative_root=authoritative_root,
+            path=f"{path}[]",
+        )
 
 
 @pytest.mark.parametrize("mode", ["fix", "validate"])
@@ -201,6 +343,11 @@ def test_plan_dispatches_read_only_adapter_with_one_provider_credential(
     adapter.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
         'test -n "${OPENAI_API_KEY:-}" && test -z "${SAKANA_API_KEY:-}"\n'
+        'test "$(basename "$GENERATION_SCHEMA_PATH")" = "countyforge-plan-generation.schema.json"\n'
+        'test "$RESULT_SCHEMA_NAME" = "countyforge-plan-result.schema.json"\n'
+        'test "$(sha256sum "$GENERATION_SCHEMA_PATH" | cut -d" " -f1)" = '
+        '"$EXPECTED_GENERATION_SCHEMA_SHA256"\n'
+        'test "$EXPECTED_GENERATION_SCHEMA_SHA256" != "$EXPECTED_OUTPUT_SCHEMA_SHA256"\n'
         'mkdir -p "$OUT_DIR"\n'
         "cat > \"$OUT_DIR/countyforge-plan-result.json\" <<'JSON'\n"
         '{"contract_version":1,"status":"planned","originating_issue":1,"proposed_change_name":"safe-plan",'
@@ -219,12 +366,131 @@ def test_plan_dispatches_read_only_adapter_with_one_provider_credential(
     )
     adapter.chmod(0o755)
     kernel = Kernel()
+    resolved = kernel.resolve(request_factory("plan"))
     document, exit_code = Runner(
         kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
-    ).run(kernel.resolve(request_factory("plan")))
+    ).run(resolved)
     assert exit_code == 0
     assert document["disposition"] == "completed"
     assert document["plan"]["implementation_eligibility"] is False
+    snapshot = json.loads(
+        (
+            tmp_path / "evidence" / "plan" / resolved.run_id / "countyforge-profile.snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert snapshot["generation_schema_sha256"] == resolved.generation_schema_sha256
+    assert snapshot["output_schema_sha256"] == resolved.output_schema_sha256
+
+
+def test_plan_generation_schema_uses_provider_compatible_subset() -> None:
+    generation = json.loads(
+        Path(".ai/schemas/countyforge-plan-generation.schema.json").read_text(encoding="utf-8")
+    )
+    authoritative = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    keywords: set[str] = set()
+
+    def collect(schema: object) -> None:
+        if not isinstance(schema, dict):
+            return
+        for keyword, value in schema.items():
+            keywords.add(keyword)
+            if keyword == "properties":
+                for property_schema in value.values():
+                    collect(property_schema)
+            elif keyword == "items":
+                collect(value)
+
+    collect(generation)
+    assert keywords <= {
+        "type",
+        "enum",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+    }
+    assert generation["required"] == authoritative["required"]
+    assert set(generation["properties"]) == set(authoritative["properties"])
+    _assert_generation_structure(
+        generation,
+        authoritative,
+        authoritative_root=authoritative,
+    )
+    validate_document(_valid_plan_document(), generation, kind="planning generation fixture")
+    validate_document(_valid_plan_document(), authoritative, kind="planning result fixture")
+
+
+@pytest.mark.parametrize("drift", ["nested", "type", "enum"])
+def test_plan_generation_schema_structure_drift_fails(drift: str) -> None:
+    generation = json.loads(
+        Path(".ai/schemas/countyforge-plan-generation.schema.json").read_text(encoding="utf-8")
+    )
+    authoritative = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    changed = copy.deepcopy(generation)
+    if drift == "nested":
+        del changed["properties"]["evidence_citations"]["items"]["properties"]["excerpt"]
+    elif drift == "type":
+        changed["properties"]["problem_statement"]["type"] = "integer"
+    else:
+        changed["properties"]["status"]["enum"] = ["planned", "blocked"]
+    with pytest.raises(AssertionError):
+        _assert_generation_structure(
+            changed,
+            authoritative,
+            authoritative_root=authoritative,
+        )
+
+
+def test_plan_generation_output_still_requires_authoritative_validation(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    document = _valid_plan_document()
+    document["proposed_change_name"] = "INVALID CHANGE NAME"
+    generation = json.loads(
+        Path(".ai/schemas/countyforge-plan-generation.schema.json").read_text(encoding="utf-8")
+    )
+    validate_document(document, generation, kind="planning generation fixture")
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", document)
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+    assert exit_code == 5
+    assert result["disposition"] == "validation_failed"
+    assert "plan" not in result
+
+
+def test_plan_provider_generation_sentinel_has_specific_disposition(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", "Error generating response")
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+    assert exit_code == 5
+    assert result["disposition"] == "provider_generation_failed"
+    assert result["summary"]["error_code"] == "provider_generation_failed"
+    assert "plan" not in result
+
+
+def test_plan_provider_generation_sentinel_must_match_exactly(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", " Error generating response")
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+    assert exit_code == 5
+    assert result["disposition"] == "validation_failed"
 
 
 def test_plan_profile_mounts_match_adapter_and_provenance_contract() -> None:
@@ -242,6 +508,11 @@ def test_plan_profile_mounts_match_adapter_and_provenance_contract() -> None:
     assert '-v "$MANIFEST_PATH:/workspace/manifest.json:ro"' in adapter
     assert '"frozen_planning_packet:/workspace/packet.json:read_only"' in adapter
     assert '"frozen_context_manifest:/workspace/manifest.json:read_only"' in adapter
+    assert '--output-schema "$CONTAINER_GENERATION_SCHEMA"' in adapter
+    assert '"$EXPECTED_GENERATION_SCHEMA_SHA256"' in adapter
+    assert '"$EXPECTED_OUTPUT_SCHEMA_SHA256"' in adapter
+    assert '"generation_schema_sha256": generation_schema_sha' in adapter
+    assert '"result_schema_sha256": result_schema_sha' in adapter
 
 
 def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -> None:
