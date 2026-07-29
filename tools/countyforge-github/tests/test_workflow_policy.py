@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -757,9 +758,36 @@ def test_claim_reports_immutable_trigger_identity_disposition() -> None:
     )
     run = str(step["run"])
     assert "if ! uv run --package countyforge-github countyforge-github idempotency-key" in run
-    assert '.disposition // "identity_validation_failed"' in run
+    assert '.disposition | select(type == "string" and length > 0)' in run
+    assert 'if [ -z "$disposition" ]' in run
+    assert 'disposition="identity_validation_failed"' in run
     assert "Immutable trigger identity validation failed: disposition=$disposition" in run
     assert "exit 2" in run
+
+
+def test_claim_identity_disposition_defaults_for_empty_output(tmp_path: Path) -> None:
+    identity = tmp_path / "identity.json"
+    identity.write_text("", encoding="utf-8")
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'disposition="$(jq -er '
+                "'.disposition | select(type == \"string\" and length > 0)' "
+                '"$1" 2>/dev/null || true)"; '
+                'if [ -z "$disposition" ]; then '
+                'disposition="identity_validation_failed"; fi; '
+                "printf '%s' \"$disposition\""
+            ),
+            "claim-identity-fallback",
+            str(identity),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout == "identity_validation_failed"
 
 
 def test_maintenance_never_dispatches_work() -> None:

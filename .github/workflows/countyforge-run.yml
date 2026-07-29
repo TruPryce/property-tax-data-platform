@@ -130,10 +130,12 @@ jobs:
             --trigger "$RUNNER_TEMP/countyforge/trigger.json" \
             > "$RUNNER_TEMP/countyforge/identity.json"; then
             disposition="$(
-              jq -r '.disposition // "identity_validation_failed"' \
-                "$RUNNER_TEMP/countyforge/identity.json" 2>/dev/null \
-                || printf '%s' identity_validation_failed
+              jq -er '.disposition | select(type == "string" and length > 0)' \
+                "$RUNNER_TEMP/countyforge/identity.json" 2>/dev/null || true
             )"
+            if [ -z "$disposition" ]; then
+              disposition="identity_validation_failed"
+            fi
             echo "::error::Immutable trigger identity validation failed: disposition=$disposition" >&2
             exit 2
           fi

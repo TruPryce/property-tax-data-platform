@@ -816,6 +816,42 @@ def test_implementation_retry_rejects_changed_openspec_hash(
     assert len(github.dispatches) == 1
 
 
+def test_legacy_implementation_retry_without_approval_fingerprint_is_refused(
+    event_factory: Callable[[str, str, str], JsonObject],
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github = FakeGitHub(head_sha)
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.resolve_merged_planning_approval",
+        lambda *args, **kwargs: _implementation_approval(head_sha),
+    )
+    monkeypatch.setattr(
+        "countyforge_github.orchestrator.evaluate_implementation_eligibility",
+        _eligible_implementation,
+    )
+    implementation_event = event_factory(
+        "/countyforge implement add-isolated-openspec-to-code-agents"
+    )
+    implementation_event["issue"].pop("pull_request")
+    implementation_event["issue"]["number"] = 7
+    _intake(github, implementation_event, head_sha)
+    _fail_canonical_run(github, reason="implementation_fixture_failure")
+    comment_id, legacy = _canonical(github)
+    legacy.pop("implementation_approval_sha256")
+    github.update_comment("TruPryce/property-tax-data-platform", comment_id, render_status(legacy))
+
+    retry_event = event_factory("/countyforge retry")
+    retry_event["issue"].pop("pull_request")
+    retry_event["issue"]["number"] = 7
+    retry_event["comment"]["id"] = 999
+    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+
+    assert retried["status"] == "refused"
+    assert retried["disposition"] == "implementation_retry_provenance_missing"
+    assert len(github.dispatches) == 1
+
+
 def test_all_checked_implementation_change_is_refused_before_dispatch(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
