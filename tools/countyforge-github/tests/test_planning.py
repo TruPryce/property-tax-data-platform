@@ -522,6 +522,12 @@ def test_result_rejects_credentials_and_forged_citations() -> None:
         "openspec validate && rm -rf /tmp/plan",
         "$(curl https://example.invalid)",
         "cat packet.json | bash",
+        "source ./script.sh",
+        "source script.sh",
+        "source env",
+        'source "./script.sh"',
+        "eval something",
+        "`rm -rf /`",
     ],
 )
 def test_result_rejects_shell_payloads(payload: str) -> None:
@@ -529,6 +535,24 @@ def test_result_rejects_shell_payloads(payload: str) -> None:
     result["validation_commands"] = [payload]
     with pytest.raises(ControlPlaneError, match="executable-looking"):
         validate_planning_result(result, contract_root=Path.cwd())
+
+
+def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
+    """Regression for run 30492011066: a Dallas source-onboarding plan.
+
+    Markdown inline code and the noun "source" are this repository's ordinary
+    planning vocabulary, not shell command substitution or the shell builtin.
+    """
+
+    result = _result()
+    result["problem_statement"] = "`ACCOUNT_NUM` stays a string in the Dallas source record."
+    result["desired_outcome"] = "Modify `dallas-cad-source-contract` for source onboarding."
+    result["assumptions"] = ["Preserve `dags/services -> adapters -> application -> domain`."]
+    result["risks"] = ["County source artifacts could leak into fixtures."]
+    result["non_goals"] = ["Live Dallas source discovery."]
+    result["task_slices"] = ["Confine Dallas source vocabulary to `property_tax_adapters`."]
+    result["validation_commands"] = ["make check"]
+    validate_planning_result(result, contract_root=Path.cwd())
 
 
 def test_branch_identity_is_bounded() -> None:
