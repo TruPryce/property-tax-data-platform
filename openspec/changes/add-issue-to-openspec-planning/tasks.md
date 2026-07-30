@@ -72,3 +72,5 @@
 - [x] 8.8 Model non-reproducible commit SHAs in the publication fixture so tree-and-parent recovery is proven rather than assumed.
 - [x] 8.9 Decide deduplication only after ref equivalence and a matching draft head; fail closed as `planning_draft_conflict` on a stale, divergent, or force-pushed marker.
 - [x] 8.10 Reserve stage and completed stages as validated exact-prefix fields, make persisted progress authoritative, fail closed on contradiction, and allow-list auxiliary detail.
+- [x] 8.11 Open the publication evidence boundary in the adapter command before reading inputs or constructing the GitHub client.
+- [x] 8.12 Convert contract-check and unexpected exceptions into sanitized stage-carrying publication failures, and read the pull-request response inside its own stage.

@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from countyforge_github.cli import main as github_cli_main
+from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning import (
     ContextLimits,
@@ -18,11 +20,13 @@ from countyforge_github.planning import (
     materialize_plan,
     planning_branch,
     planning_context_fingerprint,
+    publication_progress,
     publish_plan,
     select_planning_comments,
     validate_planning_result,
 )
 from countyforge_github.redaction import redact_untrusted_text
+from countyforge_github.results import normalize_publication_result
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -806,12 +810,13 @@ def test_publication_failure_names_its_stage_and_stays_sanitized(
 
     github = _PublicationGitHub(fail_at=operation, status=422)
     progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
-    with pytest.raises(ControlPlaneError) as raised:
-        publish_plan(
-            github,
-            progress_path=progress_path,
-            **_publication_case(tmp_path, f"stage-{operation}"),  # type: ignore[arg-type]
-        )
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                github,
+                progress=progress,
+                **_publication_case(tmp_path, f"stage-{operation}"),  # type: ignore[arg-type]
+            )
     error = raised.value
     assert error.code == "github_api_error"
     assert error.message == "GitHub API request failed."
@@ -840,12 +845,13 @@ def test_publication_port_preflight_runs_under_initialized_stage_tracking(
             return []
 
     progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
-    with pytest.raises(ControlPlaneError) as raised:
-        publish_plan(
-            _IncompleteGitHub(),
-            progress_path=progress_path,
-            **_publication_case(tmp_path, "incomplete-port"),  # type: ignore[arg-type]
-        )
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                _IncompleteGitHub(),
+                progress=progress,
+                **_publication_case(tmp_path, "incomplete-port"),  # type: ignore[arg-type]
+            )
     assert raised.value.code == "github_port_incomplete"
     assert raised.value.details["stage"] == "validate_result"
     assert raised.value.details["completed"] == []
@@ -861,8 +867,9 @@ def test_publication_progress_survives_a_failure_before_any_api_call(tmp_path: P
     progress_path = tmp_path / "progress.json"
     case = _publication_case(tmp_path, "provenance")
     case["issue_number"] = 7
-    with pytest.raises(ControlPlaneError) as raised:
-        publish_plan(github, progress_path=progress_path, **case)  # type: ignore[arg-type]
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(github, progress=progress, **case)  # type: ignore[arg-type]
     assert raised.value.code == "planning_provenance_mismatch"
     assert raised.value.details["stage"] == "validate_result"
     assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "validate_result"
@@ -1003,3 +1010,190 @@ def test_publication_reuses_a_draft_created_before_the_attempt_died(tmp_path: Pa
     assert second["pr_number"] == first["pr_number"]
     assert len(github.created_refs) == 1
     assert len(github.pull_requests) == 1
+
+
+def _publish_cli(
+    tmp_path: Path,
+    case: dict[str, object],
+    *,
+    progress_path: Path,
+    result_body: str | None = None,
+    token: str | None = "fixture-token",
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[int, JsonObject]:
+    """Drive `publish-plan` through the CLI so preflight failures are covered."""
+
+    result_file = tmp_path / f"{progress_path.stem}-result.json"
+    result_file.write_text(
+        result_body if result_body is not None else json.dumps(case["result"]), encoding="utf-8"
+    )
+    if token is None:
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_TOKEN", token)
+    captured: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda value: captured.append(str(value)))
+    code = github_cli_main(
+        [
+            "--contract-root",
+            str(Path.cwd()),
+            "publish-plan",
+            "--result",
+            str(result_file),
+            "--repository",
+            str(case["repository"]),
+            "--default-branch",
+            "main",
+            "--target-sha",
+            str(case["target_sha"]),
+            "--issue-number",
+            str(case["issue_number"]),
+            "--run-id",
+            str(case["run_id"]),
+            "--publication-root",
+            str(case["publication_root"]),
+            "--planning-packet",
+            str(case["planning_packet_path"]),
+            "--context-manifest",
+            str(case["context_manifest_path"]),
+            "--publication-progress",
+            str(progress_path),
+        ]
+    )
+    return code, json.loads(captured[-1])
+
+
+@pytest.mark.parametrize(
+    ("body", "token", "disposition"),
+    [
+        ("{ not json", "fixture-token", "invalid_json"),
+        ('["a list"]', "fixture-token", "invalid_json_type"),
+        (None, None, "github_token_missing"),
+    ],
+)
+def test_publish_cli_preflight_failures_still_name_their_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str | None,
+    token: str | None,
+    disposition: str,
+) -> None:
+    """Reading the result and building the client happen inside the boundary."""
+
+    case = _publication_case(tmp_path, f"cli-{disposition}")
+    progress_path = tmp_path / "cli-progress" / f"{disposition}.json"
+    code, document = _publish_cli(
+        tmp_path,
+        case,
+        progress_path=progress_path,
+        result_body=body,
+        token=token,
+        monkeypatch=monkeypatch,
+    )
+    assert code != 0
+    assert document["ok"] is False
+    assert document["disposition"] == disposition
+    assert document["details"]["stage"] == "validate_result"
+    assert document["details"]["completed"] == []
+    # The evidence the workflow uploads exists even though nothing was read.
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": "validate_result",
+        "completed": [],
+    }
+    normalized = normalize_publication_result(
+        result_path=_emitted(tmp_path, document), progress_path=progress_path, exit_code=code
+    )
+    assert normalized["ok"] is False
+    assert normalized["details"]["stage"] == "validate_result"
+    assert "outputs" not in normalized
+
+
+def _emitted(tmp_path: Path, document: JsonObject) -> Path:
+    path = tmp_path / f"emitted-{abs(hash(json.dumps(document, sort_keys=True)))}.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+class _MalformedGitHub(_PublicationGitHub):
+    """GitHub responses are untrusted; a wrong shape must not escape untyped."""
+
+    def __init__(self, malformed: str) -> None:
+        super().__init__()
+        self.malformed = malformed
+
+    def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
+        if self.malformed == "get_git_commit":
+            return "not-a-commit"  # type: ignore[return-value]
+        return super().get_git_commit(repository, sha)
+
+    def create_pull_request(self, repository: str, payload: dict[str, object]) -> dict[str, object]:
+        if self.malformed == "create_pull_request":
+            super().create_pull_request(repository, payload)
+            return "not-a-pull-request"  # type: ignore[return-value]
+        return super().create_pull_request(repository, payload)
+
+
+@pytest.mark.parametrize(
+    ("malformed", "stage", "code"),
+    [
+        # An unguarded shape reaches the wrapper as a plain AttributeError...
+        ("get_git_commit", "load_parent_commit", "publication_internal_error"),
+        # ...while a guarded one is refused in the stage that produced it,
+        # rather than after `complete` has already been entered.
+        ("create_pull_request", "create_pull_request", "github_api_invalid_response"),
+    ],
+)
+def test_malformed_github_response_is_sanitized_with_its_stage(
+    tmp_path: Path, malformed: str, stage: str, code: str
+) -> None:
+    progress_path = tmp_path / "malformed" / f"{malformed}.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                _MalformedGitHub(malformed),
+                progress=progress,
+                **_publication_case(tmp_path, f"malformed-{malformed}"),  # type: ignore[arg-type]
+            )
+    error = raised.value
+    assert error.code == code
+    assert error.exit_code != 0
+    if code == "publication_internal_error":
+        assert error.exit_code == 5
+        assert error.message == "Publication failed unexpectedly."
+        assert error.details["error_type"] == "AttributeError"
+    assert error.details["stage"] == stage
+    assert error.details["completed"] == list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)])
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == stage
+
+
+def test_unreadable_materialized_file_is_sanitized_with_its_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError reading a rendered file must not escape as an untyped crash."""
+
+    case = _publication_case(tmp_path, "unreadable")
+    root = case["publication_root"]
+    assert isinstance(root, Path)
+    materialize_plan(
+        dict(case["result"]),  # type: ignore[arg-type]
+        publication_root=root,
+        issue_number=6,
+        run_id=str(case["run_id"]),
+    )
+    case["already_materialized"] = True
+    original = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "proposal.md":
+            raise OSError("unreadable")
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    progress_path = tmp_path / "unreadable" / "progress.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(_PublicationGitHub(), progress=progress, **case)  # type: ignore[arg-type]
+    assert raised.value.code == "publication_internal_error"
+    assert raised.value.details["error_type"] == "OSError"
+    assert raised.value.details["stage"] == "create_blobs"
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "create_blobs"

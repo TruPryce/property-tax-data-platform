@@ -15,7 +15,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -695,7 +695,7 @@ _PUBLICATION_STAGES = (
 )
 
 
-class _PublicationProgress:
+class PublicationProgress:
     """Record the last entered publication stage on every exit path."""
 
     def __init__(self, path: Path | None = None) -> None:
@@ -746,13 +746,40 @@ class _PublicationProgress:
 
 
 @contextmanager
-def _publication_progress(path: Path | None) -> Iterator[_PublicationProgress]:
-    progress = _PublicationProgress(path)
+def publication_progress(path: Path | None = None) -> Iterator[PublicationProgress]:
+    """Open the publication evidence boundary.
+
+    Callers open this before reading inputs or constructing a GitHub client, so
+    an unreadable result artifact or a missing token is attributed like any
+    other publication failure instead of escaping without a stage.  Every exit
+    leaves a sanitized `ControlPlaneError` carrying the stage it reached.
+    """
+
+    progress = PublicationProgress(path)
     try:
         yield progress
     except ControlPlaneError as error:
         error.details.update(progress.as_document())
         raise
+    except KernelError as error:
+        # A trusted contract check failed inside publication; keep its stable
+        # code but re-envelope it so the stage travels with it.
+        raise ControlPlaneError(
+            error.code,
+            "Publication failed a trusted contract check.",
+            dict(progress.as_document()),
+            exit_code=5,
+        ) from None
+    except Exception as error:  # noqa: BLE001 - sanitize every publication failure
+        # GitHub responses and the filesystem are untrusted here, so an
+        # AttributeError, TypeError, or OSError must still name its stage.  Only
+        # the exception class name crosses the boundary; no value does.
+        raise ControlPlaneError(
+            "publication_internal_error",
+            "Publication failed unexpectedly.",
+            {"error_type": type(error).__name__, **progress.as_document()},
+            exit_code=5,
+        ) from None
 
 
 def _marker_match(
@@ -827,7 +854,7 @@ def publish_plan(
     context_manifest_path: Path,
     evidence_url: str | None = None,
     already_materialized: bool = False,
-    progress_path: Path | None = None,
+    progress: PublicationProgress | None = None,
 ) -> JsonObject:
     """Publish a validated plan through GitHub's Git data API.
 
@@ -835,6 +862,8 @@ def publish_plan(
     rendered first; only those deterministic files become blobs in the new commit.
     Every stage transition is recorded, and any sanitized failure carries the
     stage it failed in so a partially applied publication can be diagnosed.
+    A caller that already opened `publication_progress` passes it in and owns
+    that boundary; otherwise one is opened for the duration of this call.
     """
 
     required = (
@@ -849,7 +878,10 @@ def publish_plan(
     )
     # Every fallible preflight runs under initialized tracking; an unusable port
     # must not be the one failure that reports no stage.
-    with _publication_progress(progress_path) as progress:
+    boundary: AbstractContextManager[PublicationProgress] = (
+        nullcontext(progress) if progress is not None else publication_progress()
+    )
+    with boundary as progress:
         if not all(hasattr(github, name) for name in required):
             raise ControlPlaneError(
                 "github_port_incomplete", "GitHub publication port is incomplete."
@@ -1058,6 +1090,14 @@ def publish_plan(
                 "draft": True,
             },
         )
+        # Read the response while still in this stage, so a malformed one is
+        # attributed to the mutation that produced it rather than to `complete`.
+        if not isinstance(pr, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub pull-request identity is unavailable."
+            )
+        pr_number = pr.get("number")
+        pr_url = pr.get("html_url")
         action = "superseded" if predecessor is not None else "created"
         revision = 2 if predecessor is not None else 1
         revision_document: JsonObject = {
@@ -1125,8 +1165,8 @@ def publish_plan(
             "action": action,
             "branch": branch,
             "commit_sha": commit,
-            "pr_number": pr.get("number"),
-            "pr_url": pr.get("html_url"),
+            "pr_number": pr_number,
+            "pr_url": pr_url,
             "change_name": change,
             "run_id": run_id,
             "context_manifest_sha256": manifest_sha,

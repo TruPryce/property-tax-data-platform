@@ -83,9 +83,16 @@ validate_result  validate_provenance  resolve_predecessor  create_blobs  load_pa
 create_tree  create_commit  create_ref  create_pull_request  complete
 ```
 
-Tracking opens inside `validate_result` before the first fallible preflight, so no failure and no
-snapshot ever names a stage outside that list. `--publication-progress <path>` replaces each
-transition atomically, so a hard kill still leaves evidence.
+Tracking opens inside `validate_result` before the first fallible preflight — before the result
+artifact is read and before the GitHub client is constructed — so an unreadable input or a missing
+token is attributed like any other publication failure, and no snapshot ever names a stage outside
+that list. `--publication-progress <path>` replaces each transition atomically, so a hard kill
+still leaves evidence.
+
+Nothing leaves publication unsanitized. A trusted contract check keeps its stable code; an
+unexpected exception — an `OSError` reading a rendered file, an `AttributeError` from an untrusted
+GitHub response — becomes `publication_internal_error` carrying the stage and only the exception
+class name, never a value.
 
 The workflow captures the publisher's return code rather than aborting on it, then reduces stdout
 and that code to one document with `normalize-publication-result`:

@@ -41,6 +41,7 @@ from countyforge_github.planning import (
     DEFAULT_TRUSTED_BOT_ID,
     build_planning_packet,
     materialize_plan,
+    publication_progress,
     publish_plan,
     validate_planning_result,
 )
@@ -776,24 +777,28 @@ def main(arguments: Sequence[str] | None = None) -> int:
             _emit({"ok": int(evidence["exit_code"]) == 0, "evidence": evidence})
             return 0 if int(evidence["exit_code"]) == 0 else 5
         if command_name == "publish-plan":
-            result = _load(args.result, "planning result")
-            _emit(
-                publish_plan(
-                    _github_client(),
-                    repository=args.repository,
-                    default_branch=args.default_branch,
-                    target_sha=args.target_sha,
-                    issue_number=args.issue_number,
-                    run_id=args.run_id,
-                    result=result,
-                    publication_root=args.publication_root,
-                    planning_packet_path=args.planning_packet,
-                    context_manifest_path=args.context_manifest,
-                    evidence_url=args.evidence_url,
-                    already_materialized=args.already_materialized,
-                    progress_path=args.publication_progress,
+            # The evidence boundary opens before the result artifact is read and
+            # before the GitHub client exists, so an unreadable input or a
+            # missing token is attributed like any other publication failure
+            # rather than escaping without a stage or a progress document.
+            with publication_progress(args.publication_progress) as progress:
+                _emit(
+                    publish_plan(
+                        _github_client(),
+                        repository=args.repository,
+                        default_branch=args.default_branch,
+                        target_sha=args.target_sha,
+                        issue_number=args.issue_number,
+                        run_id=args.run_id,
+                        result=_load(args.result, "planning result"),
+                        publication_root=args.publication_root,
+                        planning_packet_path=args.planning_packet,
+                        context_manifest_path=args.context_manifest,
+                        evidence_url=args.evidence_url,
+                        already_materialized=args.already_materialized,
+                        progress=progress,
+                    )
                 )
-            )
             return 0
         if command_name == "reconcile":
             _emit(
