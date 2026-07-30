@@ -67,3 +67,6 @@
 - [x] 8.3 Upload the publication result and progress documents with `if: always()`.
 - [x] 8.4 Inspect the deterministic planning ref before creating it; resume an equivalent generated ref and fail closed on a divergent one.
 - [x] 8.5 Add fixtures for failures at blob, parent-commit, tree, commit, ref, and pull-request creation, and prove each preserves sanitized evidence and the correct stage.
+- [x] 8.6 Open stage tracking before the port preflight, never persist a null stage, and replace progress snapshots atomically.
+- [x] 8.7 Normalize publisher output and its return code in a typed adapter command; fail closed on missing, malformed, non-object, failing, inconsistent, or incomplete results and emit outputs only for a validated success.
+- [x] 8.8 Model non-reproducible commit SHAs in the publication fixture so tree-and-parent recovery is proven rather than assumed.

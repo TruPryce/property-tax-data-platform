@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -699,7 +700,10 @@ class _PublicationProgress:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path
-        self.stage: str | None = None
+        # Tracking opens inside the first stage rather than at a null one, so no
+        # persisted snapshot and no sanitized failure can name a stage outside
+        # the closed vocabulary -- not even a kill during the very first write.
+        self.stage: str = _PUBLICATION_STAGES[0]
         self.completed: list[str] = []
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -710,8 +714,7 @@ class _PublicationProgress:
             raise ControlPlaneError(
                 "invalid_publication_stage", "Publication reported an unknown stage."
             )
-        if self.stage is not None:
-            self.completed.append(self.stage)
+        self.completed.append(self.stage)
         self.stage = stage
         self._write()
 
@@ -719,13 +722,22 @@ class _PublicationProgress:
         return {"stage": self.stage, "completed": list(self.completed)}
 
     def _write(self) -> None:
-        """Persist after every transition so a hard kill still leaves evidence."""
+        """Persist each transition atomically so a hard kill still leaves evidence.
+
+        `write_text` would truncate first, so a kill inside that window could
+        leave neither the previous nor the current snapshot.
+        """
 
         if self._path is None:
             return
-        self._path.write_text(
-            json.dumps(self.as_document(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        document = json.dumps(self.as_document(), indent=2, sort_keys=True) + "\n"
+        pending = self._path.with_name(f"{self._path.name}.pending")
+        try:
+            pending.write_text(document, encoding="utf-8")
+            os.replace(pending, self._path)
+        except OSError:
+            pending.unlink(missing_ok=True)
+            raise
 
 
 @contextmanager
@@ -844,10 +856,13 @@ def publish_plan(
         "get_git_ref",
         "create_pull_request",
     )
-    if not all(hasattr(github, name) for name in required):
-        raise ControlPlaneError("github_port_incomplete", "GitHub publication port is incomplete.")
+    # Every fallible preflight runs under initialized tracking; an unusable port
+    # must not be the one failure that reports no stage.
     with _publication_progress(progress_path) as progress:
-        progress.enter("validate_result")
+        if not all(hasattr(github, name) for name in required):
+            raise ControlPlaneError(
+                "github_port_incomplete", "GitHub publication port is incomplete."
+            )
         validate_planning_result(result, contract_root=publication_root)
         issue = int(issue_number)
         if int(result["originating_issue"]) != issue:

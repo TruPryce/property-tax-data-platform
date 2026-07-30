@@ -83,11 +83,26 @@ validate_result  validate_provenance  resolve_predecessor  create_blobs  load_pa
 create_tree  create_commit  create_ref  create_pull_request  complete
 ```
 
-`--publication-progress <path>` writes each transition to disk, so a hard kill still leaves
-evidence. The workflow captures the publisher's return code rather than aborting on it,
-substitutes a `publication_result_missing` document if the redirect is empty, reports
-`disposition`, `.details.stage`, and `.details.status` as an Actions error, and uploads
-`countyforge-publication.json` and `countyforge-publication-progress.json` with `if: always()`.
+Tracking opens inside `validate_result` before the first fallible preflight, so no failure and no
+snapshot ever names a stage outside that list. `--publication-progress <path>` replaces each
+transition atomically, so a hard kill still leaves evidence.
+
+The workflow captures the publisher's return code rather than aborting on it, then reduces stdout
+and that code to one document with `normalize-publication-result`:
+
+| Publisher output at exit | Normalized disposition | Effective exit |
+|---|---|---|
+| complete, well-typed, `ok: true`, exit 0 | `planning_publication_completed` | 0 |
+| absent or empty | `publication_result_missing` | captured code, or 5 |
+| unparseable or not a single JSON object | `publication_result_malformed` | captured code, or 5 |
+| `ok: false` | its own sanitized disposition | captured code, or 5 |
+| `ok: true` with a nonzero exit | `publication_result_inconsistent` | captured code |
+| `ok: true` missing or mistyped publication facts | `publication_result_incomplete` | 5 |
+
+A closed-vocabulary stage surviving in the progress file is carried into the fallback, so a hard
+kill still reports where it died. Step outputs are read only from the normalizer's validated
+`.outputs`. `countyforge-publication.json`, `countyforge-publication-progress.json`, and
+`countyforge-publication-normalized.json` all upload with `if: always()`.
 
 Before creating the ref, publication inspects it. A retry cannot reproduce a commit SHA, but a
 tree is content-addressed:

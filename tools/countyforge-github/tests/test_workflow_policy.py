@@ -729,24 +729,35 @@ def test_planning_publication_preserves_its_structured_result_on_every_exit() ->
     publication = next(step for step in steps if step.get("id") == "planning-publication")
     run = str(publication["run"])
     # The return code is captured instead of aborting the step, so the redirected
-    # document survives to be read and uploaded.
+    # document survives to be read, normalized, and uploaded.
     assert "set +e" in run and "publication_rc=$?" in run and "set -e" in run
     assert "--publication-progress" in run
-    assert 'test -s "$publication_result"' in run
-    assert "publication_result_missing" in run
+    # Consistency between the document and the return code is decided by the
+    # typed adapter, never by a bare nonempty-file test.
+    assert "normalize-publication-result" in run
+    assert '--exit-code "$publication_rc"' in run
+    assert "effective_rc=" in run
     assert ".details.stage" in run and ".details.status" in run
     assert "::error::Planning publication failed:" in run
-    assert 'exit "$publication_rc"' in run
-    # Every output assignment must sit behind the failure branch.
-    assert run.index('exit "$publication_rc"') < run.index("change_name=$(jq")
+    assert 'exit "$effective_rc"' in run
+    # Every output assignment must sit behind the failure branch and read only
+    # the normalizer's validated outputs.
+    assert run.index('exit "$effective_rc"') < run.index("change_name=$(jq")
+    for field in ("change_name", "branch", "pr_number", "context_manifest_sha256"):
+        assert f".outputs.{field}" in run
+    assert '"$publication_result"' not in run.split('exit "$effective_rc"')[1]
     upload = next(
         step
         for step in steps
         if step.get("name") == "Upload sanitized planning publication evidence"
     )
     assert upload["if"] == "always()"
-    assert "countyforge-publication.json" in str(upload["with"]["path"])
-    assert "countyforge-publication-progress.json" in str(upload["with"]["path"])
+    for artifact in (
+        "countyforge-publication.json",
+        "countyforge-publication-progress.json",
+        "countyforge-publication-normalized.json",
+    ):
+        assert artifact in str(upload["with"]["path"])
 
 
 def test_planning_materialization_reports_upstream_provider_failure() -> None:

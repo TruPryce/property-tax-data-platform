@@ -1771,6 +1771,7 @@ jobs:
           test -f "$planning_packet" && test -f "$context_manifest"
           publication_result="$RUNNER_TEMP/countyforge-publication.json"
           publication_progress="$RUNNER_TEMP/countyforge-publication-progress.json"
+          publication_normalized="$RUNNER_TEMP/countyforge-publication-normalized.json"
           set +e
           uv run --package countyforge-github countyforge-github publish-plan \
             --result "$plan_file" --repository "$TARGET_REPOSITORY" --default-branch main \
@@ -1781,22 +1782,25 @@ jobs:
             --publication-progress "$publication_progress" > "$publication_result"
           publication_rc=$?
           set -e
-          # A hard kill can leave the redirect empty; canonical state must never
-          # depend on a missing document.
-          test -s "$publication_result" || printf '%s\n' \
-            '{"ok":false,"disposition":"publication_result_missing","message":"Publisher returned no structured result.","details":{}}' \
-            > "$publication_result"
-          if [ "$publication_rc" -ne 0 ]; then
-            disposition="$(jq -r '.disposition // "planning_publication_failed"' "$publication_result")"
-            stage="$(jq -r '.details.stage // "unknown"' "$publication_result")"
-            status="$(jq -r '.details.status // "unknown"' "$publication_result")"
+          # Missing, malformed, non-object, or exit-code-inconsistent publisher
+          # output becomes sanitized evidence with a nonzero effective code, so
+          # finalization can never proceed on a document it could not read.
+          uv run --package countyforge-github countyforge-github normalize-publication-result \
+            --result "$publication_result" --progress "$publication_progress" \
+            --exit-code "$publication_rc" > "$publication_normalized"
+          effective_rc="$(jq -r '.exit_code // 5' "$publication_normalized" 2>/dev/null || echo 5)"
+          case "$effective_rc" in ''|*[!0-9]*) effective_rc=5 ;; esac
+          if [ "$effective_rc" -ne 0 ]; then
+            disposition="$(jq -r '.disposition // "planning_publication_failed"' "$publication_normalized")"
+            stage="$(jq -r '.details.stage // "unknown"' "$publication_normalized")"
+            status="$(jq -r '.details.status // "unknown"' "$publication_normalized")"
             echo "::error::Planning publication failed: disposition=$disposition stage=$stage status=$status"
-            exit "$publication_rc"
+            exit "$effective_rc"
           fi
-          echo "change_name=$(jq -r .change_name "$publication_result")" >> "$GITHUB_OUTPUT"
-          echo "branch=$(jq -r .branch "$publication_result")" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$(jq -r .pr_number "$publication_result")" >> "$GITHUB_OUTPUT"
-          echo "context_sha256=$(jq -r .context_manifest_sha256 "$publication_result")" >> "$GITHUB_OUTPUT"
+          echo "change_name=$(jq -r .outputs.change_name "$publication_normalized")" >> "$GITHUB_OUTPUT"
+          echo "branch=$(jq -r .outputs.branch "$publication_normalized")" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(jq -r .outputs.pr_number "$publication_normalized")" >> "$GITHUB_OUTPUT"
+          echo "context_sha256=$(jq -r .outputs.context_manifest_sha256 "$publication_normalized")" >> "$GITHUB_OUTPUT"
           echo "result_sha256=$(sha256sum "$plan_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Upload sanitized planning publication evidence
@@ -1807,6 +1811,7 @@ jobs:
           path: |
             ${{ runner.temp }}/countyforge-publication.json
             ${{ runner.temp }}/countyforge-publication-progress.json
+            ${{ runner.temp }}/countyforge-publication-normalized.json
           if-no-files-found: warn
           retention-days: 14
 

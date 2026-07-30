@@ -9,6 +9,23 @@ from pathlib import Path
 from countyforge_github.contracts import JsonObject
 
 _DISPOSITION = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+# Mirrors the publisher's closed vocabulary; a progress document naming anything
+# else is untrusted evidence and is ignored rather than reported.
+PUBLICATION_STAGES = (
+    "validate_result",
+    "validate_provenance",
+    "resolve_predecessor",
+    "create_blobs",
+    "load_parent_commit",
+    "create_tree",
+    "create_commit",
+    "create_ref",
+    "create_pull_request",
+    "complete",
+)
+_PUBLICATION_ACTIONS = frozenset({"created", "superseded", "deduplicated"})
 
 
 def _read_result(path: Path | None) -> JsonObject | None:
@@ -95,4 +112,126 @@ def resolve_terminal_result(
         "ok": True,
         "state": states.get(raw_disposition, "failed"),
         "disposition": raw_disposition,
+    }
+
+
+def _publication_progress_details(path: Path | None) -> JsonObject:
+    """Recover a closed-vocabulary stage from the publisher's progress snapshot.
+
+    A hard kill can leave the redirected stdout empty while the progress file
+    still holds the last stage entered, so the fallback document must not report
+    `unknown` when that evidence survived.
+    """
+
+    document = _read_result(path)
+    if document is None:
+        return {}
+    stage = document.get("stage")
+    if not isinstance(stage, str) or stage not in PUBLICATION_STAGES:
+        return {}
+    raw_completed = document.get("completed")
+    completed = (
+        [item for item in raw_completed if isinstance(item, str) and item in PUBLICATION_STAGES]
+        if isinstance(raw_completed, list)
+        else []
+    )
+    return {"stage": stage, "completed": completed}
+
+
+def _publication_failure(
+    disposition: str, message: str, *, exit_code: int, details: JsonObject
+) -> JsonObject:
+    return {
+        "ok": False,
+        "exit_code": exit_code if exit_code != 0 else 5,
+        "disposition": disposition,
+        "message": message,
+        "details": details,
+    }
+
+
+def _publication_outputs(result: JsonObject) -> JsonObject | None:
+    """Return the step outputs only when every required field has its type."""
+
+    change_name = result.get("change_name")
+    branch = result.get("branch")
+    pr_number = result.get("pr_number")
+    context_sha = result.get("context_manifest_sha256")
+    if (
+        result.get("action") not in _PUBLICATION_ACTIONS
+        or result.get("stage") != "complete"
+        or not isinstance(change_name, str)
+        or not change_name
+        or not isinstance(branch, str)
+        or not branch
+        or isinstance(pr_number, bool)
+        or not isinstance(pr_number, int)
+        or not isinstance(context_sha, str)
+        or _SHA256.fullmatch(context_sha) is None
+    ):
+        return None
+    return {
+        "change_name": change_name,
+        "branch": branch,
+        "pr_number": pr_number,
+        "context_manifest_sha256": context_sha,
+    }
+
+
+def normalize_publication_result(
+    *, result_path: Path | None, progress_path: Path | None, exit_code: int
+) -> JsonObject:
+    """Reduce publisher stdout and its return code to one consistent document.
+
+    The workflow must never finalize a planning run on evidence it could not
+    read.  A missing, malformed, non-object, or internally inconsistent result
+    becomes a sanitized failure with a nonzero effective exit code, and step
+    outputs are produced only for a zero exit that also reports a complete,
+    well-typed success.
+    """
+
+    progress = _publication_progress_details(progress_path)
+    raw = _read_result(result_path)
+    if raw is None:
+        empty = result_path is None or not result_path.is_file() or not result_path.read_bytes()
+        return _publication_failure(
+            "publication_result_missing" if empty else "publication_result_malformed",
+            "Publisher returned no usable structured result.",
+            exit_code=exit_code,
+            details=progress,
+        )
+    details = raw.get("details")
+    merged: JsonObject = {**progress, **(details if isinstance(details, dict) else {})}
+    if raw.get("ok") is not True:
+        disposition = raw.get("disposition")
+        return _publication_failure(
+            disposition
+            if isinstance(disposition, str) and _DISPOSITION.fullmatch(disposition)
+            else "planning_publication_failed",
+            "Publication reported a sanitized failure.",
+            exit_code=exit_code,
+            details=merged,
+        )
+    if exit_code != 0:
+        return _publication_failure(
+            "publication_result_inconsistent",
+            "Publication reported success with a nonzero exit code.",
+            exit_code=exit_code,
+            details=merged,
+        )
+    outputs = _publication_outputs(raw)
+    if outputs is None:
+        return _publication_failure(
+            "publication_result_incomplete",
+            "Publication reported success without complete publication facts.",
+            exit_code=5,
+            details=merged,
+        )
+    return {
+        "ok": True,
+        "exit_code": 0,
+        "disposition": "planning_publication_completed",
+        "message": "Publication completed.",
+        "details": merged,
+        "outputs": outputs,
     }

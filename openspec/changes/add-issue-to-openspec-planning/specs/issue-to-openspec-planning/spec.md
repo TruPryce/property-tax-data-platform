@@ -37,7 +37,7 @@ The planning result SHALL use a versioned authoritative schema with bounded stri
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.
 
-Publication SHALL record the last entered stage from a closed vocabulary and MUST attach it to every sanitized failure, and the trusted workflow MUST preserve and upload the publisher's structured result on both success and failure. Before creating the deterministic planning ref, publication MUST inspect it: an absent ref is created, a ref whose commit carries this plan's tree and trusted parent is resumed, and any other ref fails closed as a branch conflict without being moved.
+Publication SHALL record the last entered stage from a closed vocabulary, starting before its first fallible preflight so no failure and no persisted snapshot can report a stage outside that vocabulary, and MUST attach it to every sanitized failure. The trusted workflow MUST preserve and upload the publisher's structured result on both success and failure, and MUST reduce that result and the captured return code to one consistent document: a missing, malformed, non-object, or exit-code-inconsistent result becomes sanitized evidence with a nonzero effective exit code, a surviving closed-vocabulary progress stage is carried into that evidence, and step outputs are produced only for a zero exit that also reports complete, well-typed publication facts. Before creating the deterministic planning ref, publication MUST inspect it: an absent ref is created, a ref whose commit carries this plan's tree and trusted parent is resumed, and any other ref fails closed as a branch conflict without being moved.
 
 #### Scenario: Validation fails closed
 - **WHEN** result hashes, issue/repository/SHA/run bindings, schema, path policy, or deterministic validation fail
@@ -46,6 +46,10 @@ Publication SHALL record the last entered stage from a closed vocabulary and MUS
 #### Scenario: Name the failing publication mutation
 - **WHEN** a GitHub Git-data or pull-request mutation fails during publication
 - **THEN** the sanitized result records the failing stage and the stages already completed, the workflow preserves and uploads that document, and canonical state records `planning_publication_failed`
+
+#### Scenario: Refuse to finalize on unreadable publisher evidence
+- **WHEN** the publisher's result is missing, malformed, not a single JSON object, reports failure, or reports success alongside a nonzero exit code or incomplete publication facts
+- **THEN** normalization replaces it with sanitized evidence carrying a nonzero effective exit code and any surviving progress stage, and no publication step output is written
 
 #### Scenario: Resume an interrupted publication
 - **WHEN** the deterministic planning ref already exists and its commit carries this plan's tree and trusted parent

@@ -45,7 +45,7 @@ from countyforge_github.planning import (
     validate_planning_result,
 )
 from countyforge_github.requests import build_run_request
-from countyforge_github.results import resolve_terminal_result
+from countyforge_github.results import normalize_publication_result, resolve_terminal_result
 from countyforge_github.state import reconcile_workflow, render_status, transition_state
 from countyforge_github.workflow_control import (
     advance_run,
@@ -253,6 +253,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _file(result, "result", required=False)
     _file(result, "exit_code", required=False)
+
+    publication = subparsers.add_parser("normalize-publication-result")
+    publication.add_argument("--result", type=Path)
+    publication.add_argument("--progress", type=Path)
+    publication.add_argument("--exit-code", type=int, required=True)
 
     intake = subparsers.add_parser("intake")
     _file(intake, "event")
@@ -805,6 +810,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     command=args.command,
                     result_path=args.result,
                     exit_code_path=args.exit_code,
+                )
+            )
+            return 0
+        if command_name == "normalize-publication-result":
+            # Always exits zero: this command *is* the workflow's fail-closed
+            # reading of the publisher, and its own document carries the
+            # effective exit code the step must use.
+            _emit(
+                normalize_publication_result(
+                    result_path=args.result,
+                    progress_path=args.progress,
+                    exit_code=args.exit_code,
                 )
             )
             return 0

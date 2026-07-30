@@ -614,12 +614,16 @@ class _PublicationGitHub:
     ) -> str:
         del repository, message
         self._maybe_fail("create_git_commit")
-        self.commits["commit-sha"] = {
-            "sha": "commit-sha",
+        # GitHub stamps each commit, so a retry of the same plan never
+        # reproduces the previous SHA.  Recovery must match on the
+        # content-addressed tree instead.
+        sha = f"commit-{len(self.commits) + 1}"
+        self.commits[sha] = {
+            "sha": sha,
             "tree": {"sha": tree_sha},
             "parents": [{"sha": parent_sha}],
         }
-        return "commit-sha"
+        return sha
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository
@@ -644,7 +648,7 @@ class _PublicationGitHub:
             "number": len(self.pull_requests) + 1,
             "html_url": "https://github.com/TruPryce/property-tax-data-platform/pull/99",
             **payload,
-            "head": {"ref": payload["head"], "sha": "commit-sha"},
+            "head": {"ref": payload["head"], "sha": self.refs.get(f"refs/heads/{payload['head']}")},
         }
         self.pull_requests.append(pull)
         return pull
@@ -823,6 +827,35 @@ def test_publication_failure_names_its_stage_and_stays_sanitized(
         assert github.pull_requests == []
 
 
+def test_publication_port_preflight_runs_under_initialized_stage_tracking(
+    tmp_path: Path,
+) -> None:
+    """An unusable port must not be the one failure that reports no stage."""
+
+    class _IncompleteGitHub:
+        def list_pull_requests(
+            self, repository: str, *, head: str, base: str
+        ) -> list[dict[str, object]]:
+            del repository, head, base
+            return []
+
+    progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(
+            _IncompleteGitHub(),
+            progress_path=progress_path,
+            **_publication_case(tmp_path, "incomplete-port"),  # type: ignore[arg-type]
+        )
+    assert raised.value.code == "github_port_incomplete"
+    assert raised.value.details["stage"] == "validate_result"
+    assert raised.value.details["completed"] == []
+    # The first snapshot ever written already names a closed-vocabulary stage.
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": "validate_result",
+        "completed": [],
+    }
+
+
 def test_publication_progress_survives_a_failure_before_any_api_call(tmp_path: Path) -> None:
     github = _PublicationGitHub()
     progress_path = tmp_path / "progress.json"
@@ -836,19 +869,30 @@ def test_publication_progress_survives_a_failure_before_any_api_call(tmp_path: P
 
 
 def test_publication_resumes_a_ref_left_by_an_interrupted_attempt(tmp_path: Path) -> None:
-    """A retry cannot reproduce a commit SHA, but the tree is content-addressed."""
+    """A retry cannot reproduce a commit SHA, but the tree is content-addressed.
+
+    The retry must therefore recognize its own interrupted attempt through tree
+    and parent equivalence, not by comparing the freshly created commit SHA.
+    """
 
     github = _PublicationGitHub(fail_at="create_pull_request")
     with pytest.raises(ControlPlaneError):
         publish_plan(github, **_publication_case(tmp_path, "interrupted"))  # type: ignore[arg-type]
-    assert len(github.created_refs) == 1
+    branch = planning_branch(6, "add-safe-planning")
+    assert github.created_refs == [(f"refs/heads/{branch}", "commit-1")]
     assert github.pull_requests == []
 
     github.fail_at = None
     resumed = publish_plan(github, **_publication_case(tmp_path, "resumed"))  # type: ignore[arg-type]
+    # The retry really did mint a second, different candidate commit...
+    assert set(github.commits) == {"commit-1", "commit-2"}
+    assert github.commits["commit-1"]["tree"] == github.commits["commit-2"]["tree"]
+    # ...and still resumed the original ref rather than recreating or moving it.
+    assert github.created_refs == [(f"refs/heads/{branch}", "commit-1")]
+    assert github.refs[f"refs/heads/{branch}"] == "commit-1"
     assert resumed["action"] == "created"
-    assert resumed["commit_sha"] == "commit-sha"
-    assert len(github.created_refs) == 1
+    assert resumed["branch"] == branch
+    assert resumed["commit_sha"] == "commit-1"
     assert len(github.pull_requests) == 1
     assert resumed["stage"] == "complete"
     assert resumed["completed"] == list(_STAGE_ORDER[:-1])
