@@ -13,7 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -676,6 +677,139 @@ def materialize_plan(
     }
 
 
+# Publication is a multi-step sequence against GitHub's Git data API.  Failing
+# before the ref exists is operationally different from failing after the branch
+# is visible, and a sanitized status code alone cannot tell the two apart.
+_PUBLICATION_STAGES = (
+    "validate_result",
+    "validate_provenance",
+    "resolve_predecessor",
+    "create_blobs",
+    "load_parent_commit",
+    "create_tree",
+    "create_commit",
+    "create_ref",
+    "create_pull_request",
+    "complete",
+)
+
+
+class _PublicationProgress:
+    """Record the last entered publication stage on every exit path."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path
+        self.stage: str | None = None
+        self.completed: list[str] = []
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self._write()
+
+    def enter(self, stage: str) -> None:
+        if stage not in _PUBLICATION_STAGES:
+            raise ControlPlaneError(
+                "invalid_publication_stage", "Publication reported an unknown stage."
+            )
+        if self.stage is not None:
+            self.completed.append(self.stage)
+        self.stage = stage
+        self._write()
+
+    def as_document(self) -> JsonObject:
+        return {"stage": self.stage, "completed": list(self.completed)}
+
+    def _write(self) -> None:
+        """Persist after every transition so a hard kill still leaves evidence."""
+
+        if self._path is None:
+            return
+        self._path.write_text(
+            json.dumps(self.as_document(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+
+@contextmanager
+def _publication_progress(path: Path | None) -> Iterator[_PublicationProgress]:
+    progress = _PublicationProgress(path)
+    try:
+        yield progress
+    except ControlPlaneError as error:
+        error.details.update(progress.as_document())
+        raise
+
+
+def _deduplicated(
+    pulls: Iterable[JsonObject],
+    *,
+    run_id: str,
+    manifest_sha: str,
+    branch: str,
+    change: str,
+    require_run: bool = True,
+) -> JsonObject | None:
+    """Return the existing draft that already carries this exact plan, if any."""
+
+    for pull in pulls:
+        body = str(pull.get("body", ""))
+        if require_run and f"run={run_id}" not in body:
+            continue
+        if f"context={manifest_sha}" not in body:
+            continue
+        head = pull.get("head")
+        return {
+            "ok": True,
+            "action": "deduplicated",
+            "branch": branch,
+            "commit_sha": str(head.get("sha", "")) if isinstance(head, dict) else "",
+            "pr_number": pull.get("number"),
+            "pr_url": pull.get("html_url"),
+            "change_name": change,
+            "run_id": run_id,
+            "context_manifest_sha256": manifest_sha,
+            "implementation_eligible": False,
+        }
+    return None
+
+
+def _publish_ref(
+    github: Any, *, repository: str, ref: str, commit: str, tree: str, parent: str
+) -> tuple[str, bool]:
+    """Create the deterministic planning ref, or resume the one already there.
+
+    A retry cannot reproduce a commit SHA, but the tree is content-addressed, so
+    an existing ref whose commit carries this exact tree and parent is a prior
+    attempt of this same plan and is safe to resume.  Anything else on that ref
+    is human-owned or divergent and fails closed rather than being moved.
+    """
+
+    existing = github.get_git_ref(repository, ref)
+    if existing is None:
+        github.create_git_ref(repository, ref, commit)
+        return commit, False
+    object_facts = existing.get("object") if isinstance(existing, dict) else None
+    head_sha = object_facts.get("sha") if isinstance(object_facts, dict) else None
+    if not isinstance(head_sha, str) or not head_sha:
+        raise ControlPlaneError(
+            "github_api_invalid_response", "GitHub ref identity is unavailable."
+        )
+    head_commit = github.get_git_commit(repository, head_sha)
+    head_tree = head_commit.get("tree") if isinstance(head_commit, dict) else None
+    parents = head_commit.get("parents") if isinstance(head_commit, dict) else None
+    parent_shas = (
+        [item.get("sha") for item in parents if isinstance(item, dict)]
+        if isinstance(parents, list)
+        else []
+    )
+    if not isinstance(head_tree, dict) or head_tree.get("sha") != tree or parent_shas != [parent]:
+        raise ControlPlaneError(
+            "planning_branch_conflict",
+            "The deterministic planning branch already exists and does not hold this plan.",
+            {"ref": ref},
+            exit_code=5,
+        )
+    return head_sha, True
+
+
 def publish_plan(
     github: Any,
     *,
@@ -690,11 +824,14 @@ def publish_plan(
     context_manifest_path: Path,
     evidence_url: str | None = None,
     already_materialized: bool = False,
+    progress_path: Path | None = None,
 ) -> JsonObject:
     """Publish a validated plan through GitHub's Git data API.
 
     The caller supplies a trusted checkout and a GitHub port.  The model result is
     rendered first; only those deterministic files become blobs in the new commit.
+    Every stage transition is recorded, and any sanitized failure carries the
+    stage it failed in so a partially applied publication can be diagnosed.
     """
 
     required = (
@@ -704,256 +841,278 @@ def publish_plan(
         "create_git_tree",
         "create_git_commit",
         "create_git_ref",
+        "get_git_ref",
         "create_pull_request",
     )
     if not all(hasattr(github, name) for name in required):
         raise ControlPlaneError("github_port_incomplete", "GitHub publication port is incomplete.")
-    validate_planning_result(result, contract_root=publication_root)
-    issue = int(issue_number)
-    if int(result["originating_issue"]) != issue:
-        raise ControlPlaneError(
-            "planning_provenance_mismatch", "Planning result issue does not match the trigger."
+    with _publication_progress(progress_path) as progress:
+        progress.enter("validate_result")
+        validate_planning_result(result, contract_root=publication_root)
+        issue = int(issue_number)
+        if int(result["originating_issue"]) != issue:
+            raise ControlPlaneError(
+                "planning_provenance_mismatch", "Planning result issue does not match the trigger."
+            )
+        progress.enter("validate_provenance")
+        try:
+            packet = load_json_object(planning_packet_path, kind="planning packet")
+            manifest = load_json_object(context_manifest_path, kind="planning context manifest")
+            validate_document(
+                packet,
+                load_json_object(
+                    publication_root / ".ai/schemas/countyforge-planning-packet.schema.json",
+                    kind="planning packet schema",
+                ),
+                kind="planning packet",
+            )
+            validate_document(
+                manifest,
+                load_json_object(
+                    publication_root
+                    / ".ai/schemas/countyforge-planning-context-manifest.schema.json",
+                    kind="planning manifest schema",
+                ),
+                kind="planning context manifest",
+            )
+        except (OSError, UnicodeError, ValueError, KernelError):
+            raise ControlPlaneError(
+                "planning_provenance_mismatch", "Planning provenance is invalid."
+            ) from None
+        packet_sha = hashlib.sha256(planning_packet_path.read_bytes()).hexdigest()
+        manifest_sha = hashlib.sha256(context_manifest_path.read_bytes()).hexdigest()
+        repository_facts = packet.get("repository")
+        if (
+            not isinstance(repository_facts, dict)
+            or packet["run_id"] != run_id
+            or packet["issue"]["number"] != issue
+            or repository_facts["full_name"] != repository
+            or repository_facts["target_sha"] != target_sha
+            or manifest["run_id"] != run_id
+            or manifest["issue_number"] != issue
+            or manifest["repository_full_name"] != repository
+            or manifest["target_sha"] != target_sha
+            or manifest["packet_sha256"] != packet_sha
+            or manifest.get("planning_context_sha256") != packet.get("planning_context_sha256")
+        ):
+            raise ControlPlaneError(
+                "planning_provenance_mismatch",
+                "Planning packet does not match the publication trigger.",
+            )
+        validate_planning_result(
+            result,
+            contract_root=publication_root,
+            source_ids={str(source["source_id"]) for source in packet["sources"]},
         )
-    try:
-        packet = load_json_object(planning_packet_path, kind="planning packet")
-        manifest = load_json_object(context_manifest_path, kind="planning context manifest")
-        validate_document(
-            packet,
-            load_json_object(
-                publication_root / ".ai/schemas/countyforge-planning-packet.schema.json",
-                kind="planning packet schema",
-            ),
-            kind="planning packet",
-        )
-        validate_document(
-            manifest,
-            load_json_object(
-                publication_root / ".ai/schemas/countyforge-planning-context-manifest.schema.json",
-                kind="planning manifest schema",
-            ),
-            kind="planning context manifest",
-        )
-    except (OSError, UnicodeError, ValueError, KernelError):
-        raise ControlPlaneError(
-            "planning_provenance_mismatch", "Planning provenance is invalid."
-        ) from None
-    packet_sha = hashlib.sha256(planning_packet_path.read_bytes()).hexdigest()
-    manifest_sha = hashlib.sha256(context_manifest_path.read_bytes()).hexdigest()
-    repository_facts = packet.get("repository")
-    if (
-        not isinstance(repository_facts, dict)
-        or packet["run_id"] != run_id
-        or packet["issue"]["number"] != issue
-        or repository_facts["full_name"] != repository
-        or repository_facts["target_sha"] != target_sha
-        or manifest["run_id"] != run_id
-        or manifest["issue_number"] != issue
-        or manifest["repository_full_name"] != repository
-        or manifest["target_sha"] != target_sha
-        or manifest["packet_sha256"] != packet_sha
-        or manifest.get("planning_context_sha256") != packet.get("planning_context_sha256")
-    ):
-        raise ControlPlaneError(
-            "planning_provenance_mismatch",
-            "Planning packet does not match the publication trigger.",
-        )
-    validate_planning_result(
-        result,
-        contract_root=publication_root,
-        source_ids={str(source["source_id"]) for source in packet["sources"]},
-    )
-    change = str(result["proposed_change_name"])
-    base_branch = planning_branch(issue, change)
-    branch = base_branch
-    owner = repository.split("/", 1)[0]
-    existing = github.list_pull_requests(repository, head=f"{owner}:{branch}", base=default_branch)
-    bot_marker = f"<!-- countyforge-plan:v1 run={run_id} context={manifest_sha} -->"
-    for pull in existing:
-        body = str(pull.get("body", ""))
-        if f"run={run_id}" in body and f"context={manifest_sha}" in body:
-            return {
-                "ok": True,
-                "action": "deduplicated",
-                "branch": branch,
-                "commit_sha": str(pull.get("head", {}).get("sha", "")),
-                "pr_number": pull.get("number"),
-                "pr_url": pull.get("html_url"),
-                "change_name": change,
-                "run_id": run_id,
-                "context_manifest_sha256": manifest_sha,
-                "implementation_eligible": False,
-            }
-    predecessor: JsonObject | None = existing[0] if existing else None
-    if predecessor is not None:
-        branch = f"{base_branch}-r{manifest_sha[:8]}"
-        versioned = github.list_pull_requests(
+        progress.enter("resolve_predecessor")
+        change = str(result["proposed_change_name"])
+        base_branch = planning_branch(issue, change)
+        branch = base_branch
+        owner = repository.split("/", 1)[0]
+        existing = github.list_pull_requests(
             repository, head=f"{owner}:{branch}", base=default_branch
         )
-        for pull in versioned:
-            body = str(pull.get("body", ""))
-            if f"context={manifest_sha}" in body:
-                return {
-                    "ok": True,
-                    "action": "deduplicated",
-                    "branch": branch,
-                    "commit_sha": str(pull.get("head", {}).get("sha", "")),
-                    "pr_number": pull.get("number"),
-                    "pr_url": pull.get("html_url"),
-                    "change_name": change,
-                    "run_id": run_id,
-                    "context_manifest_sha256": manifest_sha,
-                    "implementation_eligible": False,
-                }
-    if already_materialized:
-        files = [
-            f"openspec/changes/{change}/.openspec.yaml",
-            f"openspec/changes/{change}/proposal.md",
-            f"openspec/changes/{change}/design.md",
-            f"openspec/changes/{change}/tasks.md",
-            f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
-        ]
-        if not all((publication_root / relative).is_file() for relative in files):
-            raise ControlPlaneError(
-                "planning_materialization_missing",
-                "Trusted planning files are missing before publication.",
+        bot_marker = f"<!-- countyforge-plan:v1 run={run_id} context={manifest_sha} -->"
+        duplicate = _deduplicated(
+            existing, run_id=run_id, manifest_sha=manifest_sha, branch=branch, change=change
+        )
+        if duplicate is not None:
+            progress.enter("complete")
+            return {**duplicate, **progress.as_document()}
+        predecessor: JsonObject | None = existing[0] if existing else None
+        if predecessor is not None:
+            branch = f"{base_branch}-r{manifest_sha[:8]}"
+            versioned = github.list_pull_requests(
+                repository, head=f"{owner}:{branch}", base=default_branch
             )
-        manifest = {
-            "change_name": change,
-            "issue_number": issue,
+            duplicate = _deduplicated(
+                versioned,
+                run_id=run_id,
+                manifest_sha=manifest_sha,
+                branch=branch,
+                change=change,
+                require_run=False,
+            )
+            if duplicate is not None:
+                progress.enter("complete")
+                return {**duplicate, **progress.as_document()}
+        progress.enter("create_blobs")
+        if already_materialized:
+            files = [
+                f"openspec/changes/{change}/.openspec.yaml",
+                f"openspec/changes/{change}/proposal.md",
+                f"openspec/changes/{change}/design.md",
+                f"openspec/changes/{change}/tasks.md",
+                f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
+            ]
+            if not all((publication_root / relative).is_file() for relative in files):
+                raise ControlPlaneError(
+                    "planning_materialization_missing",
+                    "Trusted planning files are missing before publication.",
+                )
+            manifest = {
+                "change_name": change,
+                "issue_number": issue,
+                "run_id": run_id,
+                "files": files,
+                "implementation_eligibility": False,
+            }
+        else:
+            manifest = materialize_plan(
+                result, publication_root=publication_root, issue_number=issue, run_id=run_id
+            )
+        entries: list[JsonObject] = []
+        for relative in manifest["files"]:
+            path = publication_root / relative
+            entries.append(
+                {
+                    "path": relative,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": github.create_git_blob(repository, path.read_text(encoding="utf-8")),
+                }
+            )
+        # Every revision is based on the immutable trusted default-branch SHA.  This
+        # prevents a human edit on an earlier draft from becoming an implicit input to
+        # a later generated plan.
+        progress.enter("load_parent_commit")
+        parent = target_sha
+        commit_document = github.get_git_commit(repository, parent)
+        tree_document = commit_document.get("tree")
+        if not isinstance(tree_document, dict) or not isinstance(tree_document.get("sha"), str):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub commit tree identity is unavailable."
+            )
+        progress.enter("create_tree")
+        tree = github.create_git_tree(repository, str(tree_document["sha"]), entries)
+        progress.enter("create_commit")
+        commit = github.create_git_commit(
+            repository, f"plan: draft OpenSpec for issue #{issue}", tree, parent
+        )
+        progress.enter("create_ref")
+        ref = f"refs/heads/{branch}"
+        commit, resumed = _publish_ref(
+            github, repository=repository, ref=ref, commit=commit, tree=tree, parent=parent
+        )
+        progress.enter("create_pull_request")
+        if resumed:
+            # A prior attempt already left the branch in place; its draft may have
+            # been created before that attempt died.
+            duplicate = _deduplicated(
+                github.list_pull_requests(
+                    repository, head=f"{owner}:{branch}", base=default_branch
+                ),
+                run_id=run_id,
+                manifest_sha=manifest_sha,
+                branch=branch,
+                change=change,
+                require_run=predecessor is None,
+            )
+            if duplicate is not None:
+                progress.enter("complete")
+                return {**duplicate, **progress.as_document()}
+        predecessor_link = (
+            f"\nPredecessor draft: #{predecessor['number']} (superseded without modifying it).\n"
+            if predecessor is not None
+            else ""
+        )
+        evidence = f"\nEvidence: {evidence_url}\n" if evidence_url else ""
+        body = (
+            f"{bot_marker}\n\n## CountyForge planning draft\n\n"
+            f"Originating issue: https://github.com/{repository}/issues/{issue}\n\n"
+            f"Proposed OpenSpec change: `{change}`\n\n"
+            f"CountyForge run: `{run_id}`\n\n"
+            f"Assumptions: {len(result['assumptions'])}; unresolved decisions: {len(result['unresolved_decisions'])}; "
+            f"blockers: {len(result['blocked_reasons'])}.\n\n"
+            f"Validation commands: {', '.join(result['validation_commands']) or 'none recorded'}\n"
+            f"{predecessor_link}{evidence}\n"
+            "No production code is included. An authorized maintainer must approve this planning PR before implementation.\n"
+        )
+        pr = github.create_pull_request(
+            repository,
+            {
+                "title": f"[CountyForge plan] {change}",
+                "head": branch,
+                "base": default_branch,
+                "body": body,
+                "draft": True,
+            },
+        )
+        action = "superseded" if predecessor is not None else "created"
+        revision = 2 if predecessor is not None else 1
+        revision_document: JsonObject = {
+            "contract_version": 1,
+            "revision": revision,
+            "semantic_identity": planning_identity(
+                issue_number=issue,
+                target_sha=target_sha,
+                change_name=change,
+                context_sha256=manifest_sha,
+            ),
+            "context_sha256": manifest_sha,
+            "predecessor_run_id": None,
+            "predecessor_pr_number": int(predecessor["number"]) if predecessor else None,
+            "supersession_reason": "new bounded issue context" if predecessor else "initial plan",
+        }
+        validate_document(
+            revision_document,
+            load_json_object(
+                publication_root / ".ai/schemas/countyforge-planning-revision.schema.json",
+                kind="planning revision schema",
+            ),
+            kind="planning revision",
+        )
+        publication_manifest: JsonObject = {
+            "contract_version": 1,
             "run_id": run_id,
-            "files": files,
+            "issue_number": issue,
+            "change_name": change,
+            "branch": branch,
+            "target_sha": target_sha,
+            "files": manifest["files"]
+            if "files" in manifest
+            else [
+                f"openspec/changes/{change}/.openspec.yaml",
+                f"openspec/changes/{change}/proposal.md",
+                f"openspec/changes/{change}/design.md",
+                f"openspec/changes/{change}/tasks.md",
+                f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
+            ],
+            "validation": {
+                "passed": True,
+                "gates": [
+                    "planning-result-schema",
+                    "openspec-validate",
+                    "openspec-doctor",
+                    "documentation-links",
+                    "artifact-policy",
+                ],
+            },
             "implementation_eligibility": False,
         }
-    else:
-        manifest = materialize_plan(
-            result, publication_root=publication_root, issue_number=issue, run_id=run_id
+        validate_document(
+            publication_manifest,
+            load_json_object(
+                publication_root
+                / ".ai/schemas/countyforge-planning-publication-manifest.schema.json",
+                kind="planning publication schema",
+            ),
+            kind="planning publication manifest",
         )
-    entries: list[JsonObject] = []
-    for relative in manifest["files"]:
-        path = publication_root / relative
-        entries.append(
-            {
-                "path": relative,
-                "mode": "100644",
-                "type": "blob",
-                "sha": github.create_git_blob(repository, path.read_text(encoding="utf-8")),
-            }
-        )
-    # Every revision is based on the immutable trusted default-branch SHA.  This
-    # prevents a human edit on an earlier draft from becoming an implicit input to
-    # a later generated plan.
-    parent = target_sha
-    commit_document = github.get_git_commit(repository, parent)
-    tree_document = commit_document.get("tree")
-    if not isinstance(tree_document, dict) or not isinstance(tree_document.get("sha"), str):
-        raise ControlPlaneError(
-            "github_api_invalid_response", "GitHub commit tree identity is unavailable."
-        )
-    tree = github.create_git_tree(repository, str(tree_document["sha"]), entries)
-    commit = github.create_git_commit(
-        repository, f"plan: draft OpenSpec for issue #{issue}", tree, parent
-    )
-    ref = f"refs/heads/{branch}"
-    github.create_git_ref(repository, ref, commit)
-    predecessor_link = (
-        f"\nPredecessor draft: #{predecessor['number']} (superseded without modifying it).\n"
-        if predecessor is not None
-        else ""
-    )
-    evidence = f"\nEvidence: {evidence_url}\n" if evidence_url else ""
-    body = (
-        f"{bot_marker}\n\n## CountyForge planning draft\n\n"
-        f"Originating issue: https://github.com/{repository}/issues/{issue}\n\n"
-        f"Proposed OpenSpec change: `{change}`\n\n"
-        f"CountyForge run: `{run_id}`\n\n"
-        f"Assumptions: {len(result['assumptions'])}; unresolved decisions: {len(result['unresolved_decisions'])}; "
-        f"blockers: {len(result['blocked_reasons'])}.\n\n"
-        f"Validation commands: {', '.join(result['validation_commands']) or 'none recorded'}\n"
-        f"{predecessor_link}{evidence}\n"
-        "No production code is included. An authorized maintainer must approve this planning PR before implementation.\n"
-    )
-    pr = github.create_pull_request(
-        repository,
-        {
-            "title": f"[CountyForge plan] {change}",
-            "head": branch,
-            "base": default_branch,
-            "body": body,
-            "draft": True,
-        },
-    )
-    action = "superseded" if predecessor is not None else "created"
-    revision = 2 if predecessor is not None else 1
-    revision_document: JsonObject = {
-        "contract_version": 1,
-        "revision": revision,
-        "semantic_identity": planning_identity(
-            issue_number=issue,
-            target_sha=target_sha,
-            change_name=change,
-            context_sha256=manifest_sha,
-        ),
-        "context_sha256": manifest_sha,
-        "predecessor_run_id": None,
-        "predecessor_pr_number": int(predecessor["number"]) if predecessor else None,
-        "supersession_reason": "new bounded issue context" if predecessor else "initial plan",
-    }
-    validate_document(
-        revision_document,
-        load_json_object(
-            publication_root / ".ai/schemas/countyforge-planning-revision.schema.json",
-            kind="planning revision schema",
-        ),
-        kind="planning revision",
-    )
-    publication_manifest: JsonObject = {
-        "contract_version": 1,
-        "run_id": run_id,
-        "issue_number": issue,
-        "change_name": change,
-        "branch": branch,
-        "target_sha": target_sha,
-        "files": manifest["files"]
-        if "files" in manifest
-        else [
-            f"openspec/changes/{change}/.openspec.yaml",
-            f"openspec/changes/{change}/proposal.md",
-            f"openspec/changes/{change}/design.md",
-            f"openspec/changes/{change}/tasks.md",
-            f"openspec/changes/{change}/specs/{_spec_capability(result)}/spec.md",
-        ],
-        "validation": {
-            "passed": True,
-            "gates": [
-                "planning-result-schema",
-                "openspec-validate",
-                "openspec-doctor",
-                "documentation-links",
-                "artifact-policy",
-            ],
-        },
-        "implementation_eligibility": False,
-    }
-    validate_document(
-        publication_manifest,
-        load_json_object(
-            publication_root / ".ai/schemas/countyforge-planning-publication-manifest.schema.json",
-            kind="planning publication schema",
-        ),
-        kind="planning publication manifest",
-    )
-    return {
-        "ok": True,
-        "action": action,
-        "branch": branch,
-        "commit_sha": commit,
-        "pr_number": pr.get("number"),
-        "pr_url": pr.get("html_url"),
-        "change_name": change,
-        "run_id": run_id,
-        "context_manifest_sha256": manifest_sha,
-        "planning_revision": revision,
-        "publication_manifest": publication_manifest,
-        "revision": revision_document,
-        "implementation_eligible": False,
-    }
+        progress.enter("complete")
+        return {
+            "ok": True,
+            "action": action,
+            "branch": branch,
+            "commit_sha": commit,
+            "pr_number": pr.get("number"),
+            "pr_url": pr.get("html_url"),
+            "change_name": change,
+            "run_id": run_id,
+            "context_manifest_sha256": manifest_sha,
+            "planning_revision": revision,
+            "publication_manifest": publication_manifest,
+            "revision": revision_document,
+            "implementation_eligible": False,
+            **progress.as_document(),
+        }

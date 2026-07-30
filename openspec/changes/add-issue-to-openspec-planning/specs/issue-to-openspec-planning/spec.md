@@ -37,9 +37,23 @@ The planning result SHALL use a versioned authoritative schema with bounded stri
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.
 
+Publication SHALL record the last entered stage from a closed vocabulary and MUST attach it to every sanitized failure, and the trusted workflow MUST preserve and upload the publisher's structured result on both success and failure. Before creating the deterministic planning ref, publication MUST inspect it: an absent ref is created, a ref whose commit carries this plan's tree and trusted parent is resumed, and any other ref fails closed as a branch conflict without being moved.
+
 #### Scenario: Validation fails closed
 - **WHEN** result hashes, issue/repository/SHA/run bindings, schema, path policy, or deterministic validation fail
 - **THEN** no commit or PR update is made and canonical status records a sanitized failure
+
+#### Scenario: Name the failing publication mutation
+- **WHEN** a GitHub Git-data or pull-request mutation fails during publication
+- **THEN** the sanitized result records the failing stage and the stages already completed, the workflow preserves and uploads that document, and canonical state records `planning_publication_failed`
+
+#### Scenario: Resume an interrupted publication
+- **WHEN** the deterministic planning ref already exists and its commit carries this plan's tree and trusted parent
+- **THEN** publication reuses that ref and its existing draft if one was created, instead of creating a second branch or draft
+
+#### Scenario: Refuse a divergent planning ref
+- **WHEN** the deterministic planning ref exists and holds any other commit
+- **THEN** publication fails closed as a branch conflict and never moves the ref
 
 ### Requirement: Deterministic planning revisions
 The control plane SHALL deduplicate identical semantic planning requests. Changed context SHALL create a revision and a linked superseding draft without overwriting human edits; an exact same-run publication may be reused idempotently. Blocking unresolved decisions SHALL keep implementation ineligible.

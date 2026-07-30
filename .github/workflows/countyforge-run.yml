@@ -1769,17 +1769,46 @@ jobs:
           planning_packet="$RUNNER_TEMP/countyforge-planning/countyforge-planning-packet.json"
           context_manifest="$RUNNER_TEMP/countyforge-planning/countyforge-context-manifest.json"
           test -f "$planning_packet" && test -f "$context_manifest"
+          publication_result="$RUNNER_TEMP/countyforge-publication.json"
+          publication_progress="$RUNNER_TEMP/countyforge-publication-progress.json"
+          set +e
           uv run --package countyforge-github countyforge-github publish-plan \
             --result "$plan_file" --repository "$TARGET_REPOSITORY" --default-branch main \
             --target-sha "$TARGET_SHA" --issue-number "$ISSUE_NUMBER" --run-id "$COUNTYFORGE_RUN_ID" \
             --publication-root "$GITHUB_WORKSPACE" \
             --planning-packet "$planning_packet" --context-manifest "$context_manifest" \
-            --evidence-url "$EVIDENCE_URL" --already-materialized > "$RUNNER_TEMP/countyforge-publication.json"
-          echo "change_name=$(jq -r .change_name "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
-          echo "branch=$(jq -r .branch "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$(jq -r .pr_number "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
-          echo "context_sha256=$(jq -r .context_manifest_sha256 "$RUNNER_TEMP/countyforge-publication.json")" >> "$GITHUB_OUTPUT"
+            --evidence-url "$EVIDENCE_URL" --already-materialized \
+            --publication-progress "$publication_progress" > "$publication_result"
+          publication_rc=$?
+          set -e
+          # A hard kill can leave the redirect empty; canonical state must never
+          # depend on a missing document.
+          test -s "$publication_result" || printf '%s\n' \
+            '{"ok":false,"disposition":"publication_result_missing","message":"Publisher returned no structured result.","details":{}}' \
+            > "$publication_result"
+          if [ "$publication_rc" -ne 0 ]; then
+            disposition="$(jq -r '.disposition // "planning_publication_failed"' "$publication_result")"
+            stage="$(jq -r '.details.stage // "unknown"' "$publication_result")"
+            status="$(jq -r '.details.status // "unknown"' "$publication_result")"
+            echo "::error::Planning publication failed: disposition=$disposition stage=$stage status=$status"
+            exit "$publication_rc"
+          fi
+          echo "change_name=$(jq -r .change_name "$publication_result")" >> "$GITHUB_OUTPUT"
+          echo "branch=$(jq -r .branch "$publication_result")" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(jq -r .pr_number "$publication_result")" >> "$GITHUB_OUTPUT"
+          echo "context_sha256=$(jq -r .context_manifest_sha256 "$publication_result")" >> "$GITHUB_OUTPUT"
           echo "result_sha256=$(sha256sum "$plan_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sanitized planning publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-plan-publisher-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-publication.json
+            ${{ runner.temp }}/countyforge-publication-progress.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Update canonical comment and check
         if: always()

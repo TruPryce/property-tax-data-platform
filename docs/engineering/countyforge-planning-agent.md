@@ -72,6 +72,32 @@ unresolved decisions, states that no production code is included, and requires m
 approval. A merged planning PR is the initial approval evidence; reactions and labels do not
 approve a plan.
 
+## Publication stages and evidence
+
+Publication is a multi-step sequence against GitHub's Git data API, so a bare exit code cannot
+say which mutation failed. The publisher enters a closed stage vocabulary and attaches the
+current stage plus the completed prefix to every sanitized failure:
+
+```text
+validate_result  validate_provenance  resolve_predecessor  create_blobs  load_parent_commit
+create_tree  create_commit  create_ref  create_pull_request  complete
+```
+
+`--publication-progress <path>` writes each transition to disk, so a hard kill still leaves
+evidence. The workflow captures the publisher's return code rather than aborting on it,
+substitutes a `publication_result_missing` document if the redirect is empty, reports
+`disposition`, `.details.stage`, and `.details.status` as an Actions error, and uploads
+`countyforge-publication.json` and `countyforge-publication-progress.json` with `if: always()`.
+
+Before creating the ref, publication inspects it. A retry cannot reproduce a commit SHA, but a
+tree is content-addressed:
+
+| Deterministic ref | Behavior |
+|---|---|
+| absent | create it |
+| commit carries this plan's tree and trusted parent | resume, reusing an already-created draft |
+| anything else | fail closed as `planning_branch_conflict`; the ref is never moved |
+
 ## Revisions and recovery
 
 Identical semantic planning identity deduplicates. Changed context creates a revision. The

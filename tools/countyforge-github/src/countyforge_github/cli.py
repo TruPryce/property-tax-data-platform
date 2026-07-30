@@ -240,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--context-manifest", type=Path, required=True)
     publish.add_argument("--evidence-url")
     publish.add_argument("--already-materialized", action="store_true")
+    publish.add_argument("--publication-progress", type=Path)
 
     reconcile = subparsers.add_parser("reconcile")
     _file(reconcile, "state")
@@ -785,6 +786,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     context_manifest_path=args.context_manifest,
                     evidence_url=args.evidence_url,
                     already_materialized=args.already_materialized,
+                    progress_path=args.publication_progress,
                 )
             )
             return 0

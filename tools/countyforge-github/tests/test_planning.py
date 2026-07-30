@@ -562,10 +562,25 @@ def test_branch_identity_is_bounded() -> None:
 
 
 class _PublicationGitHub:
-    def __init__(self) -> None:
+    def __init__(self, fail_at: str | None = None, status: int = 422) -> None:
         self.pull_requests: list[dict[str, object]] = []
         self.created_refs: list[tuple[str, str]] = []
         self.tree_bases: list[str] = []
+        self.refs: dict[str, str] = {}
+        self.commits: dict[str, dict[str, object]] = {}
+        self.fail_at = fail_at
+        self.status = status
+
+    def _maybe_fail(self, operation: str) -> None:
+        """Stand in for a sanitized GitHub REST failure at one mutation."""
+
+        if operation == self.fail_at:
+            raise ControlPlaneError(
+                "github_api_error",
+                "GitHub API request failed.",
+                {"status": self.status},
+                exit_code=5,
+            )
 
     def list_pull_requests(
         self, repository: str, *, head: str, base: str
@@ -576,34 +591,55 @@ class _PublicationGitHub:
 
     def create_git_blob(self, repository: str, content: str) -> str:
         del repository
+        self._maybe_fail("create_git_blob")
         return f"blob-{len(content)}"
 
     def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
         del repository
+        self._maybe_fail("get_git_commit")
+        if sha in self.commits:
+            return self.commits[sha]
         return {"sha": sha, "tree": {"sha": "base-tree-sha"}}
 
     def create_git_tree(
         self, repository: str, base_sha: str, entries: list[dict[str, object]]
     ) -> str:
         del repository, entries
+        self._maybe_fail("create_git_tree")
         self.tree_bases.append(base_sha)
         return "tree-sha"
 
     def create_git_commit(
         self, repository: str, message: str, tree_sha: str, parent_sha: str
     ) -> str:
-        del repository, message, tree_sha, parent_sha
+        del repository, message
+        self._maybe_fail("create_git_commit")
+        self.commits["commit-sha"] = {
+            "sha": "commit-sha",
+            "tree": {"sha": tree_sha},
+            "parents": [{"sha": parent_sha}],
+        }
         return "commit-sha"
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository
+        self._maybe_fail("create_git_ref")
         self.created_refs.append((ref, sha))
+        self.refs[ref] = sha
+
+    def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
+        del repository
+        self._maybe_fail("get_git_ref")
+        if ref not in self.refs:
+            return None
+        return {"ref": ref, "object": {"sha": self.refs[ref], "type": "commit"}}
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository, ref, sha
 
     def create_pull_request(self, repository: str, payload: dict[str, object]) -> dict[str, object]:
         del repository
+        self._maybe_fail("create_pull_request")
         pull = {
             "number": len(self.pull_requests) + 1,
             "html_url": "https://github.com/TruPryce/property-tax-data-platform/pull/99",
@@ -689,3 +725,159 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
     assert revision["branch"] != first_publication["branch"]
     assert len(github.pull_requests) == 2
     assert github.tree_bases == ["base-tree-sha", "base-tree-sha"]
+    assert first_publication["stage"] == "complete"
+    assert duplicate["stage"] == "complete"
+    assert duplicate["completed"] == [
+        "validate_result",
+        "validate_provenance",
+        "resolve_predecessor",
+    ]
+
+
+# The closed publication stage vocabulary, in the order the publisher enters it.
+_STAGE_ORDER = (
+    "validate_result",
+    "validate_provenance",
+    "resolve_predecessor",
+    "create_blobs",
+    "load_parent_commit",
+    "create_tree",
+    "create_commit",
+    "create_ref",
+    "create_pull_request",
+    "complete",
+)
+
+
+def _publication_case(tmp_path: Path, name: str, run_id: str = "plan-stage") -> dict[str, object]:
+    """Build one deterministic publication call from the free offline fixtures."""
+
+    root = Path.cwd()
+    trigger = _trigger(root)
+    info = build_planning_packet(
+        trigger=trigger,
+        issue={
+            "number": 6,
+            "title": "Feature work",
+            "body": "Problem: bounded planning is needed. Outcome: create an OpenSpec draft.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path / f"{name}-packet",
+        run_id=run_id,
+    )
+    result = _result()
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    result["evidence_citations"][0]["source_id"] = packet["sources"][0]["source_id"]
+    publication_root = tmp_path / f"{name}-root"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+    return {
+        "repository": "TruPryce/property-tax-data-platform",
+        "default_branch": "main",
+        "target_sha": str(trigger["target"]["head_sha"]),
+        "issue_number": 6,
+        "run_id": run_id,
+        "result": result,
+        "publication_root": publication_root,
+        "planning_packet_path": Path(info["packet_path"]),
+        "context_manifest_path": Path(info["manifest_path"]),
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "stage"),
+    [
+        ("create_git_blob", "create_blobs"),
+        ("get_git_commit", "load_parent_commit"),
+        ("create_git_tree", "create_tree"),
+        ("create_git_commit", "create_commit"),
+        ("create_git_ref", "create_ref"),
+        ("create_pull_request", "create_pull_request"),
+    ],
+)
+def test_publication_failure_names_its_stage_and_stays_sanitized(
+    tmp_path: Path, operation: str, stage: str
+) -> None:
+    """Run 30507375764 exited 5 without saying which GitHub mutation failed."""
+
+    github = _PublicationGitHub(fail_at=operation, status=422)
+    progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(
+            github,
+            progress_path=progress_path,
+            **_publication_case(tmp_path, f"stage-{operation}"),  # type: ignore[arg-type]
+        )
+    error = raised.value
+    assert error.code == "github_api_error"
+    assert error.message == "GitHub API request failed."
+    assert error.exit_code == 5
+    assert error.details["status"] == 422
+    assert error.details["stage"] == stage
+    assert error.details["completed"] == list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)])
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": stage,
+        "completed": list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)]),
+    }
+    if stage != "create_pull_request":
+        assert github.pull_requests == []
+
+
+def test_publication_progress_survives_a_failure_before_any_api_call(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    progress_path = tmp_path / "progress.json"
+    case = _publication_case(tmp_path, "provenance")
+    case["issue_number"] = 7
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(github, progress_path=progress_path, **case)  # type: ignore[arg-type]
+    assert raised.value.code == "planning_provenance_mismatch"
+    assert raised.value.details["stage"] == "validate_result"
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "validate_result"
+
+
+def test_publication_resumes_a_ref_left_by_an_interrupted_attempt(tmp_path: Path) -> None:
+    """A retry cannot reproduce a commit SHA, but the tree is content-addressed."""
+
+    github = _PublicationGitHub(fail_at="create_pull_request")
+    with pytest.raises(ControlPlaneError):
+        publish_plan(github, **_publication_case(tmp_path, "interrupted"))  # type: ignore[arg-type]
+    assert len(github.created_refs) == 1
+    assert github.pull_requests == []
+
+    github.fail_at = None
+    resumed = publish_plan(github, **_publication_case(tmp_path, "resumed"))  # type: ignore[arg-type]
+    assert resumed["action"] == "created"
+    assert resumed["commit_sha"] == "commit-sha"
+    assert len(github.created_refs) == 1
+    assert len(github.pull_requests) == 1
+    assert resumed["stage"] == "complete"
+    assert resumed["completed"] == list(_STAGE_ORDER[:-1])
+
+
+def test_publication_fails_closed_on_a_divergent_planning_ref(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    branch = planning_branch(6, "add-safe-planning")
+    github.refs[f"refs/heads/{branch}"] = "human-sha"
+    github.commits["human-sha"] = {
+        "sha": "human-sha",
+        "tree": {"sha": "human-tree"},
+        "parents": [{"sha": "human-parent"}],
+    }
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(github, **_publication_case(tmp_path, "divergent"))  # type: ignore[arg-type]
+    assert raised.value.code == "planning_branch_conflict"
+    assert raised.value.details["stage"] == "create_ref"
+    assert github.created_refs == []
+    assert github.pull_requests == []
+
+
+def test_publication_reuses_a_draft_created_before_the_attempt_died(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    first = publish_plan(github, **_publication_case(tmp_path, "first"))  # type: ignore[arg-type]
+    assert first["action"] == "created"
+    # The ref and draft both exist; a retry must reuse them, not create a second.
+    second = publish_plan(github, **_publication_case(tmp_path, "second"))  # type: ignore[arg-type]
+    assert second["action"] == "deduplicated"
+    assert second["pr_number"] == first["pr_number"]
+    assert len(github.created_refs) == 1
+    assert len(github.pull_requests) == 1

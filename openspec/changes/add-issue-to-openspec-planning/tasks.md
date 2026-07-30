@@ -59,3 +59,11 @@
 - [x] 7.2 Keep substitution, chaining, interpreter, destructive-command, and command-position builtin detection in command and task fields.
 - [x] 7.3 Add accepted-vocabulary and rejected-payload fixtures plus a minimized regression fixture from run 30492011066.
 - [x] 7.4 Reject `eval`/`source` in command position with any argument, drop the bypassable filename-shape exception, and keep `task_slices` prose-compatible by scanning its inline-code spans.
+
+## 8. Publication observability and recovery
+
+- [x] 8.1 Record the last entered publication stage from a closed vocabulary and attach it to every sanitized failure.
+- [x] 8.2 Capture the publisher return code without losing its JSON result, require a structured document on every exit path, and surface disposition, stage, and status in the Actions error.
+- [x] 8.3 Upload the publication result and progress documents with `if: always()`.
+- [x] 8.4 Inspect the deterministic planning ref before creating it; resume an equivalent generated ref and fail closed on a divergent one.
+- [x] 8.5 Add fixtures for failures at blob, parent-commit, tree, commit, ref, and pull-request creation, and prove each preserves sanitized evidence and the correct stage.

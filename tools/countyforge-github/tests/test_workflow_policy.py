@@ -722,6 +722,33 @@ def test_planning_publication_rechecks_live_lease_and_finalizes_failures() -> No
     assert "steps.terminal.outputs.disposition == 'completed'" in publication_step["if"]
 
 
+def test_planning_publication_preserves_its_structured_result_on_every_exit() -> None:
+    """Run 30507375764 exited 5 and discarded the publisher's own error document."""
+
+    steps = _jobs("countyforge-run.yml")["plan-publish"]["steps"]
+    publication = next(step for step in steps if step.get("id") == "planning-publication")
+    run = str(publication["run"])
+    # The return code is captured instead of aborting the step, so the redirected
+    # document survives to be read and uploaded.
+    assert "set +e" in run and "publication_rc=$?" in run and "set -e" in run
+    assert "--publication-progress" in run
+    assert 'test -s "$publication_result"' in run
+    assert "publication_result_missing" in run
+    assert ".details.stage" in run and ".details.status" in run
+    assert "::error::Planning publication failed:" in run
+    assert 'exit "$publication_rc"' in run
+    # Every output assignment must sit behind the failure branch.
+    assert run.index('exit "$publication_rc"') < run.index("change_name=$(jq")
+    upload = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload sanitized planning publication evidence"
+    )
+    assert upload["if"] == "always()"
+    assert "countyforge-publication.json" in str(upload["with"]["path"])
+    assert "countyforge-publication-progress.json" in str(upload["with"]["path"])
+
+
 def test_planning_materialization_reports_upstream_provider_failure() -> None:
     steps = _jobs("countyforge-run.yml")["plan-validation"]["steps"]
     materialize = next(
