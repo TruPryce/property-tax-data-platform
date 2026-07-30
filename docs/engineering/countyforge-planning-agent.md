@@ -36,6 +36,16 @@ SHA, and run ID. The plan profile binds both schema names and hashes. Its genera
 not replace or weaken authoritative post-generation validation. The profile is read-only and
 writes only run evidence.
 
+Both the runner and the GitHub adapter then apply the same executable-content policy, scoped by
+what a field is for. `task_slices` and `validation_commands` describe work and commands, so they
+carry the full policy: command/parameter substitution, command chaining and separators,
+interpreter `-c` invocations, destructive commands, and `eval`/`source` in command position. All
+other planning fields are architecture prose and are checked only for substitution and
+interpreter piping. Markdown inline code is unwrapped before scanning instead of being treated as
+command substitution, so a plan may write `` `ACCOUNT_NUM` ``, `` `dallas-cad-source-contract` ``,
+or "the Dallas source record" without failing closed. Prose stays bounded by the authoritative
+schema, path policy, citations, output budgets, and trusted materialization.
+
 ## Materialization and publication
 
 Trusted code renders only `.openspec.yaml`, `proposal.md`, `design.md`, `tasks.md`, and one

@@ -16,7 +16,7 @@ The planning adapter SHALL classify structured issues and construct a strict pac
 - **THEN** the comment is excluded from both fingerprints and the packet, while an identical marker authored by a user remains selected as untrusted evidence
 
 ### Requirement: Strict planning result
-The planning result SHALL use a versioned authoritative schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. A separate provider-generation schema MAY omit unsupported constraint keywords only to shape structured generation; it MUST preserve the complete required field and object structure and MUST NOT replace authoritative trusted validation. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail trusted validation.
+The planning result SHALL use a versioned authoritative schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. A separate provider-generation schema MAY omit unsupported constraint keywords only to shape structured generation; it MUST preserve the complete required field and object structure and MUST NOT replace authoritative trusted validation. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail trusted validation. Shell-payload scanning SHALL be scoped by field purpose: command and task fields carry the full policy, every other planning field is checked only for command/parameter substitution and interpreter piping, and no field MAY be rejected for Markdown inline code or for domain vocabulary that merely reuses a shell builtin name outside command position.
 
 #### Scenario: Materialize only OpenSpec files
 - **WHEN** a schema-valid plan is published
@@ -25,6 +25,10 @@ The planning result SHALL use a versioned authoritative schema with bounded stri
 #### Scenario: Reject generation-only validity
 - **WHEN** provider output satisfies the generation schema but violates a bound, path rule, constant, or policy in the authoritative result contract
 - **THEN** trusted validation fails closed before materialization and publication
+
+#### Scenario: Accept planning prose that names identifiers and county sources
+- **WHEN** a schema-valid plan quotes identifiers such as `ACCOUNT_NUM` in Markdown inline code, or describes county source records, source members, and source onboarding
+- **THEN** trusted payload validation accepts the result, while command and task fields still fail closed on substitution, chaining, interpreters, destructive commands, and shell builtins in command position
 
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.

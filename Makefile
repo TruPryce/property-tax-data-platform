@@ -167,7 +167,7 @@ countyforge-plan-check:
 	$(UV) run python3 -m json.tool .ai/schemas/countyforge-plan-result.schema.json >/dev/null
 
 countyforge-plan-fixtures:
-	$(UV) run pytest tools/countyforge-github/tests/test_planning.py tools/countyforge-runner/tests/test_execution.py -q
+	$(UV) run pytest tools/countyforge-github/tests/test_planning.py tools/countyforge-runner/tests/test_execution.py tools/countyforge-runner/tests/test_planning_policy.py -q
 
 countyforge-plan-policy-tests:
 	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py tools/countyforge-github/tests/test_requests.py -q
