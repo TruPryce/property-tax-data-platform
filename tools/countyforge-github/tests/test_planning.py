@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -728,14 +729,13 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
     assert revision["action"] == "superseded"
     assert revision["branch"] != first_publication["branch"]
     assert len(github.pull_requests) == 2
-    assert github.tree_bases == ["base-tree-sha", "base-tree-sha"]
-    assert first_publication["stage"] == "complete"
-    assert duplicate["stage"] == "complete"
-    assert duplicate["completed"] == [
-        "validate_result",
-        "validate_provenance",
-        "resolve_predecessor",
-    ]
+    # Deduplication now builds its candidate tree first, because a marker alone
+    # cannot prove the branch behind that draft still holds this plan.
+    assert github.tree_bases == ["base-tree-sha", "base-tree-sha", "base-tree-sha"]
+    assert duplicate["commit_sha"] == github.refs[f"refs/heads/{first_publication['branch']}"]
+    for document in (first_publication, duplicate, revision):
+        assert document["stage"] == "complete"
+        assert document["completed"] == list(_STAGE_ORDER[:-1])
 
 
 # The closed publication stage vocabulary, in the order the publisher enters it.
@@ -913,6 +913,84 @@ def test_publication_fails_closed_on_a_divergent_planning_ref(tmp_path: Path) ->
     assert raised.value.details["stage"] == "create_ref"
     assert github.created_refs == []
     assert github.pull_requests == []
+
+
+def _marker_draft(
+    branch: str, *, run_id: str, context_sha: str, head_sha: str
+) -> dict[str, object]:
+    """A draft whose bot marker claims a plan, regardless of what its ref holds."""
+
+    return {
+        "number": 41,
+        "html_url": "https://github.com/TruPryce/property-tax-data-platform/pull/41",
+        "body": f"<!-- countyforge-plan:v1 run={run_id} context={context_sha} -->\n",
+        "head": {"ref": branch, "sha": head_sha},
+    }
+
+
+def _context_sha(case: dict[str, object]) -> str:
+    manifest = case["context_manifest_path"]
+    assert isinstance(manifest, Path)
+    return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("ref_state", ["absent", "divergent", "head_mismatch"])
+def test_marker_only_deduplication_never_reports_success(tmp_path: Path, ref_state: str) -> None:
+    """A body marker is mutable; the branch behind it may be gone or rewritten."""
+
+    github = _PublicationGitHub()
+    case = _publication_case(tmp_path, f"marker-{ref_state}")
+    branch = planning_branch(6, "add-safe-planning")
+    ref = f"refs/heads/{branch}"
+    head_sha = "commit-1"
+    if ref_state == "divergent":
+        github.refs[ref] = "human-sha"
+        github.commits["human-sha"] = {
+            "sha": "human-sha",
+            "tree": {"sha": "human-tree"},
+            "parents": [{"sha": "human-parent"}],
+        }
+        head_sha = "human-sha"
+    elif ref_state == "head_mismatch":
+        # The ref still holds this plan, but the draft points somewhere else.
+        github.refs[ref] = "commit-0"
+        github.commits["commit-0"] = {
+            "sha": "commit-0",
+            "tree": {"sha": "tree-sha"},
+            "parents": [{"sha": case["target_sha"]}],
+        }
+        head_sha = "force-pushed-sha"
+    github.pull_requests.append(
+        _marker_draft(
+            branch,
+            run_id=str(case["run_id"]),
+            context_sha=_context_sha(case),
+            head_sha=head_sha,
+        )
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(github, **case)  # type: ignore[arg-type]
+    expected = "planning_branch_conflict" if ref_state == "divergent" else "planning_draft_conflict"
+    assert raised.value.code == expected
+    assert raised.value.exit_code == 5
+    # No second draft, and a pre-existing ref is never moved.
+    assert len(github.pull_requests) == 1
+    if ref_state == "divergent":
+        assert github.refs[ref] == "human-sha"
+
+
+def test_marker_deduplication_reports_the_verified_ref_commit(tmp_path: Path) -> None:
+    """A believed marker returns the verified ref SHA, not the draft's claim."""
+
+    github = _PublicationGitHub()
+    first = publish_plan(github, **_publication_case(tmp_path, "verified-first"))  # type: ignore[arg-type]
+    branch = str(first["branch"])
+    duplicate = publish_plan(github, **_publication_case(tmp_path, "verified-again"))  # type: ignore[arg-type]
+    assert duplicate["action"] == "deduplicated"
+    assert duplicate["commit_sha"] == github.refs[f"refs/heads/{branch}"] == first["commit_sha"]
+    assert duplicate["pr_number"] == first["pr_number"]
+    assert len(github.pull_requests) == 1
+    assert len(github.created_refs) == 1
 
 
 def test_publication_reuses_a_draft_created_before_the_attempt_died(tmp_path: Path) -> None:

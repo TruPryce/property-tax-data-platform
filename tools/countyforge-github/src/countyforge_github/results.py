@@ -115,27 +115,57 @@ def resolve_terminal_result(
     }
 
 
-def _publication_progress_details(path: Path | None) -> JsonObject:
-    """Recover a closed-vocabulary stage from the publisher's progress snapshot.
+def _publication_stage_details(document: JsonObject | None) -> JsonObject:
+    """Accept a stage only with its exact ordered completed prefix.
 
-    A hard kill can leave the redirected stdout empty while the progress file
-    still holds the last stage entered, so the fallback document must not report
-    `unknown` when that evidence survived.
+    The publisher can only enter consecutive stages, so `completed` is always
+    the vocabulary prefix ending at the current stage.  Anything reordered,
+    duplicated, truncated, or invented is not evidence this publisher produced
+    and is discarded rather than reported.
     """
 
-    document = _read_result(path)
     if document is None:
         return {}
     stage = document.get("stage")
     if not isinstance(stage, str) or stage not in PUBLICATION_STAGES:
         return {}
-    raw_completed = document.get("completed")
-    completed = (
-        [item for item in raw_completed if isinstance(item, str) and item in PUBLICATION_STAGES]
-        if isinstance(raw_completed, list)
-        else []
-    )
-    return {"stage": stage, "completed": completed}
+    expected = list(PUBLICATION_STAGES[: PUBLICATION_STAGES.index(stage)])
+    if document.get("completed") != expected:
+        return {}
+    return {"stage": stage, "completed": expected}
+
+
+def _raw_stage_details(raw: JsonObject) -> JsonObject:
+    """A success reports its stage at the top level; a failure inside `details`."""
+
+    details = raw.get("details")
+    if isinstance(details, dict):
+        reported = _publication_stage_details(details)
+        if reported:
+            return reported
+    return _publication_stage_details(raw)
+
+
+def _publication_details(raw: JsonObject, progress: JsonObject) -> JsonObject | None:
+    """Merge sanitized publication details, or refuse contradictory evidence.
+
+    `stage` and `completed` are reserved: they come from validated evidence, and
+    persisted progress wins because it survives a kill that truncated stdout.
+    If a valid raw stage disagrees with a valid persisted one, the two records of
+    the same run contradict each other and neither may be reported.  Everything
+    else the publisher put in `details` is dropped here; the raw document is
+    uploaded intact alongside this one.
+    """
+
+    reported = _raw_stage_details(raw)
+    if progress and reported and progress != reported:
+        return None
+    details: JsonObject = dict(progress or reported)
+    raw_details = raw.get("details")
+    status = raw_details.get("status") if isinstance(raw_details, dict) else None
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        details["status"] = status
+    return details
 
 
 def _publication_failure(
@@ -190,7 +220,7 @@ def normalize_publication_result(
     well-typed success.
     """
 
-    progress = _publication_progress_details(progress_path)
+    progress = _publication_stage_details(_read_result(progress_path))
     raw = _read_result(result_path)
     if raw is None:
         empty = result_path is None or not result_path.is_file() or not result_path.read_bytes()
@@ -200,14 +230,23 @@ def normalize_publication_result(
             exit_code=exit_code,
             details=progress,
         )
-    details = raw.get("details")
-    merged: JsonObject = {**progress, **(details if isinstance(details, dict) else {})}
-    if raw.get("ok") is not True:
-        disposition = raw.get("disposition")
+    merged = _publication_details(raw, progress)
+    reported = raw.get("disposition")
+    disposition = (
+        reported
+        if isinstance(reported, str) and _DISPOSITION.fullmatch(reported)
+        else "planning_publication_failed"
+    )
+    if merged is None:
         return _publication_failure(
-            disposition
-            if isinstance(disposition, str) and _DISPOSITION.fullmatch(disposition)
-            else "planning_publication_failed",
+            "publication_evidence_inconsistent",
+            "Publication stage evidence contradicts its persisted progress.",
+            exit_code=exit_code,
+            details={"reported_disposition": disposition, **progress},
+        )
+    if raw.get("ok") is not True:
+        return _publication_failure(
+            disposition,
             "Publication reported a sanitized failure.",
             exit_code=exit_code,
             details=merged,
@@ -220,7 +259,7 @@ def normalize_publication_result(
             details=merged,
         )
     outputs = _publication_outputs(raw)
-    if outputs is None:
+    if outputs is None or merged.get("stage") != "complete":
         return _publication_failure(
             "publication_result_incomplete",
             "Publication reported success without complete publication facts.",

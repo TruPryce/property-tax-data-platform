@@ -710,9 +710,14 @@ class _PublicationProgress:
         self._write()
 
     def enter(self, stage: str) -> None:
-        if stage not in _PUBLICATION_STAGES:
+        # Consecutive-only transitions keep `completed` an exact ordered prefix
+        # of the vocabulary, which is what readers of this evidence validate.
+        if (
+            stage not in _PUBLICATION_STAGES
+            or _PUBLICATION_STAGES.index(stage) != _PUBLICATION_STAGES.index(self.stage) + 1
+        ):
             raise ControlPlaneError(
-                "invalid_publication_stage", "Publication reported an unknown stage."
+                "invalid_publication_stage", "Publication reported an out-of-order stage."
             )
         self.completed.append(self.stage)
         self.stage = stage
@@ -750,36 +755,22 @@ def _publication_progress(path: Path | None) -> Iterator[_PublicationProgress]:
         raise
 
 
-def _deduplicated(
-    pulls: Iterable[JsonObject],
-    *,
-    run_id: str,
-    manifest_sha: str,
-    branch: str,
-    change: str,
-    require_run: bool = True,
+def _marker_match(
+    pulls: Iterable[JsonObject], *, run_id: str, manifest_sha: str, require_run: bool = True
 ) -> JsonObject | None:
-    """Return the existing draft that already carries this exact plan, if any."""
+    """Find the draft whose bot marker claims this plan.
+
+    A marker is a mutable substring of a pull-request body and is only a
+    candidate: the branch behind it may since have been deleted, force-pushed,
+    or edited.  Deduplication is decided later, against the verified ref.
+    """
 
     for pull in pulls:
         body = str(pull.get("body", ""))
         if require_run and f"run={run_id}" not in body:
             continue
-        if f"context={manifest_sha}" not in body:
-            continue
-        head = pull.get("head")
-        return {
-            "ok": True,
-            "action": "deduplicated",
-            "branch": branch,
-            "commit_sha": str(head.get("sha", "")) if isinstance(head, dict) else "",
-            "pr_number": pull.get("number"),
-            "pr_url": pull.get("html_url"),
-            "change_name": change,
-            "run_id": run_id,
-            "context_manifest_sha256": manifest_sha,
-            "implementation_eligible": False,
-        }
+        if f"context={manifest_sha}" in body:
+            return pull
     return None
 
 
@@ -928,29 +919,21 @@ def publish_plan(
             repository, head=f"{owner}:{branch}", base=default_branch
         )
         bot_marker = f"<!-- countyforge-plan:v1 run={run_id} context={manifest_sha} -->"
-        duplicate = _deduplicated(
-            existing, run_id=run_id, manifest_sha=manifest_sha, branch=branch, change=change
+        # A marker only nominates a candidate draft.  Nothing returns success
+        # here: the tree has not been built yet, so the ref behind that draft is
+        # still unverified.
+        marker_pull = _marker_match(existing, run_id=run_id, manifest_sha=manifest_sha)
+        predecessor: JsonObject | None = (
+            None if marker_pull is not None else (existing[0] if existing else None)
         )
-        if duplicate is not None:
-            progress.enter("complete")
-            return {**duplicate, **progress.as_document()}
-        predecessor: JsonObject | None = existing[0] if existing else None
         if predecessor is not None:
             branch = f"{base_branch}-r{manifest_sha[:8]}"
             versioned = github.list_pull_requests(
                 repository, head=f"{owner}:{branch}", base=default_branch
             )
-            duplicate = _deduplicated(
-                versioned,
-                run_id=run_id,
-                manifest_sha=manifest_sha,
-                branch=branch,
-                change=change,
-                require_run=False,
+            marker_pull = _marker_match(
+                versioned, run_id=run_id, manifest_sha=manifest_sha, require_run=False
             )
-            if duplicate is not None:
-                progress.enter("complete")
-                return {**duplicate, **progress.as_document()}
         progress.enter("create_blobs")
         if already_materialized:
             files = [
@@ -1010,22 +993,44 @@ def publish_plan(
             github, repository=repository, ref=ref, commit=commit, tree=tree, parent=parent
         )
         progress.enter("create_pull_request")
-        if resumed:
+        if marker_pull is None and resumed:
             # A prior attempt already left the branch in place; its draft may have
-            # been created before that attempt died.
-            duplicate = _deduplicated(
+            # been created between that listing and now.
+            marker_pull = _marker_match(
                 github.list_pull_requests(
                     repository, head=f"{owner}:{branch}", base=default_branch
                 ),
                 run_id=run_id,
                 manifest_sha=manifest_sha,
-                branch=branch,
-                change=change,
                 require_run=predecessor is None,
             )
-            if duplicate is not None:
-                progress.enter("complete")
-                return {**duplicate, **progress.as_document()}
+        if marker_pull is not None:
+            # Only now, against the verified ref, can a marker be believed.  A
+            # draft whose head is not that ref is stale, force-pushed, or edited,
+            # and must never be reported as this plan's publication.
+            head = marker_pull.get("head")
+            head_sha = str(head.get("sha", "")) if isinstance(head, dict) else ""
+            if not resumed or head_sha != commit:
+                raise ControlPlaneError(
+                    "planning_draft_conflict",
+                    "An existing planning draft does not match the verified planning ref.",
+                    {"ref": ref},
+                    exit_code=5,
+                )
+            progress.enter("complete")
+            return {
+                "ok": True,
+                "action": "deduplicated",
+                "branch": branch,
+                "commit_sha": commit,
+                "pr_number": marker_pull.get("number"),
+                "pr_url": marker_pull.get("html_url"),
+                "change_name": change,
+                "run_id": run_id,
+                "context_manifest_sha256": manifest_sha,
+                "implementation_eligible": False,
+                **progress.as_document(),
+            }
         predecessor_link = (
             f"\nPredecessor draft: #{predecessor['number']} (superseded without modifying it).\n"
             if predecessor is not None

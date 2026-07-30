@@ -175,18 +175,39 @@ def test_implementation_completed_without_payload_fails_closed(tmp_path: Path) -
     assert resolved["disposition"] == "invalid_result_evidence"
 
 
+# The publisher can only enter consecutive stages, so `completed` is always the
+# exact vocabulary prefix ending at the current stage.
+_STAGES = (
+    "validate_result",
+    "validate_provenance",
+    "resolve_predecessor",
+    "create_blobs",
+    "load_parent_commit",
+    "create_tree",
+    "create_commit",
+    "create_ref",
+    "create_pull_request",
+    "complete",
+)
+
+
+def _prefix(stage: str) -> list[str]:
+    return list(_STAGES[: _STAGES.index(stage)])
+
+
 _SUCCESS = json.dumps(
     {
         "ok": True,
         "action": "created",
         "stage": "complete",
+        "completed": _prefix("complete"),
         "branch": "countyforge/plan/issue-6-add-safe-planning",
         "change_name": "add-safe-planning",
         "pr_number": 12,
         "context_manifest_sha256": "a" * 64,
     }
 )
-_PROGRESS = json.dumps({"stage": "create_ref", "completed": ["validate_result", "create_blobs"]})
+_PROGRESS = json.dumps({"stage": "create_ref", "completed": _prefix("create_ref")})
 
 
 def test_publication_success_yields_typed_outputs(tmp_path: Path) -> None:
@@ -216,10 +237,7 @@ def test_publication_missing_result_reports_the_surviving_progress_stage(tmp_pat
     assert normalized["ok"] is False
     assert normalized["exit_code"] == 137
     assert normalized["disposition"] == "publication_result_missing"
-    assert normalized["details"] == {
-        "stage": "create_ref",
-        "completed": ["validate_result", "create_blobs"],
-    }
+    assert normalized["details"] == {"stage": "create_ref", "completed": _prefix("create_ref")}
 
 
 def test_publication_absent_result_file_is_missing_not_malformed(tmp_path: Path) -> None:
@@ -259,17 +277,24 @@ def test_publication_failure_document_keeps_its_sanitized_disposition(tmp_path: 
         {
             "ok": False,
             "disposition": "github_api_error",
-            "details": {"status": 403, "stage": "create_ref", "completed": ["create_commit"]},
+            "details": {
+                "status": 403,
+                "ref": "refs/heads/countyforge/plan/issue-6-add-safe-planning",
+                "stage": "create_ref",
+                "completed": _prefix("create_ref"),
+            },
         }
     )
     normalized = normalize_publication_result(
         result_path=_write(tmp_path / "result.json", body), progress_path=None, exit_code=5
     )
     assert normalized["disposition"] == "github_api_error"
+    # Only the reserved stage fields and a bounded integer status survive; the
+    # raw document keeps everything else and is uploaded intact.
     assert normalized["details"] == {
         "status": 403,
         "stage": "create_ref",
-        "completed": ["create_commit"],
+        "completed": _prefix("create_ref"),
     }
     assert normalized["exit_code"] == 5
 
@@ -317,3 +342,102 @@ def test_publication_success_requires_complete_well_typed_facts(
     assert normalized["disposition"] == "publication_result_incomplete"
     assert normalized["exit_code"] == 5
     assert "outputs" not in normalized
+
+
+def test_publication_raw_details_cannot_override_persisted_progress(tmp_path: Path) -> None:
+    """Two records of the same run that disagree are not evidence of either."""
+
+    body = json.dumps(
+        {
+            "ok": False,
+            "disposition": "github_api_error",
+            "details": {
+                "status": 403,
+                "stage": "create_pull_request",
+                "completed": _prefix("create_pull_request"),
+            },
+        }
+    )
+    normalized = normalize_publication_result(
+        result_path=_write(tmp_path / "result.json", body),
+        progress_path=_write(tmp_path / "progress.json", _PROGRESS),
+        exit_code=5,
+    )
+    assert normalized["ok"] is False
+    assert normalized["disposition"] == "publication_evidence_inconsistent"
+    assert normalized["exit_code"] == 5
+    # The persisted stage still reaches the operator, as does the original code.
+    assert normalized["details"] == {
+        "reported_disposition": "github_api_error",
+        "stage": "create_ref",
+        "completed": _prefix("create_ref"),
+    }
+
+
+def test_publication_success_contradicting_progress_fails_closed(tmp_path: Path) -> None:
+    normalized = normalize_publication_result(
+        result_path=_write(tmp_path / "result.json", _SUCCESS),
+        progress_path=_write(tmp_path / "progress.json", _PROGRESS),
+        exit_code=0,
+    )
+    assert normalized["ok"] is False
+    assert normalized["disposition"] == "publication_evidence_inconsistent"
+    assert normalized["exit_code"] == 5
+    assert "outputs" not in normalized
+
+
+def test_publication_agreeing_raw_and_persisted_progress_is_accepted(tmp_path: Path) -> None:
+    progress = json.dumps({"stage": "complete", "completed": _prefix("complete")})
+    normalized = normalize_publication_result(
+        result_path=_write(tmp_path / "result.json", _SUCCESS),
+        progress_path=_write(tmp_path / "progress.json", progress),
+        exit_code=0,
+    )
+    assert normalized["ok"] is True
+    assert normalized["details"] == {"stage": "complete", "completed": _prefix("complete")}
+
+
+@pytest.mark.parametrize(
+    "completed",
+    [
+        ["create_blobs", "validate_result"],
+        ["validate_result", "validate_result", "resolve_predecessor"],
+        ["validate_result"],
+        [*_prefix("create_ref"), "complete"],
+        "validate_result",
+        None,
+    ],
+)
+def test_publication_rejects_a_completed_list_that_is_not_the_exact_prefix(
+    tmp_path: Path, completed: object
+) -> None:
+    progress = json.dumps({"stage": "create_ref", "completed": completed})
+    normalized = normalize_publication_result(
+        result_path=_write(tmp_path / "result.json", ""),
+        progress_path=_write(tmp_path / "progress.json", progress),
+        exit_code=1,
+    )
+    assert normalized["details"] == {}
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"stage": "rm -rf /", "completed": []},
+        {"stage": 7, "completed": []},
+        {"status": "403"},
+        {"status": True},
+        {"status": 99},
+        {"status": 600},
+        {"token": "ghp_secret", "ref": "refs/heads/x"},
+    ],
+)
+def test_publication_drops_unvalidated_auxiliary_details(
+    tmp_path: Path, details: dict[str, object]
+) -> None:
+    body = json.dumps({"ok": False, "disposition": "github_api_error", "details": details})
+    normalized = normalize_publication_result(
+        result_path=_write(tmp_path / "result.json", body), progress_path=None, exit_code=5
+    )
+    assert normalized["disposition"] == "github_api_error"
+    assert normalized["details"] == {}

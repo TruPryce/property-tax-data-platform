@@ -70,3 +70,5 @@
 - [x] 8.6 Open stage tracking before the port preflight, never persist a null stage, and replace progress snapshots atomically.
 - [x] 8.7 Normalize publisher output and its return code in a typed adapter command; fail closed on missing, malformed, non-object, failing, inconsistent, or incomplete results and emit outputs only for a validated success.
 - [x] 8.8 Model non-reproducible commit SHAs in the publication fixture so tree-and-parent recovery is proven rather than assumed.
+- [x] 8.9 Decide deduplication only after ref equivalence and a matching draft head; fail closed as `planning_draft_conflict` on a stale, divergent, or force-pushed marker.
+- [x] 8.10 Reserve stage and completed stages as validated exact-prefix fields, make persisted progress authoritative, fail closed on contradiction, and allow-list auxiliary detail.

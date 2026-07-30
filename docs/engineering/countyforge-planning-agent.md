@@ -113,6 +113,18 @@ tree is content-addressed:
 | commit carries this plan's tree and trusted parent | resume, reusing an already-created draft |
 | anything else | fail closed as `planning_branch_conflict`; the ref is never moved |
 
+A draft's `<!-- countyforge-plan:v1 run=… context=… -->` marker only nominates a candidate.
+Markers are mutable and outlive their branch, so a deduplicated success is reported only after the
+ref passes that check **and** the draft's head is the verified ref — and the reported commit is
+the verified SHA, not the draft's claim. A marker whose branch is absent, divergent, or
+force-pushed away fails closed as `planning_draft_conflict`.
+
+Stage evidence is validated the same way. Stages advance only to the next in the vocabulary, so
+`completed` is always the exact ordered prefix; anything reordered, duplicated, truncated, or
+invented is discarded. Persisted progress outranks the reported document, two valid records that
+disagree fail closed as `publication_evidence_inconsistent`, and only an integer HTTP `status`
+crosses into the normalized document — the rest stays in the raw artifact.
+
 ## Revisions and recovery
 
 Identical semantic planning identity deduplicates. Changed context creates a revision. The
