@@ -37,14 +37,20 @@ not replace or weaken authoritative post-generation validation. The profile is r
 writes only run evidence.
 
 Both the runner and the GitHub adapter then apply the same executable-content policy, scoped by
-what a field is for. `task_slices` and `validation_commands` describe work and commands, so they
-carry the full policy: command/parameter substitution, command chaining and separators,
-interpreter `-c` invocations, destructive commands, and `eval`/`source` in command position. All
-other planning fields are architecture prose and are checked only for substitution and
-interpreter piping. Markdown inline code is unwrapped before scanning instead of being treated as
-command substitution, so a plan may write `` `ACCOUNT_NUM` ``, `` `dallas-cad-source-contract` ``,
-or "the Dallas source record" without failing closed. Prose stays bounded by the authoritative
-schema, path policy, citations, output budgets, and trusted materialization.
+what a field is for.
+
+| Field | Scanned for |
+|---|---|
+| `validation_commands` | everything, including `eval`/`source` in command position with any argument |
+| `task_slices` | substitution, chaining, separators, interpreter `-c`, destructive commands; the builtin rule applies to its inline-code spans |
+| all other planning fields | command/parameter substitution and interpreter piping only |
+
+Markdown inline code is unwrapped before scanning instead of being treated as command
+substitution, so a plan may write `` `ACCOUNT_NUM` ``, `` `dallas-cad-source-contract` ``, or "the
+Dallas source record" without failing closed. Builtin detection makes no judgement about whether
+an argument resembles a filename — `source script.sh` is rejected exactly like
+`source ./script.sh` — because a shape heuristic would only be bypassable. Prose stays bounded by
+the authoritative schema, path policy, citations, output budgets, and trusted materialization.
 
 ## Materialization and publication
 

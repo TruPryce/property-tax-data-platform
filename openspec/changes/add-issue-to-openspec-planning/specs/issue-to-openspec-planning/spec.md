@@ -16,7 +16,7 @@ The planning adapter SHALL classify structured issues and construct a strict pac
 - **THEN** the comment is excluded from both fingerprints and the packet, while an identical marker authored by a user remains selected as untrusted evidence
 
 ### Requirement: Strict planning result
-The planning result SHALL use a versioned authoritative schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. A separate provider-generation schema MAY omit unsupported constraint keywords only to shape structured generation; it MUST preserve the complete required field and object structure and MUST NOT replace authoritative trusted validation. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail trusted validation. Shell-payload scanning SHALL be scoped by field purpose: command and task fields carry the full policy, every other planning field is checked only for command/parameter substitution and interpreter piping, and no field MAY be rejected for Markdown inline code or for domain vocabulary that merely reuses a shell builtin name outside command position.
+The planning result SHALL use a versioned authoritative schema with bounded strings and arrays, kebab-case change names, safe repository-relative OpenSpec paths, packet citations, assumptions, unresolved decisions, blocked reasons, and explicit implementation eligibility. A separate provider-generation schema MAY omit unsupported constraint keywords only to shape structured generation; it MUST preserve the complete required field and object structure and MUST NOT replace authoritative trusted validation. Unknown properties, absolute/traversal paths, shell payloads, secrets, workflow/policy paths, and production-code paths MUST fail trusted validation. Shell-payload scanning SHALL be scoped by field purpose. Command fields MUST reject any shell builtin invoked in command position with an argument, and detection MUST NOT depend on whether that argument resembles a filename. Task fields MUST apply that same rule to their Markdown inline-code spans while remaining prose-compatible, and MUST still reject substitution, chaining, separators, interpreters, and destructive commands anywhere in the slice. Every other planning field MUST be checked only for command/parameter substitution and interpreter piping. Markdown inline code MUST be unwrapped rather than rejected, and no field MAY be rejected for domain vocabulary that reuses a shell builtin name outside command position.
 
 #### Scenario: Materialize only OpenSpec files
 - **WHEN** a schema-valid plan is published
@@ -28,7 +28,11 @@ The planning result SHALL use a versioned authoritative schema with bounded stri
 
 #### Scenario: Accept planning prose that names identifiers and county sources
 - **WHEN** a schema-valid plan quotes identifiers such as `ACCOUNT_NUM` in Markdown inline code, or describes county source records, source members, and source onboarding
-- **THEN** trusted payload validation accepts the result, while command and task fields still fail closed on substitution, chaining, interpreters, destructive commands, and shell builtins in command position
+- **THEN** trusted payload validation accepts the result, while command and task fields still fail closed on substitution, chaining, interpreters, and destructive commands
+
+#### Scenario: Reject a sourced script whatever its argument looks like
+- **WHEN** a command field or a task field's inline-code span invokes `source` or `eval` in command position, whether the argument is a bare relative script, a quoted path, a variable, or a dotted path
+- **THEN** trusted payload validation fails closed, and no filename-shape exception is granted
 
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.

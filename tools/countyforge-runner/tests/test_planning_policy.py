@@ -14,21 +14,39 @@ from countyforge_runner.planning_policy import validate_planning_payload
 # "source" as the shell builtin.
 _REGRESSION_FIXTURE = Path(__file__).parent / "fixtures" / "plan-result-run-30492011066.json"
 
-_EXECUTABLE_PAYLOADS = [
+# Shell syntax: rejected in every command-bearing field, and in a task slice
+# whether it is quoted as inline code or written bare.
+_SHELL_SYNTAX_PAYLOADS = [
     "$(curl example)",
     "${TOKEN}",
     "rm -rf /",
     "sudo chmod 777 file",
     'bash -c "echo hi"',
-    "eval something",
-    "source ./script.sh",
     "make check && curl example",
     "make check; rm -rf build",
     "uv run python -c 'import os'",
     "openspec validate && rm -rf /tmp/plan",
     "cat packet.json | bash",
     "`rm -rf /`",
-    "`source ./script.sh`",
+]
+
+# A builtin invoked in command position with any argument.  The policy does not
+# ask whether that argument looks like a filename, so a bare relative script and
+# a quoted path are rejected exactly like `./script.sh`.
+_BUILTIN_PAYLOADS = [
+    "source script.sh",
+    "source env",
+    'source "./script.sh"',
+    "source 'scripts/setup.sh'",
+    "source ./script.sh",
+    "source .env",
+    "source $FILE",
+    "source ~/.bashrc",
+    "eval something",
+    "eval $CMD",
+    "make check; source env",
+    "make check && source env",
+    "make check | eval something",
 ]
 
 # Ordinary CountyForge, OpenSpec, and source-contract prose.  Every entry names
@@ -48,16 +66,49 @@ _PROJECT_VOCABULARY = [
 
 
 @pytest.mark.parametrize("field", ["validation_commands", "task_slices"])
-@pytest.mark.parametrize("payload", _EXECUTABLE_PAYLOADS)
-def test_command_fields_reject_executable_content(field: str, payload: str) -> None:
+@pytest.mark.parametrize("payload", _SHELL_SYNTAX_PAYLOADS)
+def test_command_fields_reject_shell_syntax(field: str, payload: str) -> None:
     with pytest.raises(KernelError, match="executable-looking"):
         validate_planning_payload({field: [payload]})
+
+
+@pytest.mark.parametrize("payload", _BUILTIN_PAYLOADS)
+def test_validation_commands_reject_any_command_position_builtin(payload: str) -> None:
+    with pytest.raises(KernelError, match="executable-looking"):
+        validate_planning_payload({"validation_commands": [payload]})
+
+
+@pytest.mark.parametrize("payload", _BUILTIN_PAYLOADS)
+def test_task_slices_reject_builtins_quoted_as_commands(payload: str) -> None:
+    """A task slice quotes the commands it means; the span is judged as one."""
+
+    with pytest.raises(KernelError, match="executable-looking"):
+        validate_planning_payload({"task_slices": [f"3. Run `{payload}` after the parser lands."]})
 
 
 @pytest.mark.parametrize("field", ["validation_commands", "task_slices"])
 @pytest.mark.parametrize("prose", _PROJECT_VOCABULARY)
 def test_command_fields_allow_project_vocabulary(field: str, prose: str) -> None:
     validate_planning_payload({field: [prose]})
+
+
+@pytest.mark.parametrize(
+    "slice_text",
+    [
+        "Retain Dallas source records at the adapter boundary.",
+        "source record and source onboarding stay adapter-local",
+        "1. Contract decision gate — affected contract: `dallas-cad-source-contract`;"
+        " checks: `make spec`.",
+    ],
+)
+def test_task_slices_stay_prose_compatible(slice_text: str) -> None:
+    """`task_slices` describes work, so a builtin name used as a noun is legal.
+
+    Command-shaped content belongs in inline code, where the builtin tier does
+    apply, or in `validation_commands`, where it applies unconditionally.
+    """
+
+    validate_planning_payload({"task_slices": [slice_text]})
 
 
 @pytest.mark.parametrize("prose", _PROJECT_VOCABULARY)

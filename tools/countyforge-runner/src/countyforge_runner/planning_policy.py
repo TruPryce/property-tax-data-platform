@@ -21,23 +21,26 @@ _SUBSTITUTION = (
     re.compile(r"\|\s*(?:sh|bash|zsh|python(?:3)?|node)\b"),
 )
 
-# Shell vocabulary, scanned only in fields that describe commands.  Words such
-# as "source", "docker", and "git" are ordinary architecture prose everywhere
-# else, and this repository plans county source-onboarding work constantly.
-_COMMAND_PAYLOADS = (
+# Executable shell syntax: chaining, separators, interpreters, and destructive
+# commands.  Rejected wherever a field describes work or commands.
+_SHELL_SYNTAX = (
     *_SUBSTITUTION,
     re.compile(r"(?:^|\s)(?:rm|sudo|chmod|chown|curl|wget|docker|git\s+(?:push|commit|reset))\b"),
     re.compile(r"(?:^|\s)(?:bash|sh|zsh|python(?:3)?|node)\s+-c\b"),
-    # `eval` and `source` are builtins only in command position, and `source`
-    # must additionally take something path-shaped: "source record" and "source
-    # onboarding" are this project's own vocabulary, `source ./script.sh` is not.
-    re.compile(r"(?:^|[;&|]\s*)eval\s+\S", re.MULTILINE),
-    re.compile(r"(?:^|[;&|]\s*)source\s+(?:\S*/|\.\w|[$~])", re.MULTILINE),
     re.compile(r"\|\||&&"),
     re.compile(r";\s*(?:rm|git|curl|wget|bash|sh|python(?:3)?)\b"),
 )
 
-_COMMAND_FIELDS = ("task_slices", "validation_commands")
+# `eval` and `source` invoked in command position with any argument.  The policy
+# makes no guess about whether that argument looks like a filename: `source
+# script.sh` and `source "./setup.sh"` are as executable as `source ./x.sh`, and
+# a shape heuristic would only be bypassable.  Both names are also ordinary
+# nouns -- this repository plans county source contracts constantly -- so the
+# tier applies only where the text is a command rather than a description.
+_BUILTINS = (re.compile(r"(?:^|[;&|]\s*)(?:eval|source)\s+\S", re.MULTILINE),)
+
+_COMMAND_PAYLOADS = (*_SHELL_SYNTAX, *_BUILTINS)
+
 _PROSE_FIELDS = (
     "problem_statement",
     "desired_outcome",
@@ -64,39 +67,51 @@ def _strings(result: JsonObject, fields: tuple[str, ...]) -> list[str]:
     return values
 
 
-def _command_candidates(value: str) -> list[str]:
-    """Scan a command field as written and once per inline-code span.
+def _scan(text: str, patterns: tuple[re.Pattern[str], ...]) -> None:
+    if any(pattern.search(text) for pattern in patterns):
+        _reject()
 
-    Unwrapping the backticks keeps ``make check`` readable to the payload rules
-    instead of rejecting every Markdown identifier.  Re-scanning each span on its
-    own puts its first word in command position, so a quoted ``source ./x.sh``
-    is still caught wherever the plan happens to quote it.
-    """
 
-    return [_INLINE_CODE.sub(r" \1 ", value), *_INLINE_CODE.findall(value)]
+def _unwrap(value: str) -> str:
+    """Drop the backticks so inline code is read as text, not as substitution."""
+
+    return _INLINE_CODE.sub(r" \1 ", value)
 
 
 def validate_planning_payload(result: JsonObject) -> None:
     """Reject executable-looking content before a plan is reported successful.
 
-    Scanning is tiered by what a field is for.  ``task_slices`` and
-    ``validation_commands`` describe work and commands, so they carry the full
-    shell-payload policy.  Every other planning field is architecture prose and
-    is checked only for command/parameter substitution and interpreter piping,
-    which have no legitimate prose meaning.  Prose remains bounded by the
-    authoritative schema, path policy, citations, output budgets, and trusted
-    materialization.  This policy is intentionally dependency-free so the runner
-    can enforce it before writing a completed result; the GitHub adapter repeats
-    the same policy alongside its path and citation checks.
+    Scanning is tiered by what a field is for.
+
+    ``validation_commands`` names commands, so every rule applies to it,
+    including a shell builtin invoked in command position with any argument.
+
+    ``task_slices`` describes work in prose that quotes its commands, so the
+    builtin tier applies to its Markdown inline-code spans rather than to the
+    surrounding sentence: ``Retain Dallas source records`` is a description and
+    ``Run `source ./setup.sh``` is not.  Substitution, chaining, separators,
+    interpreters, and destructive commands still apply to the whole slice.
+
+    Every other planning field is architecture prose and is checked only for
+    command/parameter substitution and interpreter piping, which have no
+    legitimate prose meaning.  Prose remains bounded by the authoritative
+    schema, path policy, citations, output budgets, and trusted materialization.
+
+    This policy is intentionally dependency-free so the runner can enforce it
+    before writing a completed result; the GitHub adapter repeats the same
+    policy alongside its path and citation checks.
     """
 
     for value in _strings(result, _PROSE_FIELDS):
-        if any(pattern.search(value) for pattern in _SUBSTITUTION):
-            _reject()
-    for value in _strings(result, _COMMAND_FIELDS):
-        for candidate in _command_candidates(value):
-            if any(pattern.search(candidate) for pattern in _COMMAND_PAYLOADS):
-                _reject()
+        _scan(value, _SUBSTITUTION)
+    for value in _strings(result, ("task_slices",)):
+        _scan(_unwrap(value), _SHELL_SYNTAX)
+        for span in _INLINE_CODE.findall(value):
+            _scan(span, _COMMAND_PAYLOADS)
+    for value in _strings(result, ("validation_commands",)):
+        _scan(_unwrap(value), _COMMAND_PAYLOADS)
+        for span in _INLINE_CODE.findall(value):
+            _scan(span, _COMMAND_PAYLOADS)
 
 
 def _reject() -> NoReturn:

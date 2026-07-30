@@ -58,3 +58,4 @@
 - [x] 7.1 Scope executable-content scanning by field purpose and stop rejecting Markdown inline code and mid-sentence `source`/`eval` prose.
 - [x] 7.2 Keep substitution, chaining, interpreter, destructive-command, and command-position builtin detection in command and task fields.
 - [x] 7.3 Add accepted-vocabulary and rejected-payload fixtures plus a minimized regression fixture from run 30492011066.
+- [x] 7.4 Reject `eval`/`source` in command position with any argument, drop the bypassable filename-shape exception, and keep `task_slices` prose-compatible by scanning its inline-code spans.
