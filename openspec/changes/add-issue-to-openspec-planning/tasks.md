@@ -59,3 +59,18 @@
 - [x] 7.2 Keep substitution, chaining, interpreter, destructive-command, and command-position builtin detection in command and task fields.
 - [x] 7.3 Add accepted-vocabulary and rejected-payload fixtures plus a minimized regression fixture from run 30492011066.
 - [x] 7.4 Reject `eval`/`source` in command position with any argument, drop the bypassable filename-shape exception, and keep `task_slices` prose-compatible by scanning its inline-code spans.
+
+## 8. Publication observability and recovery
+
+- [x] 8.1 Record the last entered publication stage from a closed vocabulary and attach it to every sanitized failure.
+- [x] 8.2 Capture the publisher return code without losing its JSON result, require a structured document on every exit path, and surface disposition, stage, and status in the Actions error.
+- [x] 8.3 Upload the publication result and progress documents with `if: always()`.
+- [x] 8.4 Inspect the deterministic planning ref before creating it; resume an equivalent generated ref and fail closed on a divergent one.
+- [x] 8.5 Add fixtures for failures at blob, parent-commit, tree, commit, ref, and pull-request creation, and prove each preserves sanitized evidence and the correct stage.
+- [x] 8.6 Open stage tracking before the port preflight, never persist a null stage, and replace progress snapshots atomically.
+- [x] 8.7 Normalize publisher output and its return code in a typed adapter command; fail closed on missing, malformed, non-object, failing, inconsistent, or incomplete results and emit outputs only for a validated success.
+- [x] 8.8 Model non-reproducible commit SHAs in the publication fixture so tree-and-parent recovery is proven rather than assumed.
+- [x] 8.9 Decide deduplication only after ref equivalence and a matching draft head; fail closed as `planning_draft_conflict` on a stale, divergent, or force-pushed marker.
+- [x] 8.10 Reserve stage and completed stages as validated exact-prefix fields, make persisted progress authoritative, fail closed on contradiction, and allow-list auxiliary detail.
+- [x] 8.11 Open the publication evidence boundary in the adapter command before reading inputs or constructing the GitHub client.
+- [x] 8.12 Convert contract-check and unexpected exceptions into sanitized stage-carrying publication failures, and read the pull-request response inside its own stage.

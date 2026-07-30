@@ -72,6 +72,66 @@ unresolved decisions, states that no production code is included, and requires m
 approval. A merged planning PR is the initial approval evidence; reactions and labels do not
 approve a plan.
 
+## Publication stages and evidence
+
+Publication is a multi-step sequence against GitHub's Git data API, so a bare exit code cannot
+say which mutation failed. The publisher enters a closed stage vocabulary and attaches the
+current stage plus the completed prefix to every sanitized failure:
+
+```text
+validate_result  validate_provenance  resolve_predecessor  create_blobs  load_parent_commit
+create_tree  create_commit  create_ref  create_pull_request  complete
+```
+
+Tracking opens inside `validate_result` before the first fallible preflight — before the result
+artifact is read and before the GitHub client is constructed — so an unreadable input or a missing
+token is attributed like any other publication failure, and no snapshot ever names a stage outside
+that list. `--publication-progress <path>` replaces each transition atomically, so a hard kill
+still leaves evidence.
+
+Nothing leaves publication unsanitized. A trusted contract check keeps its stable code; an
+unexpected exception — an `OSError` reading a rendered file, an `AttributeError` from an untrusted
+GitHub response — becomes `publication_internal_error` carrying the stage and only the exception
+class name, never a value.
+
+The workflow captures the publisher's return code rather than aborting on it, then reduces stdout
+and that code to one document with `normalize-publication-result`:
+
+| Publisher output at exit | Normalized disposition | Effective exit |
+|---|---|---|
+| complete, well-typed, `ok: true`, exit 0 | `planning_publication_completed` | 0 |
+| absent or empty | `publication_result_missing` | captured code, or 5 |
+| unparseable or not a single JSON object | `publication_result_malformed` | captured code, or 5 |
+| `ok: false` | its own sanitized disposition | captured code, or 5 |
+| `ok: true` with a nonzero exit | `publication_result_inconsistent` | captured code |
+| `ok: true` missing or mistyped publication facts | `publication_result_incomplete` | 5 |
+
+A closed-vocabulary stage surviving in the progress file is carried into the fallback, so a hard
+kill still reports where it died. Step outputs are read only from the normalizer's validated
+`.outputs`. `countyforge-publication.json`, `countyforge-publication-progress.json`, and
+`countyforge-publication-normalized.json` all upload with `if: always()`.
+
+Before creating the ref, publication inspects it. A retry cannot reproduce a commit SHA, but a
+tree is content-addressed:
+
+| Deterministic ref | Behavior |
+|---|---|
+| absent | create it |
+| commit carries this plan's tree and trusted parent | resume, reusing an already-created draft |
+| anything else | fail closed as `planning_branch_conflict`; the ref is never moved |
+
+A draft's `<!-- countyforge-plan:v1 run=… context=… -->` marker only nominates a candidate.
+Markers are mutable and outlive their branch, so a deduplicated success is reported only after the
+ref passes that check **and** the draft's head is the verified ref — and the reported commit is
+the verified SHA, not the draft's claim. A marker whose branch is absent, divergent, or
+force-pushed away fails closed as `planning_draft_conflict`.
+
+Stage evidence is validated the same way. Stages advance only to the next in the vocabulary, so
+`completed` is always the exact ordered prefix; anything reordered, duplicated, truncated, or
+invented is discarded. Persisted progress outranks the reported document, two valid records that
+disagree fail closed as `publication_evidence_inconsistent`, and only an integer HTTP `status`
+crosses into the normalized document — the rest stays in the raw artifact.
+
 ## Revisions and recovery
 
 Identical semantic planning identity deduplicates. Changed context creates a revision. The

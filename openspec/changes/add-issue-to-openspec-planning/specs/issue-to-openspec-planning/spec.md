@@ -37,9 +37,41 @@ The planning result SHALL use a versioned authoritative schema with bounded stri
 ### Requirement: Trusted planning publication
 The planning model MUST run without a writable repository, GitHub write token, Git credentials, production credentials, arbitrary tools, or ungoverned network access. A no-secret trusted job SHALL validate packet/result provenance and deterministic repository gates before any branch or draft PR mutation.
 
+Publication SHALL record the last entered stage from a closed vocabulary, opening that evidence boundary before its inputs are read and before any provider client is constructed, so no failure and no persisted snapshot can report a stage outside that vocabulary. Every failure leaving publication MUST be sanitized and MUST carry its stage, including a contract-check failure and an unexpected exception from untrusted API responses or the filesystem; no raw exception value MAY cross that boundary. Recorded stages SHALL advance only to the next stage in the vocabulary, so completed stages are always its exact ordered prefix. The trusted workflow MUST preserve and upload the publisher's structured result on both success and failure, and MUST reduce that result and the captured return code to one consistent document: a missing, malformed, non-object, or exit-code-inconsistent result becomes sanitized evidence with a nonzero effective exit code, and step outputs are produced only for a zero exit that also reports complete, well-typed publication facts. Stage and completed stages are reserved normalized fields validated as an exact ordered prefix; persisted progress is authoritative over the reported document, contradiction between two valid records fails closed, and only bounded allow-listed auxiliary detail is carried forward.
+
+Before creating the deterministic planning ref, publication MUST inspect it: an absent ref is created, a ref whose commit carries this plan's tree and trusted parent is resumed, and any other ref fails closed as a branch conflict without being moved. A pull-request body marker is mutable evidence and MUST NOT by itself deduplicate a publication: a deduplicated success SHALL be reported only after the candidate tree is built, the deterministic ref passes that equivalence check, and the draft's head matches the verified ref; otherwise publication fails closed as a draft conflict.
+
 #### Scenario: Validation fails closed
 - **WHEN** result hashes, issue/repository/SHA/run bindings, schema, path policy, or deterministic validation fail
 - **THEN** no commit or PR update is made and canonical status records a sanitized failure
+
+#### Scenario: Name the failing publication mutation
+- **WHEN** a GitHub Git-data or pull-request mutation fails during publication
+- **THEN** the sanitized result records the failing stage and the stages already completed, the workflow preserves and uploads that document, and canonical state records `planning_publication_failed`
+
+#### Scenario: Refuse to finalize on unreadable publisher evidence
+- **WHEN** the publisher's result is missing, malformed, not a single JSON object, reports failure, or reports success alongside a nonzero exit code or incomplete publication facts
+- **THEN** normalization replaces it with sanitized evidence carrying a nonzero effective exit code and any surviving progress stage, and no publication step output is written
+
+#### Scenario: Resume an interrupted publication
+- **WHEN** the deterministic planning ref already exists and its commit carries this plan's tree and trusted parent
+- **THEN** publication reuses that ref and its existing draft if one was created, instead of creating a second branch or draft
+
+#### Scenario: Refuse a divergent planning ref
+- **WHEN** the deterministic planning ref exists and holds any other commit
+- **THEN** publication fails closed as a branch conflict and never moves the ref
+
+#### Scenario: Refuse a marker whose branch no longer backs it
+- **WHEN** an existing draft's body marker claims this plan but its branch is absent, divergent, or force-pushed away from the verified ref
+- **THEN** publication fails closed as a draft conflict instead of reporting a deduplicated success, and creates no second draft
+
+#### Scenario: Attribute a preflight or unexpected publication failure
+- **WHEN** the planning result artifact is unreadable or invalid, the provider client cannot be constructed, or an unexpected exception escapes a publication stage
+- **THEN** the failure is reported as a sanitized publication failure carrying its stage, the progress document exists, and no raw exception value appears in the output
+
+#### Scenario: Refuse contradictory publication evidence
+- **WHEN** the reported result and the persisted progress both carry a valid stage and they disagree
+- **THEN** normalization reports inconsistent evidence with a nonzero effective exit code and the persisted stage, and writes no publication step output
 
 ### Requirement: Deterministic planning revisions
 The control plane SHALL deduplicate identical semantic planning requests. Changed context SHALL create a revision and a linked superseding draft without overwriting human edits; an exact same-run publication may be reused idempotently. Blocking unresolved decisions SHALL keep implementation ineligible.

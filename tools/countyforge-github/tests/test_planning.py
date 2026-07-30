@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from countyforge_github.cli import main as github_cli_main
+from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning import (
     ContextLimits,
@@ -17,11 +20,13 @@ from countyforge_github.planning import (
     materialize_plan,
     planning_branch,
     planning_context_fingerprint,
+    publication_progress,
     publish_plan,
     select_planning_comments,
     validate_planning_result,
 )
 from countyforge_github.redaction import redact_untrusted_text
+from countyforge_github.results import normalize_publication_result
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -562,10 +567,25 @@ def test_branch_identity_is_bounded() -> None:
 
 
 class _PublicationGitHub:
-    def __init__(self) -> None:
+    def __init__(self, fail_at: str | None = None, status: int = 422) -> None:
         self.pull_requests: list[dict[str, object]] = []
         self.created_refs: list[tuple[str, str]] = []
         self.tree_bases: list[str] = []
+        self.refs: dict[str, str] = {}
+        self.commits: dict[str, dict[str, object]] = {}
+        self.fail_at = fail_at
+        self.status = status
+
+    def _maybe_fail(self, operation: str) -> None:
+        """Stand in for a sanitized GitHub REST failure at one mutation."""
+
+        if operation == self.fail_at:
+            raise ControlPlaneError(
+                "github_api_error",
+                "GitHub API request failed.",
+                {"status": self.status},
+                exit_code=5,
+            )
 
     def list_pull_requests(
         self, repository: str, *, head: str, base: str
@@ -576,39 +596,64 @@ class _PublicationGitHub:
 
     def create_git_blob(self, repository: str, content: str) -> str:
         del repository
+        self._maybe_fail("create_git_blob")
         return f"blob-{len(content)}"
 
     def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
         del repository
+        self._maybe_fail("get_git_commit")
+        if sha in self.commits:
+            return self.commits[sha]
         return {"sha": sha, "tree": {"sha": "base-tree-sha"}}
 
     def create_git_tree(
         self, repository: str, base_sha: str, entries: list[dict[str, object]]
     ) -> str:
         del repository, entries
+        self._maybe_fail("create_git_tree")
         self.tree_bases.append(base_sha)
         return "tree-sha"
 
     def create_git_commit(
         self, repository: str, message: str, tree_sha: str, parent_sha: str
     ) -> str:
-        del repository, message, tree_sha, parent_sha
-        return "commit-sha"
+        del repository, message
+        self._maybe_fail("create_git_commit")
+        # GitHub stamps each commit, so a retry of the same plan never
+        # reproduces the previous SHA.  Recovery must match on the
+        # content-addressed tree instead.
+        sha = f"commit-{len(self.commits) + 1}"
+        self.commits[sha] = {
+            "sha": sha,
+            "tree": {"sha": tree_sha},
+            "parents": [{"sha": parent_sha}],
+        }
+        return sha
 
     def create_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository
+        self._maybe_fail("create_git_ref")
         self.created_refs.append((ref, sha))
+        self.refs[ref] = sha
+
+    def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
+        del repository
+        self._maybe_fail("get_git_ref")
+        if ref not in self.refs:
+            return None
+        return {"ref": ref, "object": {"sha": self.refs[ref], "type": "commit"}}
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository, ref, sha
 
     def create_pull_request(self, repository: str, payload: dict[str, object]) -> dict[str, object]:
         del repository
+        self._maybe_fail("create_pull_request")
         pull = {
             "number": len(self.pull_requests) + 1,
             "html_url": "https://github.com/TruPryce/property-tax-data-platform/pull/99",
             **payload,
-            "head": {"ref": payload["head"], "sha": "commit-sha"},
+            "head": {"ref": payload["head"], "sha": self.refs.get(f"refs/heads/{payload['head']}")},
         }
         self.pull_requests.append(pull)
         return pull
@@ -688,4 +733,467 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
     assert revision["action"] == "superseded"
     assert revision["branch"] != first_publication["branch"]
     assert len(github.pull_requests) == 2
-    assert github.tree_bases == ["base-tree-sha", "base-tree-sha"]
+    # Deduplication now builds its candidate tree first, because a marker alone
+    # cannot prove the branch behind that draft still holds this plan.
+    assert github.tree_bases == ["base-tree-sha", "base-tree-sha", "base-tree-sha"]
+    assert duplicate["commit_sha"] == github.refs[f"refs/heads/{first_publication['branch']}"]
+    for document in (first_publication, duplicate, revision):
+        assert document["stage"] == "complete"
+        assert document["completed"] == list(_STAGE_ORDER[:-1])
+
+
+# The closed publication stage vocabulary, in the order the publisher enters it.
+_STAGE_ORDER = (
+    "validate_result",
+    "validate_provenance",
+    "resolve_predecessor",
+    "create_blobs",
+    "load_parent_commit",
+    "create_tree",
+    "create_commit",
+    "create_ref",
+    "create_pull_request",
+    "complete",
+)
+
+
+def _publication_case(tmp_path: Path, name: str, run_id: str = "plan-stage") -> dict[str, object]:
+    """Build one deterministic publication call from the free offline fixtures."""
+
+    root = Path.cwd()
+    trigger = _trigger(root)
+    info = build_planning_packet(
+        trigger=trigger,
+        issue={
+            "number": 6,
+            "title": "Feature work",
+            "body": "Problem: bounded planning is needed. Outcome: create an OpenSpec draft.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path / f"{name}-packet",
+        run_id=run_id,
+    )
+    result = _result()
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    result["evidence_citations"][0]["source_id"] = packet["sources"][0]["source_id"]
+    publication_root = tmp_path / f"{name}-root"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+    return {
+        "repository": "TruPryce/property-tax-data-platform",
+        "default_branch": "main",
+        "target_sha": str(trigger["target"]["head_sha"]),
+        "issue_number": 6,
+        "run_id": run_id,
+        "result": result,
+        "publication_root": publication_root,
+        "planning_packet_path": Path(info["packet_path"]),
+        "context_manifest_path": Path(info["manifest_path"]),
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "stage"),
+    [
+        ("create_git_blob", "create_blobs"),
+        ("get_git_commit", "load_parent_commit"),
+        ("create_git_tree", "create_tree"),
+        ("create_git_commit", "create_commit"),
+        ("create_git_ref", "create_ref"),
+        ("create_pull_request", "create_pull_request"),
+    ],
+)
+def test_publication_failure_names_its_stage_and_stays_sanitized(
+    tmp_path: Path, operation: str, stage: str
+) -> None:
+    """Run 30507375764 exited 5 without saying which GitHub mutation failed."""
+
+    github = _PublicationGitHub(fail_at=operation, status=422)
+    progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                github,
+                progress=progress,
+                **_publication_case(tmp_path, f"stage-{operation}"),  # type: ignore[arg-type]
+            )
+    error = raised.value
+    assert error.code == "github_api_error"
+    assert error.message == "GitHub API request failed."
+    assert error.exit_code == 5
+    assert error.details["status"] == 422
+    assert error.details["stage"] == stage
+    assert error.details["completed"] == list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)])
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": stage,
+        "completed": list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)]),
+    }
+    if stage != "create_pull_request":
+        assert github.pull_requests == []
+
+
+def test_publication_port_preflight_runs_under_initialized_stage_tracking(
+    tmp_path: Path,
+) -> None:
+    """An unusable port must not be the one failure that reports no stage."""
+
+    class _IncompleteGitHub:
+        def list_pull_requests(
+            self, repository: str, *, head: str, base: str
+        ) -> list[dict[str, object]]:
+            del repository, head, base
+            return []
+
+    progress_path = tmp_path / "progress" / "countyforge-publication-progress.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                _IncompleteGitHub(),
+                progress=progress,
+                **_publication_case(tmp_path, "incomplete-port"),  # type: ignore[arg-type]
+            )
+    assert raised.value.code == "github_port_incomplete"
+    assert raised.value.details["stage"] == "validate_result"
+    assert raised.value.details["completed"] == []
+    # The first snapshot ever written already names a closed-vocabulary stage.
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": "validate_result",
+        "completed": [],
+    }
+
+
+def test_publication_progress_survives_a_failure_before_any_api_call(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    progress_path = tmp_path / "progress.json"
+    case = _publication_case(tmp_path, "provenance")
+    case["issue_number"] = 7
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(github, progress=progress, **case)  # type: ignore[arg-type]
+    assert raised.value.code == "planning_provenance_mismatch"
+    assert raised.value.details["stage"] == "validate_result"
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "validate_result"
+
+
+def test_publication_resumes_a_ref_left_by_an_interrupted_attempt(tmp_path: Path) -> None:
+    """A retry cannot reproduce a commit SHA, but the tree is content-addressed.
+
+    The retry must therefore recognize its own interrupted attempt through tree
+    and parent equivalence, not by comparing the freshly created commit SHA.
+    """
+
+    github = _PublicationGitHub(fail_at="create_pull_request")
+    with pytest.raises(ControlPlaneError):
+        publish_plan(github, **_publication_case(tmp_path, "interrupted"))  # type: ignore[arg-type]
+    branch = planning_branch(6, "add-safe-planning")
+    assert github.created_refs == [(f"refs/heads/{branch}", "commit-1")]
+    assert github.pull_requests == []
+
+    github.fail_at = None
+    resumed = publish_plan(github, **_publication_case(tmp_path, "resumed"))  # type: ignore[arg-type]
+    # The retry really did mint a second, different candidate commit...
+    assert set(github.commits) == {"commit-1", "commit-2"}
+    assert github.commits["commit-1"]["tree"] == github.commits["commit-2"]["tree"]
+    # ...and still resumed the original ref rather than recreating or moving it.
+    assert github.created_refs == [(f"refs/heads/{branch}", "commit-1")]
+    assert github.refs[f"refs/heads/{branch}"] == "commit-1"
+    assert resumed["action"] == "created"
+    assert resumed["branch"] == branch
+    assert resumed["commit_sha"] == "commit-1"
+    assert len(github.pull_requests) == 1
+    assert resumed["stage"] == "complete"
+    assert resumed["completed"] == list(_STAGE_ORDER[:-1])
+
+
+def test_publication_fails_closed_on_a_divergent_planning_ref(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    branch = planning_branch(6, "add-safe-planning")
+    github.refs[f"refs/heads/{branch}"] = "human-sha"
+    github.commits["human-sha"] = {
+        "sha": "human-sha",
+        "tree": {"sha": "human-tree"},
+        "parents": [{"sha": "human-parent"}],
+    }
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(github, **_publication_case(tmp_path, "divergent"))  # type: ignore[arg-type]
+    assert raised.value.code == "planning_branch_conflict"
+    assert raised.value.details["stage"] == "create_ref"
+    assert github.created_refs == []
+    assert github.pull_requests == []
+
+
+def _marker_draft(
+    branch: str, *, run_id: str, context_sha: str, head_sha: str
+) -> dict[str, object]:
+    """A draft whose bot marker claims a plan, regardless of what its ref holds."""
+
+    return {
+        "number": 41,
+        "html_url": "https://github.com/TruPryce/property-tax-data-platform/pull/41",
+        "body": f"<!-- countyforge-plan:v1 run={run_id} context={context_sha} -->\n",
+        "head": {"ref": branch, "sha": head_sha},
+    }
+
+
+def _context_sha(case: dict[str, object]) -> str:
+    manifest = case["context_manifest_path"]
+    assert isinstance(manifest, Path)
+    return hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("ref_state", ["absent", "divergent", "head_mismatch"])
+def test_marker_only_deduplication_never_reports_success(tmp_path: Path, ref_state: str) -> None:
+    """A body marker is mutable; the branch behind it may be gone or rewritten."""
+
+    github = _PublicationGitHub()
+    case = _publication_case(tmp_path, f"marker-{ref_state}")
+    branch = planning_branch(6, "add-safe-planning")
+    ref = f"refs/heads/{branch}"
+    head_sha = "commit-1"
+    if ref_state == "divergent":
+        github.refs[ref] = "human-sha"
+        github.commits["human-sha"] = {
+            "sha": "human-sha",
+            "tree": {"sha": "human-tree"},
+            "parents": [{"sha": "human-parent"}],
+        }
+        head_sha = "human-sha"
+    elif ref_state == "head_mismatch":
+        # The ref still holds this plan, but the draft points somewhere else.
+        github.refs[ref] = "commit-0"
+        github.commits["commit-0"] = {
+            "sha": "commit-0",
+            "tree": {"sha": "tree-sha"},
+            "parents": [{"sha": case["target_sha"]}],
+        }
+        head_sha = "force-pushed-sha"
+    github.pull_requests.append(
+        _marker_draft(
+            branch,
+            run_id=str(case["run_id"]),
+            context_sha=_context_sha(case),
+            head_sha=head_sha,
+        )
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        publish_plan(github, **case)  # type: ignore[arg-type]
+    expected = "planning_branch_conflict" if ref_state == "divergent" else "planning_draft_conflict"
+    assert raised.value.code == expected
+    assert raised.value.exit_code == 5
+    # No second draft, and a pre-existing ref is never moved.
+    assert len(github.pull_requests) == 1
+    if ref_state == "divergent":
+        assert github.refs[ref] == "human-sha"
+
+
+def test_marker_deduplication_reports_the_verified_ref_commit(tmp_path: Path) -> None:
+    """A believed marker returns the verified ref SHA, not the draft's claim."""
+
+    github = _PublicationGitHub()
+    first = publish_plan(github, **_publication_case(tmp_path, "verified-first"))  # type: ignore[arg-type]
+    branch = str(first["branch"])
+    duplicate = publish_plan(github, **_publication_case(tmp_path, "verified-again"))  # type: ignore[arg-type]
+    assert duplicate["action"] == "deduplicated"
+    assert duplicate["commit_sha"] == github.refs[f"refs/heads/{branch}"] == first["commit_sha"]
+    assert duplicate["pr_number"] == first["pr_number"]
+    assert len(github.pull_requests) == 1
+    assert len(github.created_refs) == 1
+
+
+def test_publication_reuses_a_draft_created_before_the_attempt_died(tmp_path: Path) -> None:
+    github = _PublicationGitHub()
+    first = publish_plan(github, **_publication_case(tmp_path, "first"))  # type: ignore[arg-type]
+    assert first["action"] == "created"
+    # The ref and draft both exist; a retry must reuse them, not create a second.
+    second = publish_plan(github, **_publication_case(tmp_path, "second"))  # type: ignore[arg-type]
+    assert second["action"] == "deduplicated"
+    assert second["pr_number"] == first["pr_number"]
+    assert len(github.created_refs) == 1
+    assert len(github.pull_requests) == 1
+
+
+def _publish_cli(
+    tmp_path: Path,
+    case: dict[str, object],
+    *,
+    progress_path: Path,
+    result_body: str | None = None,
+    token: str | None = "fixture-token",
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[int, JsonObject]:
+    """Drive `publish-plan` through the CLI so preflight failures are covered."""
+
+    result_file = tmp_path / f"{progress_path.stem}-result.json"
+    result_file.write_text(
+        result_body if result_body is not None else json.dumps(case["result"]), encoding="utf-8"
+    )
+    if token is None:
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_TOKEN", token)
+    captured: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda value: captured.append(str(value)))
+    code = github_cli_main(
+        [
+            "--contract-root",
+            str(Path.cwd()),
+            "publish-plan",
+            "--result",
+            str(result_file),
+            "--repository",
+            str(case["repository"]),
+            "--default-branch",
+            "main",
+            "--target-sha",
+            str(case["target_sha"]),
+            "--issue-number",
+            str(case["issue_number"]),
+            "--run-id",
+            str(case["run_id"]),
+            "--publication-root",
+            str(case["publication_root"]),
+            "--planning-packet",
+            str(case["planning_packet_path"]),
+            "--context-manifest",
+            str(case["context_manifest_path"]),
+            "--publication-progress",
+            str(progress_path),
+        ]
+    )
+    return code, json.loads(captured[-1])
+
+
+@pytest.mark.parametrize(
+    ("body", "token", "disposition"),
+    [
+        ("{ not json", "fixture-token", "invalid_json"),
+        ('["a list"]', "fixture-token", "invalid_json_type"),
+        (None, None, "github_token_missing"),
+    ],
+)
+def test_publish_cli_preflight_failures_still_name_their_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str | None,
+    token: str | None,
+    disposition: str,
+) -> None:
+    """Reading the result and building the client happen inside the boundary."""
+
+    case = _publication_case(tmp_path, f"cli-{disposition}")
+    progress_path = tmp_path / "cli-progress" / f"{disposition}.json"
+    code, document = _publish_cli(
+        tmp_path,
+        case,
+        progress_path=progress_path,
+        result_body=body,
+        token=token,
+        monkeypatch=monkeypatch,
+    )
+    assert code != 0
+    assert document["ok"] is False
+    assert document["disposition"] == disposition
+    assert document["details"]["stage"] == "validate_result"
+    assert document["details"]["completed"] == []
+    # The evidence the workflow uploads exists even though nothing was read.
+    assert json.loads(progress_path.read_text(encoding="utf-8")) == {
+        "stage": "validate_result",
+        "completed": [],
+    }
+    normalized = normalize_publication_result(
+        result_path=_emitted(tmp_path, document), progress_path=progress_path, exit_code=code
+    )
+    assert normalized["ok"] is False
+    assert normalized["details"]["stage"] == "validate_result"
+    assert "outputs" not in normalized
+
+
+def _emitted(tmp_path: Path, document: JsonObject) -> Path:
+    path = tmp_path / f"emitted-{abs(hash(json.dumps(document, sort_keys=True)))}.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+class _MalformedGitHub(_PublicationGitHub):
+    """GitHub responses are untrusted; a wrong shape must not escape untyped."""
+
+    def __init__(self, malformed: str) -> None:
+        super().__init__()
+        self.malformed = malformed
+
+    def get_git_commit(self, repository: str, sha: str) -> dict[str, object]:
+        if self.malformed == "get_git_commit":
+            return "not-a-commit"  # type: ignore[return-value]
+        return super().get_git_commit(repository, sha)
+
+    def create_pull_request(self, repository: str, payload: dict[str, object]) -> dict[str, object]:
+        if self.malformed == "create_pull_request":
+            super().create_pull_request(repository, payload)
+            return "not-a-pull-request"  # type: ignore[return-value]
+        return super().create_pull_request(repository, payload)
+
+
+@pytest.mark.parametrize(
+    ("malformed", "stage", "code"),
+    [
+        # An unguarded shape reaches the wrapper as a plain AttributeError...
+        ("get_git_commit", "load_parent_commit", "publication_internal_error"),
+        # ...while a guarded one is refused in the stage that produced it,
+        # rather than after `complete` has already been entered.
+        ("create_pull_request", "create_pull_request", "github_api_invalid_response"),
+    ],
+)
+def test_malformed_github_response_is_sanitized_with_its_stage(
+    tmp_path: Path, malformed: str, stage: str, code: str
+) -> None:
+    progress_path = tmp_path / "malformed" / f"{malformed}.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(
+                _MalformedGitHub(malformed),
+                progress=progress,
+                **_publication_case(tmp_path, f"malformed-{malformed}"),  # type: ignore[arg-type]
+            )
+    error = raised.value
+    assert error.code == code
+    assert error.exit_code != 0
+    if code == "publication_internal_error":
+        assert error.exit_code == 5
+        assert error.message == "Publication failed unexpectedly."
+        assert error.details["error_type"] == "AttributeError"
+    assert error.details["stage"] == stage
+    assert error.details["completed"] == list(_STAGE_ORDER[: _STAGE_ORDER.index(stage)])
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == stage
+
+
+def test_unreadable_materialized_file_is_sanitized_with_its_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError reading a rendered file must not escape as an untyped crash."""
+
+    case = _publication_case(tmp_path, "unreadable")
+    root = case["publication_root"]
+    assert isinstance(root, Path)
+    materialize_plan(
+        dict(case["result"]),  # type: ignore[arg-type]
+        publication_root=root,
+        issue_number=6,
+        run_id=str(case["run_id"]),
+    )
+    case["already_materialized"] = True
+    original = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "proposal.md":
+            raise OSError("unreadable")
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    progress_path = tmp_path / "unreadable" / "progress.json"
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress(progress_path) as progress:
+            publish_plan(_PublicationGitHub(), progress=progress, **case)  # type: ignore[arg-type]
+    assert raised.value.code == "publication_internal_error"
+    assert raised.value.details["error_type"] == "OSError"
+    assert raised.value.details["stage"] == "create_blobs"
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "create_blobs"

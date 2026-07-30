@@ -41,11 +41,12 @@ from countyforge_github.planning import (
     DEFAULT_TRUSTED_BOT_ID,
     build_planning_packet,
     materialize_plan,
+    publication_progress,
     publish_plan,
     validate_planning_result,
 )
 from countyforge_github.requests import build_run_request
-from countyforge_github.results import resolve_terminal_result
+from countyforge_github.results import normalize_publication_result, resolve_terminal_result
 from countyforge_github.state import reconcile_workflow, render_status, transition_state
 from countyforge_github.workflow_control import (
     advance_run,
@@ -240,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--context-manifest", type=Path, required=True)
     publish.add_argument("--evidence-url")
     publish.add_argument("--already-materialized", action="store_true")
+    publish.add_argument("--publication-progress", type=Path)
 
     reconcile = subparsers.add_parser("reconcile")
     _file(reconcile, "state")
@@ -252,6 +254,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _file(result, "result", required=False)
     _file(result, "exit_code", required=False)
+
+    publication = subparsers.add_parser("normalize-publication-result")
+    publication.add_argument("--result", type=Path)
+    publication.add_argument("--progress", type=Path)
+    publication.add_argument("--exit-code", type=int, required=True)
 
     intake = subparsers.add_parser("intake")
     _file(intake, "event")
@@ -770,23 +777,28 @@ def main(arguments: Sequence[str] | None = None) -> int:
             _emit({"ok": int(evidence["exit_code"]) == 0, "evidence": evidence})
             return 0 if int(evidence["exit_code"]) == 0 else 5
         if command_name == "publish-plan":
-            result = _load(args.result, "planning result")
-            _emit(
-                publish_plan(
-                    _github_client(),
-                    repository=args.repository,
-                    default_branch=args.default_branch,
-                    target_sha=args.target_sha,
-                    issue_number=args.issue_number,
-                    run_id=args.run_id,
-                    result=result,
-                    publication_root=args.publication_root,
-                    planning_packet_path=args.planning_packet,
-                    context_manifest_path=args.context_manifest,
-                    evidence_url=args.evidence_url,
-                    already_materialized=args.already_materialized,
+            # The evidence boundary opens before the result artifact is read and
+            # before the GitHub client exists, so an unreadable input or a
+            # missing token is attributed like any other publication failure
+            # rather than escaping without a stage or a progress document.
+            with publication_progress(args.publication_progress) as progress:
+                _emit(
+                    publish_plan(
+                        _github_client(),
+                        repository=args.repository,
+                        default_branch=args.default_branch,
+                        target_sha=args.target_sha,
+                        issue_number=args.issue_number,
+                        run_id=args.run_id,
+                        result=_load(args.result, "planning result"),
+                        publication_root=args.publication_root,
+                        planning_packet_path=args.planning_packet,
+                        context_manifest_path=args.context_manifest,
+                        evidence_url=args.evidence_url,
+                        already_materialized=args.already_materialized,
+                        progress=progress,
+                    )
                 )
-            )
             return 0
         if command_name == "reconcile":
             _emit(
@@ -803,6 +815,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     command=args.command,
                     result_path=args.result,
                     exit_code_path=args.exit_code,
+                )
+            )
+            return 0
+        if command_name == "normalize-publication-result":
+            # Always exits zero: this command *is* the workflow's fail-closed
+            # reading of the publisher, and its own document carries the
+            # effective exit code the step must use.
+            _emit(
+                normalize_publication_result(
+                    result_path=args.result,
+                    progress_path=args.progress,
+                    exit_code=args.exit_code,
                 )
             )
             return 0
