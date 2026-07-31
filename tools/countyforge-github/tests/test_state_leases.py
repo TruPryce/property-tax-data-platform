@@ -42,9 +42,19 @@ class FakeGitHub:
         self.cancelled: list[int] = []
         self.workflow: JsonObject = {}
         self.replace_on_get: JsonObject | None = None
+        self.default_branch = "main"
+        self.default_branch_sha = "a" * 40
 
     def repository_permission(self, repository: str, actor: str) -> JsonObject:
         return {"permission": "write", "role_name": "write"}
+
+    def repository_profile(self, repository: str) -> JsonObject:
+        return {"full_name": repository, "default_branch": self.default_branch}
+
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None:
+        if ref != f"refs/heads/{self.default_branch}":
+            return None
+        return {"ref": ref, "object": {"sha": self.default_branch_sha, "type": "commit"}}
 
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]:
         return copy.deepcopy(self.comments)

@@ -26,7 +26,10 @@ jobs:
       actions: read
       checks: read
       contents: read
-      issues: read
+      # Display refresh rewrites the canonical comment body from unchanged
+      # state, so retry eligibility does not stay stale between commands. It
+      # performs no lifecycle transition and dispatches no agent work.
+      issues: write
       pull-requests: read
     steps:
       - name: Check out immutable trusted tooling
@@ -41,7 +44,7 @@ jobs:
         with:
           version: "0.11.16"
 
-      - name: Discover candidates only; never mutate or dispatch agent work
+      - name: Refresh canonical displays; never transition state or dispatch agent work
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -50,4 +53,5 @@ jobs:
           uv run --package countyforge-github countyforge-github maintain \
             --repository "$TARGET_REPOSITORY" \
             --trusted-bot-id 41898282 \
+            --refresh-displays \
             --at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

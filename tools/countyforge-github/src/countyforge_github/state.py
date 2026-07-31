@@ -335,11 +335,63 @@ def decode_marker(
     return state
 
 
-def render_status(state: JsonObject, contracts: ControlContracts | None = None) -> str:
-    """Render bounded human status and the machine-owned canonical marker."""
+# Only an issue target's retry comparand is the default-branch head; a pull
+# request is retried against its own head, so the default branch says nothing
+# about whether that retry would be accepted.
+_DEFAULT_BRANCH_TARGETS = frozenset({"issue"})
+UNKNOWN_ELIGIBILITY = "unknown"
+
+
+def retry_eligibility(state: JsonObject, freshness: JsonObject | None) -> str:
+    """Report whether a retry would be accepted, or `unknown` when it cannot be.
+
+    True requires both a retryable lifecycle state and a live default-branch SHA
+    that still equals the recorded target.  Anything unresolved -- a failed
+    lookup, or a target whose comparand is not the default branch -- reports
+    `unknown` rather than guessing in either direction.  This value is displayed
+    only; `/countyforge retry` resolves the live target itself.
+    """
+
+    if str(state.get("lifecycle_state")) not in RETRYABLE_STATES:
+        return "false"
+    if str(state.get("target_type")) not in _DEFAULT_BRANCH_TARGETS:
+        return UNKNOWN_ELIGIBILITY
+    if freshness is None or not freshness.get("available"):
+        return UNKNOWN_ELIGIBILITY
+    return (
+        "true" if freshness.get("default_branch_sha") == state.get("target_head_sha") else "false"
+    )
+
+
+def render_status(
+    state: JsonObject,
+    contracts: ControlContracts | None = None,
+    freshness: JsonObject | None = None,
+) -> str:
+    """Render bounded human status and the machine-owned canonical marker.
+
+    `freshness` is live default-branch metadata resolved at render time.  It is
+    never encoded into the marker, so two renderings of the same state differ
+    only in display and leave semantic identity untouched.
+    """
 
     marker = encode_marker(state, contracts)
     short_sha = _display_value(str(state["target_head_sha"])[:12], "unknown", 12)
+    eligible = retry_eligibility(state, freshness)
+    resolved_freshness = freshness or {}
+    default_branch = _display_value(
+        resolved_freshness.get("default_branch") if resolved_freshness.get("available") else None,
+        "unavailable",
+        255,
+    )
+    default_branch_sha = _display_value(
+        str(resolved_freshness.get("default_branch_sha") or "")[:12] or None
+        if resolved_freshness.get("available")
+        else None,
+        "unavailable",
+        12,
+    )
+    checked_at = _display_value(resolved_freshness.get("checked_at"), "never", 40)
     guidance = ""
     if state["lifecycle_state"] in {"queued", "preparing", "running"}:
         guidance = "\n\nAuthorized maintainers may use `/countyforge cancel`."
@@ -348,6 +400,12 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
             "\n\nAuthorized maintainers may use `/countyforge retry` "
             "while the target SHA is unchanged."
         )
+        if eligible == "false":
+            guidance = (
+                "\n\nThe default branch has moved since this run targeted its SHA, so "
+                "`/countyforge retry` will be refused. Issue `/countyforge "
+                f"{_display_value(state.get('command'), 'plan', 32)}` instead."
+            )
     evidence = "Pending" if state["evidence_url"] is None else _display_evidence(state)
     planning_rows = ""
     if state["command"] == "plan":
@@ -422,7 +480,11 @@ def render_status(state: JsonObject, contracts: ControlContracts | None = None) 
         "| Profile | `"
         f"{_display_value(state.get('profile_id'), 'unknown', 80)}@"
         f"{_display_value(state.get('profile_version'), '?', 12)}` |\n"
-        f"| Target | `{short_sha}` |\n"
+        f"| Target SHA | `{short_sha}` |\n"
+        f"| Default branch | `{default_branch}` |\n"
+        f"| Current default-branch SHA | `{default_branch_sha}` |\n"
+        f"| Retry eligible | `{eligible}` |\n"
+        f"| Main checked | `{checked_at}` |\n"
         f"| State | `{_display_value(state.get('lifecycle_state'), 'unknown', 32)}` |\n"
         f"| Attempt | `{_display_value(state.get('attempt'), '?', 12)}` |\n"
         f"{planning_rows}"
