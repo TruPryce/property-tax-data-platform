@@ -9,12 +9,15 @@ import pytest
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.freshness import resolve_default_branch, unavailable_freshness
-from countyforge_github.maintenance import audit_expired_leases
+from countyforge_github.maintenance import MAX_DISPLAY_REFRESHES, audit_expired_leases
 from countyforge_github.state import decode_marker, render_status, retry_eligibility, retry_state
 
 TARGET = "a" * 40
 ADVANCED = "b" * 40
 AT = "2026-07-31T00:00:00Z"
+# Comfortably older than MIN_COMMENT_AGE_SECONDS and MAX_DISPLAY_AGE_SECONDS.
+OLD = "2026-07-29T00:00:00Z"
+JUST_NOW = "2026-07-30T23:59:00Z"
 
 
 class _FreshnessGitHub:
@@ -44,6 +47,16 @@ class _FreshnessGitHub:
 
     def get_comment(self, repository: str, comment_id: int) -> JsonObject:
         return copy.deepcopy(next(item for item in self.comments if item["id"] == comment_id))
+
+    def add_comment(self, body: str, *, comment_id: int = 500, updated_at: str = OLD) -> None:
+        self.comments.append(
+            {
+                "id": comment_id,
+                "body": body,
+                "updated_at": updated_at,
+                "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
+            }
+        )
 
     def update_comment(self, repository: str, comment_id: int, body: str) -> JsonObject:
         self.updated.append((comment_id, body))
@@ -201,13 +214,7 @@ def test_maintenance_refresh_updates_display_without_touching_identity(
 ) -> None:
     state = _issue_state(queued_state_factory)
     github = _FreshnessGitHub(head=TARGET)
-    github.comments = [
-        {
-            "id": 500,
-            "body": render_status(state, None, unavailable_freshness("2026-07-30T00:00:00Z")),
-            "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
-        }
-    ]
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
     before = copy.deepcopy(github.comments[0]["body"])
     result = audit_expired_leases(
         github,  # type: ignore[arg-type]
@@ -241,13 +248,7 @@ def test_maintenance_refresh_is_a_no_op_without_the_flag(
 ) -> None:
     state = _issue_state(queued_state_factory)
     github = _FreshnessGitHub(head=TARGET)
-    github.comments = [
-        {
-            "id": 500,
-            "body": render_status(state, None, unavailable_freshness("2026-07-30T00:00:00Z")),
-            "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
-        }
-    ]
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
     result = audit_expired_leases(
         github,  # type: ignore[arg-type]
         repository="TruPryce/property-tax-data-platform",
@@ -268,21 +269,13 @@ def test_maintenance_refresh_leaves_a_concurrently_changed_state_alone(
     moved = copy.deepcopy(state)
     moved["revision"] = int(state["revision"]) + 1
     github = _FreshnessGitHub(head=TARGET)
-    github.comments = [
-        {
-            "id": 500,
-            "body": render_status(state, None, unavailable_freshness("2026-07-30T00:00:00Z")),
-            "user": {"id": 41898282, "type": "Bot", "login": "github-actions[bot]"},
-        }
-    ]
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
 
     listed = github.list_repository_comments
 
     def _race(repository: str) -> list[JsonObject]:
         comments = listed(repository)
-        github.comments[0]["body"] = render_status(
-            moved, None, unavailable_freshness("2026-07-30T00:00:00Z")
-        )
+        github.comments[0]["body"] = render_status(moved, None, unavailable_freshness(OLD))
         return comments
 
     github.list_repository_comments = _race  # type: ignore[method-assign]
@@ -295,3 +288,128 @@ def test_maintenance_refresh_leaves_a_concurrently_changed_state_alone(
     )
     assert result["displays_refreshed"] == 0
     assert github.updated == []
+
+
+def _sweep(github: _FreshnessGitHub, at: str = AT) -> JsonObject:
+    return audit_expired_leases(
+        github,  # type: ignore[arg-type]
+        repository="TruPryce/property-tax-data-platform",
+        trusted_bot_id=41898282,
+        at=at,
+        refresh_displays=True,
+    )
+
+
+def test_active_runs_are_never_refreshed_out_of_their_state_lane(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """An out-of-lane write could lose the race and revert a live run's marker.
+
+    An active run's own `countyforge-state-*` lane rewrites the comment on every
+    transition, so there is nothing stale to fix and everything to lose.
+    """
+
+    for lifecycle in (
+        "received",
+        "authorized",
+        "queued",
+        "preparing",
+        "running",
+        "cancel_requested",
+    ):
+        state = _issue_state(queued_state_factory, lifecycle_state=lifecycle, disposition=None)
+        github = _FreshnessGitHub(head=ADVANCED)
+        github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
+        result = _sweep(github)
+        assert result["displays_refreshed"] == 0, lifecycle
+        assert github.updated == [], lifecycle
+
+
+def test_unchanged_facts_do_not_rewrite_the_comment_every_sweep(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """Rewriting on every sweep would pin the newest comments to the front of a
+    newest-updated listing and starve older ones forever."""
+
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=TARGET)
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
+    assert _sweep(github)["displays_refreshed"] == 1
+
+    # Second sweep, one minute later: same branch, same SHA, same eligibility.
+    github.comments[0]["updated_at"] = AT
+    assert _sweep(github, at="2026-07-31T00:01:00Z")["displays_refreshed"] == 0
+    assert len(github.updated) == 1
+
+
+def test_a_changed_default_branch_sha_does_rewrite_the_comment(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=TARGET)
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
+    assert _sweep(github)["displays_refreshed"] == 1
+    assert _row(str(github.comments[0]["body"]), "Retry eligible") == "true"
+
+    # Main advances: eligibility flips, so the display must be rewritten.
+    github.comments[0]["updated_at"] = AT
+    github.head = ADVANCED
+    assert _sweep(github, at="2026-07-31T00:10:00Z")["displays_refreshed"] == 1
+    assert _row(str(github.comments[0]["body"]), "Retry eligible") == "false"
+
+
+def test_an_aged_observation_is_renewed_even_when_facts_are_unchanged(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=TARGET)
+    fresh = {
+        "available": True,
+        "default_branch": "main",
+        "default_branch_sha": TARGET,
+        "checked_at": "2026-07-30T00:00:00Z",
+    }
+    github.add_comment(render_status(state, None, fresh))
+    # More than MAX_DISPLAY_AGE_SECONDS since that observation.
+    assert _sweep(github)["displays_refreshed"] == 1
+    assert _row(str(github.comments[0]["body"]), "Main checked") == AT
+
+
+def test_a_just_written_comment_is_left_to_its_own_writer(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """A settled comment written moments ago is most likely a new run claiming
+    the target; reverting its marker would break that writer."""
+
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=ADVANCED)
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)), updated_at=JUST_NOW)
+    assert _sweep(github)["displays_refreshed"] == 0
+    assert github.updated == []
+
+
+def test_the_refresh_budget_bounds_writes_but_not_inspection(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """Writes are capped per sweep; skipped comments still let the scan advance."""
+
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=TARGET)
+    for index in range(MAX_DISPLAY_REFRESHES + 4):
+        github.add_comment(
+            render_status(state, None, unavailable_freshness(OLD)), comment_id=600 + index
+        )
+    result = _sweep(github)
+    assert result["displays_refreshed"] == MAX_DISPLAY_REFRESHES
+    assert result["inspected"] == MAX_DISPLAY_REFRESHES + 4
+    assert len(github.updated) == MAX_DISPLAY_REFRESHES
+
+    # The written ones are now current, so the next sweep spends its whole
+    # budget on the four that were starved rather than rewriting the same ones.
+    for comment in github.comments[:MAX_DISPLAY_REFRESHES]:
+        comment["updated_at"] = AT
+    later = _sweep(github, at="2026-07-31T00:20:00Z")
+    assert later["displays_refreshed"] == 4
+    assert {item[0] for item in github.updated[MAX_DISPLAY_REFRESHES:]} == {
+        600 + index for index in range(MAX_DISPLAY_REFRESHES, MAX_DISPLAY_REFRESHES + 4)
+    }

@@ -341,6 +341,10 @@ def decode_marker(
 _DEFAULT_BRANCH_TARGETS = frozenset({"issue"})
 UNKNOWN_ELIGIBILITY = "unknown"
 
+# The one rendered row that changes on every observation.  Readers that compare
+# two renderings for a material difference exclude it by this prefix.
+CHECKED_ROW_PREFIX: Final = "| Main checked |"
+
 
 def retry_eligibility(state: JsonObject, freshness: JsonObject | None) -> str:
     """Report whether a retry would be accepted, or `unknown` when it cannot be.
@@ -484,7 +488,7 @@ def render_status(
         f"| Default branch | `{default_branch}` |\n"
         f"| Current default-branch SHA | `{default_branch_sha}` |\n"
         f"| Retry eligible | `{eligible}` |\n"
-        f"| Main checked | `{checked_at}` |\n"
+        f"{CHECKED_ROW_PREFIX} `{checked_at}` |\n"
         f"| State | `{_display_value(state.get('lifecycle_state'), 'unknown', 32)}` |\n"
         f"| Attempt | `{_display_value(state.get('attempt'), '?', 12)}` |\n"
         f"{planning_rows}"

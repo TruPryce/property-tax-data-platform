@@ -40,7 +40,7 @@ The publication workflow SHALL run its sanitized canonical finalizer even when m
 
 ### Requirement: Live default-branch freshness in canonical status
 
-Whenever canonical state is rendered or reconciled, the control plane SHALL resolve the repository's default branch and its current head SHA through the trusted GitHub port, and SHALL display the target SHA, the default branch name, the current default-branch SHA, retry eligibility, and the instant the default branch was checked. Retry eligibility MUST be true only when the lifecycle state is retryable and the current default-branch SHA exactly equals the recorded target head SHA; a target whose retry comparand is not the default branch, and an unresolved lookup, MUST report unknown rather than guessing. The resolved value is display and reconciliation metadata only: it MUST NOT be persisted into canonical state, MUST NOT participate in semantic run identity or the canonical marker, and MUST NOT authorize execution. `/countyforge retry` SHALL continue to resolve the live target independently and compare it itself. Scheduled maintenance SHALL refresh canonical displays for a bounded number of retryable or active runs so eligibility does not remain stale between commands, MUST leave lifecycle, history, revision, and idempotency identity unchanged, and MUST preserve the single canonical bot-owned status comment.
+Whenever canonical state is rendered or reconciled, the control plane SHALL resolve the repository's default branch and its current head SHA through the trusted GitHub port, and SHALL display the target SHA, the default branch name, the current default-branch SHA, retry eligibility, and the instant the default branch was checked. Retry eligibility MUST be true only when the lifecycle state is retryable and the current default-branch SHA exactly equals the recorded target head SHA; a target whose retry comparand is not the default branch, and an unresolved lookup, MUST report unknown rather than guessing. The resolved value is display and reconciliation metadata only: it MUST NOT be persisted into canonical state, MUST NOT participate in semantic run identity or the canonical marker, and MUST NOT authorize execution. `/countyforge retry` SHALL continue to resolve the live target independently and compare it itself. Scheduled maintenance SHALL refresh canonical displays for a bounded number of retryable runs so eligibility does not remain stale between commands. It MUST NOT refresh an active run, whose own per-target lane already rewrites that comment and which an out-of-lane write could revert. It MUST leave lifecycle, history, revision, and idempotency identity unchanged, MUST preserve the single canonical bot-owned status comment, and MUST write only when the branch, its SHA, or retry eligibility changed or the displayed observation has aged past a bounded interval, so a newest-updated listing cannot pin the same comments at its front and starve the rest.
 
 #### Scenario: Report a retryable run whose default branch has not moved
 - **WHEN** canonical status is rendered for a retryable issue-target run and the default-branch head still equals its target SHA
@@ -59,8 +59,16 @@ Whenever canonical state is rendered or reconciled, the control plane SHALL reso
 - **THEN** retry resolves the live target itself and is refused, because the rendered value never authorizes execution
 
 #### Scenario: Refresh a stale display without mutating a run
-- **WHEN** scheduled maintenance refreshes a bounded set of retryable or active canonical comments
+- **WHEN** scheduled maintenance refreshes a bounded set of retryable canonical comments
 - **THEN** each rendered marker still encodes the exact state that was read, history and idempotency identity are unchanged, no second status comment is created, and a concurrently changed state is left to its own target lane
+
+#### Scenario: Leave an active run to its own state lane
+- **WHEN** a repository-wide sweep encounters a canonical comment whose run is active
+- **THEN** it performs no display write, because that write is outside the per-target lane and could revert lifecycle, revision, disposition, and history to an older marker
+
+#### Scenario: Refuse a refresh that would only restamp the observation
+- **WHEN** a sweep re-renders a settled display whose branch, SHA, and eligibility are unchanged and whose observation is within its bounded age
+- **THEN** no write occurs, so the newest-updated listing does not keep the same comments at its front and previously unreached comments are refreshed on a later sweep
 
 ### Requirement: Minimal permissions and secrets
 

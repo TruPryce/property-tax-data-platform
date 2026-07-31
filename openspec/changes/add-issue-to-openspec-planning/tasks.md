@@ -82,3 +82,5 @@
 - [x] 9.3 Keep the resolved value out of canonical state, the marker, and semantic identity, and out of every authorization path.
 - [x] 9.4 Refresh a bounded set of retryable or active canonical displays from scheduled maintenance without changing lifecycle, history, revision, or idempotency identity.
 - [x] 9.5 Add fixtures for equal main, advanced main, a non-`main` default branch, lookup failure, a stale display that cannot authorize retry, and a maintenance refresh that preserves identity.
+- [x] 9.6 Exclude active runs from the out-of-lane sweep so a display write can never revert a live run's marker.
+- [x] 9.7 Write only on changed branch/SHA/eligibility or an aged observation, so the newest-updated listing cannot starve older comments.

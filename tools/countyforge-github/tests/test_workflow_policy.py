@@ -860,3 +860,7 @@ def test_maintenance_is_audit_only_outside_the_per_target_state_lane() -> None:
     # The only write is the display re-render, guarded by a compare-and-set.
     assert source.count("github.update_comment(") == 1
     assert "canonical_bytes(current) != canonical_bytes(state)" in source
+    # The out-of-lane sweep refreshes settled runs only. An active run's own
+    # lane owns its comment, and losing that race would revert a live marker.
+    assert "_REFRESHABLE_STATES = RETRYABLE_STATES" in source
+    assert "ACTIVE_STATES" not in source
