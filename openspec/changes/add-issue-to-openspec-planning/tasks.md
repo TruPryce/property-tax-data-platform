@@ -83,3 +83,5 @@
 - [x] 9.4 Refresh freshness only from in-lane canonical writers, publishing a corrected display on an unchanged state and skipping a write that would only restamp the observation.
 - [x] 9.5 Add fixtures for equal main, advanced main, a non-`main` default branch, lookup failure, a stale display that cannot authorize retry, and an in-lane refresh that preserves identity.
 - [x] 9.6 Keep repository-wide maintenance out of canonical comments entirely; an out-of-lane patch cannot be serialized and could revert a newly claimed run.
+- [x] 9.7 Require the observation instant from the current operation at every canonical write, so a freshly resolved SHA is never stamped with a run's finish time.
+- [x] 9.8 Emit replacement guidance that can be issued as written, naming the recorded OpenSpec change for an implementation run.

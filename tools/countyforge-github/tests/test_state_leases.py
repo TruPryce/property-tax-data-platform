@@ -407,6 +407,7 @@ def test_status_comment_is_updated_without_spam(
         trusted_bot_id=41898282,
         state=state,
         expected_state=None,
+        at="2026-07-19T12:05:00Z",
     )
     updated = copy.deepcopy(state)
     updated = bump_revision(updated, at="2026-07-19T12:00:03Z")
@@ -417,6 +418,7 @@ def test_status_comment_is_updated_without_spam(
         trusted_bot_id=41898282,
         state=updated,
         expected_state=state,
+        at="2026-07-19T12:05:00Z",
     )
     assert len(github.comments) == 1
     assert github.comments[0]["id"] == first["id"]
@@ -437,6 +439,7 @@ def test_serialized_writers_have_one_state_lane_winner(
         trusted_bot_id=41898282,
         state=predecessor,
         expected_state=None,
+        at="2026-07-19T12:05:00Z",
     )
     writer_a = _transition(predecessor, "running", "2026-07-19T12:01:00Z", "started")
     writer_b = _transition(predecessor, "preparing", "2026-07-19T12:01:01Z", "preparing")
@@ -447,6 +450,7 @@ def test_serialized_writers_have_one_state_lane_winner(
         trusted_bot_id=41898282,
         state=writer_a,
         expected_state=predecessor,
+        at="2026-07-19T12:05:00Z",
     )
     with pytest.raises(ControlPlaneError) as raised:
         upsert_canonical_status(
@@ -456,6 +460,7 @@ def test_serialized_writers_have_one_state_lane_winner(
             trusted_bot_id=41898282,
             state=writer_b,
             expected_state=predecessor,
+            at="2026-07-19T12:05:00Z",
         )
     assert raised.value.code == "state_write_conflict"
     current = decode_marker(
@@ -484,6 +489,7 @@ def test_stale_predecessor_after_concurrent_win_fails_closed(
         trusted_bot_id=41898282,
         state=predecessor,
         expected_state=None,
+        at="2026-07-19T12:05:00Z",
     )
     desired = _transition(
         predecessor,
@@ -501,6 +507,7 @@ def test_stale_predecessor_after_concurrent_win_fails_closed(
             trusted_bot_id=41898282,
             state=desired,
             expected_state=predecessor,
+            at="2026-07-19T12:05:00Z",
         )
     assert raised.value.code == "state_write_conflict"
     current = decode_marker(

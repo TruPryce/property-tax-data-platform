@@ -22,6 +22,7 @@ MAX_MARKER_BYTES: Final = 24_576
 MAX_HISTORY_ENTRIES: Final = 20
 MAX_RECENT_RUNS: Final = 5
 _MARKER = re.compile(r"<!-- countyforge-status:v1:([A-Za-z0-9_-]+) -->")
+_CHANGE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 ACTIVE_STATES = frozenset(
     {"received", "authorized", "queued", "preparing", "running", "cancel_requested"}
@@ -378,6 +379,23 @@ def retry_eligibility(state: JsonObject, freshness: JsonObject | None) -> str:
     )
 
 
+def _replacement_command(state: JsonObject) -> str:
+    """Render a command a maintainer can paste, never a form intake would reject.
+
+    `implement` is meaningless without its OpenSpec change, so it is emitted with
+    the recorded change name or not as a concrete command at all.
+    """
+
+    command = _display_value(state.get("command"), "plan", 32)
+    if command != "implement":
+        return f"`/countyforge {command}`"
+    arguments = state.get("command_arguments")
+    change = arguments.get("openspec_change") if isinstance(arguments, dict) else None
+    if isinstance(change, str) and _CHANGE_NAME.fullmatch(change):
+        return f"`/countyforge implement {change}`"
+    return "a new `/countyforge implement <change>` command"
+
+
 def render_status(
     state: JsonObject,
     contracts: ControlContracts | None = None,
@@ -418,8 +436,8 @@ def render_status(
         if eligible == "false":
             guidance = (
                 "\n\nThe default branch has moved since this run targeted its SHA, so "
-                "`/countyforge retry` will be refused. Issue `/countyforge "
-                f"{_display_value(state.get('command'), 'plan', 32)}` instead."
+                f"`/countyforge retry` will be refused. Issue {_replacement_command(state)} "
+                "instead."
             )
     evidence = "Pending" if state["evidence_url"] is None else _display_evidence(state)
     planning_rows = ""

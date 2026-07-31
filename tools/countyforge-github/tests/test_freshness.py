@@ -11,7 +11,13 @@ from countyforge_github.control import upsert_canonical_status
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.freshness import resolve_default_branch, unavailable_freshness
 from countyforge_github.maintenance import audit_expired_leases
-from countyforge_github.state import decode_marker, render_status, retry_eligibility, retry_state
+from countyforge_github.state import (
+    _replacement_command,
+    decode_marker,
+    render_status,
+    retry_eligibility,
+    retry_state,
+)
 
 TARGET = "a" * 40
 ADVANCED = "b" * 40
@@ -319,3 +325,88 @@ def test_a_stale_predecessor_still_fails_closed_during_a_display_refresh(
     with pytest.raises(ControlPlaneError, match="state_write_conflict|changed before publication"):
         _publish(github, state, state)
     assert github.updated == []
+
+
+def test_status_stamps_the_observation_with_its_own_instant(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """A settled run's `updated_at` is when it finished, not when main was read.
+
+    Stamping a freshly resolved SHA with it would report an observation that
+    never happened.
+    """
+
+    state = _issue_state(queued_state_factory, updated_at="2026-07-20T08:00:00Z")
+    github = _FreshnessGitHub(head=TARGET)
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
+    github.head = ADVANCED
+    later = "2026-07-31T09:15:00Z"
+    _publish(github, state, state, at=later)
+    body = str(github.comments[0]["body"])
+    assert _row(body, "Main checked") == later
+    assert _row(body, "Main checked") != str(state["updated_at"])
+    # The newly resolved SHA and the instant it was observed agree.
+    assert _row(body, "Current default-branch SHA") == ADVANCED[:12]
+    assert _row(body, "Retry eligible") == "false"
+
+
+def test_every_canonical_writer_supplies_its_own_observation_instant() -> None:
+    """`at` is required, so a writer cannot silently fall back to run state."""
+
+    import inspect
+
+    from countyforge_github.control import publish_canonical_state, upsert_canonical_status
+
+    for function in (upsert_canonical_status, publish_canonical_state):
+        parameter = inspect.signature(function).parameters["at"]
+        assert parameter.default is inspect.Parameter.empty, function.__name__
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments", "expected"),
+    [
+        ("plan", {}, "`/countyforge plan`"),
+        ("review", {}, "`/countyforge review`"),
+        (
+            "implement",
+            {"openspec_change": "add-dallas-cad-source-parser-foundation"},
+            "`/countyforge implement add-dallas-cad-source-parser-foundation`",
+        ),
+        ("implement", {}, "a new `/countyforge implement <change>` command"),
+    ],
+)
+def test_ineligible_guidance_never_emits_an_incomplete_command(
+    queued_state_factory: Callable[[str], JsonObject],
+    command: str,
+    arguments: dict[str, object],
+    expected: str,
+) -> None:
+    """`/countyforge implement` without its change name would be rejected."""
+
+    state = _issue_state(queued_state_factory, command=command, command_arguments=arguments)
+    body = render_status(
+        state,
+        None,
+        {
+            "available": True,
+            "default_branch": "main",
+            "default_branch_sha": ADVANCED,
+            "checked_at": AT,
+        },
+    )
+    assert _row(body, "Retry eligible") == "false"
+    assert expected in body
+    assert "`/countyforge implement`" not in body
+
+
+@pytest.mark.parametrize("change", ["Bad Name", "", "../escape", 7, None])
+def test_the_change_name_guard_rejects_anything_unpasteable(change: object) -> None:
+    """Defence in depth: the state schema already constrains this value, so the
+    guard is reached only if that contract ever loosens."""
+
+    assert (
+        _replacement_command(
+            {"command": "implement", "command_arguments": {"openspec_change": change}}
+        )
+        == "a new `/countyforge implement <change>` command"
+    )

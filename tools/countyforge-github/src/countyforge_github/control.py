@@ -67,7 +67,7 @@ def upsert_canonical_status(
     trusted_bot_id: int,
     state: JsonObject,
     expected_state: JsonObject | None,
-    at: str | None = None,
+    at: str,
 ) -> JsonObject:
     """Create once, or reread/compare canonical state immediately before one PATCH.
 
@@ -83,9 +83,11 @@ def upsert_canonical_status(
     # Live default-branch identity is resolved on every canonical render, so the
     # published comment answers "can this still be retried" without a maintainer
     # checking GitHub by hand.  It never enters the marker.
-    freshness = resolve_default_branch(
-        github, repository=repository, at=at or str(state["updated_at"])
-    )
+    #
+    # `at` is the current operation's instant and is required: a settled run's
+    # `updated_at` is when the run finished, and stamping a freshly resolved SHA
+    # with it would report an observation that never happened.
+    freshness = resolve_default_branch(github, repository=repository, at=at)
     body = render_status(state, None, freshness)
     existing = find_canonical_state(
         github.list_comments(repository, target_number),
@@ -159,7 +161,7 @@ def publish_canonical_state(
     trusted_bot_id: int,
     expected_state: JsonObject | None,
     state: JsonObject,
-    at: str | None = None,
+    at: str,
 ) -> JsonObject:
     """Compare/publish canonical comment state and mirror its existing PR check."""
 
