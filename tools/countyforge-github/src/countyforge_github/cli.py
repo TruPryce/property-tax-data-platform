@@ -343,7 +343,6 @@ def build_parser() -> argparse.ArgumentParser:
     maintain.add_argument("--repository", required=True)
     maintain.add_argument("--trusted-bot-id", type=int, required=True)
     maintain.add_argument("--at", required=True)
-    maintain.add_argument("--refresh-displays", action="store_true")
 
     subparsers.add_parser("check")
     return parser
@@ -963,7 +962,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     repository=args.repository,
                     trusted_bot_id=args.trusted_bot_id,
                     at=args.at,
-                    refresh_displays=args.refresh_displays,
                 )
             )
             return 0

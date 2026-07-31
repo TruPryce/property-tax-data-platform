@@ -40,7 +40,7 @@ The publication workflow SHALL run its sanitized canonical finalizer even when m
 
 ### Requirement: Live default-branch freshness in canonical status
 
-Whenever canonical state is rendered or reconciled, the control plane SHALL resolve the repository's default branch and its current head SHA through the trusted GitHub port, and SHALL display the target SHA, the default branch name, the current default-branch SHA, retry eligibility, and the instant the default branch was checked. Retry eligibility MUST be true only when the lifecycle state is retryable and the current default-branch SHA exactly equals the recorded target head SHA; a target whose retry comparand is not the default branch, and an unresolved lookup, MUST report unknown rather than guessing. The resolved value is display and reconciliation metadata only: it MUST NOT be persisted into canonical state, MUST NOT participate in semantic run identity or the canonical marker, and MUST NOT authorize execution. `/countyforge retry` SHALL continue to resolve the live target independently and compare it itself. Scheduled maintenance SHALL refresh canonical displays for a bounded number of retryable runs so eligibility does not remain stale between commands. It MUST NOT refresh an active run, whose own per-target lane already rewrites that comment and which an out-of-lane write could revert. It MUST leave lifecycle, history, revision, and idempotency identity unchanged, MUST preserve the single canonical bot-owned status comment, and MUST write only when the branch, its SHA, or retry eligibility changed or the displayed observation has aged past a bounded interval, so a newest-updated listing cannot pin the same comments at its front and starve the rest.
+Whenever canonical state is rendered or reconciled, the control plane SHALL resolve the repository's default branch and its current head SHA through the trusted GitHub port, and SHALL display the target SHA, the default branch name, the current default-branch SHA, retry eligibility, and the instant the default branch was checked. Retry eligibility MUST be true only when the lifecycle state is retryable and the current default-branch SHA exactly equals the recorded target head SHA; a target whose retry comparand is not the default branch, and an unresolved lookup, MUST report unknown rather than guessing. The resolved value is display and reconciliation metadata only: it MUST NOT be persisted into canonical state, MUST NOT participate in semantic run identity or the canonical marker, and MUST NOT authorize execution. `/countyforge retry` SHALL continue to resolve the live target independently and compare it itself. Freshness SHALL be refreshed only by writers inside the target's canonical concurrency lane, using the ordinary expected-state write path. A canonical write MUST publish a corrected display even when canonical state is unchanged, so `/countyforge status` on a settled run reports a currently observed verdict; it MUST NOT write when the branch, its SHA, and eligibility are all unchanged. Repository-wide scheduled maintenance MUST NOT patch canonical comments, because it cannot join a target's lane and GitHub offers no conditional comment write, so any such patch could revert a newly claimed run to an older marker.
 
 #### Scenario: Report a retryable run whose default branch has not moved
 - **WHEN** canonical status is rendered for a retryable issue-target run and the default-branch head still equals its target SHA
@@ -58,21 +58,21 @@ Whenever canonical state is rendered or reconciled, the control plane SHALL reso
 - **WHEN** a displayed default-branch SHA is stale and a retry is issued against a target whose live head has since changed
 - **THEN** retry resolves the live target itself and is refused, because the rendered value never authorizes execution
 
-#### Scenario: Refresh a stale display without mutating a run
-- **WHEN** scheduled maintenance refreshes a bounded set of retryable canonical comments
-- **THEN** each rendered marker still encodes the exact state that was read, history and idempotency identity are unchanged, no second status comment is created, and a concurrently changed state is left to its own target lane
+#### Scenario: Correct a stale display on an unchanged run
+- **WHEN** `/countyforge status` reconciles a settled run to the same canonical state and the default branch has moved since it ran
+- **THEN** the in-lane writer publishes the corrected eligibility against the expected predecessor, the marker still encodes the unchanged state, and no second status comment is created
 
-#### Scenario: Leave an active run to its own state lane
-- **WHEN** a repository-wide sweep encounters a canonical comment whose run is active
-- **THEN** it performs no display write, because that write is outside the per-target lane and could revert lifecycle, revision, disposition, and history to an older marker
+#### Scenario: Refuse a write that would only restamp the observation
+- **WHEN** an in-lane writer re-renders a display whose branch, SHA, and eligibility are all unchanged
+- **THEN** no comment update is sent
 
-#### Scenario: Refuse a refresh that would only restamp the observation
-- **WHEN** a sweep re-renders a settled display whose branch, SHA, and eligibility are unchanged and whose observation is within its bounded age
-- **THEN** no write occurs, so the newest-updated listing does not keep the same comments at its front and previously unreached comments are refreshed on a later sweep
+#### Scenario: Keep repository-wide maintenance out of canonical comments
+- **WHEN** the scheduled sweep encounters a canonical comment whose display is stale
+- **THEN** it records discovery only and sends no comment update, because an out-of-lane patch could revert a run claimed between its read and its write
 
 ### Requirement: Minimal permissions and secrets
 
-Each workflow job MUST declare least-privilege `GITHUB_TOKEN` permissions and MUST NOT receive `packages: write`, `deployments: write`, `id-token: write`, `security-events: write`, a code-push credential, or a production credential. Intake/control may receive only the issue/PR/check/Actions access required to authorize, dispatch, reconcile, or cancel; packet preparation MUST receive no provider credential; execution MUST receive exactly the selected provider credential at the invocation step; and publication MUST receive no provider credential. The trusted planning `plan-publish` job MAY receive `contents: write`, `issues: write`, `pull-requests: write`, and `checks: write` solely to materialize the bounded OpenSpec files on the deterministic planning ref and create or update a draft PR. The scheduled maintenance job MAY receive `issues: write` solely to re-render canonical comment bodies from unchanged state; it MUST NOT transition state or dispatch work. The read-only `publish` and `plan-validation` jobs MUST NOT receive `contents: write`.
+Each workflow job MUST declare least-privilege `GITHUB_TOKEN` permissions and MUST NOT receive `packages: write`, `deployments: write`, `id-token: write`, `security-events: write`, a code-push credential, or a production credential. Intake/control may receive only the issue/PR/check/Actions access required to authorize, dispatch, reconcile, or cancel; packet preparation MUST receive no provider credential; execution MUST receive exactly the selected provider credential at the invocation step; and publication MUST receive no provider credential. The trusted planning `plan-publish` job MAY receive `contents: write`, `issues: write`, `pull-requests: write`, and `checks: write` solely to materialize the bounded OpenSpec files on the deterministic planning ref and create or update a draft PR. The read-only `publish` and `plan-validation` jobs MUST NOT receive `contents: write`.
 
 #### Scenario: Deny secret-bearing preparation
 - **WHEN** workflow policy checks inspect packet-preparation jobs

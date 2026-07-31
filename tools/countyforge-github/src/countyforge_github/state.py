@@ -341,9 +341,20 @@ def decode_marker(
 _DEFAULT_BRANCH_TARGETS = frozenset({"issue"})
 UNKNOWN_ELIGIBILITY = "unknown"
 
-# The one rendered row that changes on every observation.  Readers that compare
-# two renderings for a material difference exclude it by this prefix.
+# The one rendered row that changes on every observation.  Comparing two
+# renderings for a material difference excludes it.
 CHECKED_ROW_PREFIX: Final = "| Main checked |"
+
+
+def display_signature(body: str) -> str:
+    """Everything a rendered status asserts except when it was observed.
+
+    A writer uses this to decide whether a re-render is worth a comment update:
+    a changed default branch, SHA, or eligibility is, a new observation instant
+    on its own is not.
+    """
+
+    return "\n".join(line for line in body.splitlines() if not line.startswith(CHECKED_ROW_PREFIX))
 
 
 def retry_eligibility(state: JsonObject, freshness: JsonObject | None) -> str:

@@ -840,27 +840,23 @@ def test_maintenance_is_audit_only_outside_the_per_target_state_lane() -> None:
     job = _jobs("countyforge-maintenance.yml")["reconcile"]
     assert workflow["concurrency"]["group"] == "countyforge-maintenance-${{ github.repository_id }}"
     assert "concurrency" not in job
-    # Display refresh rewrites a canonical comment body from unchanged state, so
-    # the job needs issue write. It still performs no lifecycle transition.
     assert job["permissions"] == {
         "actions": "read",
         "checks": "read",
         "contents": "read",
-        "issues": "write",
+        "issues": "read",
         "pull-requests": "read",
     }
-    assert "--refresh-displays" in str(job)
     source = Path("tools/countyforge-github/src/countyforge_github/maintenance.py").read_text(
         encoding="utf-8"
     )
     assert "publish_canonical_state" not in source
     assert "transition_state" not in source
     assert "dispatch_workflow" not in source
-    assert '"mutation": "display_refresh" if refreshed else "audit_only"' in source
-    # The only write is the display re-render, guarded by a compare-and-set.
-    assert source.count("github.update_comment(") == 1
-    assert "canonical_bytes(current) != canonical_bytes(state)" in source
-    # The out-of-lane sweep refreshes settled runs only. An active run's own
-    # lane owns its comment, and losing that race would revert a live marker.
-    assert "_REFRESHABLE_STATES = RETRYABLE_STATES" in source
-    assert "ACTIVE_STATES" not in source
+    assert '"mutation": "audit_only"' in source
+    # The sweep writes nothing at all -- including the canonical display. GitHub
+    # has no conditional comment write, so a repository-wide patch could always
+    # lose a race against command intake and revert a newly claimed run.
+    assert "update_comment" not in source
+    assert "render_status" not in source
+    assert "resolve_default_branch" not in source
