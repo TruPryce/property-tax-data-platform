@@ -24,6 +24,13 @@ def audit_expired_leases(
     transition inside the existing ``countyforge-state-*`` lane.  This prevents a
     repository-wide scan from racing a per-target claim, heartbeat, cancellation, or
     terminal publication while retaining an auditable discovery signal.
+
+    That reasoning covers the canonical *display*, not only lifecycle.  GitHub
+    offers no conditional comment write, so a repository-wide patch can always
+    lose a race against command intake and revert a newly claimed run to an older
+    marker; a comment-age heuristic narrows that window but does not serialize
+    anything.  Default-branch freshness is therefore refreshed by the ordinary
+    in-lane writers, including ``/countyforge status``, and never from here.
     """
 
     inspected = 0

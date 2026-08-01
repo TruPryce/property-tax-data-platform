@@ -135,6 +135,7 @@ def claim_run(
         trusted_bot_id=trusted_bot_id,
         expected_state=expected,
         state=state,
+        at=at,
     )
     return state
 
@@ -180,6 +181,7 @@ def fail_unclaimed_run(
         trusted_bot_id=trusted_bot_id,
         expected_state=expected,
         state=failed,
+        at=at,
     )
     return failed
 
@@ -288,5 +290,6 @@ def advance_run(
         trusted_bot_id=trusted_bot_id,
         expected_state=expected,
         state=updated,
+        at=at,
     )
     return updated

@@ -523,6 +523,7 @@ def process_intake(
             trusted_bot_id=trusted_bot_id,
             expected_state=expected,
             state=existing,
+            at=timestamp,
         )
         events.append(
             state_event(
@@ -582,6 +583,7 @@ def process_intake(
             trusted_bot_id=trusted_bot_id,
             expected_state=expected,
             state=existing,
+            at=timestamp,
         )
         events.append(
             state_event(
@@ -891,6 +893,7 @@ def process_intake(
                 trusted_bot_id=trusted_bot_id,
                 expected_state=active,
                 state=stale,
+                at=timestamp,
             )
             existing = stale
             recovered_disposition = str(existing["disposition"] or "lease_expired")
@@ -920,6 +923,7 @@ def process_intake(
         trusted_bot_id=trusted_bot_id,
         expected_state=expected_for_queue,
         state=state,
+        at=timestamp,
     )
     comment_id = int(status_comment["id"])
     if target["type"] == "pull_request":
@@ -943,6 +947,7 @@ def process_intake(
                 trusted_bot_id=trusted_bot_id,
                 expected_state=expected_without_check,
                 state=state,
+                at=timestamp,
             )
         except ControlPlaneError:
             predecessors = [expected_without_check]
@@ -967,6 +972,7 @@ def process_intake(
                         trusted_bot_id=trusted_bot_id,
                         expected_state=predecessor,
                         state=failed,
+                        at=timestamp,
                     )
                     break
                 except ControlPlaneError as recovery_error:
@@ -991,6 +997,7 @@ def process_intake(
             trusted_bot_id=trusted_bot_id,
             expected_state=state,
             state=failed,
+            at=timestamp,
         )
         raise
     status, conclusion = check_status(state["lifecycle_state"])

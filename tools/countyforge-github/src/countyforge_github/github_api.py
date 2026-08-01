@@ -18,6 +18,8 @@ class GitHubPort(Protocol):
 
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]: ...
 
+    def repository_profile(self, repository: str) -> JsonObject: ...
+
     def list_repository_comments(self, repository: str) -> list[JsonObject]: ...
 
     def get_comment(self, repository: str, comment_id: int) -> JsonObject: ...
@@ -162,6 +164,14 @@ class GitHubRestClient:
             "GitHub state lookup exceeded its bounded pagination limit.",
             exit_code=5,
         )
+
+    def repository_profile(self, repository: str) -> JsonObject:
+        value = self._request("GET", f"/repos/{repository}")
+        if not isinstance(value, dict):
+            raise ControlPlaneError(
+                "github_api_invalid_response", "GitHub repository facts are unavailable."
+            )
+        return value
 
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]:
         return self._list_pages(f"/repos/{repository}/issues/{target_number}/comments")

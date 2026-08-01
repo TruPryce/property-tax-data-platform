@@ -851,5 +851,12 @@ def test_maintenance_is_audit_only_outside_the_per_target_state_lane() -> None:
         encoding="utf-8"
     )
     assert "publish_canonical_state" not in source
-    assert "update_comment" not in source
+    assert "transition_state" not in source
+    assert "dispatch_workflow" not in source
     assert '"mutation": "audit_only"' in source
+    # The sweep writes nothing at all -- including the canonical display. GitHub
+    # has no conditional comment write, so a repository-wide patch could always
+    # lose a race against command intake and revert a newly claimed run.
+    assert "update_comment" not in source
+    assert "render_status" not in source
+    assert "resolve_default_branch" not in source

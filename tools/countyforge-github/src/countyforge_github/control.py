@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from countyforge_github.contracts import ControlContracts, JsonObject, canonical_bytes
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.freshness import resolve_default_branch
 from countyforge_github.github_api import GitHubPort
 from countyforge_github.state import (
     ACTIVE_STATES,
@@ -65,6 +66,7 @@ def upsert_canonical_status(
     trusted_bot_id: int,
     state: JsonObject,
     expected_state: JsonObject | None,
+    at: str,
 ) -> JsonObject:
     """Create once, or reread/compare canonical state immediately before one PATCH.
 
@@ -77,7 +79,15 @@ def upsert_canonical_status(
     next state. The revision is application-level stale-state detection, not an atomic CAS.
     """
 
-    body = render_status(state)
+    # Live default-branch identity is resolved on every canonical render, so the
+    # published comment answers "can this still be retried" without a maintainer
+    # checking GitHub by hand.  It never enters the marker.
+    #
+    # `at` is the current operation's instant and is required: a settled run's
+    # `updated_at` is when the run finished, and stamping a freshly resolved SHA
+    # with it would report an observation that never happened.
+    freshness = resolve_default_branch(github, repository=repository, at=at)
+    body = render_status(state, None, freshness)
     existing = find_canonical_state(
         github.list_comments(repository, target_number),
         trusted_bot_id=trusted_bot_id,
@@ -111,7 +121,14 @@ def upsert_canonical_status(
         raise ControlPlaneError(
             "state_write_conflict", "Canonical CountyForge state changed before publication."
         )
-    if canonical_bytes(state) == canonical_bytes(expected_state):
+    # Compare what will actually be published, not just canonical state.  An
+    # unchanged state still carries a new observation of the default branch, and
+    # `/countyforge status` on a settled run is exactly how a maintainer asks for
+    # that observation to be renewed; skipping the write would answer with the
+    # previous one.  This write is inside the target's concurrency lane and the
+    # persisted marker was just compared against the expected predecessor, so it
+    # is the ordinary expected-state write path.
+    if str(comment.get("body", "")) == body:
         return comment
     return github.update_comment(repository, existing[0], body)
 
@@ -143,6 +160,7 @@ def publish_canonical_state(
     trusted_bot_id: int,
     expected_state: JsonObject | None,
     state: JsonObject,
+    at: str,
 ) -> JsonObject:
     """Compare/publish canonical comment state and mirror its existing PR check."""
 
@@ -153,6 +171,7 @@ def publish_canonical_state(
         trusted_bot_id=trusted_bot_id,
         state=state,
         expected_state=expected_state,
+        at=at,
     )
     update_check_for_state(github, repository, state)
     return comment

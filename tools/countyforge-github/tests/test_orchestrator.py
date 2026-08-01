@@ -54,9 +54,24 @@ class FakeGitHub:
         self.fail_next_comment_update = False
         self.fail_check_creation = False
         self.fail_target_resolution = False
+        self.default_branch: str | None = "main"
+        self.default_branch_sha = head_sha
+        self.fail_repository_profile = False
 
     def repository_permission(self, repository: str, actor: str) -> JsonObject:
         return copy.deepcopy(self.permission)
+
+    def repository_profile(self, repository: str) -> JsonObject:
+        if self.fail_repository_profile:
+            raise ControlPlaneError(
+                "github_api_error", "GitHub API request failed.", {"status": 503}
+            )
+        return {"full_name": repository, "default_branch": self.default_branch}
+
+    def get_git_ref(self, repository: str, ref: str) -> JsonObject | None:
+        if ref != f"refs/heads/{self.default_branch}":
+            return None
+        return {"ref": ref, "object": {"sha": self.default_branch_sha, "type": "commit"}}
 
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]:
         return copy.deepcopy(self.comments)

@@ -74,3 +74,14 @@
 - [x] 8.10 Reserve stage and completed stages as validated exact-prefix fields, make persisted progress authoritative, fail closed on contradiction, and allow-list auxiliary detail.
 - [x] 8.11 Open the publication evidence boundary in the adapter command before reading inputs or constructing the GitHub client.
 - [x] 8.12 Convert contract-check and unexpected exceptions into sanitized stage-carrying publication failures, and read the pull-request response inside its own stage.
+
+## 9. Live default-branch freshness
+
+- [x] 9.1 Resolve the default branch and its head SHA through the trusted port whenever canonical state is rendered or reconciled, degrading to an explicit unavailable record.
+- [x] 9.2 Render target SHA, default branch, current default-branch SHA, retry eligibility, and the checked timestamp, reporting `unknown` rather than guessing.
+- [x] 9.3 Keep the resolved value out of canonical state, the marker, and semantic identity, and out of every authorization path.
+- [x] 9.4 Refresh freshness only from in-lane canonical writers, comparing the rendered body so an unchanged state still renews its observation.
+- [x] 9.5 Add fixtures for equal main, advanced main, a non-`main` default branch, lookup failure, a stale display that cannot authorize retry, and an in-lane refresh that preserves identity.
+- [x] 9.6 Keep repository-wide maintenance out of canonical comments entirely; an out-of-lane patch cannot be serialized and could revert a newly claimed run.
+- [x] 9.7 Require the observation instant from the current operation at every canonical write, so a freshly resolved SHA is never stamped with a run's finish time.
+- [x] 9.8 Emit replacement guidance that can be issued as written, naming the recorded OpenSpec change for an implementation run.

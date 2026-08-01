@@ -20,6 +20,7 @@ from countyforge_github.contracts import (
     load_json_object,
 )
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.freshness import resolve_default_branch, unavailable_freshness
 from countyforge_github.github_api import GitHubRestClient
 from countyforge_github.identity import (
     build_trigger,
@@ -120,6 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = subparsers.add_parser("render-status")
     _file(render, "state")
+    render.add_argument("--repository")
+    render.add_argument("--at")
 
     request = subparsers.add_parser("build-run-request")
     _file(request, "trigger")
@@ -488,7 +491,23 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if command_name == "render-status":
             state = _load(args.state, "GitHub state")
-            _emit({"ok": True, "body": render_status(state, contracts), "state": state})
+            # Offline rendering stays supported: without a repository the live
+            # lookup is skipped and freshness renders as unavailable rather than
+            # as a stale value.
+            at = args.at or str(state["updated_at"])
+            freshness = (
+                resolve_default_branch(_github_client(), repository=args.repository, at=at)
+                if args.repository
+                else unavailable_freshness(at)
+            )
+            _emit(
+                {
+                    "ok": True,
+                    "body": render_status(state, contracts, freshness),
+                    "state": state,
+                    "freshness": freshness,
+                }
+            )
             return 0
         if command_name == "build-run-request":
             contract_root = contracts.contract_root
