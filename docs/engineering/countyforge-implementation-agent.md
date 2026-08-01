@@ -13,6 +13,23 @@ OpenSpec validation and checks structured blocking markers across the complete a
 Draft PRs, labels, reactions, bot comments, and
 planning-agent output are not approval evidence.
 
+## Provider routing
+
+Implementation has two visible lanes, `implementation-openai` and `implementation-sakana`, gated
+on the provider the trusted claim resolved. Exactly one runs per request; there is no runtime
+fallback, so an infrastructure failure stays attributable to the selected provider. Each lane
+receives only its own credential and only its own provider endpoint through the proxy sidecar, and
+neither credential reaches packet construction, trusted validation, or publication.
+
+Both images are built from the same public pinned base with the pinned Codex CLI, matching the
+planning image strategy. The previous OpenAI image inherited `FROM ghcr.io/openai/codex`, which
+GitHub-hosted runners cannot pull anonymously; run 30691544362 failed with a GHCR 403 before the
+model was invoked. Pulling it would have required package credentials this job must never hold.
+
+Each lane publishes provider-qualified artifacts, and trusted validation downloads only the
+selected provider's. A lane that published no result is classified as a provider infrastructure
+failure, never as a model failure, and validation refuses to proceed.
+
 ## Three roots and credentials
 
 - `contract_root`: trusted tooling, profiles, schemas, policies, prompts, and adapters at the

@@ -42,3 +42,12 @@
 - [x] 7.2 Reconstruct planning packets at that cutoff while rejecting edits or deletion within the selected original context.
 - [x] 7.3 Add end-to-end retry packet fixtures and run the deterministic CountyForge, workflow-policy, OpenSpec, documentation, and `prepr-no-ai` gates.
 - [x] 7.4 Reconcile the 16-comment selection contract and cover selected, older unselected, and post-cutoff mutations.
+
+## 9. Provider-routed implementation execution
+
+- [x] 9.1 Declare both implementation providers, their pinned images, and their credentials in `implement.workspace-write.v1`.
+- [x] 9.2 Build both implementation images from a public pinned base with the pinned Codex CLI, replacing the uncredentialed-pull failure of `ghcr.io/openai/codex`.
+- [x] 9.3 Add a dedicated `implementation-sakana` lane alongside `implementation-openai`, mutually exclusive on the resolved provider.
+- [x] 9.4 Resolve the provider credential and endpoint in the adapter before either is exposed, and refuse an unsupported provider.
+- [x] 9.5 Publish provider-qualified lane artifacts and consume only the selected provider's in trusted validation, failing closed when it is absent.
+- [x] 9.6 Classify a lane that published no result as a provider infrastructure failure rather than a model failure, with a fixture from run 30691544362.

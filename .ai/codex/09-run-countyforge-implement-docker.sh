@@ -14,6 +14,14 @@ set -euo pipefail
 : "${OUT_DIR:?OUT_DIR is required}"
 : "${CODEX_IMAGE:?CODEX_IMAGE is required}"
 
+# Provider routing is resolved from the trusted request before any credential is
+# read, so only the selected provider's key and endpoint ever reach the model.
+case "${CODEX_PROVIDER:?CODEX_PROVIDER is required}" in
+  openai) PROVIDER_CREDENTIAL="OPENAI_API_KEY"; PROVIDER_HOST="api.openai.com" ;;
+  sakana) PROVIDER_CREDENTIAL="SAKANA_API_KEY"; PROVIDER_HOST="api.sakana.ai" ;;
+  *) echo "error: unsupported implementation provider: $CODEX_PROVIDER" >&2; exit 2 ;;
+esac
+
 mkdir -p "$OUT_DIR"
 EXPECTED_PROFILE_SHA="${COUNTYFORGE_PROFILE_SHA256:?COUNTYFORGE_PROFILE_SHA256 is required}"
 EXPECTED_CODEX_VERSION="${MIN_CODEX_CLI_VERSION:?MIN_CODEX_CLI_VERSION is required}"
@@ -36,12 +44,12 @@ if [ "$IMAGE_PROFILE_ID" != "implement.workspace-write.v1" ] || [ "$IMAGE_PROFIL
   exit 2
 fi
 IMAGE_ID="$(docker image inspect "$CODEX_IMAGE" --format '{{.Id}}')"
-python3 - "$OUT_DIR/container.provenance.json" "$CODEX_IMAGE" "$IMAGE_ID" "$CODEX_PROVIDER" "$EXPECTED_PROFILE_SHA" "$EXPECTED_CODEX_VERSION" "$CODEX_MODEL_REF" "$CODEX_REASONING_EFFORT" <<'PY'
+python3 - "$OUT_DIR/container.provenance.json" "$CODEX_IMAGE" "$IMAGE_ID" "$CODEX_PROVIDER" "$PROVIDER_CREDENTIAL" "$EXPECTED_PROFILE_SHA" "$EXPECTED_CODEX_VERSION" "$CODEX_MODEL_REF" "$CODEX_REASONING_EFFORT" <<'PY'
 import json
 import pathlib
 import sys
 
-path, image, image_id, provider, profile_sha, codex_version, model_ref, reasoning_effort = sys.argv[1:]
+path, image, image_id, provider, credential, profile_sha, codex_version, model_ref, reasoning_effort = sys.argv[1:]
 document = {
     "contract_version": 1,
     "profile_id": "implement.workspace-write.v1",
@@ -60,7 +68,7 @@ document = {
             "packet", "manifest", "task_plan", "result_schema", "command_policy", "source_snapshot"
         ],
     },
-    "credential_names": ["OPENAI_API_KEY"],
+    "credential_names": [credential],
     "enabled_tools": ["structured_file_bundle"],
     "disabled_tools": [
         "shell_tool", "unified_exec", "browser_use", "computer_use", "apps",
@@ -182,7 +190,7 @@ docker run -d --name "$PROXY_NAME" \
   --user 65532:65532 \
   -v "$(pwd)/tools/countyforge-runner/src/countyforge_runner/provider_proxy.py:/provider_proxy.py:ro" \
   "$PROXY_IMAGE" \
-  python /provider_proxy.py --host 0.0.0.0 --port 45000 --allowed-host api.openai.com \
+  python /provider_proxy.py --host 0.0.0.0 --port 45000 --allowed-host "$PROVIDER_HOST" \
   >/dev/null
 docker network connect bridge "$PROXY_NAME"
 sleep 1
@@ -207,7 +215,7 @@ docker run --rm \
   -v "$OUT_DIR:/out:rw" \
   -e CODEX_PROVIDER -e CODEX_MODEL -e CODEX_MODEL_REF -e CODEX_REASONING_EFFORT \
   -e HOME=/tmp/codex-home -e CODEX_HOME=/tmp/codex-home \
-  -e OPENAI_API_KEY \
+  -e "$PROVIDER_CREDENTIAL" \
   -e "HTTPS_PROXY=http://${PROXY_NAME}:45000" \
   -e "HTTP_PROXY=http://${PROXY_NAME}:45000" \
   -e NO_PROXY= \
@@ -255,8 +263,9 @@ PY
 # frozen by trusted tooling after this process exits; this scan covers the separate output
 # directory that is uploaded as workflow evidence.  A hit removes the offending file and
 # fails the adapter, so no provider value can cross the artifact boundary.
-if [ -n "${OPENAI_API_KEY:-}" ]; then
-  PROVIDER_SECRET="$OPENAI_API_KEY" python3 - "$OUT_DIR" <<'PY'
+PROVIDER_SECRET_VALUE="${!PROVIDER_CREDENTIAL:-}"
+if [ -n "$PROVIDER_SECRET_VALUE" ]; then
+  PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
 import os
 import pathlib
 import sys

@@ -1,0 +1,17 @@
+{
+  "run_id": 30691544362,
+  "command": "implement",
+  "selected_provider": "openai",
+  "lane_results": {
+    "openai": "failure",
+    "sakana": "skipped"
+  },
+  "failed_step": "Provision isolated workspace and resolve request",
+  "failure_stage": "image_build",
+  "published_implementation_result": false,
+  "model_invoked": false,
+  "evidence": [
+    "FROM ghcr.io/openai/codex:0.144.6",
+    "failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token: 403 Forbidden"
+  ]
+}

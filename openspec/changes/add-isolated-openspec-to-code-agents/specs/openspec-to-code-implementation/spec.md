@@ -7,6 +7,21 @@ The control plane SHALL allow `implement <change>` only when the exact change ex
 - **WHEN** an authorized maintainer requests implementation for a planning change that exists only on an unmerged or draft branch
 - **THEN** intake returns a sanitized ineligible disposition before provider credentials, target preparation, or workflow dispatch
 
+### Requirement: Provider-routed implementation execution
+The implementation profile SHALL declare every permitted provider with its own pinned image and credential. Exactly one provider lane MAY execute per request, selected from the trusted profile and request before either credential is exposed, and a lane MUST receive only its own provider credential and provider endpoint. There MUST be no runtime fallback between providers within a run, so an infrastructure failure remains attributable to the selected provider. Both lanes MUST produce the identical governed outputs under the same isolation, path policy, task plan, workspace binding, and trusted gates. Trusted validation SHALL consume artifacts only from the selected provider lane, MUST fail closed when that lane did not run or published no result, and MUST ignore an unselected lane's artifacts. Implementation images MUST be pullable by the runner without repository or package credentials.
+
+#### Scenario: Route to exactly one provider lane
+- **WHEN** the trusted claim resolves an implementation provider
+- **THEN** only that provider's lane executes, it receives only that provider's credential and endpoint, and the other lane is skipped
+
+#### Scenario: Refuse an unsupported provider before invocation
+- **WHEN** the resolved provider is not a permitted implementation provider
+- **THEN** execution fails closed before any credential is exposed or any model is invoked
+
+#### Scenario: Classify a provider image failure as infrastructure
+- **WHEN** the selected lane fails while provisioning its image and publishes no implementation result
+- **THEN** the outcome is recorded as a provider infrastructure failure rather than a model failure, and validation refuses to proceed
+
 ### Requirement: Isolated implementation workspace
 The executable profile SHALL provide the model only an ephemeral writable, de-Git workspace snapshot derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible. Trusted code MUST serialize the bounded packet, manifest, task plan, prompt, and size-limited source snapshot into the model input through the declared `bounded_stdin` contract; the model MUST NOT rely on undeclared filesystem-reading capabilities. Git metadata remains available only to trusted host tooling.
 

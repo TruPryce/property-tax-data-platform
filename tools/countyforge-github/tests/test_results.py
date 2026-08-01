@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from countyforge_github.results import (
+    classify_implementation_lane,
     normalize_publication_result,
     resolve_terminal_result,
 )
@@ -441,3 +442,93 @@ def test_publication_drops_unvalidated_auxiliary_details(
     )
     assert normalized["disposition"] == "github_api_error"
     assert normalized["details"] == {}
+
+
+# Run 30691544362: the only implementation lane failed while building
+# `FROM ghcr.io/openai/codex:0.144.6` (GHCR 403 fetching an anonymous pull
+# token), before the model was invoked, so it published no result at all.
+_LANE_FIXTURE = (
+    Path("tools/countyforge-github/tests/fixtures") / "implementation-lane-run-30691544362.json"
+)
+
+
+def test_the_run_30691544362_image_failure_is_not_a_model_outcome(tmp_path: Path) -> None:
+    fixture = json.loads(_LANE_FIXTURE.read_text(encoding="utf-8"))
+    assert fixture["model_invoked"] is False
+    assert fixture["published_implementation_result"] is False
+    assert any("ghcr.io/openai/codex" in line for line in fixture["evidence"])
+
+    classified = classify_implementation_lane(
+        selected_provider=fixture["selected_provider"],
+        lane_results=fixture["lane_results"],
+        # The lane published nothing, so there is no result document to read.
+        result_path=tmp_path / "absent.json",
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == "implementation_provider_infrastructure_failed"
+    assert classified["details"]["provider"] == "openai"
+    assert classified["disposition"] != "implementation_model_failed"
+
+
+def test_a_failed_lane_that_did_publish_is_a_model_failure(tmp_path: Path) -> None:
+    result = _write(tmp_path / "countyforge-result.json", '{"ok":false,"mode":"implement"}')
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        result_path=result,
+    )
+    assert classified["disposition"] == "implementation_model_failed"
+
+
+def test_a_successful_selected_lane_completes(tmp_path: Path) -> None:
+    result = _write(tmp_path / "countyforge-result.json", '{"ok":true,"mode":"implement"}')
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "success"},
+        result_path=result,
+    )
+    assert classified == {
+        "ok": True,
+        "disposition": "completed",
+        "details": {"provider": "sakana"},
+    }
+
+
+@pytest.mark.parametrize("provider", ["", "anthropic", "OPENAI", "unknown", "sakana-v2"])
+def test_an_unsupported_provider_fails_closed(tmp_path: Path, provider: str) -> None:
+    classified = classify_implementation_lane(
+        selected_provider=provider,
+        lane_results={"openai": "success", "sakana": "skipped"},
+        result_path=None,
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == "unsupported_implementation_provider"
+
+
+@pytest.mark.parametrize(
+    "lane_results",
+    [
+        {"openai": "success", "sakana": "success"},
+        {"openai": "failure", "sakana": "failure"},
+        {"openai": "skipped", "sakana": "skipped"},
+    ],
+)
+def test_exactly_one_lane_must_execute(tmp_path: Path, lane_results: dict[str, str]) -> None:
+    classified = classify_implementation_lane(
+        selected_provider="openai", lane_results=lane_results, result_path=None
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == "implementation_provider_lane_ambiguous"
+
+
+def test_the_unselected_lane_cannot_supply_the_outcome(tmp_path: Path) -> None:
+    """An artifact from a provider the claim did not select is never accepted."""
+
+    result = _write(tmp_path / "countyforge-result.json", '{"ok":true,"mode":"implement"}')
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "success", "sakana": "skipped"},
+        result_path=result,
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == "implementation_provider_lane_mismatch"

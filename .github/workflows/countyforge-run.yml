@@ -967,7 +967,8 @@ jobs:
           print(hashlib.sha256(payload).hexdigest())
           PY
           )"
-          ./.ai/codex/10-build-countyforge-implement-image.sh
+          CODEX_PROVIDER=openai CODEX_MODEL_REF=openai.gpt-5.6 \
+            ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -1058,7 +1059,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: countyforge-implementation-result-${{ inputs.run_id }}
+          name: countyforge-implementation-result-openai-${{ inputs.run_id }}
           path: ${{ runner.temp }}/sanitized-implementation-evidence
           if-no-files-found: warn
           retention-days: 14
@@ -1067,7 +1068,187 @@ jobs:
         if: steps.freeze.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          name: countyforge-implementation-bundle-openai-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/countyforge-workspace.tar.gz
+            ${{ runner.temp }}/frozen-implementation-result/countyforge-implementation-result.json
+          if-no-files-found: error
+          retention-days: 14
+
+  implementation-sakana:
+    name: Isolated Sakana implementation workspace
+    if: inputs.command == 'implement' && needs.claim.outputs.provider == 'sakana'
+    needs: [claim, prepare, mark-running, implementation-packet]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out immutable trusted tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.trusted_tool_sha }}
+          path: trusted
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download target and implementation packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-prepared-${{ inputs.run_id }}
+          path: prepared
+      - name: Download implementation packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: countyforge-implementation-packet-${{ inputs.run_id }}
+          path: prepared/implementation
+      - name: Install trusted CountyForge packages
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+      - name: Provision isolated workspace and resolve request
+        env:
+          TRIGGER_B64: ${{ inputs.trigger }}
+          COUNTYFORGE_RUN_ID: ${{ inputs.run_id }}
+          TARGET_HEAD_SHA: ${{ needs.claim.outputs.head_sha }}
+        run: |
+          python3 - "$TRIGGER_B64" "$RUNNER_TEMP/countyforge-trigger.json" <<'PY'
+          import base64, pathlib, sys
+          pathlib.Path(sys.argv[2]).write_bytes(base64.urlsafe_b64decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 4)))
+          PY
+          git clone --no-checkout \
+            --config core.hooksPath=/dev/null \
+            --config core.fsmonitor=false \
+            --config credential.helper= \
+            --config protocol.ext.allow=never \
+            prepared/target.git "$RUNNER_TEMP/countyforge-workspace"
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.hooksPath /dev/null
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local core.fsmonitor false
+          git -C "$RUNNER_TEMP/countyforge-workspace" config --local credential.helper ""
+          git -C "$RUNNER_TEMP/countyforge-workspace" checkout --detach "$TARGET_HEAD_SHA"
+          mkdir -p "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID"
+          cp prepared/implementation/countyforge-implementation-*.json "trusted/.ai/contexts/$COUNTYFORGE_RUN_ID/"
+          change_name="$(jq -er '.command.arguments.openspec_change' "$RUNNER_TEMP/countyforge-trigger.json")"
+          cd trusted
+          uv sync --frozen --package countyforge-github
+          uv run --package countyforge-github countyforge-github build-run-request \
+            --trigger "$RUNNER_TEMP/countyforge-trigger.json" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --implementation-packet ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-packet.json" \
+            --implementation-manifest ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-context-manifest.json" \
+            --implementation-task-plan ".ai/contexts/$COUNTYFORGE_RUN_ID/countyforge-implementation-task-plan.json" \
+            --workspace "$RUNNER_TEMP/countyforge-workspace" \
+            --workspace-binding "$RUNNER_TEMP/countyforge-workspace-binding.json" \
+            > "$RUNNER_TEMP/countyforge-request.json"
+          export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
+          import hashlib, json, sys
+          document = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          payload = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+          print(hashlib.sha256(payload).hexdigest())
+          PY
+          )"
+          CODEX_PROVIDER=sakana CODEX_MODEL_REF=sakana.fugu-ultra \
+            ./.ai/codex/10-build-countyforge-implement-image.sh
+      - name: Invoke implementation model with selected provider only
+        env:
+          SAKANA_API_KEY: ${{ secrets.SAKANA_API_KEY }}
+        run: |
+          cd trusted
+          set +e
+          uv run --package countyforge-runner countyforge-runner run \
+            --request "$RUNNER_TEMP/countyforge-request.json" \
+            --contract-root "$GITHUB_WORKSPACE/trusted" \
+            --target-root "$GITHUB_WORKSPACE/prepared/target.git" \
+            --json > "$RUNNER_TEMP/countyforge-result.json"
+          echo "$?" > "$RUNNER_TEMP/countyforge-exit-code"
+          set -e
+      - name: Freeze only the trusted, declared implementation bundle
+        id: freeze
+        continue-on-error: true
+        env:
+          WORKSPACE_DIR: ${{ runner.temp }}/countyforge-workspace
+          RUN_ID: ${{ inputs.run_id }}
+          ISSUE_NUMBER: ${{ inputs.target_number }}
+          BASE_SHA: ${{ needs.claim.outputs.base_sha }}
+        run: |
+          result_file="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          bundle="$RUNNER_TEMP/countyforge-safe-implementation"
+          test -n "$result_file"
+          change_name="$(jq -er '.openspec_change' "$result_file")"
+          test -f "$result_file"
+          cd trusted
+          uv run --package countyforge-github countyforge-github freeze-implementation-artifact \
+            --result "$result_file" --workspace "$WORKSPACE_DIR" --policy-root "$GITHUB_WORKSPACE/trusted" \
+            --output "$bundle" --run-id "$RUN_ID" --issue-number "$ISSUE_NUMBER" \
+            --change-name "$change_name" --base-sha "$BASE_SHA"
+          tar --sort=name -czf "$RUNNER_TEMP/countyforge-workspace.tar.gz" -C "$bundle" .
+          mkdir -p "$RUNNER_TEMP/frozen-implementation-result"
+          cp "$result_file" "$RUNNER_TEMP/frozen-implementation-result/countyforge-implementation-result.json"
+      - name: Prepare sanitized implementation evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
+          python3 - "$RUNNER_TEMP/sanitized-implementation-evidence" "$RUNNER_TEMP" <<'PY'
+          import hashlib, json, pathlib, shutil, sys
+          destination = pathlib.Path(sys.argv[1])
+          runner_temp = pathlib.Path(sys.argv[2])
+          candidates = list(pathlib.Path("trusted/.ai/reviews/countyforge/implement").rglob("countyforge-implementation-result.json"))
+          for source in candidates:
+              try:
+                  document = json.loads(source.read_text(encoding="utf-8"))
+              except (OSError, UnicodeError, json.JSONDecodeError):
+                  continue
+              if isinstance(document.get("implementation"), dict):
+                  document["implementation"].pop("file_bundle", None)
+                  document["implementation"]["files_content_omitted"] = True
+              elif isinstance(document, dict):
+                  document.pop("file_bundle", None)
+                  document["files_content_omitted"] = True
+              output = destination / "countyforge-implementation-result.sanitized.json"
+              output.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+              break
+          for source in candidates:
+              events = source.with_name("countyforge-implementation-model-events.ndjson")
+              if events.is_file():
+                  raw = events.read_bytes()
+                  (destination / "countyforge-implementation-model-events.summary.json").write_text(
+                      json.dumps({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "raw_content_omitted": True}) + "\n",
+                      encoding="utf-8",
+                  )
+                  break
+          for name in ("countyforge-result.json", "countyforge-exit-code"):
+              source = runner_temp / name
+              if source.is_file():
+                  if name.endswith(".json"):
+                      try:
+                          document = json.loads(source.read_text(encoding="utf-8"))
+                          if isinstance(document.get("implementation"), dict):
+                              document["implementation"].pop("file_bundle", None)
+                              document["implementation"]["files_content_omitted"] = True
+                          destination.joinpath(name).write_text(
+                              json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
+                          )
+                      except (OSError, UnicodeError, json.JSONDecodeError):
+                          destination.joinpath(name).write_text(
+                              '{"sanitized":true,"json_unavailable":true}\n', encoding="utf-8"
+                          )
+                  else:
+                      shutil.copyfile(source, destination / name)
+          PY
+      - name: Upload implementation execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-result-sakana-${{ inputs.run_id }}
+          path: ${{ runner.temp }}/sanitized-implementation-evidence
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+      - name: Upload frozen implementation bundle
+        if: steps.freeze.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: countyforge-implementation-bundle-sakana-${{ inputs.run_id }}
           path: |
             ${{ runner.temp }}/countyforge-workspace.tar.gz
             ${{ runner.temp }}/frozen-implementation-result/countyforge-implementation-result.json
@@ -1077,7 +1258,7 @@ jobs:
   implementation-validation:
     name: Trusted implementation validation
     if: always() && inputs.command == 'implement' && needs.claim.result == 'success'
-    needs: [claim, implementation-packet, implementation-openai]
+    needs: [claim, implementation-packet, implementation-openai, implementation-sakana]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1091,18 +1272,52 @@ jobs:
           path: trusted
           persist-credentials: false
           fetch-depth: 1
-      - name: Download implementation artifacts
+      - name: Download selected-provider implementation artifacts
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: countyforge-implementation-result-${{ inputs.run_id }}
+          name: countyforge-implementation-result-${{ needs.claim.outputs.provider }}-${{ inputs.run_id }}
           path: ${{ runner.temp }}/implementation-result
-      - name: Download frozen implementation bundle
+      - name: Download selected-provider frozen implementation bundle
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          name: countyforge-implementation-bundle-${{ needs.claim.outputs.provider }}-${{ inputs.run_id }}
           path: ${{ runner.temp }}/implementation-result
+      - name: Require the selected implementation provider lane
+        env:
+          SELECTED_PROVIDER: ${{ needs.claim.outputs.provider }}
+          OPENAI_RESULT: ${{ needs.implementation-openai.result }}
+          SAKANA_RESULT: ${{ needs.implementation-sakana.result }}
+        run: |
+          # Exactly one provider lane may execute. An unimplemented or unknown
+          # provider, or both lanes running, is a routing defect and must never
+          # reach validation.
+          case "$SELECTED_PROVIDER" in
+            openai|sakana) ;;
+            *) echo "::error::Unsupported implementation provider: ${SELECTED_PROVIDER:-unset}"; exit 2 ;;
+          esac
+          ran=0
+          [ "$OPENAI_RESULT" != "skipped" ] && ran=$((ran + 1))
+          [ "$SAKANA_RESULT" != "skipped" ] && ran=$((ran + 1))
+          if [ "$ran" -ne 1 ]; then
+            echo "::error::Expected exactly one implementation provider lane; openai=$OPENAI_RESULT sakana=$SAKANA_RESULT"
+            exit 2
+          fi
+          selected_result="$OPENAI_RESULT"
+          [ "$SELECTED_PROVIDER" = "sakana" ] && selected_result="$SAKANA_RESULT"
+          if [ "$selected_result" = "skipped" ]; then
+            echo "::error::The selected provider lane ($SELECTED_PROVIDER) did not run"
+            exit 2
+          fi
+          # Fail closed when the selected lane produced no result evidence, so a
+          # provider or image provisioning failure can never be validated as a
+          # model outcome.
+          if [ ! -s "$RUNNER_TEMP/implementation-result/countyforge-result.json" ]; then
+            echo "::error::Selected provider ($SELECTED_PROVIDER) published no implementation result; treating as provider_infrastructure_failed"
+            exit 2
+          fi
+          echo "selected implementation provider: $SELECTED_PROVIDER"
       - name: Download frozen implementation packet
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
