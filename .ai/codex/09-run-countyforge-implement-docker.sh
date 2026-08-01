@@ -13,6 +13,8 @@ set -euo pipefail
 : "${PROMPT_PATH:?PROMPT_PATH is required}"
 : "${OUT_DIR:?OUT_DIR is required}"
 : "${CODEX_IMAGE:?CODEX_IMAGE is required}"
+: "${MAX_MODEL_INPUT_CHARS:?MAX_MODEL_INPUT_CHARS is required}"
+: "${MAX_INPUT_BYTES:?MAX_INPUT_BYTES is required}"
 
 # Provider routing is resolved from the trusted request before any credential is
 # read, so only the selected provider's key and endpoint ever reach the model.
@@ -107,77 +109,95 @@ PY
 # model has a tested input path instead of relying on undeclared filesystem capabilities.
 MODEL_WORKSPACE="$OUT_DIR/model-workspace"
 MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"
+PROMPT_PROVENANCE="$OUT_DIR/countyforge-implementation-prompt.provenance.json"
+# The prompt is assembled by trusted, tested code under a character budget that
+# represents the provider's real input ceiling. Run 30698203658 shipped 2,103,429
+# characters to a provider accepting 1,048,576 and was rejected before the model
+# ran, because the adapter only checked a 10 MiB byte ceiling of its own.
+set +e
 python3 - "$PROMPT_PATH" "$IMPLEMENTATION_PACKET_PATH" "$IMPLEMENTATION_MANIFEST_PATH" \
   "$IMPLEMENTATION_TASK_PLAN_PATH" "$IMPLEMENTATION_SCHEMA_PATH" "$IMPLEMENTATION_COMMAND_POLICY_PATH" \
-  "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" <<'PY'
+  "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" "$PROMPT_PROVENANCE" \
+  "$MAX_MODEL_INPUT_CHARS" "$MAX_INPUT_BYTES" <<'PY'
 import json
 import pathlib
 import shutil
 import sys
 
+sys.path.insert(0, "tools/countyforge-runner/src")
+from countyforge_runner.errors import KernelError  # noqa: E402
+from countyforge_runner.implementation_prompt import (  # noqa: E402
+    PromptBudget,
+    build_implementation_prompt,
+    select_source_files,
+)
+
 (
-    prompt_path,
-    packet_path,
-    manifest_path,
-    task_path,
-    schema_path,
-    command_policy_path,
-    workspace_path,
-    model_root,
-    output,
+    prompt_path, packet_path, manifest_path, task_path, schema_path, command_policy_path,
+    workspace_path, model_root, output, provenance_path, max_chars, max_bytes,
 ) = sys.argv[1:]
 source = pathlib.Path(workspace_path).resolve(strict=True)
 model = pathlib.Path(model_root).resolve()
 if model.exists():
     shutil.rmtree(model)
 model.mkdir(parents=True)
-excluded = {".git", ".env", ".ai/policies", ".github/workflows"}
-max_bytes = 4 * 1024 * 1024
-used = 0
-files: list[tuple[str, str]] = []
-for path in sorted(source.rglob("*")):
-    if not path.is_file() or path.is_symlink():
-        continue
-    relative = path.relative_to(source).as_posix()
-    if any(relative == item or relative.startswith(item + "/") for item in excluded):
-        continue
-    if any(part in {".venv", ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"} for part in path.relative_to(source).parts):
-        continue
-    try:
-        raw = path.read_bytes()
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        continue
-    if used + len(raw) > max_bytes:
-        continue
-    used += len(raw)
-    files.append((relative, text))
-    target = model / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(raw)
 
-sections = [pathlib.Path(prompt_path).read_text(encoding="utf-8")]
-for title, path in (
-    ("IMPLEMENTATION PACKET", packet_path),
-    ("IMPLEMENTATION CONTEXT MANIFEST", manifest_path),
-    ("IMPLEMENTATION TASK PLAN", task_path),
-    ("IMPLEMENTATION RESULT SCHEMA", schema_path),
-    ("IMPLEMENTATION COMMAND POLICY", command_policy_path),
-):
-    sections.append(f"\n\n===== {title} =====\n{pathlib.Path(path).read_text(encoding='utf-8')}")
-sections.append("\n\n===== SOURCE WORKSPACE SNAPSHOT (TRUSTED READ-ONLY CONTEXT) =====")
-for relative, text in files:
-    sections.append(f"\n\n--- {relative} ---\n{text}")
-sections.append(
-    "\n\nThe dynamic context above is the complete bounded input to this run. "
-    "Use only the declared file_bundle output; do not claim commands or tests that are not "
-    "represented by trusted evidence."
+task_plan = json.loads(pathlib.Path(task_path).read_text(encoding="utf-8"))
+budget = PromptBudget(maximum_model_input_chars=int(max_chars), max_input_bytes=int(max_bytes))
+try:
+    build = build_implementation_prompt(
+        instructions=pathlib.Path(prompt_path).read_text(encoding="utf-8"),
+        contracts={
+            "packet": pathlib.Path(packet_path).read_text(encoding="utf-8"),
+            "manifest": pathlib.Path(manifest_path).read_text(encoding="utf-8"),
+            "task_plan": pathlib.Path(task_path).read_text(encoding="utf-8"),
+            "result_schema": pathlib.Path(schema_path).read_text(encoding="utf-8"),
+            "command_policy": pathlib.Path(command_policy_path).read_text(encoding="utf-8"),
+        },
+        workspace=source,
+        task_plan=task_plan,
+        budget=budget,
+    )
+except KernelError as error:
+    pathlib.Path(provenance_path).write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "ok": False,
+                "disposition": error.code,
+                "details": error.details,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raise SystemExit(2) from None
+
+# The container mounts a de-Git workspace copy; only policy-eligible files are
+# copied, matching what the prompt is allowed to describe.
+selected, _ = select_source_files(source, task_plan=task_plan)
+for path in selected:
+    target = model / path.relative_to(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, target)
+
+pathlib.Path(output).write_text(build.prompt, encoding="utf-8")
+pathlib.Path(provenance_path).write_text(
+    json.dumps({"ok": True, **build.provenance(budget)}, sort_keys=True) + "\n",
+    encoding="utf-8",
 )
-prompt = "".join(sections)
-if len(prompt.encode("utf-8")) > 10 * 1024 * 1024:
-    raise SystemExit("implementation prompt exceeds the profile input budget")
-pathlib.Path(output).write_text(prompt, encoding="utf-8")
 PY
+PROMPT_STATUS=$?
+set -e
+if [ "$PROMPT_STATUS" -ne 0 ]; then
+  # Fail before the provider network, proxy, or model container exists. The
+  # provider was never contacted, so this is never a model failure.
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"disposition\":\"implementation_prompt_budget_exceeded\"}" \
+    > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
+  echo "error: the bounded implementation prompt exceeds its trusted input budget" >&2
+  exit 2
+fi
 
 # The model receives a de-Git workspace copy.  Trusted Git metadata remains in WORKSPACE_PATH
 # for host-side binding, diffing, freezing, and publication only.

@@ -30,6 +30,17 @@ The implementation profile SHALL declare every permitted provider with its own p
 - **WHEN** the selected lane fails while provisioning its image and publishes no implementation result
 - **THEN** the outcome is recorded as a provider infrastructure failure rather than a model failure, and validation refuses to proceed
 
+### Requirement: Bounded implementation model input
+The implementation prompt SHALL be assembled under a character budget declared in the trusted profile that leaves margin beneath the selected provider's hard input limit, because providers count characters and a byte ceiling cannot represent that limit. Mandatory contracts -- instructions, packet, context manifest, task plan, result schema, and command policy -- MUST be included byte-identically and MUST NOT be truncated; if they alone exceed the budget, assembly MUST fail before the provider is contacted. Source context SHALL be selected deterministically, prioritized by the trusted task plan's approved paths, added only as complete files, and stopped before the budget is exhausted. Every included and omitted path MUST be recorded with a bounded omission reason. A budget failure MUST be classified as input preparation or provider infrastructure, never as a model failure, and its evidence MUST NOT echo prompt or source content.
+
+#### Scenario: Refuse an oversized prompt before invocation
+- **WHEN** the assembled prompt would exceed the configured character budget
+- **THEN** assembly fails before the provider network, proxy, or model container exists, and the failure is recorded with the configured ceiling and measured counts only
+
+#### Scenario: Prioritize approved implementation context
+- **WHEN** source context is selected for a task plan naming approved paths
+- **THEN** files under those paths are included before unrelated repository files, selection is identical across repeated builds, and no file is included partially
+
 ### Requirement: Isolated implementation workspace
 The executable profile SHALL provide the model only an ephemeral writable, de-Git workspace snapshot derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible. Trusted code MUST serialize the bounded packet, manifest, task plan, prompt, and size-limited source snapshot into the model input through the declared `bounded_stdin` contract; the model MUST NOT rely on undeclared filesystem-reading capabilities. Git metadata remains available only to trusted host tooling.
 

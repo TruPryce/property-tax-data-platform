@@ -551,13 +551,20 @@ def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -
     assert '"python:3.12-alpine@sha256:' in adapter
     assert 'MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"' in adapter
     assert "pathlib.Path(prompt_path).read_text" in adapter
-    assert '"IMPLEMENTATION RESULT SCHEMA"' in adapter
-    assert '"IMPLEMENTATION COMMAND POLICY"' in adapter
     assert ' < "$MODEL_PROMPT"' in adapter
-    assert 'excluded = {".git", ".env", ".ai/policies", ".github/workflows"}' in adapter
+    # Prompt assembly moved into the tested builder; the mandatory sections and
+    # snapshot exclusions are asserted there, where they can be exercised.
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    assert '"IMPLEMENTATION RESULT SCHEMA"' in builder
+    assert '"IMPLEMENTATION COMMAND POLICY"' in builder
+    for excluded in (".git", ".env", ".ai/policies", ".github/workflows"):
+        assert f'"{excluded}"' in builder
     assert profile["model_input"] == {
         "mode": "bounded_stdin",
         "prompt_path": ".ai/prompts/countyforge-implement.v1.md",
+        "maximum_model_input_chars": 950_000,
         "workspace_snapshot_max_bytes": 4 * 1024 * 1024,
         "contract_inputs": [
             "packet",

@@ -613,7 +613,13 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
     assert 'MODEL_WORKSPACE="$OUT_DIR/model-workspace"' in adapter
-    assert 'excluded = {".git", ".env", ".ai/policies", ".github/workflows"}' in adapter
+    # Snapshot exclusions moved into the tested prompt builder; the guarantee is
+    # unchanged and is now enforced where it can be exercised directly.
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    for excluded in (".git", ".env", ".ai/policies", ".github/workflows"):
+        assert f'"{excluded}"' in builder
     assert ' < "$MODEL_PROMPT"' in adapter
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
@@ -1545,3 +1551,109 @@ def test_publication_prep_passes_the_pre_freeze_implementation_fact() -> None:
     run = str(step["run"])
     assert "--implementation-result-present" in run
     assert ".implementation_result_present" in run
+
+
+_IMPLEMENT_ADAPTER = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(
+    encoding="utf-8"
+)
+
+
+def test_the_prompt_budget_gate_precedes_all_provider_activity() -> None:
+    """Run 30698203658 was rejected by the provider; this must fail before it."""
+
+    gate = _IMPLEMENT_ADAPTER.index('if [ "$PROMPT_STATUS" -ne 0 ]')
+    assert gate < _IMPLEMENT_ADAPTER.index("docker network create")
+    assert gate < _IMPLEMENT_ADAPTER.index("provider_proxy.py")
+    assert gate < _IMPLEMENT_ADAPTER.index("docker run --rm")
+    assert "implementation_prompt_budget_exceeded" in _IMPLEMENT_ADAPTER
+    # The trusted, tested builder is what assembles the prompt.
+    assert "build_implementation_prompt" in _IMPLEMENT_ADAPTER
+    assert "MAX_MODEL_INPUT_CHARS" in _IMPLEMENT_ADAPTER
+    assert "MAX_INPUT_BYTES" in _IMPLEMENT_ADAPTER
+
+
+def test_the_budget_failure_never_echoes_prompt_or_source_content() -> None:
+    failure = _IMPLEMENT_ADAPTER.split('if [ "$PROMPT_STATUS" -ne 0 ]')[1].split("fi")[0]
+    assert "$MODEL_PROMPT" not in failure
+    assert "cat " not in failure
+    assert "implementation_prompt_budget_exceeded" in failure
+
+
+def test_the_prompt_budget_change_preserves_the_sandbox_posture() -> None:
+    for flag in (
+        "--interactive",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        '--user "$(id -u):$(id -g)"',
+        "--disable shell_tool",
+        "--disable unified_exec",
+        '--allowed-host "$PROVIDER_HOST"',
+        '-e "$PROVIDER_CREDENTIAL"',
+    ):
+        assert flag in _IMPLEMENT_ADAPTER, flag
+    assert "--privileged" not in _IMPLEMENT_ADAPTER
+    assert "--network host" not in _IMPLEMENT_ADAPTER
+    # Mounts unchanged.
+    for mount in (
+        '-v "$MODEL_WORKSPACE:/workspace:rw"',
+        '-v "$OUT_DIR:/out:rw"',
+        '-v "$IMPLEMENTATION_PACKET_PATH:/workspace/implementation-packet.json:ro"',
+    ):
+        assert mount in _IMPLEMENT_ADAPTER, mount
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker is required to exercise stdin")
+def test_a_bounded_prompt_reaches_container_stdin_intact(tmp_path: Path) -> None:
+    """The budget fix must not regress prompt delivery."""
+
+    prompt = tmp_path / "prompt.md"
+    body = "SECTION\n" + ("x" * 50_000) + "\nEND\n"
+    prompt.write_text(body, encoding="utf-8")
+    with prompt.open("rb") as handle:
+        completed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--interactive",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges:true",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                _PROXY_IMAGE,
+                "sh",
+                "-c",
+                "cat",
+            ],
+            stdin=handle,
+            capture_output=True,
+            check=False,
+        )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.decode() == body
+
+
+def test_the_implementation_profile_declares_the_provider_safe_ceiling() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    model_input = profile["model_input"]
+    assert model_input["maximum_model_input_chars"] == 950_000
+    # The byte ceilings remain as defence in depth, not as the provider gate.
+    assert model_input["workspace_snapshot_max_bytes"] == 4_194_304
+    assert profile["budgets"]["defaults"]["max_input_bytes"] == 10_000_000
+
+
+def test_a_bounded_run_can_still_reach_freezing_and_validation() -> None:
+    """The budget gate must not remove the successful path."""
+
+    job = _implementation_jobs()["implementation-sakana"]
+    names = [step.get("name") for step in job["steps"]]
+    assert "Invoke implementation model with selected provider only" in names
+    assert "Freeze only the trusted, declared implementation bundle" in names
+    assert names.index("Invoke implementation model with selected provider only") < names.index(
+        "Freeze only the trusted, declared implementation bundle"
+    )
+    assert "implementation-sakana" in _implementation_jobs()["implementation-validation"]["needs"]

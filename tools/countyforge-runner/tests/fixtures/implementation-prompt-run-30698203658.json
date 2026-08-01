@@ -1,0 +1,14 @@
+{
+  "run_id": 30698203658,
+  "provider": "sakana",
+  "failure": "turn/start failed: Input exceeds the maximum length of 1048576 characters",
+  "input_error_code": "input_too_large",
+  "provider_max_chars": 1048576,
+  "actual_chars": 2103429,
+  "runner_disposition": "adapter_failed",
+  "runner_exit_code": 1,
+  "adapter_budgets_at_failure": {
+    "workspace_snapshot_max_bytes": 4194304,
+    "assembled_prompt_max_bytes": 10485760
+  }
+}
