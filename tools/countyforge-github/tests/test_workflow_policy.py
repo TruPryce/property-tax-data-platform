@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
 
@@ -860,3 +862,174 @@ def test_maintenance_is_audit_only_outside_the_per_target_state_lane() -> None:
     assert "update_comment" not in source
     assert "render_status" not in source
     assert "resolve_default_branch" not in source
+
+
+# Run 30679804092 failed with `jq: error: IN/3 is not defined` before
+# build-implementation-packet ran: `IN` takes one or two arguments, so the
+# three-argument form was a compile error rather than a failed check. Asserting
+# on source text could not have caught that, so this fixture executes the real
+# expression, extracted from the workflow, with the runner's jq.
+_TRIGGER_FIXTURE = Path("tools/countyforge-github/tests/fixtures") / (
+    "implementation-trigger-run-30679804092.json"
+)
+# The merge commit of planning PR #31: a public Git object ID, not a credential.
+# The fixture stores a placeholder because JSON cannot carry an inline pragma,
+# so every executed gate assertion runs against this real value.
+_RUN_MERGE_SHA = "7f8f8a440f529492a0d2ff9868e2f0b0098bb49a"  # pragma: allowlist secret
+_PLACEHOLDER_SHA = "7f8f8a4400000000000000000000000000000000"
+
+
+def _load_trigger() -> dict[str, Any]:
+    """Load the run's trigger with its real commit identity restored."""
+
+    raw = _TRIGGER_FIXTURE.read_text(encoding="utf-8")
+    return json.loads(raw.replace(_PLACEHOLDER_SHA, _RUN_MERGE_SHA))
+
+
+def _packet_step() -> dict[str, Any]:
+    steps = _jobs("countyforge-run.yml")["implementation-packet"]["steps"]
+    return next(
+        step for step in steps if step.get("name") == "Build accepted implementation packet"
+    )
+
+
+def _approval_gate_program() -> str:
+    """Extract the exact jq program the workflow runs, never a copy of it."""
+
+    run = str(_packet_step()["run"])
+    # Anchor on the continued `jq -e \` line: `jq -er` appears earlier in the
+    # step and would otherwise capture a different program entirely.
+    match = re.search(r"jq -e \\\n\s*'(.*?)'", run, re.S)
+    assert match is not None, run
+    return match.group(1)
+
+
+def _run_gate(trigger: dict[str, Any], tmp_path: Path) -> int:
+    path = tmp_path / "trigger.json"
+    path.write_text(json.dumps(trigger), encoding="utf-8")
+    completed = subprocess.run(
+        ["jq", "-e", _approval_gate_program(), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # A compile error is exit 3 and is the defect under test; surface it loudly
+    # instead of letting it pass as an ordinary rejection.
+    assert "not defined" not in completed.stderr, completed.stderr
+    assert "compile error" not in completed.stderr, completed.stderr
+    return completed.returncode
+
+
+def _trigger_with(**approval: Any) -> dict[str, Any]:
+    trigger = _load_trigger()
+    for key, value in approval.items():
+        if value is _ABSENT:
+            trigger["implementation_approval"].pop(key, None)
+        else:
+            trigger["implementation_approval"][key] = value
+    return trigger
+
+
+_ABSENT = object()
+
+
+def test_the_run_30679804092_fixture_is_a_valid_implementation_trigger() -> None:
+    """The gate must be exercised against the accepted trigger shape."""
+
+    from countyforge_github.contracts import ControlContracts
+
+    trigger = _load_trigger()
+    ControlContracts().validate("trigger", trigger)
+    approval = trigger["implementation_approval"]
+    assert approval["planning_pr_number"] == 31
+    assert approval["planning_pr_merge_sha"] == _RUN_MERGE_SHA
+    assert approval["approval_actor_type"] == "User"
+    assert approval["approval_actor_login"] == "mikegtech"
+    assert approval["approval_permission"] == "admin"
+    assert trigger["command"]["arguments"]["openspec_change"] == "add-dallas-cad-parser-foundation"
+    assert trigger["workflow"]["run_id"] == 30679804092
+    # The stored shape stays schema-valid on its own.
+    ControlContracts().validate("trigger", json.loads(_TRIGGER_FIXTURE.read_text(encoding="utf-8")))
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to execute the gate")
+def test_the_approval_gate_compiles_and_accepts_the_failing_run(tmp_path: Path) -> None:
+    assert _run_gate(_load_trigger(), tmp_path) == 0
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to execute the gate")
+@pytest.mark.parametrize("permission", ["admin", "maintain", "write"])
+def test_the_approval_gate_accepts_every_authorized_permission(
+    tmp_path: Path, permission: str
+) -> None:
+    assert _run_gate(_trigger_with(approval_permission=permission), tmp_path) == 0
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to execute the gate")
+@pytest.mark.parametrize(
+    "permission",
+    [
+        "read",
+        "triage",
+        "",
+        None,
+        True,
+        False,
+        0,
+        # `index` searches for a subsequence when given an array, so an array
+        # permission would pass a bare membership test.
+        ["admin"],
+        ["admin", "maintain", "write"],
+        {"permission": "admin"},
+        "Admin",
+        "admin ",
+        "admin,maintain",
+        "administrator",
+        _ABSENT,
+    ],
+)
+def test_the_approval_gate_refuses_every_other_permission(
+    tmp_path: Path, permission: object
+) -> None:
+    assert _run_gate(_trigger_with(approval_permission=permission), tmp_path) != 0
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to execute the gate")
+@pytest.mark.parametrize("number", [0, -1, None, "31", True, [31], {"number": 31}, 3.5, _ABSENT])
+def test_the_approval_gate_refuses_a_malformed_planning_pr_number(
+    tmp_path: Path, number: object
+) -> None:
+    assert _run_gate(_trigger_with(planning_pr_number=number), tmp_path) != 0
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to execute the gate")
+@pytest.mark.parametrize(
+    "merge_sha",
+    [
+        "",
+        None,
+        True,
+        31,
+        [_RUN_MERGE_SHA],
+        _RUN_MERGE_SHA.upper(),
+        _RUN_MERGE_SHA[:-1],
+        _RUN_MERGE_SHA + "a",
+        _RUN_MERGE_SHA[:-1] + "z",
+        _ABSENT,
+    ],
+)
+def test_the_approval_gate_refuses_a_malformed_merge_sha(tmp_path: Path, merge_sha: object) -> None:
+    assert _run_gate(_trigger_with(planning_pr_merge_sha=merge_sha), tmp_path) != 0
+
+
+def test_the_approval_gate_precedes_and_guards_packet_construction() -> None:
+    """The gate is a fail-closed preflight, not an afterthought."""
+
+    run = str(_packet_step()["run"])
+    assert run.index("jq -e \\") < run.index("build-implementation-packet")
+    # Portable membership only; `IN` is not defined for three arguments.
+    assert "IN(" not in run
+    assert "index($permission)" in run
+    # The Python eligibility validation this only precedes stays in place.
+    assert "build-implementation-packet" in run
+    assert "--planning-pr-merged" in run
