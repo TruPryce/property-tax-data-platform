@@ -331,6 +331,7 @@ def classify_implementation_lane(
     implementation_result_present: bool | None = None,
     freeze_outcome: str | None = None,
     frozen_bundle_present: bool | None = None,
+    adapter_disposition: str | None = None,
 ) -> JsonObject:
     """Classify which implementation provider lane owns a run's outcome.
 
@@ -357,6 +358,12 @@ def classify_implementation_lane(
             executed=executed[0],
             selected=selected_provider,
         )
+
+    # The adapter says exactly why it stopped when it stopped before the model.
+    # That is strictly more specific than anything inferable downstream, so it
+    # wins over the generic infrastructure classification.
+    if isinstance(adapter_disposition, str) and _DISPOSITION.fullmatch(adapter_disposition):
+        return _lane_failure(adapter_disposition, provider=selected_provider)
 
     # Before a valid runner result exists, any failure is infrastructure: the
     # image, the credential, the container, or the adapter -- not the model.

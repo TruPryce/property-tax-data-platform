@@ -13,6 +13,9 @@ set -euo pipefail
 : "${PROMPT_PATH:?PROMPT_PATH is required}"
 : "${OUT_DIR:?OUT_DIR is required}"
 : "${CODEX_IMAGE:?CODEX_IMAGE is required}"
+: "${MAX_MODEL_INPUT_CHARS:?MAX_MODEL_INPUT_CHARS is required}"
+: "${MAX_INPUT_BYTES:?MAX_INPUT_BYTES is required}"
+: "${MAX_WORKSPACE_SNAPSHOT_BYTES:?MAX_WORKSPACE_SNAPSHOT_BYTES is required}"
 
 # Provider routing is resolved from the trusted request before any credential is
 # read, so only the selected provider's key and endpoint ever reach the model.
@@ -29,7 +32,7 @@ if [ -z "$PROVIDER_SECRET_VALUE" ]; then
   # 30695076693 reached the model container with an empty key and produced no
   # usable bundle, while the wrapper job still concluded success.
   mkdir -p "$OUT_DIR"
-  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"credential_name\":\"$PROVIDER_CREDENTIAL\",\"credential_present\":false,\"disposition\":\"implementation_provider_credential_missing\"}" \
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"credential_name\":\"$PROVIDER_CREDENTIAL\",\"credential_present\":false,\"adapter_disposition\":\"implementation_provider_credential_missing\"}" \
     > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
   echo "error: the selected implementation provider credential is unavailable: $PROVIDER_CREDENTIAL" >&2
   exit 2
@@ -105,79 +108,169 @@ PY
 # The implementation profile intentionally exposes no shell or file-reading tool.  Build a
 # bounded, explicit prompt context from the frozen contracts and a source snapshot so the
 # model has a tested input path instead of relying on undeclared filesystem capabilities.
+scan_evidence_for_credential() {
+  if [ -z "$PROVIDER_SECRET_VALUE" ]; then
+    return 0
+  fi
+  PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+secret = os.environ.get("PROVIDER_SECRET", "")
+if not secret:
+    raise SystemExit(0)
+leaked = False
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    try:
+        data = path.read_bytes()
+    except OSError:
+        continue
+    if secret.encode() in data:
+        leaked = True
+        path.unlink(missing_ok=True)
+if leaked:
+    raise SystemExit("provider credential detected in implementation evidence")
+PY
+}
+
 MODEL_WORKSPACE="$OUT_DIR/model-workspace"
 MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"
+PROMPT_PROVENANCE="$OUT_DIR/countyforge-implementation-prompt.provenance.json"
+LANE_EVIDENCE="$OUT_DIR/countyforge-implementation-lane-evidence.json"
+# The prompt is assembled by trusted, tested code under a character budget that
+# represents the provider's real input ceiling. Run 30698203658 shipped 2,103,429
+# characters to a provider accepting 1,048,576 and was rejected before the model
+# ran, because the adapter only checked a 10 MiB byte ceiling of its own.
+set +e
 python3 - "$PROMPT_PATH" "$IMPLEMENTATION_PACKET_PATH" "$IMPLEMENTATION_MANIFEST_PATH" \
   "$IMPLEMENTATION_TASK_PLAN_PATH" "$IMPLEMENTATION_SCHEMA_PATH" "$IMPLEMENTATION_COMMAND_POLICY_PATH" \
-  "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" <<'PY'
+  "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" "$PROMPT_PROVENANCE" \
+  "$MAX_MODEL_INPUT_CHARS" "$MAX_INPUT_BYTES" "$MAX_WORKSPACE_SNAPSHOT_BYTES" \
+  "$LANE_EVIDENCE" "$CODEX_PROVIDER" <<'PY'
 import json
 import pathlib
 import shutil
 import sys
 
-(
-    prompt_path,
-    packet_path,
-    manifest_path,
-    task_path,
-    schema_path,
-    command_policy_path,
-    workspace_path,
-    model_root,
-    output,
-) = sys.argv[1:]
-source = pathlib.Path(workspace_path).resolve(strict=True)
-model = pathlib.Path(model_root).resolve()
-if model.exists():
-    shutil.rmtree(model)
-model.mkdir(parents=True)
-excluded = {".git", ".env", ".ai/policies", ".github/workflows"}
-max_bytes = 4 * 1024 * 1024
-used = 0
-files: list[tuple[str, str]] = []
-for path in sorted(source.rglob("*")):
-    if not path.is_file() or path.is_symlink():
-        continue
-    relative = path.relative_to(source).as_posix()
-    if any(relative == item or relative.startswith(item + "/") for item in excluded):
-        continue
-    if any(part in {".venv", ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__"} for part in path.relative_to(source).parts):
-        continue
-    try:
-        raw = path.read_bytes()
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        continue
-    if used + len(raw) > max_bytes:
-        continue
-    used += len(raw)
-    files.append((relative, text))
-    target = model / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(raw)
+sys.path.insert(0, "tools/countyforge-runner/src")
 
-sections = [pathlib.Path(prompt_path).read_text(encoding="utf-8")]
-for title, path in (
-    ("IMPLEMENTATION PACKET", packet_path),
-    ("IMPLEMENTATION CONTEXT MANIFEST", manifest_path),
-    ("IMPLEMENTATION TASK PLAN", task_path),
-    ("IMPLEMENTATION RESULT SCHEMA", schema_path),
-    ("IMPLEMENTATION COMMAND POLICY", command_policy_path),
-):
-    sections.append(f"\n\n===== {title} =====\n{pathlib.Path(path).read_text(encoding='utf-8')}")
-sections.append("\n\n===== SOURCE WORKSPACE SNAPSHOT (TRUSTED READ-ONLY CONTEXT) =====")
-for relative, text in files:
-    sections.append(f"\n\n--- {relative} ---\n{text}")
-sections.append(
-    "\n\nThe dynamic context above is the complete bounded input to this run. "
-    "Use only the declared file_bundle output; do not claim commands or tests that are not "
-    "represented by trusted evidence."
-)
-prompt = "".join(sections)
-if len(prompt.encode("utf-8")) > 10 * 1024 * 1024:
-    raise SystemExit("implementation prompt exceeds the profile input budget")
-pathlib.Path(output).write_text(prompt, encoding="utf-8")
+(
+    prompt_path, packet_path, manifest_path, task_path, schema_path, command_policy_path,
+    workspace_path, model_root, output, provenance_path, max_chars, max_bytes,
+    max_snapshot_bytes, lane_evidence_path, provider,
+) = sys.argv[1:]
+
+
+def fail(disposition: str, **details: object) -> None:
+    """Emit the exact reason this preparation stopped.
+
+    The shell must never infer a budget problem from a nonzero exit: a malformed
+    task plan, an unreadable contract, or an unexpected exception are different
+    failures and are classified as preparation, not budget.
+    """
+
+    pathlib.Path(lane_evidence_path).write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "provider": provider,
+                "ok": False,
+                "adapter_disposition": disposition,
+                "details": details,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raise SystemExit(2)
+
+
+try:
+    from countyforge_runner.errors import KernelError
+    from countyforge_runner.implementation_prompt import (
+        PromptBudget,
+        build_implementation_prompt,
+    )
+
+    source = pathlib.Path(workspace_path).resolve(strict=True)
+    model = pathlib.Path(model_root).resolve()
+    if model.exists():
+        shutil.rmtree(model)
+    model.mkdir(parents=True)
+    task_plan = json.loads(pathlib.Path(task_path).read_text(encoding="utf-8"))
+    contracts = {
+        "packet": pathlib.Path(packet_path).read_text(encoding="utf-8"),
+        "manifest": pathlib.Path(manifest_path).read_text(encoding="utf-8"),
+        "task_plan": pathlib.Path(task_path).read_text(encoding="utf-8"),
+        "result_schema": pathlib.Path(schema_path).read_text(encoding="utf-8"),
+        "command_policy": pathlib.Path(command_policy_path).read_text(encoding="utf-8"),
+    }
+    instructions = pathlib.Path(prompt_path).read_text(encoding="utf-8")
+    budget = PromptBudget(maximum_model_input_chars=int(max_chars), max_input_bytes=int(max_bytes))
+except (OSError, UnicodeError, ValueError, ImportError) as error:
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
+
+try:
+    build = build_implementation_prompt(
+        instructions=instructions,
+        contracts=contracts,
+        workspace=source,
+        task_plan=task_plan,
+        budget=budget,
+    )
+except KernelError as error:
+    fail(error.code, **error.details)
+except Exception as error:  # noqa: BLE001 - classify, never mislabel as a budget failure
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
+
+try:
+    # The mounted workspace is exactly the bounded set the prompt describes.
+    # One bounded view in stdin and a larger one on disk would make the profile's
+    # declared snapshot bound false and let the model read what it was not shown.
+    copied = 0
+    for relative in build.included:
+        origin = source / relative
+        copied += origin.stat().st_size
+        if copied > int(max_snapshot_bytes):
+            fail(
+                "implementation_prompt_budget_exceeded",
+                reason="workspace_snapshot_bytes_exceeded",
+                workspace_snapshot_max_bytes=int(max_snapshot_bytes),
+            )
+        target = model / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origin, target)
+    pathlib.Path(output).write_text(build.prompt, encoding="utf-8")
+    pathlib.Path(provenance_path).write_text(
+        json.dumps(
+            {"ok": True, "workspace_snapshot_bytes": copied, **build.provenance(budget)},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+except SystemExit:
+    raise
+except Exception as error:  # noqa: BLE001 - materialization is preparation, not budget
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
 PY
+PROMPT_STATUS=$?
+set -e
+if [ "$PROMPT_STATUS" -ne 0 ]; then
+  # Fail before the provider network, proxy, or model container exists, carrying
+  # the exact disposition the assembly boundary reported rather than guessing.
+  if [ ! -s "$LANE_EVIDENCE" ]; then
+    printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"adapter_disposition\":\"implementation_prompt_preparation_failed\"}" \
+      > "$LANE_EVIDENCE"
+  fi
+  echo "error: implementation prompt preparation failed: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["adapter_disposition"])' "$LANE_EVIDENCE" 2>/dev/null || echo unknown)" >&2
+  exit 2
+fi
 
 # The model receives a de-Git workspace copy.  Trusted Git metadata remains in WORKSPACE_PATH
 # for host-side binding, diffing, freezing, and publication only.
@@ -211,6 +304,7 @@ docker inspect "$PROXY_NAME" --format '{{.State.Running}}' | grep -qx true || {
   echo "provider proxy failed" >&2
   exit 2
 }
+set +e
 docker run --rm \
   --interactive \
   --read-only \
@@ -241,6 +335,30 @@ docker run --rm \
     --output-last-message /out/countyforge-implementation-result.json \
     - \
   > "$OUT_DIR/countyforge-implementation-model-events.ndjson" < "$MODEL_PROMPT"
+
+MODEL_STATUS=$?
+set -e
+
+# Sanitize evidence on every path, including failure: the drift branch below
+# uploads this directory, and the workflow uploads it with `if: always()`.
+scan_evidence_for_credential
+
+# If the provider rejected the input after our own ceiling passed, the
+# configured ceiling has drifted from the provider's real limit. That is the
+# defect from run 30698203658 recurring, so it is classified distinctly rather
+# than folded into a generic adapter failure.
+if grep -q "input_too_large" "$OUT_DIR/countyforge-implementation-model-events.ndjson" 2>/dev/null; then
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"adapter_disposition\":\"implementation_prompt_ceiling_drift\",\"configured_max_model_input_chars\":$MAX_MODEL_INPUT_CHARS}" \
+    > "$LANE_EVIDENCE"
+  echo "error: the provider rejected an input our configured ceiling accepted; the ceiling has drifted" >&2
+  exit 2
+fi
+
+# Any other nonzero provider or model exit stays exactly what it was; it is
+# never converted into ceiling drift.
+if [ "$MODEL_STATUS" -ne 0 ]; then
+  exit "$MODEL_STATUS"
+fi
 
 # The model emits a bounded structured file bundle because no process-execution tool is
 # available inside the container. Trusted host-side materialization is limited to relative
@@ -277,28 +395,4 @@ PY
 # frozen by trusted tooling after this process exits; this scan covers the separate output
 # directory that is uploaded as workflow evidence.  A hit removes the offending file and
 # fails the adapter, so no provider value can cross the artifact boundary.
-if [ -n "$PROVIDER_SECRET_VALUE" ]; then
-  PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
-import os
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve(strict=True)
-secret = os.environ.get("PROVIDER_SECRET", "")
-if not secret:
-    raise SystemExit(0)
-leaked = False
-for path in sorted(root.rglob("*")):
-    if not path.is_file() or path.is_symlink():
-        continue
-    try:
-        data = path.read_bytes()
-    except OSError:
-        continue
-    if secret.encode() in data:
-        leaked = True
-        path.unlink(missing_ok=True)
-if leaked:
-    raise SystemExit("provider credential detected in implementation evidence")
-PY
-fi
+scan_evidence_for_credential

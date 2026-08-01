@@ -59,3 +59,19 @@
 - [x] 10.3 Deliver the bounded prompt to the model container, reproduced against the real invocation shape before changing any Docker posture.
 - [x] 10.4 Classify lane outcome from host-observed execution facts so a deliberately green wrapper job can never mean completed.
 - [x] 10.5 Emit bounded host-observed lane evidence from both provider jobs and preserve the classified disposition in terminal state.
+
+## 11. Bounded implementation model input
+
+- [x] 11.1 Declare a provider-safe `maximum_model_input_chars` in the trusted implementation profile and schema, keeping byte ceilings as defence in depth.
+- [x] 11.2 Extract prompt assembly into a tested module that reserves mandatory contracts, measures characters, and adds only whole source files.
+- [x] 11.3 Prioritize source context by the trusted task plan's approved paths, deterministically and with recorded included/omitted evidence.
+- [x] 11.4 Fail closed before any provider activity when the budget cannot be met, without echoing prompt or source content.
+- [x] 11.5 Record bounded prompt provenance and classify a budget failure as input preparation rather than a model outcome.
+- [x] 11.6 Define the gated character unit as the larger of code points and UTF-16 code units.
+- [x] 11.7 Refuse rather than elide any file under the task plan's approved paths.
+- [x] 11.8 Disclose elided source context to the model in the prompt and report budget utilisation as evidence.
+- [x] 11.9 Classify a provider rejection that the configured ceiling accepted as ceiling drift.
+- [x] 11.10 Report the specific assembly failure from the Python boundary instead of inferring one from a nonzero shell exit.
+- [x] 11.11 Materialize the model workspace from the same bounded set as the prompt and enforce the declared snapshot byte bound.
+- [x] 11.12 Carry the adapter disposition through lane evidence into canonical terminal state.
+- [x] 11.13 Capture the model command status so ceiling drift stays reachable on a nonzero provider exit, and sanitize evidence on every path.

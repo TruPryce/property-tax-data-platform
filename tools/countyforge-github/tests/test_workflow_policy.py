@@ -613,7 +613,13 @@ def test_implementation_model_has_no_shell_and_publication_has_lease_preflight()
     assert "--network=bridge" not in adapter
     assert "--disable shell_tool --disable unified_exec" in adapter
     assert 'MODEL_WORKSPACE="$OUT_DIR/model-workspace"' in adapter
-    assert 'excluded = {".git", ".env", ".ai/policies", ".github/workflows"}' in adapter
+    # Snapshot exclusions moved into the tested prompt builder; the guarantee is
+    # unchanged and is now enforced where it can be exercised directly.
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    for excluded in (".git", ".env", ".ai/policies", ".github/workflows"):
+        assert f'"{excluded}"' in builder
     assert ' < "$MODEL_PROMPT"' in adapter
     validation = str(jobs["implementation-validation"])
     assert "Provision the no-network command sandbox" in validation
@@ -1533,6 +1539,9 @@ def test_the_lane_evidence_step_actually_runs_and_emits_valid_json(
         "freeze_succeeded": False,
         "freeze_outcome": "failure",
         "frozen_bundle_present": False,
+        # No adapter document present in this fixture, so the field is explicit
+        # rather than absent.
+        "adapter_disposition": None,
     }
 
 
@@ -1545,3 +1554,287 @@ def test_publication_prep_passes_the_pre_freeze_implementation_fact() -> None:
     run = str(step["run"])
     assert "--implementation-result-present" in run
     assert ".implementation_result_present" in run
+
+
+_IMPLEMENT_ADAPTER = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(
+    encoding="utf-8"
+)
+
+
+def test_the_prompt_budget_gate_precedes_all_provider_activity() -> None:
+    """Run 30698203658 was rejected by the provider; this must fail before it."""
+
+    gate = _IMPLEMENT_ADAPTER.index('if [ "$PROMPT_STATUS" -ne 0 ]')
+    assert gate < _IMPLEMENT_ADAPTER.index("docker network create")
+    assert gate < _IMPLEMENT_ADAPTER.index("provider_proxy.py")
+    assert gate < _IMPLEMENT_ADAPTER.index("docker run --rm")
+    assert "implementation_prompt_budget_exceeded" in _IMPLEMENT_ADAPTER
+    # The trusted, tested builder is what assembles the prompt.
+    assert "build_implementation_prompt" in _IMPLEMENT_ADAPTER
+    assert "MAX_MODEL_INPUT_CHARS" in _IMPLEMENT_ADAPTER
+    assert "MAX_INPUT_BYTES" in _IMPLEMENT_ADAPTER
+
+
+def test_the_budget_failure_never_echoes_prompt_or_source_content() -> None:
+    failure = _IMPLEMENT_ADAPTER.split('if [ "$PROMPT_STATUS" -ne 0 ]')[1].split("fi")[0]
+    assert "$MODEL_PROMPT" not in failure
+    assert "cat " not in failure
+    # The shell no longer names a disposition; it carries the one the assembly
+    # boundary reported, and only falls back when nothing was reported at all.
+    assert "implementation_prompt_preparation_failed" in failure
+    assert "adapter_disposition" in failure
+
+
+def test_the_prompt_budget_change_preserves_the_sandbox_posture() -> None:
+    for flag in (
+        "--interactive",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        '--user "$(id -u):$(id -g)"',
+        "--disable shell_tool",
+        "--disable unified_exec",
+        '--allowed-host "$PROVIDER_HOST"',
+        '-e "$PROVIDER_CREDENTIAL"',
+    ):
+        assert flag in _IMPLEMENT_ADAPTER, flag
+    assert "--privileged" not in _IMPLEMENT_ADAPTER
+    assert "--network host" not in _IMPLEMENT_ADAPTER
+    # Mounts unchanged.
+    for mount in (
+        '-v "$MODEL_WORKSPACE:/workspace:rw"',
+        '-v "$OUT_DIR:/out:rw"',
+        '-v "$IMPLEMENTATION_PACKET_PATH:/workspace/implementation-packet.json:ro"',
+    ):
+        assert mount in _IMPLEMENT_ADAPTER, mount
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker is required to exercise stdin")
+def test_a_bounded_prompt_reaches_container_stdin_intact(tmp_path: Path) -> None:
+    """The budget fix must not regress prompt delivery."""
+
+    prompt = tmp_path / "prompt.md"
+    body = "SECTION\n" + ("x" * 50_000) + "\nEND\n"
+    prompt.write_text(body, encoding="utf-8")
+    with prompt.open("rb") as handle:
+        completed = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--interactive",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges:true",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                _PROXY_IMAGE,
+                "sh",
+                "-c",
+                "cat",
+            ],
+            stdin=handle,
+            capture_output=True,
+            check=False,
+        )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.decode() == body
+
+
+def test_the_implementation_profile_declares_the_provider_safe_ceiling() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    model_input = profile["model_input"]
+    assert model_input["maximum_model_input_chars"] == 950_000
+    # The byte ceilings remain as defence in depth, not as the provider gate.
+    assert model_input["workspace_snapshot_max_bytes"] == 4_194_304
+    assert profile["budgets"]["defaults"]["max_input_bytes"] == 10_000_000
+
+
+def test_a_bounded_run_can_still_reach_freezing_and_validation() -> None:
+    """The budget gate must not remove the successful path."""
+
+    job = _implementation_jobs()["implementation-sakana"]
+    names = [step.get("name") for step in job["steps"]]
+    assert "Invoke implementation model with selected provider only" in names
+    assert "Freeze only the trusted, declared implementation bundle" in names
+    assert names.index("Invoke implementation model with selected provider only") < names.index(
+        "Freeze only the trusted, declared implementation bundle"
+    )
+    assert "implementation-sakana" in _implementation_jobs()["implementation-validation"]["needs"]
+
+
+def test_a_provider_rejection_after_our_gate_passes_is_classified_as_ceiling_drift() -> None:
+    """The configured ceiling drifting from the real limit is the recurring bug."""
+
+    assert "input_too_large" in _IMPLEMENT_ADAPTER
+    assert "implementation_prompt_ceiling_drift" in _IMPLEMENT_ADAPTER
+    drift = _IMPLEMENT_ADAPTER.index("implementation_prompt_ceiling_drift")
+    # Detected after invocation, and distinct from the pre-invocation budget gate.
+    assert drift > _IMPLEMENT_ADAPTER.index("docker run --rm")
+    assert drift > _IMPLEMENT_ADAPTER.index('if [ "$PROMPT_STATUS" -ne 0 ]')
+
+
+def test_the_prompt_notice_tells_the_model_about_omitted_context() -> None:
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    assert "OMITTED SOURCE CONTEXT" in builder
+    assert "Treat the snapshot as partial" in builder
+    # Approved-path material is refused rather than elided.
+    assert "The prompt budget cannot hold every approved-path file." in builder
+
+
+def test_the_prompt_boundary_reports_which_failure_occurred() -> None:
+    """A malformed task plan is not a budget problem.
+
+    The shell must not infer a budget failure from a nonzero exit; the Python
+    boundary names the disposition and the shell carries it.
+    """
+
+    assert "implementation_prompt_preparation_failed" in _IMPLEMENT_ADAPTER
+    assert "implementation_prompt_budget_exceeded" in _IMPLEMENT_ADAPTER
+    assert "adapter_disposition" in _IMPLEMENT_ADAPTER
+    # Non-budget exceptions classify as preparation.
+    assert "except (OSError, UnicodeError, ValueError, ImportError)" in _IMPLEMENT_ADAPTER
+    assert 'fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)' in (
+        _IMPLEMENT_ADAPTER
+    )
+    # And the shell reads the reported disposition rather than assuming one.
+    tail = _IMPLEMENT_ADAPTER.split('if [ "$PROMPT_STATUS" -ne 0 ]')[1]
+    assert "implementation_prompt_budget_exceeded" not in tail.split("fi")[0]
+
+
+def test_the_mounted_workspace_is_the_same_bounded_set_as_the_prompt() -> None:
+    """One bounded view in stdin and a larger one on disk would make the
+    profile's declared snapshot bound false."""
+
+    assert "for relative in build.included:" in _IMPLEMENT_ADAPTER
+    assert "MAX_WORKSPACE_SNAPSHOT_BYTES" in _IMPLEMENT_ADAPTER
+    assert "workspace_snapshot_bytes_exceeded" in _IMPLEMENT_ADAPTER
+    # The unbounded copy of every policy-eligible file is gone.
+    assert "select_source_files" not in _IMPLEMENT_ADAPTER
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENT_LANES_FOR_EVIDENCE := ["openai", "sakana"]))
+def test_each_lane_merges_the_adapter_disposition_into_its_evidence(provider: str) -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()[f"implementation-{provider}"]["steps"]
+        if item.get("name") == "Record host-observed lane evidence"
+    )
+    run = str(step["run"])
+    assert "countyforge-implementation-lane-evidence.json" in run
+    assert "LANE_ADAPTER_DISPOSITION" in run
+    assert '"adapter_disposition"' in run
+
+
+def test_publication_prep_forwards_the_adapter_disposition() -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()["implementation-publication-prep"]["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert ".adapter_disposition" in run
+    assert "--adapter-disposition" in run
+
+
+def _model_invocation_block() -> str:
+    """The adapter's real post-invocation classification, extracted verbatim."""
+
+    start = _IMPLEMENT_ADAPTER.index("MODEL_STATUS=$?")
+    end = _IMPLEMENT_ADAPTER.index("# The model emits a bounded structured file bundle")
+    return _IMPLEMENT_ADAPTER[start:end]
+
+
+@pytest.mark.parametrize(
+    ("events", "model_status", "expected_exit", "expect_drift"),
+    [
+        # The real shape from run 30698203658: provider rejects, exits nonzero.
+        ('{"error":"input_too_large"}\n', 1, 2, True),
+        ('{"error":"input_too_large"}\n', 0, 2, True),
+        # An unrelated provider or model failure is never converted to drift.
+        ('{"error":"rate_limited"}\n', 1, 1, False),
+        ('{"error":"server_error"}\n', 7, 7, False),
+        ("", 3, 3, False),
+        # A clean run falls through.
+        ('{"ok":true}\n', 0, 0, False),
+    ],
+)
+def test_a_rejected_input_is_classified_even_though_the_model_exits_nonzero(
+    tmp_path: Path, events: str, model_status: int, expected_exit: int, expect_drift: bool
+) -> None:
+    """Under `set -e` a nonzero provider exit aborted before this check ran.
+
+    That made the ceiling-drift classification unreachable for the exact failure
+    it exists to classify.
+    """
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "countyforge-implementation-model-events.ndjson").write_text(events, encoding="utf-8")
+    lane = out / "countyforge-implementation-lane-evidence.json"
+    # Mirror the adapter exactly: `set +e` around the model command, then the
+    # extracted block, which opens by capturing `$?` and restoring `set -e`.
+    script = (
+        "set -euo pipefail\n"
+        "scan_evidence_for_credential() { :; }\n"
+        "set +e\n"
+        f"( exit {model_status} )\n" + _model_invocation_block()
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "OUT_DIR": str(out),
+            "LANE_EVIDENCE": str(lane),
+            "CODEX_PROVIDER": "sakana",
+            "MAX_MODEL_INPUT_CHARS": "950000",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == expected_exit, completed.stderr
+    if not expect_drift:
+        assert not lane.is_file() or "ceiling_drift" not in lane.read_text(encoding="utf-8")
+        return
+    evidence = json.loads(lane.read_text(encoding="utf-8"))
+    assert evidence["adapter_disposition"] == "implementation_prompt_ceiling_drift"
+    assert evidence["provider"] == "sakana"
+    assert "the ceiling has drifted" in completed.stderr
+
+    # ...and that disposition must reach canonical terminal state.
+    from countyforge_github.results import classify_implementation_lane, resolve_terminal_result
+
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        adapter_disposition=str(evidence["adapter_disposition"]),
+    )
+    lane_document = tmp_path / "lane-classified.json"
+    lane_document.write_text(json.dumps(classified), encoding="utf-8")
+    assert resolve_terminal_result(
+        command="implement", result_path=None, exit_code_path=None, lane_path=lane_document
+    ) == {
+        "ok": True,
+        "state": "failed",
+        "disposition": "implementation_prompt_ceiling_drift",
+    }
+
+
+def test_the_model_invocation_status_is_captured_not_aborted_on() -> None:
+    invocation = _IMPLEMENT_ADAPTER[
+        _IMPLEMENT_ADAPTER.index("docker run --rm") : _IMPLEMENT_ADAPTER.index("MODEL_STATUS=$?")
+    ]
+    assert invocation.lstrip().startswith("docker run --rm")
+    assert (
+        _IMPLEMENT_ADAPTER[: _IMPLEMENT_ADAPTER.index("docker run --rm")]
+        .rstrip()
+        .endswith("set +e")
+    )
+    # Evidence is sanitized on every path, including the failure paths.
+    assert _IMPLEMENT_ADAPTER.count("scan_evidence_for_credential") >= 3

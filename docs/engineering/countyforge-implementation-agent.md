@@ -47,6 +47,15 @@ failure, never as a model failure, and validation refuses to proceed.
 - `source_root`: immutable base repository content;
 - `workspace_root`: ephemeral writable copy supplied to the model.
 
+The prompt is assembled under a character budget declared in the profile as
+`maximum_model_input_chars` (950,000), leaving margin beneath the provider's 1,048,576-character
+hard limit. Providers count characters, so the older 4 MiB snapshot and 10 MiB assembled-prompt
+byte ceilings could not represent that limit and are now defence in depth only. Mandatory
+contracts are byte-identical and never truncated; if they alone exceed the budget, assembly fails
+before the provider is contacted. Source context is selected deterministically, prioritized by the
+task plan's approved paths, added only as complete files, and every included and omitted path is
+recorded with a bounded reason.
+
 The model receives a de-Git workspace snapshot plus the frozen implementation packet, context
 manifest, task plan, result schema, command policy, prompt, and bounded source snapshot through
 the profile's explicit `bounded_stdin` input contract. The Codex process has no shell, unified-exec,

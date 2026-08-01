@@ -1063,6 +1063,16 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           implementation_result="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          # The adapter records exactly why it stopped -- missing credential,
+          # prompt budget, preparation failure, ceiling drift. Without merging it
+          # here that disposition dies in the runner's temporary directory and the
+          # run reports a generic adapter failure.
+          adapter_evidence="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-lane-evidence.json -type f -print -quit 2>/dev/null || true)"
+          LANE_ADAPTER_DISPOSITION=""
+          if [ -n "$adapter_evidence" ]; then
+            LANE_ADAPTER_DISPOSITION="$(jq -r '.adapter_disposition // ""' "$adapter_evidence")"
+          fi
+          export LANE_ADAPTER_DISPOSITION
           # Shell booleans are not Python literals; every fact crosses through the
           # environment and is converted inside Python.
           LANE_RUNNER_PRESENT=false
@@ -1095,6 +1105,7 @@ jobs:
                       "freeze_succeeded": freeze_outcome == "success",
                       "freeze_outcome": freeze_outcome,
                       "frozen_bundle_present": flag("LANE_BUNDLE_PRESENT"),
+                      "adapter_disposition": os.environ.get("LANE_ADAPTER_DISPOSITION") or None,
                   },
                   sort_keys=True,
               )
@@ -1290,6 +1301,16 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           implementation_result="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
+          # The adapter records exactly why it stopped -- missing credential,
+          # prompt budget, preparation failure, ceiling drift. Without merging it
+          # here that disposition dies in the runner's temporary directory and the
+          # run reports a generic adapter failure.
+          adapter_evidence="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-lane-evidence.json -type f -print -quit 2>/dev/null || true)"
+          LANE_ADAPTER_DISPOSITION=""
+          if [ -n "$adapter_evidence" ]; then
+            LANE_ADAPTER_DISPOSITION="$(jq -r '.adapter_disposition // ""' "$adapter_evidence")"
+          fi
+          export LANE_ADAPTER_DISPOSITION
           # Shell booleans are not Python literals; every fact crosses through the
           # environment and is converted inside Python.
           LANE_RUNNER_PRESENT=false
@@ -1322,6 +1343,7 @@ jobs:
                       "freeze_succeeded": freeze_outcome == "success",
                       "freeze_outcome": freeze_outcome,
                       "frozen_bundle_present": flag("LANE_BUNDLE_PRESENT"),
+                      "adapter_disposition": os.environ.get("LANE_ADAPTER_DISPOSITION") or None,
                   },
                   sort_keys=True,
               )
@@ -1695,12 +1717,16 @@ jobs:
             # Observed before freezing, so a freeze failure is not mistaken for a
             # model that produced no result.
             implementation_present="$(jq -r 'if .implementation_result_present then "true" else "false" end' "$lane_evidence")"
+            adapter_disposition="$(jq -r '.adapter_disposition // ""' "$lane_evidence")"
           fi
           implementation_result="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
           lane_arguments=(classify-implementation-lane --selected-provider "$SELECTED_PROVIDER"
             --lane-result "openai=$OPENAI_LANE" --lane-result "sakana=$SAKANA_LANE"
             --freeze-outcome "$freeze_outcome" --frozen-bundle-present "$bundle_present"
             --implementation-result-present "$implementation_present")
+          if [ -n "${adapter_disposition:-}" ]; then
+            lane_arguments+=(--adapter-disposition "$adapter_disposition")
+          fi
           if [ -n "$result_file" ]; then lane_arguments+=(--result "$result_file"); fi
           if [ -n "$exit_file" ]; then lane_arguments+=(--exit-code "$exit_file"); fi
           if [ -n "$implementation_result" ]; then lane_arguments+=(--implementation-result "$implementation_result"); fi

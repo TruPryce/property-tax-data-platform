@@ -30,6 +30,37 @@ The implementation profile SHALL declare every permitted provider with its own p
 - **WHEN** the selected lane fails while provisioning its image and publishes no implementation result
 - **THEN** the outcome is recorded as a provider infrastructure failure rather than a model failure, and validation refuses to proceed
 
+### Requirement: Bounded implementation model input
+The implementation prompt SHALL be assembled under a character budget declared in the trusted profile that leaves margin beneath the selected provider's hard input limit, because providers count characters and a byte ceiling cannot represent that limit. Mandatory contracts -- instructions, packet, context manifest, task plan, result schema, and command policy -- MUST be included byte-identically and MUST NOT be truncated; if they alone exceed the budget, assembly MUST fail before the provider is contacted. Source context SHALL be selected deterministically, prioritized by the trusted task plan's approved paths, added only as complete files, and stopped before the budget is exhausted. Dropping a file under the task's own approved paths MUST be a refusal, not an omission, because a model editing files it was never shown produces work that fails validation for reasons it could not have known. The prompt MUST tell the model which files were elided, so a partial view is visible to the model and not only to a post-hoc auditor. The character unit the budget gates on MUST be defined and MUST be the larger of Unicode code points and UTF-16 code units, so the configured margin holds whichever unit the provider counts. Every included and omitted path MUST be recorded with a bounded omission reason, together with budget utilisation so a run that begins degrading is visible. A provider rejecting an input the configured ceiling accepted MUST be classified distinctly as ceiling drift, and that classification MUST remain reachable when the provider exits nonzero, which is how such a rejection is reported. Any other provider or model failure MUST retain its own exit status and MUST NOT be converted into ceiling drift. Evidence MUST be sanitized on every exit path, including failure paths whose evidence is uploaded. A budget failure MUST be classified as input preparation or provider infrastructure, never as a model failure, and its evidence MUST NOT echo prompt or source content. The assembly boundary MUST report which failure occurred rather than leaving the caller to infer one from a nonzero exit, distinguishing at least a budget failure from a preparation failure. The workspace mounted for the model MUST be exactly the bounded set the prompt describes, so the profile's declared snapshot bound is true and the model cannot read what it was not shown. An adapter disposition MUST be carried into lane evidence and preserved in canonical terminal state; recording it only in the runner's output directory does not make it durable.
+
+#### Scenario: Refuse an oversized prompt before invocation
+- **WHEN** the assembled prompt would exceed the configured character budget
+- **THEN** assembly fails before the provider network, proxy, or model container exists, and the failure is recorded with the configured ceiling and measured counts only
+
+#### Scenario: Refuse to elide approved implementation context
+- **WHEN** a file under the task plan's approved paths cannot fit the budget
+- **THEN** assembly fails closed rather than omitting it, and the failure names the path
+
+#### Scenario: Disclose a partial snapshot to the model
+- **WHEN** unrelated repository files are elided for budget
+- **THEN** the prompt lists them and instructs the model to report a need rather than assume contents
+
+#### Scenario: Distinguish preparation failure from budget failure
+- **WHEN** prompt assembly stops for a malformed contract, an unreadable input, or an unexpected exception
+- **THEN** it is classified as a preparation failure rather than a budget failure
+
+#### Scenario: Preserve the adapter's reason in terminal state
+- **WHEN** the adapter stops before the model for a missing credential, a budget failure, a preparation failure, or ceiling drift
+- **THEN** that exact disposition reaches canonical terminal state instead of a generic adapter or infrastructure failure
+
+#### Scenario: Detect a drifted ceiling
+- **WHEN** the provider rejects an input that the configured ceiling accepted
+- **THEN** the lane records a distinct ceiling-drift disposition rather than a generic adapter failure
+
+#### Scenario: Prioritize approved implementation context
+- **WHEN** source context is selected for a task plan naming approved paths
+- **THEN** files under those paths are included before unrelated repository files, selection is identical across repeated builds, and no file is included partially
+
 ### Requirement: Isolated implementation workspace
 The executable profile SHALL provide the model only an ephemeral writable, de-Git workspace snapshot derived from the immutable trusted base. A trusted workspace-binding manifest MUST bind the workspace path, content hash, repository, issue, accepted change, run identity, immutable base/head, and disabled Git settings before provider credentials or the executor are selected. The model mount MUST mask `.git`; contract tooling, profiles, schemas, policies, source credentials, GitHub tokens, Git credentials, Docker, Tailscale, production services, and protected branches MUST remain inaccessible. Trusted code MUST serialize the bounded packet, manifest, task plan, prompt, and size-limited source snapshot into the model input through the declared `bounded_stdin` contract; the model MUST NOT rely on undeclared filesystem-reading capabilities. Git metadata remains available only to trusted host tooling.
 
