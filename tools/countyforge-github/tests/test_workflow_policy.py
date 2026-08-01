@@ -1243,3 +1243,52 @@ def test_both_lanes_share_one_task_plan_path_policy_and_workspace_binding(provid
     assert "--workspace-binding" in text
     assert "--policy-root" in text
     assert "implement.workspace-write.v1" in text
+
+
+def test_publication_prep_consumes_only_the_selected_provider_artifacts() -> None:
+    """Provider-qualified uploads must not leave publication looking at old names."""
+
+    job = _implementation_jobs()["implementation-publication-prep"]
+    assert set(job["needs"]) >= {"implementation-openai", "implementation-sakana"}
+    downloads = [
+        str(step["with"]["name"])
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+        and "implementation-validation-" not in str(step["with"]["name"])
+    ]
+    assert downloads
+    for name in downloads:
+        assert "needs.claim.outputs.provider" in name
+        assert "-openai-" not in name and "-sakana-" not in name
+
+
+def test_publication_prep_persists_the_lane_classification() -> None:
+    """The classification must become trusted evidence terminal state consumes."""
+
+    job = _implementation_jobs()["implementation-publication-prep"]
+    step = next(
+        item
+        for item in job["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert "classify-implementation-lane" in run
+    assert "--selected-provider" in run
+    assert '--lane-result "openai=$OPENAI_LANE"' in run
+    assert '--lane-result "sakana=$SAKANA_LANE"' in run
+    # Classification happens before, and feeds, terminal resolution.
+    assert run.index("classify-implementation-lane") < run.index("resolve-terminal-result")
+    assert "--lane " in run or "--lane\n" in run
+    assert sorted(step["env"]) == ["OPENAI_LANE", "SAKANA_LANE", "SELECTED_PROVIDER"]
+    upload = next(
+        item for item in job["steps"] if item.get("name") == "Upload publication preparation"
+    )
+    assert "countyforge-implementation-lane.json" in str(upload["with"]["path"])
+
+
+def test_no_implementation_job_still_references_unqualified_lane_artifacts() -> None:
+    jobs = _implementation_jobs()
+    for name in ("implementation-validation", "implementation-publication-prep"):
+        text = str(jobs[name])
+        for artifact in ("implementation-result", "implementation-bundle"):
+            assert f"countyforge-{artifact}-${{{{ inputs.run_id }}}}" not in text, name

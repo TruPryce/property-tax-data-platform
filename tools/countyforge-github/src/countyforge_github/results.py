@@ -50,10 +50,25 @@ def _read_exit_code(path: Path | None) -> int | None:
 
 
 def resolve_terminal_result(
-    *, command: str, result_path: Path | None, exit_code_path: Path | None
+    *,
+    command: str,
+    result_path: Path | None,
+    exit_code_path: Path | None,
+    lane_path: Path | None = None,
 ) -> JsonObject:
-    """Map only valid, internally consistent runner evidence to terminal state."""
+    """Map only valid, internally consistent runner evidence to terminal state.
 
+    A refused implementation lane classification takes precedence, because it
+    explains *why* the evidence is absent: `invalid_result_evidence` would report
+    a model outcome for a run whose provider image never built.  It can only
+    produce a failure, never upgrade one.
+    """
+
+    lane = _read_result(lane_path)
+    if lane is not None and lane.get("ok") is False:
+        disposition = lane.get("disposition")
+        if isinstance(disposition, str) and _DISPOSITION.fullmatch(disposition):
+            return {"ok": True, "state": "failed", "disposition": disposition}
     result = _read_result(result_path)
     if result is None:
         return {"ok": True, "state": "failed", "disposition": "invalid_result_evidence"}

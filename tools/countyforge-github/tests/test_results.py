@@ -532,3 +532,65 @@ def test_the_unselected_lane_cannot_supply_the_outcome(tmp_path: Path) -> None:
     )
     assert classified["ok"] is False
     assert classified["disposition"] == "implementation_provider_lane_mismatch"
+
+
+def test_lane_classification_reaches_terminal_state(tmp_path: Path) -> None:
+    """The classification must be trusted evidence, not a shell annotation.
+
+    Without it, terminal resolution sees missing evidence and records
+    `invalid_result_evidence`, reporting a model outcome for a run whose
+    provider image never built.
+    """
+
+    lane = _write(
+        tmp_path / "lane.json",
+        json.dumps(
+            classify_implementation_lane(
+                selected_provider="openai",
+                lane_results={"openai": "failure", "sakana": "skipped"},
+                result_path=tmp_path / "absent.json",
+            )
+        ),
+    )
+    assert resolve_terminal_result(
+        command="implement", result_path=None, exit_code_path=None, lane_path=lane
+    ) == {
+        "ok": True,
+        "state": "failed",
+        "disposition": "implementation_provider_infrastructure_failed",
+    }
+    # The same inputs without lane evidence degrade to the generic disposition.
+    assert (
+        resolve_terminal_result(command="implement", result_path=None, exit_code_path=None)[
+            "disposition"
+        ]
+        == "invalid_result_evidence"
+    )
+
+
+def test_a_refused_lane_can_only_produce_a_failure(tmp_path: Path) -> None:
+    """Lane evidence must never upgrade an outcome."""
+
+    lane = _write(tmp_path / "lane.json", json.dumps({"ok": True, "disposition": "completed"}))
+    resolved = resolve_terminal_result(
+        command="implement", result_path=None, exit_code_path=None, lane_path=lane
+    )
+    # An `ok` lane defers entirely to the ordinary evidence rules.
+    assert resolved["state"] == "failed"
+    assert resolved["disposition"] == "invalid_result_evidence"
+
+
+@pytest.mark.parametrize(
+    "lane_body",
+    ["not json", "[]", '{"ok": false}', '{"ok": false, "disposition": "Bad Code"}', ""],
+)
+def test_unusable_lane_evidence_is_ignored_rather_than_trusted(
+    tmp_path: Path, lane_body: str
+) -> None:
+    lane = _write(tmp_path / "lane.json", lane_body)
+    assert (
+        resolve_terminal_result(
+            command="implement", result_path=None, exit_code_path=None, lane_path=lane
+        )["disposition"]
+        == "invalid_result_evidence"
+    )

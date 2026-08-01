@@ -47,7 +47,11 @@ from countyforge_github.planning import (
     validate_planning_result,
 )
 from countyforge_github.requests import build_run_request
-from countyforge_github.results import normalize_publication_result, resolve_terminal_result
+from countyforge_github.results import (
+    classify_implementation_lane,
+    normalize_publication_result,
+    resolve_terminal_result,
+)
 from countyforge_github.state import reconcile_workflow, render_status, transition_state
 from countyforge_github.workflow_control import (
     advance_run,
@@ -257,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _file(result, "result", required=False)
     _file(result, "exit_code", required=False)
+    _file(result, "lane", required=False)
+
+    lane = subparsers.add_parser("classify-implementation-lane")
+    lane.add_argument("--selected-provider", required=True)
+    lane.add_argument("--lane-result", action="append", default=[], metavar="PROVIDER=RESULT")
+    _file(lane, "result", required=False)
 
     publication = subparsers.add_parser("normalize-publication-result")
     publication.add_argument("--result", type=Path)
@@ -834,6 +844,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     command=args.command,
                     result_path=args.result,
                     exit_code_path=args.exit_code,
+                    lane_path=args.lane,
                 )
             )
             return 0
@@ -846,6 +857,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     result_path=args.result,
                     progress_path=args.progress,
                     exit_code=args.exit_code,
+                )
+            )
+            return 0
+        if command_name == "classify-implementation-lane":
+            lane_results: JsonObject = {}
+            for item in args.lane_result:
+                provider, _, outcome = str(item).partition("=")
+                lane_results[provider] = outcome
+            _emit(
+                classify_implementation_lane(
+                    selected_provider=args.selected_provider,
+                    lane_results=lane_results,
+                    result_path=args.result,
                 )
             )
             return 0

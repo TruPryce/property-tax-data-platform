@@ -1543,7 +1543,7 @@ jobs:
   implementation-publication-prep:
     name: Prepare implementation publication evidence
     if: always() && inputs.command == 'implement' && needs.claim.result == 'success'
-    needs: [claim, implementation-openai, implementation-validation]
+    needs: [claim, implementation-openai, implementation-sakana, implementation-validation]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1557,17 +1557,17 @@ jobs:
           path: trusted
           persist-credentials: false
           fetch-depth: 1
-      - name: Download implementation result evidence
+      - name: Download selected-provider implementation result evidence
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: countyforge-implementation-result-${{ inputs.run_id }}
+          name: countyforge-implementation-result-${{ needs.claim.outputs.provider }}-${{ inputs.run_id }}
           path: ${{ runner.temp }}/implementation-result
-      - name: Download frozen implementation bundle
+      - name: Download selected-provider frozen implementation bundle
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: countyforge-implementation-bundle-${{ inputs.run_id }}
+          name: countyforge-implementation-bundle-${{ needs.claim.outputs.provider }}-${{ inputs.run_id }}
           path: ${{ runner.temp }}/implementation-result
       - name: Download trusted validation report
         continue-on-error: true
@@ -1580,13 +1580,26 @@ jobs:
         with:
           version: "0.11.16"
       - name: Resolve implementation terminal evidence
+        env:
+          SELECTED_PROVIDER: ${{ needs.claim.outputs.provider }}
+          OPENAI_LANE: ${{ needs.implementation-openai.result }}
+          SAKANA_LANE: ${{ needs.implementation-sakana.result }}
         run: |
           result_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-result.json -type f -print -quit 2>/dev/null || true)"
           exit_file="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-exit-code -type f -print -quit 2>/dev/null || true)"
-          arguments=(resolve-terminal-result --command implement)
+          cd trusted
+          # A lane that published nothing never reached the model. Classify that
+          # first so terminal state records a provider infrastructure failure
+          # instead of reporting a model outcome for an image that never built.
+          lane_arguments=(classify-implementation-lane --selected-provider "$SELECTED_PROVIDER"
+            --lane-result "openai=$OPENAI_LANE" --lane-result "sakana=$SAKANA_LANE")
+          if [ -n "$result_file" ]; then lane_arguments+=(--result "$result_file"); fi
+          uv run --package countyforge-github countyforge-github "${lane_arguments[@]}" \
+            > "$RUNNER_TEMP/countyforge-implementation-lane.json"
+          arguments=(resolve-terminal-result --command implement
+            --lane "$RUNNER_TEMP/countyforge-implementation-lane.json")
           if [ -n "$result_file" ]; then arguments+=(--result "$result_file"); fi
           if [ -n "$exit_file" ]; then arguments+=(--exit-code "$exit_file"); fi
-          cd trusted
           uv run --package countyforge-github countyforge-github "${arguments[@]}" \
             > "$RUNNER_TEMP/countyforge-terminal.json"
       - name: Verify trusted validation eligibility
@@ -1607,6 +1620,7 @@ jobs:
           path: |
             ${{ runner.temp }}/implementation-result
             ${{ runner.temp }}/implementation-validation
+            ${{ runner.temp }}/countyforge-implementation-lane.json
             ${{ runner.temp }}/countyforge-terminal.json
           if-no-files-found: warn
           retention-days: 14
