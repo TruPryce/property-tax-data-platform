@@ -328,6 +328,7 @@ def classify_implementation_lane(
     result_path: Path | None = None,
     exit_code_path: Path | None = None,
     implementation_result_path: Path | None = None,
+    implementation_result_present: bool | None = None,
     freeze_outcome: str | None = None,
     frozen_bundle_present: bool | None = None,
 ) -> JsonObject:
@@ -395,8 +396,12 @@ def classify_implementation_lane(
 
     # A valid model result exists from here on, so remaining failures are about
     # trusted host-side materialization rather than the provider.
-    implementation = _read_result(implementation_result_path)
-    if implementation is None:
+    #
+    # `implementation_result_present` is the host's pre-freeze observation and is
+    # the only honest signal for "did the model produce a result".  The frozen
+    # copy is uploaded only when freezing succeeds, so requiring it first would
+    # report every freeze failure as a missing model result.
+    if implementation_result_present is False:
         return _lane_failure(
             "implementation_model_failed",
             provider=selected_provider,
@@ -413,6 +418,14 @@ def classify_implementation_lane(
             "implementation_freeze_failed",
             provider=selected_provider,
             reason="frozen_bundle_missing",
+        )
+    # Freezing reported success, so the frozen result must be readable; its
+    # absence now is a materialization defect, not a freeze outcome.
+    if _read_result(implementation_result_path) is None:
+        return _lane_failure(
+            "implementation_model_failed",
+            provider=selected_provider,
+            reason="implementation_result_missing",
         )
     return {
         "ok": True,

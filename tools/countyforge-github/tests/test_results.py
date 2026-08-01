@@ -597,6 +597,7 @@ def _lane_inputs(tmp_path: Path, **overrides: object) -> dict[str, object]:
         "result_path": runner,
         "exit_code_path": _write(tmp_path / "countyforge-exit-code", "0\n"),
         "implementation_result_path": implementation,
+        "implementation_result_present": True,
         "freeze_outcome": "success",
         "frozen_bundle_present": True,
     }
@@ -659,6 +660,7 @@ def test_the_run_30695076693_shape_can_never_complete(tmp_path: Path) -> None:
         # A green wrapper job never proves the lane succeeded.
         ({"exit_code_path": None}, "implementation_provider_infrastructure_failed"),
         ({"result_path": None}, "implementation_provider_infrastructure_failed"),
+        ({"implementation_result_present": False}, "implementation_model_failed"),
         ({"implementation_result_path": None}, "implementation_model_failed"),
         ({"freeze_outcome": "failure"}, "implementation_freeze_failed"),
         ({"freeze_outcome": None}, "implementation_freeze_failed"),
@@ -720,3 +722,48 @@ def test_an_inconsistent_runner_success_is_a_model_failure(tmp_path: Path) -> No
         **_lane_inputs(tmp_path, result_path=runner)  # type: ignore[arg-type]
     )
     assert classified["disposition"] == "implementation_model_failed"
+
+
+@pytest.mark.parametrize("bundle_present", [False, None])
+def test_a_freeze_failure_is_not_reported_as_a_missing_model_result(
+    tmp_path: Path, bundle_present: object
+) -> None:
+    """The frozen result is uploaded only when freezing succeeds.
+
+    Requiring it before checking the freeze outcome would report every real
+    freeze failure as `implementation_model_failed reason=implementation_result_missing`.
+    """
+
+    classified = classify_implementation_lane(
+        **_lane_inputs(
+            tmp_path,
+            # The model did produce a result; the host saw it before freezing.
+            implementation_result_present=True,
+            # ...but the frozen copy was never uploaded, so it cannot be read.
+            implementation_result_path=tmp_path / "never-frozen.json",
+            freeze_outcome="failure",
+            frozen_bundle_present=bundle_present,
+        )  # type: ignore[arg-type]
+    )
+    assert classified["disposition"] == "implementation_freeze_failed"
+    assert classified["details"]["freeze_outcome"] == "failure"
+
+
+def test_a_missing_bundle_after_a_successful_freeze_is_still_a_freeze_failure(
+    tmp_path: Path,
+) -> None:
+    classified = classify_implementation_lane(
+        **_lane_inputs(tmp_path, frozen_bundle_present=False, implementation_result_present=True)  # type: ignore[arg-type]
+    )
+    assert classified["disposition"] == "implementation_freeze_failed"
+    assert classified["details"]["reason"] == "frozen_bundle_missing"
+
+
+def test_a_model_that_produced_no_result_is_still_a_model_failure(tmp_path: Path) -> None:
+    """The pre-freeze observation is what distinguishes the two."""
+
+    classified = classify_implementation_lane(
+        **_lane_inputs(tmp_path, implementation_result_present=False, freeze_outcome="failure")  # type: ignore[arg-type]
+    )
+    assert classified["disposition"] == "implementation_model_failed"
+    assert classified["details"]["reason"] == "implementation_result_missing"

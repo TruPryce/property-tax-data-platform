@@ -1063,25 +1063,44 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           implementation_result="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
-          bundle_present=false
-          [ -s "$RUNNER_TEMP/countyforge-workspace.tar.gz" ] && bundle_present=true
-          runner_present=false
-          [ -s "$RUNNER_TEMP/countyforge-result.json" ] && runner_present=true
-          implementation_present=false
-          [ -n "$implementation_result" ] && implementation_present=true
-          exit_code="$(cat "$RUNNER_TEMP/countyforge-exit-code" 2>/dev/null || echo "")"
-          python3 - "$RUNNER_TEMP/sanitized-implementation-evidence/countyforge-implementation-lane-evidence.json" <<PY
-          import json, os, pathlib, sys
-          pathlib.Path(sys.argv[1]).write_text(json.dumps({
-              "contract_version": 1,
-              "provider": os.environ["SELECTED_PROVIDER"],
-              "runner_exit_code": "$exit_code",
-              "runner_result_present": $runner_present,
-              "implementation_result_present": $implementation_present,
-              "freeze_succeeded": os.environ["FREEZE_OUTCOME"] == "success",
-              "freeze_outcome": os.environ["FREEZE_OUTCOME"],
-              "frozen_bundle_present": $bundle_present,
-          }, sort_keys=True) + "\n", encoding="utf-8")
+          # Shell booleans are not Python literals; every fact crosses through the
+          # environment and is converted inside Python.
+          LANE_RUNNER_PRESENT=false
+          [ -s "$RUNNER_TEMP/countyforge-result.json" ] && LANE_RUNNER_PRESENT=true
+          LANE_IMPLEMENTATION_PRESENT=false
+          [ -n "$implementation_result" ] && LANE_IMPLEMENTATION_PRESENT=true
+          LANE_BUNDLE_PRESENT=false
+          [ -s "$RUNNER_TEMP/countyforge-workspace.tar.gz" ] && LANE_BUNDLE_PRESENT=true
+          LANE_EXIT_CODE="$(cat "$RUNNER_TEMP/countyforge-exit-code" 2>/dev/null || echo "")"
+          export LANE_RUNNER_PRESENT LANE_IMPLEMENTATION_PRESENT LANE_BUNDLE_PRESENT LANE_EXIT_CODE
+          python3 - "$RUNNER_TEMP/sanitized-implementation-evidence/countyforge-implementation-lane-evidence.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          def flag(name: str) -> bool:
+              return os.environ.get(name, "false") == "true"
+
+          raw_exit = os.environ.get("LANE_EXIT_CODE", "").strip()
+          freeze_outcome = os.environ.get("FREEZE_OUTCOME", "unknown")
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(
+                  {
+                      "contract_version": 1,
+                      "provider": os.environ["SELECTED_PROVIDER"],
+                      "runner_exit_code": int(raw_exit) if raw_exit.isdigit() else None,
+                      "runner_result_present": flag("LANE_RUNNER_PRESENT"),
+                      "implementation_result_present": flag("LANE_IMPLEMENTATION_PRESENT"),
+                      "freeze_succeeded": freeze_outcome == "success",
+                      "freeze_outcome": freeze_outcome,
+                      "frozen_bundle_present": flag("LANE_BUNDLE_PRESENT"),
+                  },
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
       - name: Upload implementation execution evidence
         if: always()
@@ -1271,25 +1290,44 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           implementation_result="$(find trusted/.ai/reviews/countyforge/implement -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
-          bundle_present=false
-          [ -s "$RUNNER_TEMP/countyforge-workspace.tar.gz" ] && bundle_present=true
-          runner_present=false
-          [ -s "$RUNNER_TEMP/countyforge-result.json" ] && runner_present=true
-          implementation_present=false
-          [ -n "$implementation_result" ] && implementation_present=true
-          exit_code="$(cat "$RUNNER_TEMP/countyforge-exit-code" 2>/dev/null || echo "")"
-          python3 - "$RUNNER_TEMP/sanitized-implementation-evidence/countyforge-implementation-lane-evidence.json" <<PY
-          import json, os, pathlib, sys
-          pathlib.Path(sys.argv[1]).write_text(json.dumps({
-              "contract_version": 1,
-              "provider": os.environ["SELECTED_PROVIDER"],
-              "runner_exit_code": "$exit_code",
-              "runner_result_present": $runner_present,
-              "implementation_result_present": $implementation_present,
-              "freeze_succeeded": os.environ["FREEZE_OUTCOME"] == "success",
-              "freeze_outcome": os.environ["FREEZE_OUTCOME"],
-              "frozen_bundle_present": $bundle_present,
-          }, sort_keys=True) + "\n", encoding="utf-8")
+          # Shell booleans are not Python literals; every fact crosses through the
+          # environment and is converted inside Python.
+          LANE_RUNNER_PRESENT=false
+          [ -s "$RUNNER_TEMP/countyforge-result.json" ] && LANE_RUNNER_PRESENT=true
+          LANE_IMPLEMENTATION_PRESENT=false
+          [ -n "$implementation_result" ] && LANE_IMPLEMENTATION_PRESENT=true
+          LANE_BUNDLE_PRESENT=false
+          [ -s "$RUNNER_TEMP/countyforge-workspace.tar.gz" ] && LANE_BUNDLE_PRESENT=true
+          LANE_EXIT_CODE="$(cat "$RUNNER_TEMP/countyforge-exit-code" 2>/dev/null || echo "")"
+          export LANE_RUNNER_PRESENT LANE_IMPLEMENTATION_PRESENT LANE_BUNDLE_PRESENT LANE_EXIT_CODE
+          python3 - "$RUNNER_TEMP/sanitized-implementation-evidence/countyforge-implementation-lane-evidence.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          def flag(name: str) -> bool:
+              return os.environ.get(name, "false") == "true"
+
+          raw_exit = os.environ.get("LANE_EXIT_CODE", "").strip()
+          freeze_outcome = os.environ.get("FREEZE_OUTCOME", "unknown")
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(
+                  {
+                      "contract_version": 1,
+                      "provider": os.environ["SELECTED_PROVIDER"],
+                      "runner_exit_code": int(raw_exit) if raw_exit.isdigit() else None,
+                      "runner_result_present": flag("LANE_RUNNER_PRESENT"),
+                      "implementation_result_present": flag("LANE_IMPLEMENTATION_PRESENT"),
+                      "freeze_succeeded": freeze_outcome == "success",
+                      "freeze_outcome": freeze_outcome,
+                      "frozen_bundle_present": flag("LANE_BUNDLE_PRESENT"),
+                  },
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
       - name: Upload implementation execution evidence
         if: always()
@@ -1650,14 +1688,19 @@ jobs:
           lane_evidence="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-lane-evidence.json -type f -print -quit 2>/dev/null || true)"
           freeze_outcome="unknown"
           bundle_present="false"
+          implementation_present="false"
           if [ -n "$lane_evidence" ]; then
             freeze_outcome="$(jq -r '.freeze_outcome // "unknown"' "$lane_evidence")"
             bundle_present="$(jq -r 'if .frozen_bundle_present then "true" else "false" end' "$lane_evidence")"
+            # Observed before freezing, so a freeze failure is not mistaken for a
+            # model that produced no result.
+            implementation_present="$(jq -r 'if .implementation_result_present then "true" else "false" end' "$lane_evidence")"
           fi
           implementation_result="$(find "$RUNNER_TEMP/implementation-result" -name countyforge-implementation-result.json -type f -print -quit 2>/dev/null || true)"
           lane_arguments=(classify-implementation-lane --selected-provider "$SELECTED_PROVIDER"
             --lane-result "openai=$OPENAI_LANE" --lane-result "sakana=$SAKANA_LANE"
-            --freeze-outcome "$freeze_outcome" --frozen-bundle-present "$bundle_present")
+            --freeze-outcome "$freeze_outcome" --frozen-bundle-present "$bundle_present"
+            --implementation-result-present "$implementation_present")
           if [ -n "$result_file" ]; then lane_arguments+=(--result "$result_file"); fi
           if [ -n "$exit_file" ]; then lane_arguments+=(--exit-code "$exit_file"); fi
           if [ -n "$implementation_result" ]; then lane_arguments+=(--implementation-result "$implementation_result"); fi

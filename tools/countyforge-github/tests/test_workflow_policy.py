@@ -1483,3 +1483,65 @@ def test_publication_prep_classifies_from_host_observed_evidence() -> None:
         assert flag in run
     assert "countyforge-implementation-lane-evidence.json" in run
     assert run.index("classify-implementation-lane") < run.index("resolve-terminal-result")
+
+
+@pytest.mark.skipif(shutil.which("python3") is None, reason="python3 required")
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_the_lane_evidence_step_actually_runs_and_emits_valid_json(
+    tmp_path: Path, provider: str
+) -> None:
+    """Shell booleans are not Python literals; execute the step, don't read it."""
+
+    step = next(
+        item
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if item.get("name") == "Record host-observed lane evidence"
+    )
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "countyforge-result.json").write_text('{"ok":false}', encoding="utf-8")
+    (temp / "countyforge-exit-code").write_text("2\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(temp),
+        "SELECTED_PROVIDER": provider,
+        "FREEZE_OUTCOME": "failure",
+    }
+    completed = subprocess.run(
+        ["bash", "-e", "-c", str(step["run"])],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "NameError" not in completed.stderr
+    evidence = json.loads(
+        (
+            temp
+            / "sanitized-implementation-evidence"
+            / "countyforge-implementation-lane-evidence.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert evidence == {
+        "contract_version": 1,
+        "provider": provider,
+        "runner_exit_code": 2,
+        "runner_result_present": True,
+        "implementation_result_present": False,
+        "freeze_succeeded": False,
+        "freeze_outcome": "failure",
+        "frozen_bundle_present": False,
+    }
+
+
+def test_publication_prep_passes_the_pre_freeze_implementation_fact() -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()["implementation-publication-prep"]["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert "--implementation-result-present" in run
+    assert ".implementation_result_present" in run
