@@ -1657,3 +1657,24 @@ def test_a_bounded_run_can_still_reach_freezing_and_validation() -> None:
         "Freeze only the trusted, declared implementation bundle"
     )
     assert "implementation-sakana" in _implementation_jobs()["implementation-validation"]["needs"]
+
+
+def test_a_provider_rejection_after_our_gate_passes_is_classified_as_ceiling_drift() -> None:
+    """The configured ceiling drifting from the real limit is the recurring bug."""
+
+    assert "input_too_large" in _IMPLEMENT_ADAPTER
+    assert "implementation_prompt_ceiling_drift" in _IMPLEMENT_ADAPTER
+    drift = _IMPLEMENT_ADAPTER.index("implementation_prompt_ceiling_drift")
+    # Detected after invocation, and distinct from the pre-invocation budget gate.
+    assert drift > _IMPLEMENT_ADAPTER.index("docker run --rm")
+    assert drift > _IMPLEMENT_ADAPTER.index('if [ "$PROMPT_STATUS" -ne 0 ]')
+
+
+def test_the_prompt_notice_tells_the_model_about_omitted_context() -> None:
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    assert "OMITTED SOURCE CONTEXT" in builder
+    assert "Treat the snapshot as partial" in builder
+    # Approved-path material is refused rather than elided.
+    assert "The prompt budget cannot hold every approved-path file." in builder

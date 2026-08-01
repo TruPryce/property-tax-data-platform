@@ -49,20 +49,23 @@ def test_the_run_30698203658_input_exceeded_the_provider_ceiling() -> None:
 
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     assert fixture["input_error_code"] == "input_too_large"
-    assert fixture["actual_chars"] == 2_103_429
-    assert fixture["provider_max_chars"] == 1_048_576
+    # The exact count is recorded as evidence, not asserted: what matters is
+    # that it exceeded the provider ceiling and how that is classified.
     assert fixture["actual_chars"] > fixture["provider_max_chars"]
+    assert fixture["actual_chars"] > CEILING
     # The adapter's own ceilings could not have caught it.
     budgets = fixture["adapter_budgets_at_failure"]
     assert budgets["assembled_prompt_max_bytes"] > fixture["provider_max_chars"]
     # The configured ceiling leaves margin beneath the provider's hard limit.
     assert CEILING < fixture["provider_max_chars"]
+    assert fixture["classified_disposition"] == "implementation_prompt_budget_exceeded"
 
 
 def test_the_corrected_builder_stays_within_the_configured_ceiling(tmp_path: Path) -> None:
     """A workspace far larger than the ceiling still produces a bounded prompt."""
 
-    files = {f"libs/pkg/src/module_{index:04d}.py": "x" * 4_000 for index in range(400)}
+    files = {"libs/pkg/a.py": "keep"}
+    files.update({f"other/module_{index:04d}.py": "x" * 4_000 for index in range(400)})
     workspace = _workspace(tmp_path, files)
     build = build_implementation_prompt(
         instructions="INSTRUCTIONS",
@@ -79,7 +82,7 @@ def test_the_corrected_builder_stays_within_the_configured_ceiling(tmp_path: Pat
 
 def test_mandatory_contracts_are_present_and_byte_identical(tmp_path: Path) -> None:
     contracts = _contracts(packet='{"packet":"exact \\u00e9 bytes"}')
-    workspace = _workspace(tmp_path, {"libs/pkg/a.py": "A" * 500_000})
+    workspace = _workspace(tmp_path, {"libs/pkg/a.py": "A" * 5_000})
     build = build_implementation_prompt(
         instructions="INSTRUCTIONS",
         contracts=contracts,
@@ -117,7 +120,8 @@ def test_mandatory_contracts_alone_exceeding_the_ceiling_fail_closed(tmp_path: P
 def test_source_files_are_included_only_whole(tmp_path: Path) -> None:
     """A partial file would misrepresent the source to the model."""
 
-    files = {f"libs/pkg/f{index}.py": f"UNIQUE-{index}\n" + "y" * 20_000 for index in range(20)}
+    files = {f"other/f{index}.py": f"UNIQUE-{index}\n" + "y" * 20_000 for index in range(20)}
+    files["libs/pkg/keep.py"] = "APPROVED"
     workspace = _workspace(tmp_path, files)
     build = build_implementation_prompt(
         instructions="I",
@@ -133,7 +137,7 @@ def test_source_files_are_included_only_whole(tmp_path: Path) -> None:
 
 
 def test_selection_is_deterministic_across_repeated_builds(tmp_path: Path) -> None:
-    files = {f"libs/pkg/m{index:03d}.py": "z" * 9_000 for index in range(60)}
+    files = {f"other/m{index:03d}.py": "z" * 9_000 for index in range(60)}
     files.update({f"docs/d{index:03d}.md": "d" * 9_000 for index in range(60)})
     workspace = _workspace(tmp_path, files)
     builds = [
@@ -164,7 +168,7 @@ def test_approved_write_roots_are_prioritized_over_unrelated_files(tmp_path: Pat
         contracts=_contracts(),
         workspace=workspace,
         task_plan=_task_plan("libs/property-tax-adapters"),
-        budget=_budget(chars=60_000),
+        budget=_budget(chars=90_000),
     )
     approved = [item for item in build.included if item.startswith("libs/property-tax-adapters/")]
     # Every approved-root file is present...
@@ -181,7 +185,7 @@ def test_approved_write_roots_are_prioritized_over_unrelated_files(tmp_path: Pat
 
 
 def test_included_and_omitted_evidence_is_complete(tmp_path: Path) -> None:
-    files = {f"libs/pkg/f{index:02d}.py": "f" * 15_000 for index in range(20)}
+    files = {f"other/f{index:02d}.py": "f" * 15_000 for index in range(20)}
     workspace = _workspace(tmp_path, files)
     build = build_implementation_prompt(
         instructions="I",
@@ -296,3 +300,105 @@ def test_the_configured_ceiling_applies_to_every_provider() -> None:
     assert ceiling < 1_048_576, "must leave margin beneath the provider hard limit"
     # Both providers resolve through the same profile and therefore the same budget.
     assert set(profile["permitted_providers"]) == {"openai", "sakana"}
+
+
+def test_dropping_an_approved_path_file_is_a_refusal_not_an_omission(tmp_path: Path) -> None:
+    """The task is literally about this material.
+
+    A model editing files it was never shown produces work that fails validation
+    for reasons it could not have known, so degrading here is not acceptable.
+    """
+
+    files = {f"libs/pkg/src/big{index:02d}.py": "b" * 30_000 for index in range(10)}
+    workspace = _workspace(tmp_path, files)
+    with pytest.raises(KernelError) as raised:
+        build_implementation_prompt(
+            instructions="I",
+            contracts=_contracts(),
+            workspace=workspace,
+            task_plan=_task_plan("libs/pkg"),
+            budget=_budget(chars=60_000),
+        )
+    assert raised.value.code == "implementation_prompt_budget_exceeded"
+    assert raised.value.details["path"].startswith("libs/pkg/")
+
+
+def test_an_oversized_approved_path_file_is_also_a_refusal(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path, {"libs/pkg/huge.py": "h" * 300_000})
+    with pytest.raises(KernelError) as raised:
+        build_implementation_prompt(
+            instructions="I",
+            contracts=_contracts(),
+            workspace=workspace,
+            task_plan=_task_plan("libs/pkg"),
+            budget=_budget(),
+        )
+    assert raised.value.code == "implementation_prompt_budget_exceeded"
+    assert (
+        raised.value.details["per_file_limit_exceeded" if False else "path"] == "libs/pkg/huge.py"
+    )
+
+
+def test_the_model_is_told_what_it_was_not_shown(tmp_path: Path) -> None:
+    """Omission evidence in provenance is post-hoc audit; the model needs it too."""
+
+    files = {"libs/pkg/a.py": "keep"}
+    files.update({f"other/f{index:03d}.py": "o" * 12_000 for index in range(40)})
+    workspace = _workspace(tmp_path, files)
+    build = build_implementation_prompt(
+        instructions="I",
+        contracts=_contracts(),
+        workspace=workspace,
+        task_plan=_task_plan("libs/pkg"),
+        budget=_budget(chars=80_000),
+    )
+    assert "===== OMITTED SOURCE CONTEXT =====" in build.prompt
+    assert "Treat the snapshot as partial" in build.prompt
+    elided = [path for path, reason in build.omitted if reason == "character_budget_exceeded"]
+    assert elided and elided[0] in build.prompt
+    # And the approved-path file survived.
+    assert "libs/pkg/a.py" in build.included
+
+
+def test_a_complete_snapshot_carries_no_omission_notice(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path, {"libs/pkg/a.py": "small"})
+    build = build_implementation_prompt(
+        instructions="I",
+        contracts=_contracts(),
+        workspace=workspace,
+        task_plan=_task_plan("libs/pkg"),
+        budget=_budget(),
+    )
+    assert "OMITTED SOURCE CONTEXT" not in build.prompt
+    assert build.provenance(_budget())["source_context_elided"] is False
+
+
+def test_astral_characters_count_under_the_worst_case_definition() -> None:
+    """`len()` counts code points; a provider may count UTF-16 code units."""
+
+    from countyforge_runner.implementation_prompt import measured_length
+
+    assert measured_length("abc") == 3
+    # One astral character is two UTF-16 code units.
+    assert len("\U0001f600") == 1
+    assert measured_length("\U0001f600") == 2
+
+
+def test_budget_pressure_is_reported_as_evidence(tmp_path: Path) -> None:
+    """A run that starts degrading must be visible, not merely auditable."""
+
+    files = {"libs/pkg/a.py": "keep"}
+    files.update({f"other/f{index:03d}.py": "o" * 12_000 for index in range(40)})
+    workspace = _workspace(tmp_path, files)
+    budget = _budget(chars=80_000)
+    build = build_implementation_prompt(
+        instructions="I",
+        contracts=_contracts(),
+        workspace=workspace,
+        task_plan=_task_plan("libs/pkg"),
+        budget=budget,
+    )
+    provenance = build.provenance(budget)
+    assert provenance["source_context_elided"] is True
+    assert 0.0 < provenance["budget_utilisation"] <= 1.0
+    assert provenance["total_chars"] >= provenance["total_code_points"]

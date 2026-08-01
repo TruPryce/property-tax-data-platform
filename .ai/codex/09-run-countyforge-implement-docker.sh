@@ -262,6 +262,17 @@ docker run --rm \
     - \
   > "$OUT_DIR/countyforge-implementation-model-events.ndjson" < "$MODEL_PROMPT"
 
+# If the provider still rejects the input after our own ceiling passed, the
+# configured ceiling has drifted from the provider's real limit. That is the
+# defect that caused run 30698203658 recurring, so it is classified distinctly
+# rather than folded into a generic adapter failure.
+if grep -q "input_too_large" "$OUT_DIR/countyforge-implementation-model-events.ndjson" 2>/dev/null; then
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"disposition\":\"implementation_prompt_ceiling_drift\",\"configured_max_model_input_chars\":$MAX_MODEL_INPUT_CHARS}" \
+    > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
+  echo "error: the provider rejected an input our configured ceiling accepted; the ceiling has drifted" >&2
+  exit 2
+fi
+
 # The model emits a bounded structured file bundle because no process-execution tool is
 # available inside the container. Trusted host-side materialization is limited to relative
 # paths and the mounted workspace; the full path/secret policy is enforced before upload.

@@ -10,5 +10,6 @@
   "adapter_budgets_at_failure": {
     "workspace_snapshot_max_bytes": 4194304,
     "assembled_prompt_max_bytes": 10485760
-  }
+  },
+  "classified_disposition": "implementation_prompt_budget_exceeded"
 }
