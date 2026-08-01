@@ -1,73 +1,186 @@
-## Current-state evidence
+## Context
 
-- `ca0df171cabe5f246f2a4fe5`: Issue 17 requests synthetic observed-header Dallas parsing, typed source and vendor-neutral records, deterministic failures, source extras, tests, documentation, and strict scope exclusions.
-- `a8d0164e015d086c00140812`: ACCOUNT_NUM remains a 17-character zero-padded account identifier, GIS_PARCEL_ID is distinct, the source key includes APPRAISAL_YR, and TOT_VAL has unresolved semantics.
-- `c83b55e968e3981f0030935d`: Accepted behavior lives in OpenSpec, and the allowed dependency direction is dags and services to adapters to application to domain.
-- `76e21fb4c68b6f87724edaac`: Adapters translate external formats and implement ports, while source-specific fields stop at the adapter boundary.
-- `7676ed46a8bb877ba7fdaac0`: County adapters fingerprint layouts and quarantine incompatible drift, use only small synthetic or redistribution-safe fixtures, and require verified OpenSpec tasks before production readiness.
-- `12eb90de41980a9b5226022f`: The repository provides make check as the aggregate gate and requires delivery work to call out schema changes, backfill needs, migration order, and rollback behavior.
-- `05e1317dff1c2a0b0cdc4827`: No county adapter is production-ready yet. Synthetic fixtures are CC0, while third-party county data retains its publisher's terms.
-- `37b0be1db5c2ff2ef21f3eae`: County source onboarding must establish source authority, release semantics, format and schema behavior, identity and grain, privacy handling, quality gates, and publication blockers.
-- `714534bcff3cb21530465c55`: OpenSpec uses one spec directory per capability, normative requirements with scenarios, design decisions and risks, dependency-ordered tasks, validation, and doctor checks.
-- `d253d5455b500dc5f5a9bca6`: Trusted planning code renders only the five bounded OpenSpec artifacts, validates before publication, and keeps implementation eligibility false pending human approval and resolved decisions.
-- `2e0a24560feb74d4881dab53`: The initial approval contract is an authorized maintainer merging the planning PR, and blocking unresolved decisions keep implementation eligibility false.
-- `1f68cbd53a026079a9b30f8d`: Repository review policy blocks source artifacts, protected-owner publication, dependency violations, fabricated canonical value semantics, and premature production-ready claims.
-- `3ff4dd1258ffbf8403ca8eec`: Engineering documentation must link to normative OpenSpec requirements rather than duplicate them.
-- `fc02f32a50f16c9ec430bd1b`: The bootstrap proposal defines dallas-cad-source-contract as the distinct Dallas capability for release, schema, identity, privacy, and replacement-snapshot behavior.
+Issue #17 is limited to a synthetic Dallas parser foundation. Existing accepted planning preserves
+`ACCOUNT_NUM` as a 17-digit textual identifier, keeps `GIS_PARCEL_ID` distinct, uses
+`(ACCOUNT_NUM, APPRAISAL_YR)` as the parent-row key, and refuses to assign canonical semantics to
+`TOT_VAL`. This revision records the maintainer-approved decisions that replace the generated
+layout, package-boundary, and lexical/provenance blockers.
 
-## Proposed architecture
+The implementation remains inside `property_tax_adapters`. It does not acquire Dallas files,
+persist releases, publish data, orchestrate work, or change domain/application contracts.
 
-Create a draft OpenSpec delta for dallas-cad-source-contract that records the blocking decisions and, once maintainers resolve them, specifies typed Dallas adapter records, deterministic header-name binding, fail-closed layout and row validation, source extras and provenance preservation, approved vendor-neutral conversion, synthetic-fixture coverage, and boundary documentation. The delta must not make the adapter production-ready or add acquisition, persistence, publication, orchestration, infrastructure, or deployment behavior. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 7676ed46a8bb877ba7fdaac0, 05e1317dff1c2a0b0cdc4827]
+## Goals / Non-Goals
 
-## Dependency direction
+**Goals:**
 
-The implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.
+- Parse a precisely defined UTF-8 Dallas CSV foundation from synthetic fixtures.
+- Bind known fields only by normalized observed header name and preserve unknown source extras.
+- Produce typed Dallas-native and vendor-neutral adapter records with complete provenance.
+- Reject malformed layouts, lexical values, row widths, and duplicate parent keys deterministically.
+- Keep diagnostics bounded and safe for logs and test output.
 
-## Trust boundaries
+**Non-Goals:**
 
-Issue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.
+- Network access, Dallas source contact, county artifacts, production data, or production credentials.
+- Acquisition, Bronze, database, Silver, Gold, Airflow, services, workflows, infrastructure,
+  deployment, backfill, or production-ready status.
+- New dependencies, owner publication, protected-identity reconstruction, or domain/application
+  model changes.
+- Canonical appraisal-value or tax-collection semantics for `TOT_VAL`.
 
-## Data and contract changes
+## Decisions
 
-The planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.
+### 1. Physical CSV contract
 
-## Alternatives considered
+The parser contract version is integer `1`. Input is UTF-8; one UTF-8 BOM is accepted only at byte
+offset zero and is removed before the first observed header is retained. Any decoding failure or
+BOM elsewhere fails closed. The delimiter is comma, line endings may be LF or CRLF, and Python's
+standard CSV double-quote behavior applies: quoted fields may contain commas and a literal quote is
+represented by two consecutive quotes. Every logical data record has exactly the observed header
+width. The header is logical row 1; data records are numbered from 2 independent of physical lines
+inside quoted fields.
 
-No alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.
+Rejected alternatives: encoding auto-detection, delimiter sniffing, permissive row padding or
+truncation, and nonstandard quote escaping. Each would make identical bytes parse differently or
+hide incompatible source drift.
 
-## Decisions and assumptions
+### 2. Observed-header binding and layout identity
 
-- Dallas format names and source-native fields remain in property_tax_adapters, while property_tax_application and property_tax_domain remain vendor-neutral and preserve the adapters-to-application-to-domain dependency direction. [source_ids: c83b55e968e3981f0030935d, 76e21fb4c68b6f87724edaac, a8d0164e015d086c00140812]
-- The proposal modifies the existing dallas-cad-source-contract capability rather than creating a PACS or cross-county abstraction. [source_ids: fc02f32a50f16c9ec430bd1b, 37b0be1db5c2ff2ef21f3eae, a8d0164e015d086c00140812]
-- All examples and fixtures are small synthetic or redistribution-safe data with documented provenance and no full county release, owner, mailing-address, or protected-identity content. [source_ids: ca0df171cabe5f246f2a4fe5, 7676ed46a8bb877ba7fdaac0, 05e1317dff1c2a0b0cdc4827]
-- No network access, database migration, Bronze persistence, Gold publication, Airflow DAG, production configuration, or new dependency is planned. Any newly required dependency remains a blocking human decision. [source_id: ca0df171cabe5f246f2a4fe5]
-- Engineering documentation will link to the normative OpenSpec delta rather than duplicate its requirements. [source_id: 3ff4dd1258ffbf8403ca8eec]
+Each parsed observed header is retained after BOM removal and CSV unquoting. Its normalized form is
+computed with `header.strip(" \\t\\r\\n\\v\\f").upper()`. Blank normalized headers fail.
+Exact repeated observed headers produce `duplicate_header`; distinct observed headers that map to
+the same normalized value produce `header_normalization_collision`. No aliases,
+documentation-only names, or positional bindings are supported.
 
-## Unresolved decisions
+The required normalized header set is exactly `ACCOUNT_NUM`, `APPRAISAL_YR`, `GIS_PARCEL_ID`, and
+`TOT_VAL`; order is irrelevant. Unknown normalized headers are accepted, retained in source extras,
+and reported with `extra_columns_present` without shifting known bindings.
 
-- BLOCKING: Maintainers must approve the authoritative required observed headers, delimiter and encoding, header-normalization and collision rules, supported layout fingerprints, quoting behavior, and accepted row-width forms. The issue requests these behaviors but the accepted Dallas evidence supplied here does not define their complete contract. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 37b0be1db5c2ff2ef21f3eae]
-- BLOCKING: Maintainers must identify the exact approved vendor-neutral target record and field types, including whether an existing domain type is sufficient and which Dallas facts must remain adapter-only. [source_ids: ca0df171cabe5f246f2a4fe5, 76e21fb4c68b6f87724edaac, a8d0164e015d086c00140812]
-- BLOCKING: Maintainers must approve lexical and typed representations for Dallas numeric and date fields, the retained representation of unresolved values such as TOT_VAL, and the exact source-member, header, release, extras, and diagnostic provenance carried by parser output. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 7676ed46a8bb877ba7fdaac0]
+The layout fingerprint is SHA-256 over the UTF-8 encoding of compact canonical JSON with sorted
+keys and separators `(',', ':')` for this document:
 
-## Risks and compatibility
+```json
+{"headers":["<sorted normalized header>","..."],"parser_contract_version":1}
+```
 
-- Authority risk: implementing directly from Issue 17 could promote untrusted requirements evidence into policy or choose behavior inconsistent with the complete accepted Dallas contract. Mitigation: keep implementation blocked until the missing choices are approved in OpenSpec. [source_ids: d253d5455b500dc5f5a9bca6, c83b55e968e3981f0030935d, ca0df171cabe5f246f2a4fe5]
-- Layout-drift risk: header normalization can collapse distinct source names or silently remap an incompatible release. Mitigation: approve normalization and collision rules, fingerprint compatible layouts, and quarantine incompatible drift rather than guessing. [source_ids: ca0df171cabe5f246f2a4fe5, 7676ed46a8bb877ba7fdaac0]
-- Semantic risk: numeric conversion could fabricate canonical meaning for TOT_VAL or lose source evidence such as leading zeros and original lexical forms. Mitigation: preserve ACCOUNT_NUM as text, retain unresolved values as source-native facts, and map only approved semantics. [source_ids: a8d0164e015d086c00140812, 1f68cbd53a026079a9b30f8d]
-- Architecture risk: Dallas or PACS vocabulary could leak into reusable domain or application contracts. Mitigation: keep external-format records and mappings in property_tax_adapters and require separate approval for any vendor-neutral domain type. [source_ids: c83b55e968e3981f0030935d, 76e21fb4c68b6f87724edaac, a8d0164e015d086c00140812]
-- Privacy risk: unknown fields or malformed-row diagnostics could expose owner or mailing information. Mitigation: use identity-free synthetic fixtures, retain owner publication as default-deny, and require diagnostics that do not emit protected values. [source_ids: ca0df171cabe5f246f2a4fe5, 1f68cbd53a026079a9b30f8d, 7676ed46a8bb877ba7fdaac0]
-- Fixture-governance risk: synthetic examples could be mistaken for measured source evidence or could reproduce restricted source bytes. Mitigation: document fixture provenance and checksum, keep fixtures CC0 or otherwise redistribution-safe, and retain accepted source evidence as the authority. [source_ids: 05e1317dff1c2a0b0cdc4827, 7676ed46a8bb877ba7fdaac0, 37b0be1db5c2ff2ef21f3eae]
-- Data migration: no database schema migration is planned because the issue scope excludes database loading, Bronze persistence, and Gold publication. [source_id: ca0df171cabe5f246f2a4fe5]
-- Backfill: no production backfill is planned because this change is limited to a parser foundation and synthetic fixtures rather than processing county releases. [source_id: ca0df171cabe5f246f2a4fe5]
-- Rollback: the planned implementation is additive parser, fixture, test, and documentation work that can be reverted before production use. Because persistence and publication are excluded, no persisted-data rollback is planned. [source_ids: ca0df171cabe5f246f2a4fe5, 12eb90de41980a9b5226022f]
-- Package compatibility: preserve the adapters-to-application-to-domain dependency direction and keep Dallas-specific formats out of application and domain contracts. [source_ids: c83b55e968e3981f0030935d, 76e21fb4c68b6f87724edaac]
-- County compatibility: Dallas remains a distinct delimited-source contract and must not become a PACS or cross-county layout abstraction. [source_ids: a8d0164e015d086c00140812, fc02f32a50f16c9ec430bd1b]
-- Readiness compatibility: existing release and publication behavior remains unchanged, and the Dallas adapter remains non-production-ready until its accepted OpenSpec tasks and required checks pass. [source_ids: 05e1317dff1c2a0b0cdc4827, 7676ed46a8bb877ba7fdaac0, 12eb90de41980a9b5226022f]
+The fingerprint is provenance, not an allowlist. Missing required headers, blank or duplicate
+headers, normalization collisions, invalid CSV syntax, and incompatible row widths are unsupported
+layouts even when their fingerprint has been observed before.
 
-## Rollout and failure recovery
+Rejected alternatives: positional mapping, header aliases, fingerprints as an allowlist, and
+hashing original header order. Those approaches either weaken observed-header evidence or turn
+safe reordering and extra columns into false incompatibilities.
 
-Validation commands: openspec validate add-dallas-cad-parser-foundation, make check. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.
+### 3. Adapter-local record and conversion boundary
 
-## Testing strategy
+All new types live under `property_tax_adapters`; `property_tax_domain` and
+`property_tax_application` do not change.
 
-Run the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.
+`DallasAppraisalSourceRecord` is equivalent to:
+
+- `account_num: str`
+- `appraisal_year: int`
+- `gis_parcel_id: str`
+- `tot_val: SourceNativeDecimal`
+- `extras: Mapping[str, str]`
+- `provenance: DallasSourceProvenance`
+
+`AppraisalSourceRecord` is a vendor-neutral adapter-local output equivalent to:
+
+- `jurisdiction_code: str`, fixed to `"tx-dallas"`
+- `source_account_id: str`
+- `appraisal_year: int`
+- `parcel_reference: str | None`
+- `source_native_values: Mapping[str, SourceNativeValue]`
+- `provenance: SourceProvenance`
+
+Extras use normalized unknown-header names as keys and preserve decoded CSV field text as values.
+Conversion retains those values as explicitly source-native facts. `TOT_VAL` appears only in
+`source_native_values`; it does not populate or imply market, appraised, assessed, taxable,
+tax-amount, payment-status, delinquency, penalty, or interest fields. No domain type is approved.
+
+Rejected alternatives: adding Dallas records to the domain, modifying an application port,
+equating account and parcel identifiers, or coercing `TOT_VAL` into a canonical value.
+
+### 4. Lexical forms and duplicate grain
+
+- `ACCOUNT_NUM` matches `[0-9]{17}` exactly and is stored unchanged, including leading zeros.
+- `APPRAISAL_YR` matches `[0-9]{4}` exactly, is parsed to `int`, and is accepted only from 1900
+  through 2100 inclusive.
+- `GIS_PARCEL_ID` is required; surrounding ASCII whitespace is removed and the remaining text must
+  be non-empty. Its remaining case, punctuation, and leading zeros are preserved, and it is never
+  equated with `ACCOUNT_NUM`.
+- `TOT_VAL` matches `-?[0-9]+(?:\\.[0-9]+)?` exactly. Currency symbols, grouping commas, exponent
+  notation, leading plus, trailing decimal point, blank text, and malformed decimal text fail.
+  `decimal.Decimal` provides the parsed value while `SourceNativeDecimal` retains the exact lexical
+  text and a source-native classification marker.
+
+Required blanks never become `None`. Within one parser invocation, the second occurrence of an
+`(ACCOUNT_NUM, APPRAISAL_YR)` key fails with `duplicate_parent_key`; diagnostics do not include the
+key values.
+
+### 5. Provenance and diagnostics
+
+Both Dallas-native and vendor-neutral adapter records retain caller-supplied source member name and
+release identifier, original observed headers, normalized headers, layout fingerprint, one-based
+logical source row number, and parser contract version. Source member and release identity are
+inputs and are never inferred from row content or filenames inside a row.
+
+The closed diagnostic vocabulary is:
+
+- `invalid_encoding`
+- `unexpected_bom`
+- `blank_header`
+- `missing_required_header`
+- `duplicate_header`
+- `header_normalization_collision`
+- `malformed_csv`
+- `row_width_mismatch`
+- `invalid_account_num`
+- `invalid_appraisal_year`
+- `invalid_gis_parcel_id`
+- `invalid_tot_val`
+- `duplicate_parent_key`
+- `unsupported_layout`
+- `extra_columns_present`
+
+A diagnostic contains only its stable code and, when applicable, a normalized field/header name,
+one-based logical row number, and layout fingerprint. It never includes a complete source row,
+owner name, mailing address, protected identity, credential, or arbitrary source value. Every
+header/layout failure emits its specific code and the terminal `unsupported_layout` classification;
+`extra_columns_present` is a non-failing schema warning.
+
+### 6. Fixtures, approval, and package limits
+
+Fixtures are independently authored, small, synthetic, identity-free, and redistribution-safe.
+They contain no copied county rows or protected data. Implementation may change only
+`libs/property-tax-adapters`, adapter-local tests/fixtures below that package, and `docs`.
+
+Implementation eligibility remains false while this PR is open. An authorized maintainer merge is
+the approval event; implementation then follows the unchecked tasks and may not expand their paths.
+
+## Risks / Trade-offs
+
+- Header normalization can collapse distinct names. The parser fails closed and reports the
+  collision instead of selecting one.
+- Accepting unknown columns improves additive compatibility but may expose unreviewed facts. They
+  remain source-native extras, diagnostics identify only header names, and no semantic mapping is
+  inferred.
+- A fingerprint that is provenance rather than an allowlist accepts safe reorderings and extras.
+  Required-header, collision, CSV, and width validation remain the actual compatibility gates.
+- `Decimal` preserves numeric precision but not every lexical distinction by itself.
+  `SourceNativeDecimal` therefore retains both the parsed value and original text.
+- Synthetic fixtures do not prove compatibility with a production Dallas release. The adapter
+  remains non-production-ready and live source onboarding stays separate.
+
+## Migration Plan
+
+This is additive, pre-production adapter work with no stored data, schema migration, or backfill.
+Rollback is deletion or reversion of the adapter-local parser/types/tests and associated docs. No
+published product or persisted release requires repair.
+
+## Open Questions
+
+None for this parser-foundation slice. Any future source-member expansion, domain/application
+contract, canonical value semantics, persistence, publication, or production-readiness decision
+requires a separate reviewed OpenSpec change.

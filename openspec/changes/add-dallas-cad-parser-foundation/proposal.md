@@ -1,41 +1,76 @@
 ## Why
 
-Accepted Dallas evidence establishes ACCOUNT_NUM as a 17-character zero-padded account identifier, keeps GIS_PARCEL_ID distinct, uses ACCOUNT_NUM with APPRAISAL_YR as the source row key, and leaves TOT_VAL without approved canonical value semantics. Issue 17 requests a synthetic observed-header parser and typed conversion, but the supplied authoritative evidence does not settle the complete required-header set, delimiter and encoding contract, header-normalization collision behavior, accepted lexical forms, compatible layout fingerprints, or exact vendor-neutral target record. Those choices must not be invented from untrusted issue prose. [source_ids: a8d0164e015d086c00140812, ca0df171cabe5f246f2a4fe5, c83b55e968e3981f0030935d, d253d5455b500dc5f5a9bca6]
+Issue #17 requires a production-quality Dallas appraisal parser foundation without using or
+committing county data. Accepted Dallas evidence already distinguishes `ACCOUNT_NUM` from
+`GIS_PARCEL_ID`, identifies the account-year grain, and requires `TOT_VAL` to remain
+source-native; this planning revision supplies the previously missing physical-layout, record,
+lexical, provenance, and diagnostic decisions needed for deterministic implementation.
 
-## Outcome
+## What Changes
 
-Create a draft OpenSpec delta for dallas-cad-source-contract that records the blocking decisions and, once maintainers resolve them, specifies typed Dallas adapter records, deterministic header-name binding, fail-closed layout and row validation, source extras and provenance preservation, approved vendor-neutral conversion, synthetic-fixture coverage, and boundary documentation. The delta must not make the adapter production-ready or add acquisition, persistence, publication, orchestration, infrastructure, or deployment behavior. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 7676ed46a8bb877ba7fdaac0, 05e1317dff1c2a0b0cdc4827]
+- Define a UTF-8, comma-delimited CSV contract with optional leading BOM, standard double-quote
+  behavior, LF and CRLF support, exact row-width checks, observed-header normalization, and
+  deterministic layout fingerprints.
+- Define adapter-local `DallasAppraisalSourceRecord`, `AppraisalSourceRecord`, source-native value,
+  provenance, and diagnostic contracts under `property_tax_adapters` only.
+- Define exact lexical forms for account number, appraisal year, parcel identifier, and `TOT_VAL`,
+  including deterministic duplicate account-year rejection.
+- Preserve unknown columns as source extras and preserve `TOT_VAL` only as a source-native value;
+  no canonical appraisal or tax-collection meaning is approved.
+- Require small, synthetic, identity-free, redistribution-safe fixtures and observable tests for
+  valid input, layout variation, malformed input, provenance, diagnostics, and redaction.
+- Keep implementation eligibility false until an authorized maintainer merges this planning PR;
+  the merge is the approval event for subsequent implementation.
 
-## Scope
+## Capabilities
 
-- Originating issue: #17
-- CountyForge planning run: `gh-d60959871886b8c59984868c-a2`
-- Affected capabilities: dallas-cad-source-contract
+### New Capabilities
+
+None.
+
+### Modified Capabilities
+
+- `dallas-cad-source-contract`: add the approved parser-foundation contract for physical CSV
+  layout, adapter-local records, lexical forms, provenance, diagnostics, synthetic fixtures, and
+  fail-closed behavior.
+
+## Impact
+
+- Permitted implementation paths: `libs/property-tax-adapters` and its adapter-local tests and
+  synthetic fixtures, plus `docs`.
+- `property_tax_domain` and `property_tax_application` remain unchanged; no domain type is
+  approved by this change.
+- No new dependency is approved. The implementation uses Python standard-library CSV, decimal,
+  hashing, and JSON facilities.
+- No service, DAG, workflow, tool, infrastructure, persistence, migration, deployment, or
+  production configuration is authorized.
 
 ## Constraints
 
-- Network and credential boundary: the parser foundation requires no live Dallas endpoint, external retrieval, provider credential, runtime secret, or production connection. [source_ids: ca0df171cabe5f246f2a4fe5, c83b55e968e3981f0030935d]
-- Privacy boundary: owner and mailing-address publication remains default-deny, protected identities are never reconstructed, and fixtures and diagnostics must contain no protected identity. [source_ids: ca0df171cabe5f246f2a4fe5, 1f68cbd53a026079a9b30f8d]
-- Artifact boundary: no county archive, CSV, appraisal record, owner record, mailing-address data, full release, credential, or secret may be committed. [source_ids: ca0df171cabe5f246f2a4fe5, 12eb90de41980a9b5226022f, 1f68cbd53a026079a9b30f8d]
-- Source-license boundary: project-controlled synthetic fixtures and generated demo data are CC0, while third-party county data retains its publisher's terms and receives no redistribution grant from the project license. [source_id: 05e1317dff1c2a0b0cdc4827]
-- Semantic safety boundary: appraisal facts must not be represented as authoritative tax bills, payments, delinquencies, penalties, or interest records. [source_ids: c83b55e968e3981f0030935d, a8d0164e015d086c00140812]
+- Parser inputs are caller-supplied bytes or text, source member name, and release identifier; the
+  parser performs no network access and does not infer source or release identity from row data.
+- Fixtures and expected diagnostics MUST be small, synthetic, identity-free, and
+  redistribution-safe. No county archive, CSV extract, appraisal record, owner record, mailing
+  address, protected identity, production data, credential, or secret may be committed.
+- Owner and mailing-address publication remains default-deny, and diagnostics may not echo
+  complete rows or arbitrary source values.
+- Appraisal data remains distinct from authoritative tax bills, payments, delinquencies,
+  penalties, and interest.
 
 ## Non-goals
 
-- Live Dallas discovery, download, HTTP probing, or source contact. [source_id: ca0df171cabe5f246f2a4fe5]
-- ZIP or archive acquisition, Bronze persistence, immutable source storage, or source-release ingestion. [source_id: ca0df171cabe5f246f2a4fe5]
-- PostgreSQL loading, database migration, production backfill, Silver persistence, Gold publication, or release promotion. [source_id: ca0df171cabe5f246f2a4fe5]
-- Airflow DAG or ingestion-service orchestration. [source_ids: ca0df171cabe5f246f2a4fe5, c83b55e968e3981f0030935d]
-- Owner or mailing-address publication, protected-identity reconstruction, or owner-bearing fixtures and diagnostics. [source_ids: ca0df171cabe5f246f2a4fe5, 1f68cbd53a026079a9b30f8d]
-- Canonical child-member publication before natural child keys are approved. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812]
-- Cross-county normalization, a shared Dallas-derived base adapter, or a PACS domain abstraction. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812]
-- Production deployment or marking the Dallas adapter production-ready. [source_ids: ca0df171cabe5f246f2a4fe5, 05e1317dff1c2a0b0cdc4827, 7676ed46a8bb877ba7fdaac0]
-- Authoritative tax-bill, payment, delinquency, penalty, or interest behavior. [source_ids: c83b55e968e3981f0030935d, a8d0164e015d086c00140812]
+- Live Dallas discovery, download, HTTP probing, source contact, or network access.
+- ZIP acquisition, Bronze persistence, immutable source storage, or release ingestion.
+- PostgreSQL loading, database migration, backfill, Silver persistence, Gold publication, or
+  release promotion.
+- Airflow orchestration, ingestion-service work, workflows, provider changes, infrastructure, or
+  deployment.
+- New dependencies, owner publication, protected-identity reconstruction, or owner-bearing
+  fixtures and diagnostics.
+- Cross-county normalization, a shared Dallas-derived parser, or a PACS domain abstraction.
+- Canonical market, appraised, assessed, taxable, tax-amount, payment-status, or delinquency
+  semantics for `TOT_VAL`.
+- A production-ready designation for Dallas or any other county adapter.
 
-## Unresolved decisions
-
-- BLOCKING: Maintainers must approve the authoritative required observed headers, delimiter and encoding, header-normalization and collision rules, supported layout fingerprints, quoting behavior, and accepted row-width forms. The issue requests these behaviors but the accepted Dallas evidence supplied here does not define their complete contract. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 37b0be1db5c2ff2ef21f3eae]
-- BLOCKING: Maintainers must identify the exact approved vendor-neutral target record and field types, including whether an existing domain type is sufficient and which Dallas facts must remain adapter-only. [source_ids: ca0df171cabe5f246f2a4fe5, 76e21fb4c68b6f87724edaac, a8d0164e015d086c00140812]
-- BLOCKING: Maintainers must approve lexical and typed representations for Dallas numeric and date fields, the retained representation of unresolved values such as TOT_VAL, and the exact source-member, header, release, extras, and diagnostic provenance carried by parser output. [source_ids: ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812, 7676ed46a8bb877ba7fdaac0]
-
-This draft requires human maintainer approval before implementation.
+This planning contract remains implementation-ineligible until an authorized maintainer merges
+PR #31. The merge, not generation or validation, is the human approval event.

@@ -1,14 +1,29 @@
-## Tasks
+## 1. Adapter Records and Parser
 
-<!-- countyforge-task: 1.1 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.1 1. Resolve the blocking parser-contract decisions in dallas-cad-source-contract. Express each approved decision as normative requirements and observable scenarios covering headers, layouts, lexical forms, provenance, diagnostics, and vendor-neutral mapping. Affected contract: dallas-cad-source-contract. Prerequisites: none. [source_ids: 714534bcff3cb21530465c55, ca0df171cabe5f246f2a4fe5, a8d0164e015d086c00140812]
-<!-- countyforge-task: 1.2 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.2 2. Define typed Dallas source records and deterministic parsing behavior for property_tax_adapters after slice 1. Bind by approved normalized observed-header names, preserve source extras and provenance, and fail closed on missing, duplicate, ambiguous, colliding, incompatible, or unsupported layouts. Affected package: property_tax_adapters. Prerequisite: slice 1. [source_ids: ca0df171cabe5f246f2a4fe5, 76e21fb4c68b6f87724edaac, 7676ed46a8bb877ba7fdaac0]
-<!-- countyforge-task: 1.3 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.3 3. Define the approved conversion boundary after slices 1 and 2. Map only approved semantics into vendor-neutral records, preserve ACCOUNT_NUM as text, keep GIS_PARCEL_ID distinct, and retain TOT_VAL as a source-native fact. Affected package: property_tax_adapters, with property_tax_domain affected only if maintainers approve a vendor-neutral type. Prerequisites: slices 1 and 2. [source_ids: a8d0164e015d086c00140812, 76e21fb4c68b6f87724edaac, ca0df171cabe5f246f2a4fe5]
-<!-- countyforge-task: 1.4 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.4 4. Specify synthetic fixture and deterministic test coverage after slices 2 and 3. Cover valid rows, reordered headers, missing and duplicate headers, normalization collisions, incompatible layouts, unknown extras, malformed numeric and date forms, invalid identifiers, row-width and quoting errors, and duplicate account-year parent keys. Affected areas: adapter tests and synthetic fixtures. Prerequisites: slices 2 and 3. [source_ids: ca0df171cabe5f246f2a4fe5, 7676ed46a8bb877ba7fdaac0, 12eb90de41980a9b5226022f]
-<!-- countyforge-task: 1.5 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.5 5. Specify engineering documentation after slices 1 through 3. Document the Dallas source boundary, provenance, unresolved value semantics, fixture licensing, privacy defaults, diagnostic redaction, compatibility limits, and non-production-ready status while linking to normative OpenSpec. Affected area: engineering documentation. Prerequisites: slices 1 through 3. [source_ids: ca0df171cabe5f246f2a4fe5, 3ff4dd1258ffbf8403ca8eec, 05e1317dff1c2a0b0cdc4827]
-<!-- countyforge-task: 1.6 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
-- [ ] 1.6 6. Verify the bounded change after slices 4 and 5. Run the declared validation commands and confirm that no county source artifact, secret, protected identity, network behavior, migration, persistence, publication, DAG, infrastructure, production configuration, or production-ready designation was introduced. Affected areas: dallas-cad-source-contract and repository validation. Prerequisites: slices 4 and 5. [source_ids: 12eb90de41980a9b5226022f, 1f68cbd53a026079a9b30f8d, 7676ed46a8bb877ba7fdaac0, ca0df171cabe5f246f2a4fe5]
+<!-- countyforge-task: 1.1 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.1 Add adapter-local `SourceNativeDecimal`, `SourceNativeValue`, `DallasSourceProvenance`, `SourceProvenance`, `DallasAppraisalSourceRecord`, `AppraisalSourceRecord`, and the closed Dallas diagnostic vocabulary without changing domain or application packages.
+
+<!-- countyforge-task: 1.2 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=1.1 -->
+- [ ] 1.2 Implement UTF-8/BOM handling, strict comma-delimited CSV parsing, observed-header normalization, required-header and collision checks, canonical layout fingerprinting, exact row-width enforcement, unknown extras, and deterministic unsupported-layout diagnostics.
+
+<!-- countyforge-task: 1.3 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=1.1,1.2 -->
+- [ ] 1.3 Implement exact lexical validation and conversion for account number, appraisal year, parcel identifier, and source-native decimal values, including required-blank and duplicate account-year rejection.
+
+<!-- countyforge-task: 1.4 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=1.1,1.2,1.3 -->
+- [ ] 1.4 Implement adapter-local vendor-neutral conversion with jurisdiction `tx-dallas`, complete provenance retention, source-native extras, and no canonical semantics for `TOT_VAL`.
+
+## 2. Adapter Tests and Synthetic Fixtures
+
+<!-- countyforge-task: 2.1 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=1.2,1.3,1.4 -->
+- [ ] 2.1 Add small independently authored synthetic fixtures and deterministic tests for valid rows, reordered columns, optional BOM, LF and CRLF, quoting, missing/duplicate/colliding headers, unknown extras, short/long rows, lexical failures, and duplicate account-year keys.
+
+<!-- countyforge-task: 2.2 paths=libs/property-tax-adapters checks=repo.check risk=normal prerequisites=2.1 -->
+- [ ] 2.2 Add deterministic tests for layout fingerprints, complete provenance and source-native marker retention, closed diagnostic codes, diagnostic redaction, `TOT_VAL` remaining source-native, and the domain/application package boundary.
+
+## 3. Documentation and Validation
+
+<!-- countyforge-task: 3.1 paths=docs checks=repo.check risk=normal prerequisites=1.4,2.2 -->
+- [ ] 3.1 Document the Dallas parser source boundary, physical layout, lexical rules, provenance, diagnostics, synthetic fixture authorship, compatibility limits, privacy defaults, and non-production-ready status while linking to this normative OpenSpec contract.
+
+<!-- countyforge-task: 3.2 paths=libs/property-tax-adapters,docs checks=repo.check risk=normal prerequisites=2.1,2.2,3.1 -->
+- [ ] 3.2 Run `openspec validate add-dallas-cad-parser-foundation --strict`, `openspec doctor`, `make check`, and `make prepr-no-ai`; confirm no county artifact, production data, secret, network behavior, new dependency, domain/application change, persistence, publication, orchestration, deployment, owner publication, or production-ready claim was introduced.
