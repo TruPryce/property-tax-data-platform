@@ -1539,6 +1539,9 @@ def test_the_lane_evidence_step_actually_runs_and_emits_valid_json(
         "freeze_succeeded": False,
         "freeze_outcome": "failure",
         "frozen_bundle_present": False,
+        # No adapter document present in this fixture, so the field is explicit
+        # rather than absent.
+        "adapter_disposition": None,
     }
 
 
@@ -1576,7 +1579,10 @@ def test_the_budget_failure_never_echoes_prompt_or_source_content() -> None:
     failure = _IMPLEMENT_ADAPTER.split('if [ "$PROMPT_STATUS" -ne 0 ]')[1].split("fi")[0]
     assert "$MODEL_PROMPT" not in failure
     assert "cat " not in failure
-    assert "implementation_prompt_budget_exceeded" in failure
+    # The shell no longer names a disposition; it carries the one the assembly
+    # boundary reported, and only falls back when nothing was reported at all.
+    assert "implementation_prompt_preparation_failed" in failure
+    assert "adapter_disposition" in failure
 
 
 def test_the_prompt_budget_change_preserves_the_sandbox_posture() -> None:
@@ -1678,3 +1684,58 @@ def test_the_prompt_notice_tells_the_model_about_omitted_context() -> None:
     assert "Treat the snapshot as partial" in builder
     # Approved-path material is refused rather than elided.
     assert "The prompt budget cannot hold every approved-path file." in builder
+
+
+def test_the_prompt_boundary_reports_which_failure_occurred() -> None:
+    """A malformed task plan is not a budget problem.
+
+    The shell must not infer a budget failure from a nonzero exit; the Python
+    boundary names the disposition and the shell carries it.
+    """
+
+    assert "implementation_prompt_preparation_failed" in _IMPLEMENT_ADAPTER
+    assert "implementation_prompt_budget_exceeded" in _IMPLEMENT_ADAPTER
+    assert "adapter_disposition" in _IMPLEMENT_ADAPTER
+    # Non-budget exceptions classify as preparation.
+    assert "except (OSError, UnicodeError, ValueError, ImportError)" in _IMPLEMENT_ADAPTER
+    assert 'fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)' in (
+        _IMPLEMENT_ADAPTER
+    )
+    # And the shell reads the reported disposition rather than assuming one.
+    tail = _IMPLEMENT_ADAPTER.split('if [ "$PROMPT_STATUS" -ne 0 ]')[1]
+    assert "implementation_prompt_budget_exceeded" not in tail.split("fi")[0]
+
+
+def test_the_mounted_workspace_is_the_same_bounded_set_as_the_prompt() -> None:
+    """One bounded view in stdin and a larger one on disk would make the
+    profile's declared snapshot bound false."""
+
+    assert "for relative in build.included:" in _IMPLEMENT_ADAPTER
+    assert "MAX_WORKSPACE_SNAPSHOT_BYTES" in _IMPLEMENT_ADAPTER
+    assert "workspace_snapshot_bytes_exceeded" in _IMPLEMENT_ADAPTER
+    # The unbounded copy of every policy-eligible file is gone.
+    assert "select_source_files" not in _IMPLEMENT_ADAPTER
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENT_LANES_FOR_EVIDENCE := ["openai", "sakana"]))
+def test_each_lane_merges_the_adapter_disposition_into_its_evidence(provider: str) -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()[f"implementation-{provider}"]["steps"]
+        if item.get("name") == "Record host-observed lane evidence"
+    )
+    run = str(step["run"])
+    assert "countyforge-implementation-lane-evidence.json" in run
+    assert "LANE_ADAPTER_DISPOSITION" in run
+    assert '"adapter_disposition"' in run
+
+
+def test_publication_prep_forwards_the_adapter_disposition() -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()["implementation-publication-prep"]["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert ".adapter_disposition" in run
+    assert "--adapter-disposition" in run

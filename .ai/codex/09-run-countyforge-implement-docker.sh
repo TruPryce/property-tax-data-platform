@@ -15,6 +15,7 @@ set -euo pipefail
 : "${CODEX_IMAGE:?CODEX_IMAGE is required}"
 : "${MAX_MODEL_INPUT_CHARS:?MAX_MODEL_INPUT_CHARS is required}"
 : "${MAX_INPUT_BYTES:?MAX_INPUT_BYTES is required}"
+: "${MAX_WORKSPACE_SNAPSHOT_BYTES:?MAX_WORKSPACE_SNAPSHOT_BYTES is required}"
 
 # Provider routing is resolved from the trusted request before any credential is
 # read, so only the selected provider's key and endpoint ever reach the model.
@@ -31,7 +32,7 @@ if [ -z "$PROVIDER_SECRET_VALUE" ]; then
   # 30695076693 reached the model container with an empty key and produced no
   # usable bundle, while the wrapper job still concluded success.
   mkdir -p "$OUT_DIR"
-  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"credential_name\":\"$PROVIDER_CREDENTIAL\",\"credential_present\":false,\"disposition\":\"implementation_provider_credential_missing\"}" \
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"credential_name\":\"$PROVIDER_CREDENTIAL\",\"credential_present\":false,\"adapter_disposition\":\"implementation_provider_credential_missing\"}" \
     > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
   echo "error: the selected implementation provider credential is unavailable: $PROVIDER_CREDENTIAL" >&2
   exit 2
@@ -110,6 +111,7 @@ PY
 MODEL_WORKSPACE="$OUT_DIR/model-workspace"
 MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"
 PROMPT_PROVENANCE="$OUT_DIR/countyforge-implementation-prompt.provenance.json"
+LANE_EVIDENCE="$OUT_DIR/countyforge-implementation-lane-evidence.json"
 # The prompt is assembled by trusted, tested code under a character budget that
 # represents the provider's real input ceiling. Run 30698203658 shipped 2,103,429
 # characters to a provider accepting 1,048,576 and was rejected before the model
@@ -118,84 +120,126 @@ set +e
 python3 - "$PROMPT_PATH" "$IMPLEMENTATION_PACKET_PATH" "$IMPLEMENTATION_MANIFEST_PATH" \
   "$IMPLEMENTATION_TASK_PLAN_PATH" "$IMPLEMENTATION_SCHEMA_PATH" "$IMPLEMENTATION_COMMAND_POLICY_PATH" \
   "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" "$PROMPT_PROVENANCE" \
-  "$MAX_MODEL_INPUT_CHARS" "$MAX_INPUT_BYTES" <<'PY'
+  "$MAX_MODEL_INPUT_CHARS" "$MAX_INPUT_BYTES" "$MAX_WORKSPACE_SNAPSHOT_BYTES" \
+  "$LANE_EVIDENCE" "$CODEX_PROVIDER" <<'PY'
 import json
 import pathlib
 import shutil
 import sys
 
 sys.path.insert(0, "tools/countyforge-runner/src")
-from countyforge_runner.errors import KernelError  # noqa: E402
-from countyforge_runner.implementation_prompt import (  # noqa: E402
-    PromptBudget,
-    build_implementation_prompt,
-    select_source_files,
-)
 
 (
     prompt_path, packet_path, manifest_path, task_path, schema_path, command_policy_path,
     workspace_path, model_root, output, provenance_path, max_chars, max_bytes,
+    max_snapshot_bytes, lane_evidence_path, provider,
 ) = sys.argv[1:]
-source = pathlib.Path(workspace_path).resolve(strict=True)
-model = pathlib.Path(model_root).resolve()
-if model.exists():
-    shutil.rmtree(model)
-model.mkdir(parents=True)
 
-task_plan = json.loads(pathlib.Path(task_path).read_text(encoding="utf-8"))
-budget = PromptBudget(maximum_model_input_chars=int(max_chars), max_input_bytes=int(max_bytes))
-try:
-    build = build_implementation_prompt(
-        instructions=pathlib.Path(prompt_path).read_text(encoding="utf-8"),
-        contracts={
-            "packet": pathlib.Path(packet_path).read_text(encoding="utf-8"),
-            "manifest": pathlib.Path(manifest_path).read_text(encoding="utf-8"),
-            "task_plan": pathlib.Path(task_path).read_text(encoding="utf-8"),
-            "result_schema": pathlib.Path(schema_path).read_text(encoding="utf-8"),
-            "command_policy": pathlib.Path(command_policy_path).read_text(encoding="utf-8"),
-        },
-        workspace=source,
-        task_plan=task_plan,
-        budget=budget,
-    )
-except KernelError as error:
-    pathlib.Path(provenance_path).write_text(
+
+def fail(disposition: str, **details: object) -> None:
+    """Emit the exact reason this preparation stopped.
+
+    The shell must never infer a budget problem from a nonzero exit: a malformed
+    task plan, an unreadable contract, or an unexpected exception are different
+    failures and are classified as preparation, not budget.
+    """
+
+    pathlib.Path(lane_evidence_path).write_text(
         json.dumps(
             {
                 "contract_version": 1,
+                "provider": provider,
                 "ok": False,
-                "disposition": error.code,
-                "details": error.details,
+                "adapter_disposition": disposition,
+                "details": details,
             },
             sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
     )
-    raise SystemExit(2) from None
+    raise SystemExit(2)
 
-# The container mounts a de-Git workspace copy; only policy-eligible files are
-# copied, matching what the prompt is allowed to describe.
-selected, _ = select_source_files(source, task_plan=task_plan)
-for path in selected:
-    target = model / path.relative_to(source)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(path, target)
 
-pathlib.Path(output).write_text(build.prompt, encoding="utf-8")
-pathlib.Path(provenance_path).write_text(
-    json.dumps({"ok": True, **build.provenance(budget)}, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+try:
+    from countyforge_runner.errors import KernelError
+    from countyforge_runner.implementation_prompt import (
+        PromptBudget,
+        build_implementation_prompt,
+    )
+
+    source = pathlib.Path(workspace_path).resolve(strict=True)
+    model = pathlib.Path(model_root).resolve()
+    if model.exists():
+        shutil.rmtree(model)
+    model.mkdir(parents=True)
+    task_plan = json.loads(pathlib.Path(task_path).read_text(encoding="utf-8"))
+    contracts = {
+        "packet": pathlib.Path(packet_path).read_text(encoding="utf-8"),
+        "manifest": pathlib.Path(manifest_path).read_text(encoding="utf-8"),
+        "task_plan": pathlib.Path(task_path).read_text(encoding="utf-8"),
+        "result_schema": pathlib.Path(schema_path).read_text(encoding="utf-8"),
+        "command_policy": pathlib.Path(command_policy_path).read_text(encoding="utf-8"),
+    }
+    instructions = pathlib.Path(prompt_path).read_text(encoding="utf-8")
+    budget = PromptBudget(maximum_model_input_chars=int(max_chars), max_input_bytes=int(max_bytes))
+except (OSError, UnicodeError, ValueError, ImportError) as error:
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
+
+try:
+    build = build_implementation_prompt(
+        instructions=instructions,
+        contracts=contracts,
+        workspace=source,
+        task_plan=task_plan,
+        budget=budget,
+    )
+except KernelError as error:
+    fail(error.code, **error.details)
+except Exception as error:  # noqa: BLE001 - classify, never mislabel as a budget failure
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
+
+try:
+    # The mounted workspace is exactly the bounded set the prompt describes.
+    # One bounded view in stdin and a larger one on disk would make the profile's
+    # declared snapshot bound false and let the model read what it was not shown.
+    copied = 0
+    for relative in build.included:
+        origin = source / relative
+        copied += origin.stat().st_size
+        if copied > int(max_snapshot_bytes):
+            fail(
+                "implementation_prompt_budget_exceeded",
+                reason="workspace_snapshot_bytes_exceeded",
+                workspace_snapshot_max_bytes=int(max_snapshot_bytes),
+            )
+        target = model / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origin, target)
+    pathlib.Path(output).write_text(build.prompt, encoding="utf-8")
+    pathlib.Path(provenance_path).write_text(
+        json.dumps(
+            {"ok": True, "workspace_snapshot_bytes": copied, **build.provenance(budget)},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+except SystemExit:
+    raise
+except Exception as error:  # noqa: BLE001 - materialization is preparation, not budget
+    fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
 PY
 PROMPT_STATUS=$?
 set -e
 if [ "$PROMPT_STATUS" -ne 0 ]; then
-  # Fail before the provider network, proxy, or model container exists. The
-  # provider was never contacted, so this is never a model failure.
-  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"disposition\":\"implementation_prompt_budget_exceeded\"}" \
-    > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
-  echo "error: the bounded implementation prompt exceeds its trusted input budget" >&2
+  # Fail before the provider network, proxy, or model container exists, carrying
+  # the exact disposition the assembly boundary reported rather than guessing.
+  if [ ! -s "$LANE_EVIDENCE" ]; then
+    printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"adapter_disposition\":\"implementation_prompt_preparation_failed\"}" \
+      > "$LANE_EVIDENCE"
+  fi
+  echo "error: implementation prompt preparation failed: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["adapter_disposition"])' "$LANE_EVIDENCE" 2>/dev/null || echo unknown)" >&2
   exit 2
 fi
 
@@ -267,7 +311,7 @@ docker run --rm \
 # defect that caused run 30698203658 recurring, so it is classified distinctly
 # rather than folded into a generic adapter failure.
 if grep -q "input_too_large" "$OUT_DIR/countyforge-implementation-model-events.ndjson" 2>/dev/null; then
-  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"disposition\":\"implementation_prompt_ceiling_drift\",\"configured_max_model_input_chars\":$MAX_MODEL_INPUT_CHARS}" \
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"adapter_disposition\":\"implementation_prompt_ceiling_drift\",\"configured_max_model_input_chars\":$MAX_MODEL_INPUT_CHARS}" \
     > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
   echo "error: the provider rejected an input our configured ceiling accepted; the ceiling has drifted" >&2
   exit 2

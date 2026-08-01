@@ -240,6 +240,11 @@ class Runner:
                     (resolved.profile.get("model_input") or {}).get("maximum_model_input_chars", 0)
                 ),
                 "MAX_INPUT_BYTES": str(resolved.effective_budgets["max_input_bytes"]),
+                "MAX_WORKSPACE_SNAPSHOT_BYTES": str(
+                    (resolved.profile.get("model_input") or {}).get(
+                        "workspace_snapshot_max_bytes", 0
+                    )
+                ),
             }
         )
         if resolved.request["mode"] == "review":

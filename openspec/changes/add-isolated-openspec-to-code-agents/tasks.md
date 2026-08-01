@@ -71,3 +71,6 @@
 - [x] 11.7 Refuse rather than elide any file under the task plan's approved paths.
 - [x] 11.8 Disclose elided source context to the model in the prompt and report budget utilisation as evidence.
 - [x] 11.9 Classify a provider rejection that the configured ceiling accepted as ceiling drift.
+- [x] 11.10 Report the specific assembly failure from the Python boundary instead of inferring one from a nonzero shell exit.
+- [x] 11.11 Materialize the model workspace from the same bounded set as the prompt and enforce the declared snapshot byte bound.
+- [x] 11.12 Carry the adapter disposition through lane evidence into canonical terminal state.

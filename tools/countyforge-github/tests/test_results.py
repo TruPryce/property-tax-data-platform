@@ -767,3 +767,57 @@ def test_a_model_that_produced_no_result_is_still_a_model_failure(tmp_path: Path
     )
     assert classified["disposition"] == "implementation_model_failed"
     assert classified["details"]["reason"] == "implementation_result_missing"
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    [
+        "implementation_provider_credential_missing",
+        "implementation_prompt_budget_exceeded",
+        "implementation_prompt_ceiling_drift",
+        "implementation_prompt_preparation_failed",
+    ],
+)
+def test_the_adapter_disposition_survives_to_terminal_state(
+    tmp_path: Path, disposition: str
+) -> None:
+    """Writing it to the run directory is not durability.
+
+    Without carrying it through lane evidence, each of these became a generic
+    infrastructure failure and the specific reason died in the runner's
+    temporary output directory.
+    """
+
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        adapter_disposition=disposition,
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == disposition
+    lane = _write(tmp_path / "lane.json", json.dumps(classified))
+    assert (
+        resolve_terminal_result(
+            command="implement", result_path=None, exit_code_path=None, lane_path=lane
+        )["disposition"]
+        == disposition
+    )
+
+
+def test_an_unusable_adapter_disposition_is_ignored(tmp_path: Path) -> None:
+    """Untrusted or malformed text must not become a canonical disposition."""
+
+    for value in ("", "Not A Code", "x" * 200, None):
+        classified = classify_implementation_lane(
+            selected_provider="sakana",
+            lane_results={"openai": "skipped", "sakana": "failure"},
+            adapter_disposition=value,
+        )
+        assert classified["disposition"] == "implementation_provider_infrastructure_failed"
+
+
+def test_an_adapter_disposition_never_upgrades_a_lane_to_success(tmp_path: Path) -> None:
+    classified = classify_implementation_lane(
+        **_lane_inputs(tmp_path, adapter_disposition="implementation_prompt_budget_exceeded")  # type: ignore[arg-type]
+    )
+    assert classified["ok"] is False
