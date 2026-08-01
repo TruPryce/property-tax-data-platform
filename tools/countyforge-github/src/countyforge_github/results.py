@@ -291,61 +291,144 @@ def normalize_publication_result(
     }
 
 
-# Exactly one implementation provider lane may execute per request. Run
-# 30691544362 failed while building `ghcr.io/openai/codex` (GHCR 403) before the
-# model was invoked, so its lane produced no result evidence at all. That is a
-# provider/image provisioning failure and must never be reported as a model
-# outcome.
+# Exactly one implementation provider lane may execute per request.
+#
+# A GitHub job result of `success` does not prove the lane succeeded: the runner
+# invocation is wrapped in `set +e` so its exit code is captured as evidence, and
+# the freeze step is `continue-on-error`. Run 30695076693 concluded `success`
+# with an empty credential, a nonzero captured exit, and no frozen bundle.
+# Classification therefore reads host-observed execution facts, never the
+# wrapper's conclusion alone, and never a model-authored field.
 IMPLEMENTATION_PROVIDERS = frozenset({"openai", "sakana"})
+
+
+def _lane_failure(disposition: str, **details: object) -> JsonObject:
+    return {"ok": False, "disposition": disposition, "details": details}
+
+
+def _runner_reports_success(document: JsonObject) -> bool:
+    """A runner result counts only when it is internally consistent."""
+
+    summary = document.get("summary")
+    return (
+        document.get("ok") is True
+        and document.get("mode") == "implement"
+        and document.get("disposition") == "completed"
+        and isinstance(summary, dict)
+        and summary.get("disposition") == "completed"
+        and summary.get("exit_code") == 0
+        and isinstance(document.get("implementation"), dict)
+    )
 
 
 def classify_implementation_lane(
     *,
     selected_provider: str,
     lane_results: JsonObject,
-    result_path: Path | None,
+    result_path: Path | None = None,
+    exit_code_path: Path | None = None,
+    implementation_result_path: Path | None = None,
+    implementation_result_present: bool | None = None,
+    freeze_outcome: str | None = None,
+    frozen_bundle_present: bool | None = None,
 ) -> JsonObject:
     """Classify which implementation provider lane owns a run's outcome.
 
     `lane_results` maps provider name to its GitHub job result, where `skipped`
-    means the lane did not run.  The classification is deliberately coarse and
-    fail-closed: anything that is not one selected lane with readable result
-    evidence is refused rather than validated.
+    means the lane did not run.  Everything else is host-observed evidence the
+    provider job captured.  `completed` requires every success condition to be
+    independently proven; anything unproven is a failure, and the distinction
+    between an infrastructure failure and a model failure is drawn only where
+    trusted evidence supports it.
     """
 
     if selected_provider not in IMPLEMENTATION_PROVIDERS:
-        return {"ok": False, "disposition": "unsupported_implementation_provider"}
+        return _lane_failure("unsupported_implementation_provider", selected=selected_provider)
     executed = sorted(
         provider
         for provider, outcome in lane_results.items()
         if isinstance(outcome, str) and outcome != "skipped"
     )
     if len(executed) != 1:
-        return {
-            "ok": False,
-            "disposition": "implementation_provider_lane_ambiguous",
-            "details": {"executed": executed},
-        }
+        return _lane_failure("implementation_provider_lane_ambiguous", executed=executed)
     if executed[0] != selected_provider:
-        return {
-            "ok": False,
-            "disposition": "implementation_provider_lane_mismatch",
-            "details": {"executed": executed[0], "selected": selected_provider},
-        }
-    outcome = str(lane_results[selected_provider])
-    evidence = _read_result(result_path)
-    if evidence is None:
-        # No result document means the lane never reached the model: an image
-        # pull or build failure, a missing credential, or a runner fault.
-        return {
-            "ok": False,
-            "disposition": "implementation_provider_infrastructure_failed",
-            "details": {"provider": selected_provider, "lane_result": outcome},
-        }
-    if outcome != "success":
-        return {
-            "ok": False,
-            "disposition": "implementation_model_failed",
-            "details": {"provider": selected_provider, "lane_result": outcome},
-        }
-    return {"ok": True, "disposition": "completed", "details": {"provider": selected_provider}}
+        return _lane_failure(
+            "implementation_provider_lane_mismatch",
+            executed=executed[0],
+            selected=selected_provider,
+        )
+
+    # Before a valid runner result exists, any failure is infrastructure: the
+    # image, the credential, the container, or the adapter -- not the model.
+    exit_code = _read_exit_code(exit_code_path)
+    runner = _read_result(result_path)
+    if runner is None:
+        return _lane_failure(
+            "implementation_provider_infrastructure_failed",
+            provider=selected_provider,
+            reason="runner_result_missing",
+        )
+    if exit_code is None:
+        return _lane_failure(
+            "implementation_provider_infrastructure_failed",
+            provider=selected_provider,
+            reason="runner_exit_code_missing",
+        )
+    disposition = runner.get("disposition")
+    if exit_code != 0 or runner.get("ok") is not True:
+        # The runner ran and reported; a nonzero exit with an adapter-level
+        # disposition is the container or provider failing, not the model.
+        infrastructure = disposition in {"adapter_failed", "profile_not_implemented", None}
+        return _lane_failure(
+            "implementation_provider_infrastructure_failed"
+            if infrastructure
+            else "implementation_model_failed",
+            provider=selected_provider,
+            runner_exit_code=exit_code,
+            runner_disposition=disposition if isinstance(disposition, str) else None,
+        )
+    if not _runner_reports_success(runner):
+        return _lane_failure(
+            "implementation_model_failed",
+            provider=selected_provider,
+            reason="runner_result_inconsistent",
+        )
+
+    # A valid model result exists from here on, so remaining failures are about
+    # trusted host-side materialization rather than the provider.
+    #
+    # `implementation_result_present` is the host's pre-freeze observation and is
+    # the only honest signal for "did the model produce a result".  The frozen
+    # copy is uploaded only when freezing succeeds, so requiring it first would
+    # report every freeze failure as a missing model result.
+    if implementation_result_present is False:
+        return _lane_failure(
+            "implementation_model_failed",
+            provider=selected_provider,
+            reason="implementation_result_missing",
+        )
+    if freeze_outcome != "success":
+        return _lane_failure(
+            "implementation_freeze_failed",
+            provider=selected_provider,
+            freeze_outcome=freeze_outcome,
+        )
+    if frozen_bundle_present is not True:
+        return _lane_failure(
+            "implementation_freeze_failed",
+            provider=selected_provider,
+            reason="frozen_bundle_missing",
+        )
+    # Freezing reported success, so the frozen result must be readable; its
+    # absence now is a materialization defect, not a freeze outcome.
+    if _read_result(implementation_result_path) is None:
+        return _lane_failure(
+            "implementation_model_failed",
+            provider=selected_provider,
+            reason="implementation_result_missing",
+        )
+    return {
+        "ok": True,
+        "disposition": "completed",
+        "details": {"provider": selected_provider, "runner_exit_code": exit_code},
+    }

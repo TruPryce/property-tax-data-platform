@@ -267,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
     lane.add_argument("--selected-provider", required=True)
     lane.add_argument("--lane-result", action="append", default=[], metavar="PROVIDER=RESULT")
     _file(lane, "result", required=False)
+    _file(lane, "exit_code", required=False)
+    _file(lane, "implementation_result", required=False)
+    lane.add_argument("--implementation-result-present", choices=["true", "false"])
+    lane.add_argument("--freeze-outcome")
+    lane.add_argument("--frozen-bundle-present", choices=["true", "false"])
 
     publication = subparsers.add_parser("normalize-publication-result")
     publication.add_argument("--result", type=Path)
@@ -870,6 +875,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
                     selected_provider=args.selected_provider,
                     lane_results=lane_results,
                     result_path=args.result,
+                    exit_code_path=args.exit_code,
+                    implementation_result_path=args.implementation_result,
+                    implementation_result_present=(
+                        None
+                        if args.implementation_result_present is None
+                        else args.implementation_result_present == "true"
+                    ),
+                    freeze_outcome=args.freeze_outcome,
+                    frozen_bundle_present=(
+                        None
+                        if args.frozen_bundle_present is None
+                        else args.frozen_bundle_present == "true"
+                    ),
                 )
             )
             return 0

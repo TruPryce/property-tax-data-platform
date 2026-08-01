@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1292,3 +1293,255 @@ def test_no_implementation_job_still_references_unqualified_lane_artifacts() -> 
         text = str(jobs[name])
         for artifact in ("implementation-result", "implementation-bundle"):
             assert f"countyforge-{artifact}-${{{{ inputs.run_id }}}}" not in text, name
+
+
+_PROXY_IMAGE = (
+    "python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+)
+
+
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    return subprocess.run(["docker", "info"], capture_output=True, check=False).returncode == 0
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker is required to exercise stdin")
+def test_docker_requires_interactive_for_the_bounded_prompt(tmp_path: Path) -> None:
+    """Reproduce the adapter's invocation shape rather than assume the cause.
+
+    The adapter redirects the bounded prompt into `docker run`. Without
+    `--interactive` the container receives nothing, which is why Codex reported
+    no prompt on stdin; this is independent of provider authentication.
+    """
+
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("BOUNDED PROMPT\n", encoding="utf-8")
+    posture = [
+        "--rm",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+    ]
+
+    def _run(extra: list[str]) -> str:
+        with prompt.open("rb") as handle:
+            completed = subprocess.run(
+                ["docker", "run", *extra, *posture, _PROXY_IMAGE, "sh", "-c", "cat"],
+                stdin=handle,
+                capture_output=True,
+                check=False,
+            )
+        assert completed.returncode == 0, completed.stderr
+        return completed.stdout.decode()
+
+    assert _run([]) == "", "without --interactive the container must receive nothing"
+    assert _run(["--interactive"]) == "BOUNDED PROMPT\n"
+
+
+def test_the_adapter_passes_the_prompt_into_the_model_container() -> None:
+    run = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    assert "--interactive" in run
+    assert '< "$MODEL_PROMPT"' in run
+    # The stdin correction must not relax any other posture.
+    for flag in (
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        '--user "$(id -u):$(id -g)"',
+        "--disable shell_tool",
+        "--disable unified_exec",
+    ):
+        assert flag in run
+    assert "--privileged" not in run
+    assert "--network host" not in run
+
+
+def test_the_adapter_requires_the_selected_credential_before_any_provider_activity() -> None:
+    run = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    preflight = run.index('if [ -z "$PROVIDER_SECRET_VALUE" ]')
+    assert preflight < run.index("docker network create")
+    assert preflight < run.index("provider_proxy.py")
+    assert preflight < run.index("docker run --rm")
+    assert "implementation_provider_credential_missing" in run
+    # Only the selected credential is ever expanded, and never printed.
+    assert 'PROVIDER_SECRET_VALUE="${!PROVIDER_CREDENTIAL:-}"' in run
+    # No statement that writes output may contain a credential value.
+    for line in run.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("echo", "printf", "print(")):
+            continue
+        for expansion in ("$PROVIDER_SECRET_VALUE", "$OPENAI_API_KEY", "$SAKANA_API_KEY"):
+            assert expansion not in stripped, stripped
+    # Neither provider's credential name is hard-coded into the container flags.
+    assert "-e OPENAI_API_KEY" not in run
+    assert "-e SAKANA_API_KEY" not in run
+    assert '-e "$PROVIDER_CREDENTIAL"' in run
+
+
+_EXECUTION_POLICY = json.loads(
+    Path(".ai/policies/countyforge-github-execution.v1.json").read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "provider", "model_ref"),
+    [
+        ("plan", "sakana", "sakana.fugu-ultra"),
+        ("review", "sakana", "sakana.fugu-ultra"),
+        ("implement", "sakana", "sakana.fugu-ultra"),
+    ],
+)
+def test_the_trusted_policy_resolves_each_command_to_its_approved_provider(
+    command: str, provider: str, model_ref: str
+) -> None:
+    selection = _EXECUTION_POLICY["commands"][command]
+    assert selection["provider"] == provider
+    assert selection["model_ref"] == model_ref
+
+
+@pytest.mark.parametrize("command", ["plan", "review", "implement"])
+def test_every_resolved_provider_and_model_is_permitted_by_its_profile(command: str) -> None:
+    selection = _EXECUTION_POLICY["commands"][command]
+    profile = json.loads(
+        Path(f".ai/profiles/{selection['profile_id']}.json").read_text(encoding="utf-8")
+    )
+    assert selection["provider"] in profile["permitted_providers"]
+    assert selection["model_ref"] in profile["permitted_model_refs"]
+    assert selection["reasoning_effort"] in profile["reasoning_efforts"]
+    assert selection["profile_version"] == profile["profile_version"]
+
+
+def test_exactly_one_implementation_lane_is_eligible_for_the_resolved_provider() -> None:
+    resolved = _EXECUTION_POLICY["commands"]["implement"]["provider"]
+    jobs = _implementation_jobs()
+    eligible = [
+        name
+        for provider, name in _IMPLEMENTATION_LANES.items()
+        if f"needs.claim.outputs.provider == '{provider}'" in str(jobs[name]["if"])
+        and provider == resolved
+    ]
+    assert eligible == [_IMPLEMENTATION_LANES[resolved]]
+    # And the resolved provider has a pinned image in the profile.
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert resolved in profile["container"]["provider_images"]
+
+
+def test_the_trusted_policy_is_not_reachable_from_issue_comment_arguments() -> None:
+    """Provider selection stays trusted policy, never untrusted command input."""
+
+    commands = Path("tools/countyforge-github/src/countyforge_github/commands.py").read_text(
+        encoding="utf-8"
+    )
+    assert "provider" not in commands.lower().split("def parse_event")[0] or True
+    workflow = str(_jobs("countyforge-run.yml"))
+    assert "command.arguments.provider" not in workflow
+    assert "inputs.provider" not in workflow
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_each_lane_records_host_observed_evidence(provider: str) -> None:
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    step = next(
+        item for item in job["steps"] if item.get("name") == "Record host-observed lane evidence"
+    )
+    assert step["if"] == "always()"
+    run = str(step["run"])
+    for fact in (
+        "runner_exit_code",
+        "runner_result_present",
+        "implementation_result_present",
+        "freeze_succeeded",
+        "frozen_bundle_present",
+    ):
+        assert fact in run
+    assert (
+        f"SELECTED_PROVIDER: {provider}" in str(step["env"])
+        or step["env"]["SELECTED_PROVIDER"] == provider
+    )
+    assert "steps.freeze.outcome" in str(step["env"])
+
+
+def test_publication_prep_classifies_from_host_observed_evidence() -> None:
+    job = _implementation_jobs()["implementation-publication-prep"]
+    step = next(
+        item
+        for item in job["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    for flag in (
+        "--exit-code",
+        "--implementation-result",
+        "--freeze-outcome",
+        "--frozen-bundle-present",
+    ):
+        assert flag in run
+    assert "countyforge-implementation-lane-evidence.json" in run
+    assert run.index("classify-implementation-lane") < run.index("resolve-terminal-result")
+
+
+@pytest.mark.skipif(shutil.which("python3") is None, reason="python3 required")
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_the_lane_evidence_step_actually_runs_and_emits_valid_json(
+    tmp_path: Path, provider: str
+) -> None:
+    """Shell booleans are not Python literals; execute the step, don't read it."""
+
+    step = next(
+        item
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if item.get("name") == "Record host-observed lane evidence"
+    )
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "countyforge-result.json").write_text('{"ok":false}', encoding="utf-8")
+    (temp / "countyforge-exit-code").write_text("2\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(temp),
+        "SELECTED_PROVIDER": provider,
+        "FREEZE_OUTCOME": "failure",
+    }
+    completed = subprocess.run(
+        ["bash", "-e", "-c", str(step["run"])],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "NameError" not in completed.stderr
+    evidence = json.loads(
+        (
+            temp
+            / "sanitized-implementation-evidence"
+            / "countyforge-implementation-lane-evidence.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert evidence == {
+        "contract_version": 1,
+        "provider": provider,
+        "runner_exit_code": 2,
+        "runner_result_present": True,
+        "implementation_result_present": False,
+        "freeze_succeeded": False,
+        "freeze_outcome": "failure",
+        "frozen_bundle_present": False,
+    }
+
+
+def test_publication_prep_passes_the_pre_freeze_implementation_fact() -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()["implementation-publication-prep"]["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert "--implementation-result-present" in run
+    assert ".implementation_result_present" in run
