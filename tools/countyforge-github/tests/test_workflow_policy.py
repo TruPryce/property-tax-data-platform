@@ -1033,3 +1033,262 @@ def test_the_approval_gate_precedes_and_guards_packet_construction() -> None:
     # The Python eligibility validation this only precedes stays in place.
     assert "build-implementation-packet" in run
     assert "--planning-pr-merged" in run
+
+
+# Provider routing for implementation. Run 30691544362 had only an OpenAI lane,
+# and it failed pulling ghcr.io/openai/codex before the model was invoked.
+_IMPLEMENTATION_LANES = {"openai": "implementation-openai", "sakana": "implementation-sakana"}
+_PROVIDER_SECRETS = {"openai": "OPENAI_API_KEY", "sakana": "SAKANA_API_KEY"}
+
+
+def _implementation_jobs() -> dict[str, Any]:
+    return _jobs("countyforge-run.yml")
+
+
+def test_the_workflow_graph_contains_both_implementation_lanes() -> None:
+    jobs = _implementation_jobs()
+    assert jobs["implementation-openai"]["name"] == "Isolated OpenAI implementation workspace"
+    assert jobs["implementation-sakana"]["name"] == "Isolated Sakana implementation workspace"
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_each_lane_runs_only_for_its_own_selected_provider(provider: str) -> None:
+    jobs = _implementation_jobs()
+    for candidate, job_name in _IMPLEMENTATION_LANES.items():
+        condition = str(jobs[job_name]["if"])
+        assert "inputs.command == 'implement'" in condition
+        assert f"needs.claim.outputs.provider == '{candidate}'" in condition
+        if candidate != provider:
+            assert f"needs.claim.outputs.provider == '{provider}'" not in condition
+
+
+def test_the_two_lanes_are_mutually_exclusive() -> None:
+    """Both lanes gate on equality with the same single resolved provider."""
+
+    jobs = _implementation_jobs()
+    conditions = {name: str(jobs[job]["if"]) for name, job in _IMPLEMENTATION_LANES.items()}
+    assert conditions["openai"] != conditions["sakana"]
+    for provider, condition in conditions.items():
+        others = set(_IMPLEMENTATION_LANES) - {provider}
+        for other in others:
+            assert f"provider == '{other}'" not in condition
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_each_lane_receives_only_its_own_provider_secret(provider: str) -> None:
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    text = str(job)
+    expected = _PROVIDER_SECRETS[provider]
+    forbidden = {name for key, name in _PROVIDER_SECRETS.items() if key != provider}
+    assert f"secrets.{expected}" in text
+    for name in forbidden:
+        assert name not in text, f"{provider} lane must not reference {name}"
+    # The credential is attached to the model invocation step only.
+    invocation = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Invoke implementation model with selected provider only"
+    )
+    assert sorted(invocation["env"]) == [expected]
+
+
+@pytest.mark.parametrize(
+    "job_name", ["implementation-packet", "implementation-validation", "implementation-publish"]
+)
+def test_no_provider_secret_reaches_packet_validation_or_publication(job_name: str) -> None:
+    text = str(_implementation_jobs()[job_name])
+    for name in _PROVIDER_SECRETS.values():
+        assert name not in text, f"{job_name} must not reference {name}"
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_no_provider_lane_can_publish(provider: str) -> None:
+    """A model lane never holds a permission usable to write to the repository."""
+
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    assert job["permissions"] == {"actions": "read", "contents": "read"}
+    text = str(job)
+    for permission in ("contents: write", "issues: write", "pull-requests: write"):
+        assert permission not in text
+    assert "GITHUB_TOKEN" not in text
+    assert "github.token" not in text
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_each_lane_publishes_provider_qualified_artifacts(provider: str) -> None:
+    """Two lanes can never publish the same artifact name in one run."""
+
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    names = [
+        str(step["with"]["name"])
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    assert names, provider
+    for name in names:
+        assert f"-{provider}-" in name
+        for other in set(_IMPLEMENTATION_LANES) - {provider}:
+            assert f"-{other}-" not in name
+
+
+def test_validation_consumes_only_the_selected_provider_artifacts() -> None:
+    job = _implementation_jobs()["implementation-validation"]
+    assert set(job["needs"]) >= {"implementation-openai", "implementation-sakana"}
+    downloads = [
+        str(step["with"]["name"])
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+        and "implementation-result" in str(step["with"]["name"])
+        or str(step.get("uses", "")).startswith("actions/download-artifact")
+        and "implementation-bundle" in str(step["with"]["name"])
+    ]
+    assert downloads
+    for name in downloads:
+        # Selection is by the resolved provider, never a hard-coded lane.
+        assert "needs.claim.outputs.provider" in name
+        assert "-openai-" not in name and "-sakana-" not in name
+
+
+def test_validation_fails_closed_on_missing_or_ambiguous_lane_evidence() -> None:
+    job = _implementation_jobs()["implementation-validation"]
+    guard = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Require the selected implementation provider lane"
+    )
+    run = str(guard["run"])
+    # Unknown provider, both lanes, no lane, and a lane that published nothing.
+    assert "Unsupported implementation provider" in run
+    assert "Expected exactly one implementation provider lane" in run
+    assert "did not run" in run
+    assert "published no implementation result" in run
+    assert "provider_infrastructure_failed" in run
+    assert run.count("exit 2") >= 4
+    steps = [step.get("name") for step in job["steps"]]
+    assert steps.index("Require the selected implementation provider lane") < steps.index(
+        "Provision the no-network command sandbox"
+    )
+
+
+def test_neither_implementation_image_is_pulled_from_a_credentialed_registry() -> None:
+    """Run 30691544362 failed fetching an anonymous GHCR token for this image."""
+
+    build = Path(".ai/codex/10-build-countyforge-implement-image.sh").read_text(encoding="utf-8")
+    # Assert on what the script does, not on the comment explaining why it no
+    # longer does it.
+    executable = "\n".join(line for line in build.splitlines() if not line.lstrip().startswith("#"))
+    assert "ghcr.io" not in executable
+    # Public pinned base plus the pinned CLI, matching the planning image.
+    assert "FROM node:22-bookworm-slim" in build
+    assert 'npm install -g "@openai/codex@${CODEX_VERSION}"' in build
+    assert not Path(".ai/codex/implement.Dockerfile").exists()
+
+
+def test_both_implementation_images_keep_the_same_sandbox_posture() -> None:
+    build = Path(".ai/codex/10-build-countyforge-implement-image.sh").read_text(encoding="utf-8")
+    run = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    assert "USER 10001:10001" in build
+    for flag in ("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true"):
+        assert flag in run
+    assert "shell_tool = false" in build and "unified_exec = false" in build
+    # Provider routing resolves the credential and endpoint before either is used.
+    assert 'openai) PROVIDER_CREDENTIAL="OPENAI_API_KEY"; PROVIDER_HOST="api.openai.com"' in run
+    assert 'sakana) PROVIDER_CREDENTIAL="SAKANA_API_KEY"; PROVIDER_HOST="api.sakana.ai"' in run
+    assert "unsupported implementation provider" in run
+    assert '--allowed-host "$PROVIDER_HOST"' in run
+    assert '-e "$PROVIDER_CREDENTIAL"' in run
+
+
+def test_the_implementation_profile_declares_both_providers() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["permitted_providers"] == ["openai", "sakana"]
+    assert profile["container"]["provider_images"] == {
+        "openai": "countyforge-implement-agent:openai-v1",
+        "sakana": "countyforge-implement-agent:sakana-v1",
+    }
+    assert set(profile["credential_names"]) == {"OPENAI_API_KEY", "SAKANA_API_KEY"}
+    # Same governed outputs and posture for both providers.
+    assert profile["output_schema"] == "countyforge-implementation-result.schema.json"
+    assert profile["model_tools"] == ["structured_file_bundle"]
+    assert profile["expected_security_posture"]["read_only_rootfs"] is True
+    assert profile["expected_security_posture"]["non_root"] is True
+    assert profile["expected_security_posture"]["cap_drop_all"] is True
+    assert profile["expected_security_posture"]["no_new_privileges"] is True
+    assert profile["network"]["policy"] == "provider_only"
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_both_lanes_produce_the_identical_governed_outputs(provider: str) -> None:
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    text = str(job)
+    for artifact in (
+        "countyforge-implementation-result.json",
+        "countyforge-result.json",
+        "countyforge-exit-code",
+        "countyforge-workspace.tar.gz",
+    ):
+        assert artifact in text, f"{provider} lane must emit {artifact}"
+    assert "freeze-implementation-artifact" in text
+    assert "countyforge-implementation-model-events" in text
+
+
+@pytest.mark.parametrize("provider", sorted(_IMPLEMENTATION_LANES))
+def test_both_lanes_share_one_task_plan_path_policy_and_workspace_binding(provider: str) -> None:
+    job = _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]
+    text = str(job)
+    assert "countyforge-implementation-task-plan.json" in text
+    assert "countyforge-implementation-context-manifest.json" in text
+    assert "--workspace-binding" in text
+    assert "--policy-root" in text
+    assert "implement.workspace-write.v1" in text
+
+
+def test_publication_prep_consumes_only_the_selected_provider_artifacts() -> None:
+    """Provider-qualified uploads must not leave publication looking at old names."""
+
+    job = _implementation_jobs()["implementation-publication-prep"]
+    assert set(job["needs"]) >= {"implementation-openai", "implementation-sakana"}
+    downloads = [
+        str(step["with"]["name"])
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact")
+        and "implementation-validation-" not in str(step["with"]["name"])
+    ]
+    assert downloads
+    for name in downloads:
+        assert "needs.claim.outputs.provider" in name
+        assert "-openai-" not in name and "-sakana-" not in name
+
+
+def test_publication_prep_persists_the_lane_classification() -> None:
+    """The classification must become trusted evidence terminal state consumes."""
+
+    job = _implementation_jobs()["implementation-publication-prep"]
+    step = next(
+        item
+        for item in job["steps"]
+        if item.get("name") == "Resolve implementation terminal evidence"
+    )
+    run = str(step["run"])
+    assert "classify-implementation-lane" in run
+    assert "--selected-provider" in run
+    assert '--lane-result "openai=$OPENAI_LANE"' in run
+    assert '--lane-result "sakana=$SAKANA_LANE"' in run
+    # Classification happens before, and feeds, terminal resolution.
+    assert run.index("classify-implementation-lane") < run.index("resolve-terminal-result")
+    assert "--lane " in run or "--lane\n" in run
+    assert sorted(step["env"]) == ["OPENAI_LANE", "SAKANA_LANE", "SELECTED_PROVIDER"]
+    upload = next(
+        item for item in job["steps"] if item.get("name") == "Upload publication preparation"
+    )
+    assert "countyforge-implementation-lane.json" in str(upload["with"]["path"])
+
+
+def test_no_implementation_job_still_references_unqualified_lane_artifacts() -> None:
+    jobs = _implementation_jobs()
+    for name in ("implementation-validation", "implementation-publication-prep"):
+        text = str(jobs[name])
+        for artifact in ("implementation-result", "implementation-bundle"):
+            assert f"countyforge-{artifact}-${{{{ inputs.run_id }}}}" not in text, name

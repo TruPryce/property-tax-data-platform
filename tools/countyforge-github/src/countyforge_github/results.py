@@ -50,10 +50,25 @@ def _read_exit_code(path: Path | None) -> int | None:
 
 
 def resolve_terminal_result(
-    *, command: str, result_path: Path | None, exit_code_path: Path | None
+    *,
+    command: str,
+    result_path: Path | None,
+    exit_code_path: Path | None,
+    lane_path: Path | None = None,
 ) -> JsonObject:
-    """Map only valid, internally consistent runner evidence to terminal state."""
+    """Map only valid, internally consistent runner evidence to terminal state.
 
+    A refused implementation lane classification takes precedence, because it
+    explains *why* the evidence is absent: `invalid_result_evidence` would report
+    a model outcome for a run whose provider image never built.  It can only
+    produce a failure, never upgrade one.
+    """
+
+    lane = _read_result(lane_path)
+    if lane is not None and lane.get("ok") is False:
+        disposition = lane.get("disposition")
+        if isinstance(disposition, str) and _DISPOSITION.fullmatch(disposition):
+            return {"ok": True, "state": "failed", "disposition": disposition}
     result = _read_result(result_path)
     if result is None:
         return {"ok": True, "state": "failed", "disposition": "invalid_result_evidence"}
@@ -274,3 +289,63 @@ def normalize_publication_result(
         "details": merged,
         "outputs": outputs,
     }
+
+
+# Exactly one implementation provider lane may execute per request. Run
+# 30691544362 failed while building `ghcr.io/openai/codex` (GHCR 403) before the
+# model was invoked, so its lane produced no result evidence at all. That is a
+# provider/image provisioning failure and must never be reported as a model
+# outcome.
+IMPLEMENTATION_PROVIDERS = frozenset({"openai", "sakana"})
+
+
+def classify_implementation_lane(
+    *,
+    selected_provider: str,
+    lane_results: JsonObject,
+    result_path: Path | None,
+) -> JsonObject:
+    """Classify which implementation provider lane owns a run's outcome.
+
+    `lane_results` maps provider name to its GitHub job result, where `skipped`
+    means the lane did not run.  The classification is deliberately coarse and
+    fail-closed: anything that is not one selected lane with readable result
+    evidence is refused rather than validated.
+    """
+
+    if selected_provider not in IMPLEMENTATION_PROVIDERS:
+        return {"ok": False, "disposition": "unsupported_implementation_provider"}
+    executed = sorted(
+        provider
+        for provider, outcome in lane_results.items()
+        if isinstance(outcome, str) and outcome != "skipped"
+    )
+    if len(executed) != 1:
+        return {
+            "ok": False,
+            "disposition": "implementation_provider_lane_ambiguous",
+            "details": {"executed": executed},
+        }
+    if executed[0] != selected_provider:
+        return {
+            "ok": False,
+            "disposition": "implementation_provider_lane_mismatch",
+            "details": {"executed": executed[0], "selected": selected_provider},
+        }
+    outcome = str(lane_results[selected_provider])
+    evidence = _read_result(result_path)
+    if evidence is None:
+        # No result document means the lane never reached the model: an image
+        # pull or build failure, a missing credential, or a runner fault.
+        return {
+            "ok": False,
+            "disposition": "implementation_provider_infrastructure_failed",
+            "details": {"provider": selected_provider, "lane_result": outcome},
+        }
+    if outcome != "success":
+        return {
+            "ok": False,
+            "disposition": "implementation_model_failed",
+            "details": {"provider": selected_provider, "lane_result": outcome},
+        }
+    return {"ok": True, "disposition": "completed", "details": {"provider": selected_provider}}

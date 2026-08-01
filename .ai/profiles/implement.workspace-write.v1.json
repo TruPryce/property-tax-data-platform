@@ -6,8 +6,8 @@
   "enabled": true,
   "implementation_state": "implemented",
   "executor": ".ai/codex/09-run-countyforge-implement-docker.sh",
-  "permitted_providers": ["openai"],
-  "permitted_model_refs": ["openai.gpt-5.6"],
+  "permitted_providers": ["openai", "sakana"],
+  "permitted_model_refs": ["openai.gpt-5.6", "sakana.fugu", "sakana.fugu-ultra"],
   "reasoning_efforts": ["high", "xhigh"],
   "default_reasoning_effort": "xhigh",
   "maximum_reasoning_effort": "xhigh",
@@ -25,9 +25,9 @@
   "model_tools": ["structured_file_bundle"],
   "deterministic_commands": ["artifacts.check", "docs.links", "repo.check", "repo.runner-contract", "repo.prepr-no-ai"],
   "network": {"policy": "provider_only", "destinations": ["selected_provider_api"]},
-  "credential_names": ["OPENAI_API_KEY"],
+  "credential_names": ["OPENAI_API_KEY", "SAKANA_API_KEY"],
   "host_credential_broker_names": [],
-  "environment_allowlist": ["PATH", "HOME", "TMPDIR", "OPENAI_API_KEY"],
-  "container": {"image": "countyforge-implement-agent:openai-v1", "provider_images": {"openai": "countyforge-implement-agent:openai-v1"}, "availability": "available", "configuration_bundle": "implement-workspace-write-v1", "codex_cli_version": "0.144.6"},
+  "environment_allowlist": ["PATH", "HOME", "TMPDIR", "OPENAI_API_KEY", "SAKANA_API_KEY"],
+  "container": {"image": null, "provider_images": {"openai": "countyforge-implement-agent:openai-v1", "sakana": "countyforge-implement-agent:sakana-v1"}, "availability": "available", "configuration_bundle": "implement-workspace-write-v1", "codex_cli_version": "0.144.6"},
   "expected_security_posture": {"read_only_rootfs": true, "non_root": true, "cap_drop_all": true, "no_new_privileges": true, "repository_mounted": true, "model_shell": false, "browser": false, "apps_or_mcp": false, "image_generation": false, "web_search": false, "production_credentials": false}
 }
