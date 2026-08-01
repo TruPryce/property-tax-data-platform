@@ -30,6 +30,8 @@ from countyforge_github.github_api import GitHubPort
 from countyforge_github.redaction import redact_untrusted_text
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# One top-level `issue:` key in the materializer-generated change metadata.
+_OPENSPEC_ISSUE = re.compile(r"^issue:[ \t]*([0-9]{1,9})[ \t]*$", re.MULTILINE)
 _TASK = re.compile(r"^- \[([ xX])\] ([0-9]+\.[0-9]+)\s+(.+?)\s*$")
 _TASK_META = re.compile(
     r"^\s*<!--\s*countyforge-task:\s*([0-9]+\.[0-9]+)\s+"
@@ -421,6 +423,43 @@ def evaluate_implementation_eligibility(
     }
 
 
+def planning_change_issue(
+    github: GitHubPort, *, repository: str, change_name: str, ref: str
+) -> int | None:
+    """Read the issue a planning change is bound to from committed metadata.
+
+    The materializer writes `issue: <number>` into
+    `openspec/changes/<change>/.openspec.yaml`, so the binding lives in trusted
+    committed content rather than in mutable pull-request prose.  Exactly one
+    top-level `issue:` key is required; a file that is absent, unreadable, or
+    ambiguous proves nothing and is refused.
+    """
+
+    content = github.repository_file(
+        repository, f"openspec/changes/{change_name}/.openspec.yaml", ref
+    )
+    if content is None:
+        return None
+    matches = _OPENSPEC_ISSUE.findall(content)
+    if len(matches) != 1:
+        return None
+    return int(matches[0])
+
+
+def body_references_issue(body: str, issue_number: int) -> bool:
+    """Recognize either supported issue reference style in a planning PR body.
+
+    The publisher has emitted both a bare `#17` and a canonical `/issues/17`
+    URL over time.  This is a consistency signal only; the committed
+    `.openspec.yaml` binding is what authorizes implementation.
+    """
+
+    return bool(
+        re.search(rf"(?<![0-9A-Za-z_])#{issue_number}(?![0-9])", body)
+        or re.search(rf"/issues/{issue_number}(?![0-9])", body)
+    )
+
+
 def resolve_merged_planning_approval(
     github: GitHubPort,
     *,
@@ -431,6 +470,16 @@ def resolve_merged_planning_approval(
 ) -> JsonObject:
     """Resolve immutable approval evidence before implementation claim/provider use."""
 
+    # Bind the change to the issue from committed metadata on the trusted branch,
+    # before any pull request is considered.  A PR body is mutable prose and its
+    # issue-reference style has already drifted once; it cannot be the proof.
+    bound_issue = planning_change_issue(
+        github, repository=repository, change_name=change_name, ref=trusted_base_sha
+    )
+    if bound_issue is None:
+        return {"eligible": False, "reason": "planning_change_metadata_missing"}
+    if bound_issue != issue_number:
+        return {"eligible": False, "reason": "planning_change_issue_mismatch"}
     prefix = f"openspec/changes/{change_name}/"
     candidates: list[int] = []
     for event in github.issue_timeline(repository, issue_number):
@@ -447,7 +496,9 @@ def resolve_merged_planning_approval(
         body = str(pull.get("body") or "")
         if not merged_at or not re.fullmatch(r"[0-9a-f]{40}", merged_sha):
             continue
-        if change_name not in body or f"#{issue_number}" not in body:
+        # The change-name marker stays as a format-agnostic consistency check; the
+        # issue reference is recorded but never gates approval.
+        if change_name not in body:
             continue
         comparison = github.compare_commits(repository, merged_sha, trusted_base_sha)
         if comparison.get("status") not in {"identical", "ahead"}:
@@ -510,6 +561,10 @@ def resolve_merged_planning_approval(
             "approval_actor_type": "User",
             "approval_actor_login": str(merged_by["login"]),
             "approval_permission": str(permission),
+            # Non-authoritative: excluded from the approval envelope and its
+            # fingerprint, and reported only so an operator can see whether the
+            # published prose still agrees with the committed binding.
+            "body_issue_reference": body_references_issue(body, issue_number),
         }
     return {"eligible": False, "reason": "planning_pr_approval_not_found"}
 
@@ -1689,6 +1744,8 @@ __all__ = [
     "implementation_change_hash",
     "implementation_revision",
     "implementation_change_files",
+    "body_references_issue",
+    "planning_change_issue",
     "resolve_merged_planning_approval",
     "validate_implementation_artifact",
     "validate_implementation_result",

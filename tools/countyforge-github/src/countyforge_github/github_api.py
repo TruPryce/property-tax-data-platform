@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 import json
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
+
+# `.openspec.yaml` is a few lines of generated metadata; anything larger is not
+# the approval binding this port exists to read.
+MAX_REPOSITORY_FILE_BYTES: Final = 8_192
 
 
 class GitHubPort(Protocol):
@@ -19,6 +25,8 @@ class GitHubPort(Protocol):
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]: ...
 
     def repository_profile(self, repository: str) -> JsonObject: ...
+
+    def repository_file(self, repository: str, path: str, ref: str) -> str | None: ...
 
     def list_repository_comments(self, repository: str) -> list[JsonObject]: ...
 
@@ -172,6 +180,36 @@ class GitHubRestClient:
                 "github_api_invalid_response", "GitHub repository facts are unavailable."
             )
         return value
+
+    def repository_file(self, repository: str, path: str, ref: str) -> str | None:
+        """Read one bounded text file at an immutable ref, or None when absent.
+
+        Approval provenance is read from committed content rather than from
+        mutable pull-request prose, so this refuses anything that is not a small
+        inline base64 file: a directory listing, a symlink or submodule entry, or
+        a blob large enough that GitHub omits its content.
+        """
+
+        try:
+            value = self._request(
+                "GET", f"/repos/{repository}/contents/{quote(path)}?ref={quote(ref, safe='')}"
+            )
+        except ControlPlaneError as error:
+            if error.code == "github_api_error" and error.details.get("status") == 404:
+                return None
+            raise
+        if not isinstance(value, dict) or value.get("type") != "file":
+            return None
+        size = value.get("size")
+        if not isinstance(size, int) or size > MAX_REPOSITORY_FILE_BYTES:
+            return None
+        if value.get("encoding") != "base64" or not isinstance(value.get("content"), str):
+            return None
+        try:
+            raw = base64.b64decode(str(value["content"]), validate=False)
+            return raw.decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
 
     def list_comments(self, repository: str, target_number: int) -> list[JsonObject]:
         return self._list_pages(f"/repos/{repository}/issues/{target_number}/comments")

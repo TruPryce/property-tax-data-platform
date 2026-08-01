@@ -13,6 +13,16 @@ OpenSpec validation and checks structured blocking markers across the complete a
 Draft PRs, labels, reactions, bot comments, and
 planning-agent output are not approval evidence.
 
+The change-to-issue binding comes from committed metadata, not from pull-request prose:
+`openspec/changes/<change>/.openspec.yaml` must declare exactly one `issue:` equal to the issue
+the command was issued on, read from the trusted branch. A pull-request body can be edited after
+merge and its issue-reference style has already drifted once, so it cannot authorize anything. The
+body is still checked for the change-name marker, and its issue reference — recognized as either
+`#17` or a canonical `/issues/17` URL — is recorded as a consistency signal only. Every other
+guarantee is unchanged: merged PR, valid merge SHA, the change prefix among its files, the merge
+commit contained in the trusted base, no later modification of that prefix, bounded and complete
+compare evidence, and a human merger with `write`, `maintain`, or `admin` permission.
+
 ## Provider routing
 
 Implementation has two visible lanes, `implementation-openai` and `implementation-sakana`, gated
@@ -39,7 +49,6 @@ not prove the lane succeeded.
 Each lane publishes provider-qualified artifacts, and trusted validation downloads only the
 selected provider's. A lane that published no result is classified as a provider infrastructure
 failure, never as a model failure, and validation refuses to proceed.
-
 ## Three roots and credentials
 
 - `contract_root`: trusted tooling, profiles, schemas, policies, prompts, and adapters at the

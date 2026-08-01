@@ -1304,7 +1304,7 @@ def publish_plan(
         evidence = f"\nEvidence: {evidence_url}\n" if evidence_url else ""
         body = (
             f"{bot_marker}\n\n## CountyForge planning draft\n\n"
-            f"Originating issue: https://github.com/{repository}/issues/{issue}\n\n"
+            f"Originating issue: [#{issue}](https://github.com/{repository}/issues/{issue})\n\n"
             f"Proposed OpenSpec change: `{change}`\n\n"
             f"CountyForge run: `{run_id}`\n\n"
             f"Assumptions: {len(result['assumptions'])}; unresolved decisions: {len(result['unresolved_decisions'])}; "

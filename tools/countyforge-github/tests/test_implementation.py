@@ -17,15 +17,18 @@ from countyforge_github.implementation import (
     _has_unresolved_blocking_decision,
     _path_matches_rule,
     _tasks_from_text,
+    body_references_issue,
     evaluate_implementation_eligibility,
     freeze_implementation_artifact,
     implementation_branch,
+    planning_change_issue,
     publish_implementation,
     resolve_merged_planning_approval,
     validate_implementation_artifact,
     validate_implementation_result,
     validate_implementation_tasks,
 )
+from countyforge_github.planning import materialize_plan, publish_plan
 from countyforge_runner.contracts import load_json_object, validate_document
 
 
@@ -701,6 +704,17 @@ def test_artifact_policy_rejects_accepted_task_checkbox_mutation(
 
 
 class _ApprovalGitHub:
+    """Committed change metadata is the approval binding; PR prose is not."""
+
+    openspec_yaml: str | None = (
+        "schema: spec-driven\ncreated: 2026-07-21\nissue: 7\nparent: 2\ncapability: safe\n"
+    )
+
+    def repository_file(self, repository: str, path: str, ref: str) -> str | None:
+        if path != "openspec/changes/safe-change/.openspec.yaml":
+            return None
+        return self.openspec_yaml
+
     def issue_timeline(self, repository: str, issue_number: int) -> list[dict[str, object]]:
         return [{"source": {"issue": {"number": 123, "pull_request": {"url": "x"}}}}]
 
@@ -1042,3 +1056,186 @@ def test_publication_journals_commit_before_draft_pr_failure(tmp_path: Path) -> 
     assert journal["branch"] == "countyforge/implement/issue-7-safe-change-r1"
     assert journal["commit_sha"] == "1" * 40
     assert journal["pr_number"] is None
+
+
+class _IssueBindingGitHub(_ApprovalGitHub):
+    """Approval fake whose PR prose and committed binding vary independently."""
+
+    def __init__(self, body: str, openspec_yaml: str | None) -> None:
+        self.body = body
+        self.openspec_yaml = openspec_yaml  # type: ignore[assignment]
+
+    def pull_request(self, repository: str, number: int) -> dict[str, object]:
+        return {**super().pull_request(repository, number), "body": self.body}
+
+
+_BOUND_TO_SEVEN = "schema: spec-driven\nissue: 7\nparent: 2\ncapability: safe\n"
+_URL_BODY = (
+    "<!-- countyforge-plan:v1 run=r context=c -->\n\n"
+    "Originating issue: https://github.com/TruPryce/property-tax-data-platform/issues/7\n\n"
+    "Proposed OpenSpec change: `safe-change`\n"
+)
+
+
+def _resolve(github: object, *, issue_number: int = 7) -> dict[str, object]:
+    return resolve_merged_planning_approval(
+        github,  # type: ignore[arg-type]
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=issue_number,
+        change_name="safe-change",
+        trusted_base_sha="c" * 40,
+    )
+
+
+def test_full_issue_url_without_a_bare_hash_is_accepted() -> None:
+    """The exact shape that refused implementation on merged planning PR #31."""
+
+    approval = _resolve(_IssueBindingGitHub(_URL_BODY, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is True
+    assert approval["body_issue_reference"] is True
+
+
+def test_a_bare_hash_issue_reference_is_still_accepted() -> None:
+    body = "Originating issue #7 for accepted change safe-change"
+    approval = _resolve(_IssueBindingGitHub(body, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is True
+    assert approval["body_issue_reference"] is True
+
+
+def test_a_body_without_any_issue_reference_is_still_accepted() -> None:
+    """Mutable prose is not the binding, so its absence cannot refuse approval."""
+
+    body = "Accepted change safe-change"
+    approval = _resolve(_IssueBindingGitHub(body, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is True
+    assert approval["body_issue_reference"] is False
+
+
+def test_committed_metadata_overrides_a_body_claiming_the_right_issue() -> None:
+    """A PR body claiming issue 7 cannot approve a change bound to issue 9."""
+
+    bound_elsewhere = "schema: spec-driven\nissue: 9\nparent: 2\ncapability: safe\n"
+    approval = _resolve(_IssueBindingGitHub(_URL_BODY, bound_elsewhere))
+    assert approval["eligible"] is False
+    assert approval["reason"] == "planning_change_issue_mismatch"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        "",
+        "schema: spec-driven\nparent: 2\n",
+        "schema: spec-driven\nissue: seven\n",
+        "  issue: 7\n",
+        "schema: spec-driven\nissue: 7\nissue: 9\n",
+    ],
+)
+def test_missing_or_malformed_change_metadata_is_refused(metadata: str | None) -> None:
+    approval = _resolve(_IssueBindingGitHub(_URL_BODY, metadata))
+    assert approval["eligible"] is False
+    assert approval["reason"] == "planning_change_metadata_missing"
+
+
+def test_a_pull_request_that_never_touched_the_change_is_refused() -> None:
+    class UnrelatedFilesGitHub(_IssueBindingGitHub):
+        def pull_request_files(self, repository: str, number: int) -> list[dict[str, object]]:
+            return [{"filename": "openspec/changes/other-change/proposal.md"}]
+
+    approval = _resolve(UnrelatedFilesGitHub(_URL_BODY, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is False
+    assert approval["reason"] == "planning_pr_approval_not_found"
+
+
+def test_openspec_content_changed_after_merge_is_refused() -> None:
+    class LaterChangeGitHub(_IssueBindingGitHub):
+        def compare_commits(
+            self, repository: str, base_sha: str, head_sha: str
+        ) -> dict[str, object]:
+            return {
+                "status": "ahead",
+                "files": [{"filename": "openspec/changes/safe-change/tasks.md"}],
+                "total_commits": 1,
+            }
+
+    approval = _resolve(LaterChangeGitHub(_URL_BODY, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is False
+    assert approval["reason"] == "planning_pr_approval_not_found"
+
+
+@pytest.mark.parametrize(
+    "merged_by",
+    [
+        {"id": 41898282, "login": "github-actions[bot]", "type": "Bot"},
+        {"id": 42, "login": "maintainer", "type": "User"},
+    ],
+)
+def test_unauthorized_or_bot_merger_is_refused(merged_by: dict[str, object]) -> None:
+    class MergerGitHub(_IssueBindingGitHub):
+        def pull_request(self, repository: str, number: int) -> dict[str, object]:
+            return {**super().pull_request(repository, number), "merged_by": merged_by}
+
+        def repository_permission(self, repository: str, actor: str) -> dict[str, object]:
+            return {"permission": "read"}
+
+    approval = _resolve(MergerGitHub(_URL_BODY, _BOUND_TO_SEVEN))
+    assert approval["eligible"] is False
+    assert approval["reason"] == "planning_pr_approval_not_found"
+
+
+def test_the_published_body_and_the_resolver_share_one_contract(tmp_path: Path) -> None:
+    """Producer/consumer fixture: the exact body `publish_plan()` generates.
+
+    The reported defect was these two drifting apart, so the resolver is fed the
+    publisher's real output rather than a hand-written approximation.
+    """
+
+    from test_planning import _publication_case
+    from test_planning import (  # type: ignore[import-not-found]
+        _PublicationGitHub as PlanningGitHub,
+    )
+
+    github = PlanningGitHub()
+    case = _publication_case(tmp_path, "contract")
+    case["issue_number"] = 6
+    result = case["result"]
+    assert isinstance(result, dict)
+    result["originating_issue"] = 6
+    published = publish_plan(github, **case)  # type: ignore[arg-type]
+    body = str(github.pull_requests[0]["body"])
+
+    # The generated body carries both recognized reference styles.
+    assert f"/issues/{6}" in body
+    assert "#6" in body
+    assert body_references_issue(body, 6) is True
+    assert body_references_issue(body, 7) is False
+    # ...and the change-name marker the resolver still checks.
+    assert str(published["change_name"]) in body
+
+
+def test_the_change_metadata_reader_binds_the_generated_file(tmp_path: Path) -> None:
+    """The other half of the contract: what `materialize_plan()` writes."""
+
+    from test_planning import _publication_case  # type: ignore[import-not-found]
+
+    case = _publication_case(tmp_path, "metadata")
+    root = case["publication_root"]
+    result = case["result"]
+    assert isinstance(root, Path) and isinstance(result, dict)
+    materialize_plan(result, publication_root=root, issue_number=6, run_id="metadata-run")
+    change = str(result["proposed_change_name"])
+    written = (root / f"openspec/changes/{change}/.openspec.yaml").read_text(encoding="utf-8")
+
+    class _FileGitHub:
+        def repository_file(self, repository: str, path: str, ref: str) -> str | None:
+            return written if path == f"openspec/changes/{change}/.openspec.yaml" else None
+
+    assert (
+        planning_change_issue(
+            _FileGitHub(),  # type: ignore[arg-type]
+            repository="TruPryce/property-tax-data-platform",
+            change_name=change,
+            ref="c" * 40,
+        )
+        == 6
+    )
