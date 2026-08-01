@@ -108,6 +108,35 @@ PY
 # The implementation profile intentionally exposes no shell or file-reading tool.  Build a
 # bounded, explicit prompt context from the frozen contracts and a source snapshot so the
 # model has a tested input path instead of relying on undeclared filesystem capabilities.
+scan_evidence_for_credential() {
+  if [ -z "$PROVIDER_SECRET_VALUE" ]; then
+    return 0
+  fi
+  PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+secret = os.environ.get("PROVIDER_SECRET", "")
+if not secret:
+    raise SystemExit(0)
+leaked = False
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    try:
+        data = path.read_bytes()
+    except OSError:
+        continue
+    if secret.encode() in data:
+        leaked = True
+        path.unlink(missing_ok=True)
+if leaked:
+    raise SystemExit("provider credential detected in implementation evidence")
+PY
+}
+
 MODEL_WORKSPACE="$OUT_DIR/model-workspace"
 MODEL_PROMPT="$OUT_DIR/implementation-prompt.md"
 PROMPT_PROVENANCE="$OUT_DIR/countyforge-implementation-prompt.provenance.json"
@@ -275,6 +304,7 @@ docker inspect "$PROXY_NAME" --format '{{.State.Running}}' | grep -qx true || {
   echo "provider proxy failed" >&2
   exit 2
 }
+set +e
 docker run --rm \
   --interactive \
   --read-only \
@@ -306,15 +336,28 @@ docker run --rm \
     - \
   > "$OUT_DIR/countyforge-implementation-model-events.ndjson" < "$MODEL_PROMPT"
 
-# If the provider still rejects the input after our own ceiling passed, the
+MODEL_STATUS=$?
+set -e
+
+# Sanitize evidence on every path, including failure: the drift branch below
+# uploads this directory, and the workflow uploads it with `if: always()`.
+scan_evidence_for_credential
+
+# If the provider rejected the input after our own ceiling passed, the
 # configured ceiling has drifted from the provider's real limit. That is the
-# defect that caused run 30698203658 recurring, so it is classified distinctly
-# rather than folded into a generic adapter failure.
+# defect from run 30698203658 recurring, so it is classified distinctly rather
+# than folded into a generic adapter failure.
 if grep -q "input_too_large" "$OUT_DIR/countyforge-implementation-model-events.ndjson" 2>/dev/null; then
   printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"ok\":false,\"adapter_disposition\":\"implementation_prompt_ceiling_drift\",\"configured_max_model_input_chars\":$MAX_MODEL_INPUT_CHARS}" \
-    > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
+    > "$LANE_EVIDENCE"
   echo "error: the provider rejected an input our configured ceiling accepted; the ceiling has drifted" >&2
   exit 2
+fi
+
+# Any other nonzero provider or model exit stays exactly what it was; it is
+# never converted into ceiling drift.
+if [ "$MODEL_STATUS" -ne 0 ]; then
+  exit "$MODEL_STATUS"
 fi
 
 # The model emits a bounded structured file bundle because no process-execution tool is
@@ -352,28 +395,4 @@ PY
 # frozen by trusted tooling after this process exits; this scan covers the separate output
 # directory that is uploaded as workflow evidence.  A hit removes the offending file and
 # fails the adapter, so no provider value can cross the artifact boundary.
-if [ -n "$PROVIDER_SECRET_VALUE" ]; then
-  PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
-import os
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve(strict=True)
-secret = os.environ.get("PROVIDER_SECRET", "")
-if not secret:
-    raise SystemExit(0)
-leaked = False
-for path in sorted(root.rglob("*")):
-    if not path.is_file() or path.is_symlink():
-        continue
-    try:
-        data = path.read_bytes()
-    except OSError:
-        continue
-    if secret.encode() in data:
-        leaked = True
-        path.unlink(missing_ok=True)
-if leaked:
-    raise SystemExit("provider credential detected in implementation evidence")
-PY
-fi
+scan_evidence_for_credential

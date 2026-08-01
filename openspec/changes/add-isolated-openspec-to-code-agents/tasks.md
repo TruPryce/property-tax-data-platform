@@ -74,3 +74,4 @@
 - [x] 11.10 Report the specific assembly failure from the Python boundary instead of inferring one from a nonzero shell exit.
 - [x] 11.11 Materialize the model workspace from the same bounded set as the prompt and enforce the declared snapshot byte bound.
 - [x] 11.12 Carry the adapter disposition through lane evidence into canonical terminal state.
+- [x] 11.13 Capture the model command status so ceiling drift stays reachable on a nonzero provider exit, and sanitize evidence on every path.

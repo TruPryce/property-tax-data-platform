@@ -1739,3 +1739,102 @@ def test_publication_prep_forwards_the_adapter_disposition() -> None:
     run = str(step["run"])
     assert ".adapter_disposition" in run
     assert "--adapter-disposition" in run
+
+
+def _model_invocation_block() -> str:
+    """The adapter's real post-invocation classification, extracted verbatim."""
+
+    start = _IMPLEMENT_ADAPTER.index("MODEL_STATUS=$?")
+    end = _IMPLEMENT_ADAPTER.index("# The model emits a bounded structured file bundle")
+    return _IMPLEMENT_ADAPTER[start:end]
+
+
+@pytest.mark.parametrize(
+    ("events", "model_status", "expected_exit", "expect_drift"),
+    [
+        # The real shape from run 30698203658: provider rejects, exits nonzero.
+        ('{"error":"input_too_large"}\n', 1, 2, True),
+        ('{"error":"input_too_large"}\n', 0, 2, True),
+        # An unrelated provider or model failure is never converted to drift.
+        ('{"error":"rate_limited"}\n', 1, 1, False),
+        ('{"error":"server_error"}\n', 7, 7, False),
+        ("", 3, 3, False),
+        # A clean run falls through.
+        ('{"ok":true}\n', 0, 0, False),
+    ],
+)
+def test_a_rejected_input_is_classified_even_though_the_model_exits_nonzero(
+    tmp_path: Path, events: str, model_status: int, expected_exit: int, expect_drift: bool
+) -> None:
+    """Under `set -e` a nonzero provider exit aborted before this check ran.
+
+    That made the ceiling-drift classification unreachable for the exact failure
+    it exists to classify.
+    """
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "countyforge-implementation-model-events.ndjson").write_text(events, encoding="utf-8")
+    lane = out / "countyforge-implementation-lane-evidence.json"
+    # Mirror the adapter exactly: `set +e` around the model command, then the
+    # extracted block, which opens by capturing `$?` and restoring `set -e`.
+    script = (
+        "set -euo pipefail\n"
+        "scan_evidence_for_credential() { :; }\n"
+        "set +e\n"
+        f"( exit {model_status} )\n" + _model_invocation_block()
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "OUT_DIR": str(out),
+            "LANE_EVIDENCE": str(lane),
+            "CODEX_PROVIDER": "sakana",
+            "MAX_MODEL_INPUT_CHARS": "950000",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == expected_exit, completed.stderr
+    if not expect_drift:
+        assert not lane.is_file() or "ceiling_drift" not in lane.read_text(encoding="utf-8")
+        return
+    evidence = json.loads(lane.read_text(encoding="utf-8"))
+    assert evidence["adapter_disposition"] == "implementation_prompt_ceiling_drift"
+    assert evidence["provider"] == "sakana"
+    assert "the ceiling has drifted" in completed.stderr
+
+    # ...and that disposition must reach canonical terminal state.
+    from countyforge_github.results import classify_implementation_lane, resolve_terminal_result
+
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        adapter_disposition=str(evidence["adapter_disposition"]),
+    )
+    lane_document = tmp_path / "lane-classified.json"
+    lane_document.write_text(json.dumps(classified), encoding="utf-8")
+    assert resolve_terminal_result(
+        command="implement", result_path=None, exit_code_path=None, lane_path=lane_document
+    ) == {
+        "ok": True,
+        "state": "failed",
+        "disposition": "implementation_prompt_ceiling_drift",
+    }
+
+
+def test_the_model_invocation_status_is_captured_not_aborted_on() -> None:
+    invocation = _IMPLEMENT_ADAPTER[
+        _IMPLEMENT_ADAPTER.index("docker run --rm") : _IMPLEMENT_ADAPTER.index("MODEL_STATUS=$?")
+    ]
+    assert invocation.lstrip().startswith("docker run --rm")
+    assert (
+        _IMPLEMENT_ADAPTER[: _IMPLEMENT_ADAPTER.index("docker run --rm")]
+        .rstrip()
+        .endswith("set +e")
+    )
+    # Evidence is sanitized on every path, including the failure paths.
+    assert _IMPLEMENT_ADAPTER.count("scan_evidence_for_credential") >= 3
