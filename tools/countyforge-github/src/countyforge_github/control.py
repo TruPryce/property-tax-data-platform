@@ -10,7 +10,6 @@ from countyforge_github.state import (
     ACTIVE_STATES,
     check_status,
     decode_marker,
-    display_signature,
     render_status,
     transition_state,
 )
@@ -122,15 +121,15 @@ def upsert_canonical_status(
         raise ControlPlaneError(
             "state_write_conflict", "Canonical CountyForge state changed before publication."
         )
-    if canonical_bytes(state) == canonical_bytes(expected_state) and display_signature(
-        str(comment.get("body", ""))
-    ) == display_signature(body):
+    # Compare what will actually be published, not just canonical state.  An
+    # unchanged state still carries a new observation of the default branch, and
+    # `/countyforge status` on a settled run is exactly how a maintainer asks for
+    # that observation to be renewed; skipping the write would answer with the
+    # previous one.  This write is inside the target's concurrency lane and the
+    # persisted marker was just compared against the expected predecessor, so it
+    # is the ordinary expected-state write path.
+    if str(comment.get("body", "")) == body:
         return comment
-    # An unchanged state may still need its display corrected: `/countyforge
-    # status` on a settled run is exactly how a maintainer asks whether the
-    # default branch has moved since it ran.  This write is inside the target's
-    # concurrency lane and the persisted marker was just compared against the
-    # expected predecessor, so it is the ordinary expected-state write path.
     return github.update_comment(repository, existing[0], body)
 
 

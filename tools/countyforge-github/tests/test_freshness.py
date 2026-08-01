@@ -285,16 +285,50 @@ def test_status_on_an_unchanged_run_still_refreshes_a_stale_display(
     assert canonical_bytes(decoded) == canonical_bytes(state)
 
 
-def test_an_unchanged_state_and_unchanged_display_writes_nothing(
+def test_status_renews_the_observation_even_when_nothing_else_changed(
     queued_state_factory: Callable[[str], JsonObject],
 ) -> None:
+    """Renewing freshness on demand is the whole point of `/countyforge status`.
+
+    A later status on an unchanged terminal run must move `Main checked` and
+    nothing else -- including the hidden marker, which stays byte-identical.
+    """
+
+    state = _issue_state(queued_state_factory)
+    github = _FreshnessGitHub(head=TARGET)
+    github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
+    _publish(github, state, state)
+    first = str(github.comments[0]["body"])
+    assert _row(first, "Main checked") == AT
+
+    later = "2026-07-31T06:30:00Z"
+    _publish(github, state, state, at=later)
+    second = str(github.comments[0]["body"])
+    assert len(github.updated) == 2
+    assert _row(second, "Main checked") == later
+
+    # Only that row moved.
+    assert [line for line in first.splitlines() if not line.startswith("| Main checked |")] == [
+        line for line in second.splitlines() if not line.startswith("| Main checked |")
+    ]
+    for body in (first, second):
+        decoded = decode_marker(
+            body, author_id=41898282, author_type="Bot", trusted_bot_id=41898282
+        )
+        assert canonical_bytes(decoded) == canonical_bytes(state)
+
+
+def test_an_identical_render_writes_nothing(
+    queued_state_factory: Callable[[str], JsonObject],
+) -> None:
+    """A byte-identical body still costs nothing; only the observation renews."""
+
     state = _issue_state(queued_state_factory)
     github = _FreshnessGitHub(head=TARGET)
     github.add_comment(render_status(state, None, unavailable_freshness(OLD)))
     _publish(github, state, state)
     assert len(github.updated) == 1
-    # Nothing moved since; only the observation instant would differ.
-    _publish(github, state, state, at="2026-07-31T01:00:00Z")
+    _publish(github, state, state)
     assert len(github.updated) == 1
 
 
