@@ -21,6 +21,19 @@ case "${CODEX_PROVIDER:?CODEX_PROVIDER is required}" in
   sakana) PROVIDER_CREDENTIAL="SAKANA_API_KEY"; PROVIDER_HOST="api.sakana.ai" ;;
   *) echo "error: unsupported implementation provider: $CODEX_PROVIDER" >&2; exit 2 ;;
 esac
+# Only the selected provider's credential is ever read; the other name is never
+# expanded, mounted, or passed. The value itself is never printed.
+PROVIDER_SECRET_VALUE="${!PROVIDER_CREDENTIAL:-}"
+if [ -z "$PROVIDER_SECRET_VALUE" ]; then
+  # Fail before any provider network activity or model invocation. Run
+  # 30695076693 reached the model container with an empty key and produced no
+  # usable bundle, while the wrapper job still concluded success.
+  mkdir -p "$OUT_DIR"
+  printf '%s\n' "{\"contract_version\":1,\"provider\":\"$CODEX_PROVIDER\",\"credential_name\":\"$PROVIDER_CREDENTIAL\",\"credential_present\":false,\"disposition\":\"implementation_provider_credential_missing\"}" \
+    > "$OUT_DIR/countyforge-implementation-lane-evidence.json"
+  echo "error: the selected implementation provider credential is unavailable: $PROVIDER_CREDENTIAL" >&2
+  exit 2
+fi
 
 mkdir -p "$OUT_DIR"
 EXPECTED_PROFILE_SHA="${COUNTYFORGE_PROFILE_SHA256:?COUNTYFORGE_PROFILE_SHA256 is required}"
@@ -199,6 +212,7 @@ docker inspect "$PROXY_NAME" --format '{{.State.Running}}' | grep -qx true || {
   exit 2
 }
 docker run --rm \
+  --interactive \
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges:true \
@@ -263,7 +277,6 @@ PY
 # frozen by trusted tooling after this process exits; this scan covers the separate output
 # directory that is uploaded as workflow evidence.  A hit removes the offending file and
 # fails the adapter, so no provider value can cross the artifact boundary.
-PROVIDER_SECRET_VALUE="${!PROVIDER_CREDENTIAL:-}"
 if [ -n "$PROVIDER_SECRET_VALUE" ]; then
   PROVIDER_SECRET="$PROVIDER_SECRET_VALUE" python3 - "$OUT_DIR" <<'PY'
 import os

@@ -51,3 +51,11 @@
 - [x] 9.4 Resolve the provider credential and endpoint in the adapter before either is exposed, and refuse an unsupported provider.
 - [x] 9.5 Publish provider-qualified lane artifacts and consume only the selected provider's in trusted validation, failing closed when it is absent.
 - [x] 9.6 Classify a lane that published no result as a provider infrastructure failure rather than a model failure, with a fixture from run 30691544362.
+
+## 10. Implementation provider routing correction
+
+- [x] 10.1 Pin `implement` to Sakana in the trusted execution policy, matching the repository's configured credential and the plan/review defaults.
+- [x] 10.2 Require the selected provider credential before any provider network activity or model invocation, reading only that credential and never printing its value.
+- [x] 10.3 Deliver the bounded prompt to the model container, reproduced against the real invocation shape before changing any Docker posture.
+- [x] 10.4 Classify lane outcome from host-observed execution facts so a deliberately green wrapper job can never mean completed.
+- [x] 10.5 Emit bounded host-observed lane evidence from both provider jobs and preserve the classified disposition in terminal state.

@@ -470,30 +470,6 @@ def test_the_run_30691544362_image_failure_is_not_a_model_outcome(tmp_path: Path
     assert classified["disposition"] != "implementation_model_failed"
 
 
-def test_a_failed_lane_that_did_publish_is_a_model_failure(tmp_path: Path) -> None:
-    result = _write(tmp_path / "countyforge-result.json", '{"ok":false,"mode":"implement"}')
-    classified = classify_implementation_lane(
-        selected_provider="sakana",
-        lane_results={"openai": "skipped", "sakana": "failure"},
-        result_path=result,
-    )
-    assert classified["disposition"] == "implementation_model_failed"
-
-
-def test_a_successful_selected_lane_completes(tmp_path: Path) -> None:
-    result = _write(tmp_path / "countyforge-result.json", '{"ok":true,"mode":"implement"}')
-    classified = classify_implementation_lane(
-        selected_provider="sakana",
-        lane_results={"openai": "skipped", "sakana": "success"},
-        result_path=result,
-    )
-    assert classified == {
-        "ok": True,
-        "disposition": "completed",
-        "details": {"provider": "sakana"},
-    }
-
-
 @pytest.mark.parametrize("provider", ["", "anthropic", "OPENAI", "unknown", "sakana-v2"])
 def test_an_unsupported_provider_fails_closed(tmp_path: Path, provider: str) -> None:
     classified = classify_implementation_lane(
@@ -594,3 +570,153 @@ def test_unusable_lane_evidence_is_ignored_rather_than_trusted(
         )["disposition"]
         == "invalid_result_evidence"
     )
+
+
+def _lane_inputs(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    """A fully successful Sakana lane; individual facts are overridden per case."""
+
+    runner = _write(
+        tmp_path / "countyforge-result.json",
+        json.dumps(
+            {
+                "ok": True,
+                "mode": "implement",
+                "disposition": "completed",
+                "summary": {"disposition": "completed", "exit_code": 0},
+                "implementation": {"openspec_change": "add-dallas-cad-parser-foundation"},
+            }
+        ),
+    )
+    implementation = _write(
+        tmp_path / "countyforge-implementation-result.json",
+        json.dumps({"openspec_change": "add-dallas-cad-parser-foundation", "file_bundle": []}),
+    )
+    inputs: dict[str, object] = {
+        "selected_provider": "sakana",
+        "lane_results": {"openai": "skipped", "sakana": "success"},
+        "result_path": runner,
+        "exit_code_path": _write(tmp_path / "countyforge-exit-code", "0\n"),
+        "implementation_result_path": implementation,
+        "freeze_outcome": "success",
+        "frozen_bundle_present": True,
+    }
+    inputs.update(overrides)
+    return inputs
+
+
+def test_the_successful_sakana_shape_completes(tmp_path: Path) -> None:
+    """Only Sakana ran, key present, exit zero, valid result, freeze and bundle."""
+
+    classified = classify_implementation_lane(**_lane_inputs(tmp_path))  # type: ignore[arg-type]
+    assert classified["ok"] is True
+    assert classified["disposition"] == "completed"
+    assert classified["details"]["provider"] == "sakana"
+    # Trusted validation is allowed to proceed only on this shape.
+    assert resolve_terminal_result(
+        command="implement",
+        result_path=_lane_inputs(tmp_path)["result_path"],  # type: ignore[arg-type]
+        exit_code_path=_lane_inputs(tmp_path)["exit_code_path"],  # type: ignore[arg-type]
+        lane_path=_write(tmp_path / "lane.json", json.dumps(classified)),
+    ) == {"ok": True, "state": "succeeded", "disposition": "completed"}
+
+
+def test_the_run_30695076693_shape_can_never_complete(tmp_path: Path) -> None:
+    """OpenAI selected, job green, credential absent, nonzero exit, no bundle."""
+
+    runner = _write(
+        tmp_path / "countyforge-result.json",
+        json.dumps({"ok": False, "mode": "implement", "disposition": "adapter_failed"}),
+    )
+    classified = classify_implementation_lane(
+        selected_provider="openai",
+        # The wrapper job concluded success despite doing no work.
+        lane_results={"openai": "success", "sakana": "skipped"},
+        result_path=runner,
+        exit_code_path=_write(tmp_path / "countyforge-exit-code", "2\n"),
+        implementation_result_path=None,
+        freeze_outcome="failure",
+        frozen_bundle_present=False,
+    )
+    assert classified["ok"] is False
+    assert classified["disposition"] == "implementation_provider_infrastructure_failed"
+    assert classified["details"]["runner_exit_code"] == 2
+    assert classified["details"]["runner_disposition"] == "adapter_failed"
+    # And it reaches terminal state as that, not as invalid_result_evidence.
+    assert (
+        resolve_terminal_result(
+            command="implement",
+            result_path=runner,
+            exit_code_path=_write(tmp_path / "exit2", "2\n"),
+            lane_path=_write(tmp_path / "lane.json", json.dumps(classified)),
+        )["disposition"]
+        == "implementation_provider_infrastructure_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "disposition"),
+    [
+        # A green wrapper job never proves the lane succeeded.
+        ({"exit_code_path": None}, "implementation_provider_infrastructure_failed"),
+        ({"result_path": None}, "implementation_provider_infrastructure_failed"),
+        ({"implementation_result_path": None}, "implementation_model_failed"),
+        ({"freeze_outcome": "failure"}, "implementation_freeze_failed"),
+        ({"freeze_outcome": None}, "implementation_freeze_failed"),
+        ({"frozen_bundle_present": False}, "implementation_freeze_failed"),
+        ({"frozen_bundle_present": None}, "implementation_freeze_failed"),
+        ({"selected_provider": "openai"}, "implementation_provider_lane_mismatch"),
+        ({"selected_provider": "gemini"}, "unsupported_implementation_provider"),
+        (
+            {"lane_results": {"openai": "success", "sakana": "success"}},
+            "implementation_provider_lane_ambiguous",
+        ),
+        (
+            {"lane_results": {"openai": "skipped", "sakana": "skipped"}},
+            "implementation_provider_lane_ambiguous",
+        ),
+    ],
+)
+def test_every_unproven_success_condition_refuses_completion(
+    tmp_path: Path, overrides: dict[str, object], disposition: str
+) -> None:
+    classified = classify_implementation_lane(**_lane_inputs(tmp_path, **overrides))  # type: ignore[arg-type]
+    assert classified["ok"] is False
+    assert classified["disposition"] == disposition
+
+
+@pytest.mark.parametrize("exit_code", ["1", "2", "5", "137"])
+def test_a_nonzero_captured_exit_always_fails(tmp_path: Path, exit_code: str) -> None:
+    """Regardless of the GitHub job conclusion."""
+
+    inputs = _lane_inputs(
+        tmp_path,
+        lane_results={"openai": "skipped", "sakana": "success"},
+        exit_code_path=_write(tmp_path / "exit", f"{exit_code}\n"),
+    )
+    classified = classify_implementation_lane(**inputs)  # type: ignore[arg-type]
+    assert classified["ok"] is False
+    assert classified["details"]["runner_exit_code"] == int(exit_code)
+
+
+def test_a_runner_reporting_not_ok_always_fails(tmp_path: Path) -> None:
+    runner = _write(
+        tmp_path / "not-ok-result.json",
+        json.dumps({"ok": False, "mode": "implement", "disposition": "completed"}),
+    )
+    classified = classify_implementation_lane(
+        **_lane_inputs(tmp_path, result_path=runner)  # type: ignore[arg-type]
+    )
+    assert classified["ok"] is False
+
+
+def test_an_inconsistent_runner_success_is_a_model_failure(tmp_path: Path) -> None:
+    """`ok: true` with a summary that does not corroborate it proves nothing."""
+
+    runner = _write(
+        tmp_path / "inconsistent-result.json",
+        json.dumps({"ok": True, "mode": "implement", "disposition": "completed"}),
+    )
+    classified = classify_implementation_lane(
+        **_lane_inputs(tmp_path, result_path=runner)  # type: ignore[arg-type]
+    )
+    assert classified["disposition"] == "implementation_model_failed"

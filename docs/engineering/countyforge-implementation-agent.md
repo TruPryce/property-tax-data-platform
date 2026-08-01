@@ -26,6 +26,16 @@ planning image strategy. The previous OpenAI image inherited `FROM ghcr.io/opena
 GitHub-hosted runners cannot pull anonymously; run 30691544362 failed with a GHCR 403 before the
 model was invoked. Pulling it would have required package credentials this job must never hold.
 
+The trusted execution policy pins `implement` to Sakana, matching the repository's configured
+credential and the existing plan and review defaults. Provider selection is never exposed to issue
+comment arguments. A lane fails before starting its proxy or model container when the selected
+credential is absent; the unselected provider's credential is never read.
+
+Lane outcome is classified from host-observed facts — captured runner exit code, runner result,
+implementation result, freeze outcome, and frozen bundle presence — because the workflow wraps the
+runner in `set +e` and marks freezing `continue-on-error` to capture evidence, so a green job does
+not prove the lane succeeded.
+
 Each lane publishes provider-qualified artifacts, and trusted validation downloads only the
 selected provider's. A lane that published no result is classified as a provider infrastructure
 failure, never as a model failure, and validation refuses to proceed.

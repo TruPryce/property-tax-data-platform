@@ -8,7 +8,7 @@ The control plane SHALL allow `implement <change>` only when the exact change ex
 - **THEN** intake returns a sanitized ineligible disposition before provider credentials, target preparation, or workflow dispatch
 
 ### Requirement: Provider-routed implementation execution
-The implementation profile SHALL declare every permitted provider with its own pinned image and credential. Exactly one provider lane MAY execute per request, selected from the trusted profile and request before either credential is exposed, and a lane MUST receive only its own provider credential and provider endpoint. There MUST be no runtime fallback between providers within a run, so an infrastructure failure remains attributable to the selected provider. Both lanes MUST produce the identical governed outputs under the same isolation, path policy, task plan, workspace binding, and trusted gates. Trusted validation SHALL consume artifacts only from the selected provider lane, MUST fail closed when that lane did not run or published no result, and MUST ignore an unselected lane's artifacts. Implementation images MUST be pullable by the runner without repository or package credentials.
+The implementation profile SHALL declare every permitted provider with its own pinned image and credential. Exactly one provider lane MAY execute per request, selected from the trusted profile and request before either credential is exposed, and a lane MUST receive only its own provider credential and provider endpoint. There MUST be no runtime fallback between providers within a run, so an infrastructure failure remains attributable to the selected provider. Both lanes MUST produce the identical governed outputs under the same isolation, path policy, task plan, workspace binding, and trusted gates. Trusted validation SHALL consume artifacts only from the selected provider lane, MUST fail closed when that lane did not run or published no result, and MUST ignore an unselected lane's artifacts. A lane MUST fail before any provider network activity or model invocation when the selected credential is absent, and MUST NOT read, expand, or pass the unselected provider's credential. Lane outcome SHALL be classified from host-observed execution facts -- the captured runner exit code, runner result, implementation result, freeze outcome, and frozen bundle presence -- never from the wrapper job's conclusion alone, which the workflow deliberately keeps green to capture evidence. A lane MAY be classified complete only when every success condition is independently proven. Implementation images MUST be pullable by the runner without repository or package credentials.
 
 #### Scenario: Route to exactly one provider lane
 - **WHEN** the trusted claim resolves an implementation provider
@@ -17,6 +17,14 @@ The implementation profile SHALL declare every permitted provider with its own p
 #### Scenario: Refuse an unsupported provider before invocation
 - **WHEN** the resolved provider is not a permitted implementation provider
 - **THEN** execution fails closed before any credential is exposed or any model is invoked
+
+#### Scenario: Refuse a lane whose credential is absent
+- **WHEN** the selected provider's credential is empty or unset
+- **THEN** the lane fails before starting the provider proxy or model container, records sanitized evidence naming the missing credential, and never falls back to another provider
+
+#### Scenario: Refuse a green wrapper job that proved nothing
+- **WHEN** a provider job concludes successfully but its captured runner exit code is nonzero, its runner result reports failure, its implementation result is absent, or its frozen bundle is missing
+- **THEN** the lane is classified as failed and terminal state records that disposition rather than a model outcome or a generic evidence error
 
 #### Scenario: Classify a provider image failure as infrastructure
 - **WHEN** the selected lane fails while provisioning its image and publishes no implementation result
