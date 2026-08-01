@@ -867,10 +867,15 @@ jobs:
           gh api "repos/$TARGET_REPOSITORY/issues/$TARGET_NUMBER" > "$RUNNER_TEMP/countyforge-issue.json"
           change_name="$(jq -er '.command.arguments.openspec_change' "$RUNNER_TEMP/countyforge-trigger.json")"
           approval_actor_id="$(jq -er '.implementation_approval.approval_actor_id' "$RUNNER_TEMP/countyforge-trigger.json")"
+          # Early fail-closed shape check only; Python eligibility validation remains
+          # authoritative. `IN` takes one or two arguments, so the three-argument form
+          # was a compile error on the runner's jq, not a failed check.
           jq -e \
-            '.implementation_approval.planning_pr_number > 0 and
-             (.implementation_approval.planning_pr_merge_sha | test("^[0-9a-f]{40}$")) and
-             (.implementation_approval.approval_permission | IN("admin"; "maintain"; "write"))' \
+            '(.implementation_approval.planning_pr_number | type == "number" and . > 0 and floor == .) and
+             (.implementation_approval.planning_pr_merge_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+             (.implementation_approval.approval_permission as $permission
+              | ($permission | type) == "string"
+                and (["admin", "maintain", "write"] | index($permission) != null))' \
             "$RUNNER_TEMP/countyforge-trigger.json" >/dev/null
           cd trusted
           uv sync --frozen --package countyforge-github

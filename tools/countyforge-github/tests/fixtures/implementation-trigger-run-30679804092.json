@@ -1,0 +1,54 @@
+{
+  "contract_version": 1,
+  "repository": {
+    "id": 987654,
+    "full_name": "TruPryce/property-tax-data-platform"
+  },
+  "target": {
+    "type": "issue",
+    "number": 17,
+    "source_repository": {
+      "id": 987654,
+      "full_name": "TruPryce/property-tax-data-platform"
+    },
+    "base_sha": "7f8f8a4400000000000000000000000000000000",
+    "head_sha": "7f8f8a4400000000000000000000000000000000"
+  },
+  "comment": {
+    "id": 5140000000,
+    "event_action": "created",
+    "delivery_id": "run-30679804092"
+  },
+  "actor": {
+    "login": "mikegtech",
+    "id": 94987127,
+    "type": "User"
+  },
+  "authorization": {
+    "permission": "admin",
+    "policy_version": 1,
+    "outcome": "allowed",
+    "reason_code": "repository_permission_allowed"
+  },
+  "command": {
+    "contract_version": 1,
+    "command": "implement",
+    "arguments": {
+      "openspec_change": "add-dallas-cad-parser-foundation"
+    }
+  },
+  "implementation_approval": {
+    "planning_pr_number": 31,
+    "planning_pr_merge_sha": "7f8f8a4400000000000000000000000000000000",
+    "approval_actor_id": 94987127,
+    "approval_actor_type": "User",
+    "approval_actor_login": "mikegtech",
+    "approval_permission": "admin"
+  },
+  "trusted_tool_sha": "7f8f8a4400000000000000000000000000000000",
+  "workflow": {
+    "run_id": 30679804092,
+    "run_attempt": 1
+  },
+  "timestamp": "2026-08-01T02:20:00Z"
+}
