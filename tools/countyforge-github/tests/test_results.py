@@ -959,6 +959,44 @@ def test_timeout_never_overrides_infrastructure_or_freeze_failures(tmp_path: Pat
             "5\n",
             "implementation_model_failed",
         ),
+        # A corroborating envelope and exit code with no summary at all: the
+        # runner writes one on every path, so this document is not what it
+        # claims to be.
+        (
+            {"ok": False, "mode": "implement", "disposition": "timed_out"},
+            "5\n",
+            "implementation_model_failed",
+        ),
+        (
+            {
+                "ok": False,
+                "mode": "implement",
+                "disposition": "timed_out",
+                "summary": None,
+            },
+            "5\n",
+            "implementation_model_failed",
+        ),
+        (
+            {
+                "ok": False,
+                "mode": "implement",
+                "disposition": "timed_out",
+                "summary": "timed_out",
+            },
+            "5\n",
+            "implementation_model_failed",
+        ),
+        (
+            {
+                "ok": False,
+                "mode": "implement",
+                "disposition": "timed_out",
+                "summary": {"exit_code": 5},
+            },
+            "5\n",
+            "implementation_model_failed",
+        ),
     ],
 )
 def test_uncorroborated_timeout_evidence_never_earns_the_timeout_disposition(
@@ -995,7 +1033,8 @@ def test_the_corroborated_timeout_shape_is_the_only_one_accepted(tmp_path: Path)
         )["disposition"]
         == "implementation_model_timed_out"
     )
-    # A summary is corroborating evidence when present, not a requirement.
+    # The runner emits a summary on every path, so an absent one means this is
+    # not the artifact the classification claims to be reading.
     del document["summary"]
     assert (
         classify_implementation_lane(
@@ -1004,5 +1043,31 @@ def test_the_corroborated_timeout_shape_is_the_only_one_accepted(tmp_path: Path)
             result_path=_write(tmp_path / "runner2.json", json.dumps(document)),
             exit_code_path=_write(tmp_path / "exit2", f"{TIMEOUT_EXIT_CODE}\n"),
         )["disposition"]
-        == "implementation_model_timed_out"
+        == "implementation_model_failed"
     )
+
+
+def test_requiring_the_summary_cannot_reject_a_real_runner_timeout() -> None:
+    """Mandating a field is only safe if the emitter always produces it.
+
+    The implement lane calls the evidence writer unconditionally, and the run
+    summary schema requires both fields with `timed_out` in its disposition
+    enum. So every conforming timeout summary satisfies the classifier, and
+    demanding one fails closed on forged evidence, not on real evidence.
+    """
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-run-summary.schema.json").read_text(encoding="utf-8")
+    )
+    assert "disposition" in schema["required"]
+    assert "exit_code" in schema["required"]
+    assert "timed_out" in schema["properties"]["disposition"]["enum"]
+    executor = Path("tools/countyforge-runner/src/countyforge_runner/executor.py").read_text(
+        encoding="utf-8"
+    )
+    # The implement lane maps a timeout to exit code 5 and writes a summary on
+    # every path, so `summary` is never absent from a real implement result.
+    assert "code = 5 if timed_out else (128 + abs(raw_code) if raw_code < 0 else raw_code)" in (
+        executor
+    )
+    assert 'disposition = "timed_out" if timed_out else' in executor

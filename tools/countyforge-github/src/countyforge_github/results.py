@@ -333,18 +333,22 @@ def _runner_reports_timeout(document: JsonObject, exit_code: int | None) -> bool
     with a successful exit, an unrelated failure code, or `ok: true` is evidence
     contradicting itself; it must fall through to the inconsistent-result and
     failure paths rather than be reported as a clean timeout.
+
+    The summary is required, not merely non-contradicting.  The runner emits one
+    on every path, so its absence means the document is not the artifact this
+    classification claims to be reading -- exactly as `_runner_reports_success`
+    treats a missing summary on the success path.
     """
 
     summary = document.get("summary")
-    if isinstance(summary, dict) and (
-        summary.get("disposition") != "timed_out" or summary.get("exit_code") != TIMEOUT_EXIT_CODE
-    ):
-        return False
     return (
         document.get("ok") is False
         and document.get("mode") == "implement"
         and document.get("disposition") == "timed_out"
         and exit_code == TIMEOUT_EXIT_CODE
+        and isinstance(summary, dict)
+        and summary.get("disposition") == "timed_out"
+        and summary.get("exit_code") == TIMEOUT_EXIT_CODE
     )
 
 
