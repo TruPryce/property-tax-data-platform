@@ -80,17 +80,41 @@ The wrapper authenticates `bws` with the access token, requests only the configu
 
 ## Administrative Access
 
-The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Keep both on loopback and publish the Airflow UI with `tailscale serve`:
+The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Keep both on loopback and publish the Airflow UI with `tailscale serve`.
+
+This requires HTTPS certificates to be enabled for the tailnet first, under **DNS → HTTPS Certificates** in the Tailscale admin console. Without it `tailscale status --json` reports `CertDomains: None` and the `--https` form fails.
 
 ```bash
 sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
+tailscale serve status
 ```
+
+The UI is then reachable on the tailnet at `https://<host>.<tailnet>.ts.net`, and the configuration persists across reboots in the `tailscaled` state.
 
 This terminates TLS with a tailnet certificate, keeps the container off the tailnet interface, and records access against a tailnet identity. Binding a container port directly to the Tailscale address also works, but it serves plaintext, and Docker fails to start the service after a reboot whenever it wins the race against `tailscaled` assigning the address.
 
 PostgreSQL has no tailnet listener. Reach it by connecting to the host over Tailscale and using a local client.
 
-The wrapper refuses any `POSTGRES_BIND_ADDRESS` or `AIRFLOW_API_BIND_ADDRESS` outside loopback and the Tailscale CGNAT range `100.64.0.0/10`. This is the only enforcement point: Docker publishes ports through its own iptables chain ahead of the host `INPUT` rules, so a `ufw` policy will not contain a misconfiguration here. Tailnet ACLs still have to restrict which devices may reach the administrative surface, and neither port may be exposed with `tailscale funnel`.
+The wrapper refuses any `POSTGRES_BIND_ADDRESS` or `AIRFLOW_API_BIND_ADDRESS` outside loopback and the Tailscale CGNAT range `100.64.0.0/10`. This is the only enforcement point: Docker publishes ports through its own iptables chain ahead of the host `INPUT` rules, so a `ufw` policy will not contain a misconfiguration here.
+
+Reaching the tailnet is not authorization to administer the platform. Tailscale's default policy accepts every source to every destination, so the administrative surface needs an explicit rule:
+
+```json
+{
+  "tagOwners": {
+    "tag:platform-runtime": ["autogroup:admin"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["tag:platform-runtime:443"]
+    }
+  ]
+}
+```
+
+Neither port may be exposed with `tailscale funnel`, which would publish it to the public internet.
 
 Inspect health without printing configuration or credentials:
 
