@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -2311,3 +2313,61 @@ def test_a_matching_identity_lets_the_run_reach_prompt_assembly_and_the_model() 
     assert identity < assembly < invocation
     # And the credential preflight still precedes all three.
     assert _IMPLEMENT_ADAPTER.index("the selected implementation provider credential") < identity
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_the_profile_digest_is_computed_not_request_sourced(provider: str) -> None:
+    """The request carries no profile digest, so it cannot be its source.
+
+    `profile` in the run request is `{id, version}` only. Claiming the digest is
+    request-sourced would describe a field that does not exist; it is computed
+    from the immutable trusted profile instead, and the requirement is that the
+    computation is shared with the runtime rather than duplicated.
+    """
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-run-request.schema.json").read_text(encoding="utf-8")
+    )
+    profile_fields = schema["properties"]["profile"]["properties"]
+    assert set(profile_fields) == {"id", "version"}
+    assert not [name for name in profile_fields if "sha" in name.lower()]
+
+    run = _build_step(provider)
+    assert "COUNTYFORGE_PROFILE_SHA256" in run
+    assert ".profile.sha256" not in run
+    # Computed from the checked-out profile, via the kernel's own function.
+    assert "from countyforge_runner.contracts import document_sha256" in run
+    assert ".ai/profiles/implement.workspace-write.v1.json" in run
+    # No second implementation of the canonicalisation lives in the workflow.
+    assert "sort_keys=True" not in run
+    assert "hashlib" not in run
+
+
+def test_image_construction_and_runtime_verification_share_one_digest_computation() -> None:
+    """Execute the workflow's digest step and compare it to the resolver's value."""
+
+    run = _build_step("sakana")
+    start = run.index('export COUNTYFORGE_PROFILE_SHA256="$(')
+    body = run[run.index("<<'PY'", start) + len("<<'PY'") : run.index("\nPY\n", start)]
+    completed = subprocess.run(
+        ["python3", "-", ".ai/profiles/implement.workspace-write.v1.json"],
+        input=textwrap.dedent(body),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    workflow_digest = completed.stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", workflow_digest)
+
+    sys.path.insert(0, "tools/countyforge-runner/src")
+    from countyforge_runner.contracts import document_sha256
+
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    # The resolver labels evidence with exactly this value, and the adapter
+    # compares the image label against it.
+    assert workflow_digest == document_sha256(profile)
+    assert 'EXPECTED_PROFILE_SHA="${COUNTYFORGE_PROFILE_SHA256:?' in _IMPLEMENT_ADAPTER
+    assert '"$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA"' in _IMPLEMENT_ADAPTER
