@@ -12,8 +12,10 @@ DOC_PATTERNS = (
     "AGENTS.md",
     "docs/**/*.md",
     "dags/*.md",
+    "infra/**/*.md",
     "libs/**/*.md",
     "services/**/*.md",
+    "tools/**/*.md",
     "openspec/AGENTS.md",
 )
 
