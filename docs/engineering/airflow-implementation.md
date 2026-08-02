@@ -47,17 +47,35 @@ def parse(lines: Iterable[str], ...) -> Iterator[Record]: ...
 Prefer returning one representation. Returning both a source-native and a vendor-neutral record for
 every row doubles peak memory for a conversion the caller may not need.
 
-**Measure before claiming.** For any code that processes a county release, include the numbers in the
-pull request:
+**Measure peak RSS, not traced allocations.** The OOM killer reads resident set size, so that is what
+the budget is denominated in. `tracemalloc` counts only allocations the Python allocator made and
+still tracks: it misses native extension buffers, memory-mapped files, child processes such as
+Access tooling, and freed-but-unreturned arena memory. The gap is not marginal — the measurement
+behind the numbers above reported 663 MiB traced against 2,079 MiB resident for the same run, a
+factor of three. Evidence gathered with `tracemalloc` alone can sit comfortably under 1 GiB while the
+task is killed at 2 GiB.
 
 ```python
-import tracemalloc
-tracemalloc.start()
-consume(parse(source))
-current, peak = tracemalloc.get_traced_memory()
+import resource
+
+def peak_rss_bytes() -> int:
+    """Peak RSS of this process and any child it waited on, in bytes."""
+    this = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return max(this, children) * 1024  # ru_maxrss is KiB on Linux
 ```
 
-Run it against a synthetic input at least as large as the real release, not a fixture.
+`ru_maxrss` is a high-water mark, so read it after the work rather than around it, and note that
+`RUSAGE_CHILDREN` only accounts for children that have been reaped.
+
+Inside a container the cgroup is the authority, because it is what the limit is enforced against:
+
+```bash
+cat /sys/fs/cgroup/memory.peak      # cgroup v2, bytes
+```
+
+Run against a synthetic input at least as large as the real release, not a fixture, and report the
+number in the pull request.
 
 ## Where Code Lives
 
@@ -99,13 +117,21 @@ new credential, it also owns the runbook step that applies a rotation.
 
 ## Failure Behaviour
 
-Adapters are required to quarantine incompatible drift rather than guess. For a release of hundreds
-of thousands of rows, aborting the whole file on the first bad row means one malformed record costs
-the entire ingestion. Separate the two cases explicitly:
+**The county source contracts are normative here, and this document is not.** Quarantine in the
+accepted specs is release-level, not row-level. A malformed non-null Collin NUMERIC value quarantines
+the affected logical release rather than the row
+([`collin-cad-source-contract`](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/collin-cad-source-contract/spec.md)),
+and Dallas, Tarrant, Denton, Ellis, `source-release-ingestion`, and `validated-data-publication` all
+quarantine the release or artifact. No accepted spec permits dropping a row and continuing.
 
-- **layout drift** — header changes, encoding failures, width mismatches — fails the release closed;
-- **row-level rejection** — a single unparseable row — quarantines that row with a bounded diagnostic
-  and lets the release continue.
+So the default is: **a release is loaded whole or not at all.** Diagnostics record which rows failed
+and why; they do not license loading the rest. Converting a malformed source value to null is
+specifically prohibited.
+
+Where a contract carves out an exception it says so — Denton marks a field absent or incompatible
+according to the approved mapping and quarantines the release only when the field is required. Read
+the relevant county contract before choosing behaviour, and if a release genuinely should survive
+partial failure, that is a change to the contract rather than a decision to make in the adapter.
 
 Set retries, task timeouts, and same-release locking explicitly. Diagnostics carry stable codes,
 normalized field names, and row numbers, never source values.
