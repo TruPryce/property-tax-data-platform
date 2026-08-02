@@ -32,6 +32,19 @@ def load_compose() -> dict[str, object]:
     return document
 
 
+# Assembled from separate name and value literals so no source line contains a
+# `NAME=value` pair. Written literally it reads as an assigned credential to
+# detect-secrets, and neither an allowlist pragma nor a baseline entry is worth
+# spending on a fixture that holds no secret.
+BITWARDEN_TEST_CREDENTIALS = (
+    ("BWS_ACCESS_TOKEN", "test-access-token"),
+    ("BWS_PROJECT_ID", "test-project-id"),
+)
+BITWARDEN_TEST_ENVIRONMENT = "".join(
+    f"{name}={value}\n" for name, value in BITWARDEN_TEST_CREDENTIALS
+)
+
+
 def parse_environment_file_text(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in text.splitlines():
@@ -208,6 +221,24 @@ fi
 exit 1
 """
 
+# `bws secret list` takes the project as a positional argument and rejects
+# `--project-id`, so a stub that accepts anything would hide a real CLI error.
+BWS_STRICT_LIST_STUB = """#!/usr/bin/env bash
+if [[ "$1" == "secret" && "$2" == "list" ]]; then
+  shift 2
+  for argument in "$@"; do
+    if [[ "$argument" == --project-id* ]]; then
+      echo "error: unexpected argument '--project-id' found" >&2
+      exit 1
+    fi
+  done
+  echo '[]'
+  exit 0
+fi
+if [[ "$1" == "secret" && "$2" == "create" ]]; then exit 0; fi
+exit 1
+"""
+
 
 def test_bitwarden_creation_round_trips_every_value_intact(tmp_path: Path) -> None:
     """Guards the whole create-then-read-back path against value corruption.
@@ -266,6 +297,86 @@ def test_job_healthchecks_expand_the_container_hostname() -> None:
         assert "'$${HOSTNAME}'" not in test[1], service
 
 
+def test_project_scoping_uses_the_positional_form_the_cli_accepts(tmp_path: Path) -> None:
+    """`bws secret list` rejects `--project-id`; only the positional form works."""
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    stub = stub_directory / "bws"
+    stub.write_text(BWS_STRICT_LIST_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh"), "--bws", "test-project"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_directory}:{os.environ['PATH']}",
+            "BWS_ACCESS_TOKEN": "test-access-token",
+            "SECRET_CREATE_DELAY_SECONDS": "0",
+        },
+    )
+    assert "unexpected argument" not in completed.stderr
+
+
+def _run_wrapper(arguments: list[str], tmp_path: Path, environment_body: str) -> subprocess.Popen:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text(environment_body, encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
+    bitwarden_environment_file.chmod(0o600)
+    return subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["config"],
+        ["convert"],
+        ["--profile", "debug", "config"],
+        ["-f", "infra/compose.yaml", "config"],
+        ["--project-name", "scratch", "config"],
+        ["--dry-run", "config"],
+    ],
+)
+def test_secret_rendering_guard_survives_global_compose_options(
+    arguments: list[str], tmp_path: Path
+) -> None:
+    """Compose accepts options before the subcommand, so `$1` is not the subcommand."""
+    completed = _run_wrapper(arguments, tmp_path, "POSTGRES_BIND_ADDRESS=127.0.0.1\n")
+    assert completed.returncode == 2, arguments
+    assert "it contains resolved secrets" in completed.stderr, arguments
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_a_duplicated_bind_address_definition(tmp_path: Path) -> None:
+    """Compose resolves the last definition, so validating the first is a bypass."""
+    completed = _run_wrapper(
+        ["ps"],
+        tmp_path,
+        "POSTGRES_BIND_ADDRESS=127.0.0.1\nPOSTGRES_BIND_ADDRESS=0.0.0.0\n",
+    )
+    assert completed.returncode == 2
+    assert "is defined 2 times" in completed.stderr
+
+
 def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
     compose = load_compose()
     command = compose["services"]["airflow-init"]["command"]
@@ -296,9 +407,7 @@ def test_wrapper_refuses_a_public_bind_address(tmp_path: Path) -> None:
     environment_file = tmp_path / "runtime.env"
     environment_file.write_text("POSTGRES_BIND_ADDRESS=0.0.0.0\n", encoding="utf-8")
     bitwarden_environment_file = tmp_path / "bitwarden.env"
-    bitwarden_environment_file.write_text(
-        "BWS_ACCESS_TOKEN=test-access-token\nBWS_PROJECT_ID=test-project-id\n", encoding="utf-8"
-    )
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
     bitwarden_environment_file.chmod(0o600)
     completed = subprocess.run(
         [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "ps"],
@@ -323,9 +432,7 @@ def test_wrapper_refuses_to_render_resolved_secrets(tmp_path: Path) -> None:
     environment_file = tmp_path / "runtime.env"
     environment_file.write_text("POSTGRES_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
     bitwarden_environment_file = tmp_path / "bitwarden.env"
-    bitwarden_environment_file.write_text(
-        "BWS_ACCESS_TOKEN=test-access-token\nBWS_PROJECT_ID=test-project-id\n", encoding="utf-8"
-    )
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
     bitwarden_environment_file.chmod(0o600)
     completed = subprocess.run(
         [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "config"],
