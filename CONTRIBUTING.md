@@ -8,6 +8,7 @@ Requirements:
 - uv
 - OpenSpec CLI 1.6 or compatible
 - Python 3.12, installed automatically by uv when permitted
+- Docker Engine with Compose V2 for infrastructure work
 
 ```bash
 git clone <repository-url>
@@ -49,6 +50,7 @@ make docs         # local Markdown links
 make spec         # active OpenSpec change and repository health
 make secrets      # all non-ignored files against the reviewed baseline
 make artifacts    # source-artifact, content-signature, path, and size policy
+make infra-check  # Airflow, PostgreSQL, secret, and network-boundary contracts
 make precommit    # every pre-commit hook against tracked files
 make check        # all checks
 make review-packet               # deterministic packet only; no model call

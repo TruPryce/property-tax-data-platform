@@ -1,6 +1,6 @@
 UV_CACHE_DIR ?= .cache/uv
 UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
-.PHONY: sync hooks format lint typecheck test docs spec secrets artifacts precommit check counties \
+.PHONY: sync hooks format lint typecheck test docs spec secrets artifacts precommit check counties infra-check \
 	codex-image review-packet prepr prepr-no-ai codex-smoke \
 	codex-observability-fixtures codex-observability-validate codex-observability-qa \
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
@@ -55,6 +55,9 @@ test:
 
 docs:
 	$(UV) run python scripts/check_doc_links.py
+
+infra-check:
+	$(UV) run pytest tests/unit/test_infrastructure_contract.py -q
 
 spec:
 	openspec validate --all --strict --no-interactive

@@ -1,0 +1,160 @@
+name: property-tax-platform
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: infra/airflow/Dockerfile
+    args:
+      AIRFLOW_VERSION: ${AIRFLOW_VERSION:-3.3.0}
+      PYTHON_VERSION: ${AIRFLOW_PYTHON_VERSION:-3.12}
+  image: property-tax-airflow:${AIRFLOW_VERSION:-3.3.0}
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-common-environment
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:?AIRFLOW_API_SECRET_KEY is required}
+    AIRFLOW__API_AUTH__JWT_ISSUER: property-tax-platform
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET is required}
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY is required}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: ${AIRFLOW_MAX_ACTIVE_RUNS_PER_DAG:-1}
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: ${AIRFLOW_MAX_ACTIVE_TASKS_PER_DAG:-2}
+    AIRFLOW__CORE__PARALLELISM: ${AIRFLOW_PARALLELISM:-4}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow_metadata:${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD is required}@postgres:5432/airflow
+    AIRFLOW__LOGGING__REMOTE_LOGGING: "false"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+  volumes:
+    - ../dags:/opt/airflow/dags:ro
+    - airflow-logs:/opt/airflow/logs
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    build:
+      context: ..
+      dockerfile: infra/postgres/Dockerfile
+      args:
+        POSTGRES_VERSION: ${POSTGRES_VERSION:-16.11}
+    image: property-tax-postgres:${POSTGRES_VERSION:-16.11}
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD is required}
+      POSTGRES_USER: platform_admin
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD is required}
+      PROPERTY_TAX_MIGRATOR_PASSWORD: ${PROPERTY_TAX_MIGRATOR_PASSWORD:?PROPERTY_TAX_MIGRATOR_PASSWORD is required}
+      PROPERTY_TAX_INGESTION_PASSWORD: ${PROPERTY_TAX_INGESTION_PASSWORD:?PROPERTY_TAX_INGESTION_PASSWORD is required}
+      PROPERTY_TAX_API_PASSWORD: ${PROPERTY_TAX_API_PASSWORD:?PROPERTY_TAX_API_PASSWORD is required}
+    ports:
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform_admin -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-5g}
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-environment
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:?AIRFLOW_ADMIN_USERNAME is required}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD is required}
+    user: "0:0"
+    mem_limit: ${AIRFLOW_INIT_MEMORY_LIMIT:-1g}
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "${AIRFLOW_API_BIND_ADDRESS:-127.0.0.1}:${AIRFLOW_API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: ${AIRFLOW_API_MEMORY_LIMIT:-1g}
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname '$${HOSTNAME}'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY_LIMIT:-6g}
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname '$${HOSTNAME}'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: ${AIRFLOW_DAG_PROCESSOR_MEMORY_LIMIT:-1g}
+    restart: unless-stopped
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname '$${HOSTNAME}'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: ${AIRFLOW_TRIGGERER_MEMORY_LIMIT:-512m}
+    restart: unless-stopped
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles: [debug]
+    command: [bash, -c, airflow]
+    depends_on:
+      <<: *airflow-common-depends-on
+
+volumes:
+  airflow-logs:
+  postgres-data:

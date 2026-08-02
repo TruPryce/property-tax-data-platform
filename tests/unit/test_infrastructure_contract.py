@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+import yaml
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+INFRA_ROOT = REPOSITORY_ROOT / "infra"
+COMPOSE_FILE = INFRA_ROOT / "compose.yaml"
+SECRET_VARIABLES = {
+    "POSTGRES_SUPERUSER_PASSWORD",
+    "AIRFLOW_DB_PASSWORD",
+    "PROPERTY_TAX_MIGRATOR_PASSWORD",
+    "PROPERTY_TAX_INGESTION_PASSWORD",
+    "PROPERTY_TAX_API_PASSWORD",
+    "AIRFLOW_FERNET_KEY",
+    "AIRFLOW_API_SECRET_KEY",
+    "AIRFLOW_JWT_SECRET",
+    "AIRFLOW_ADMIN_PASSWORD",
+}
+
+
+def load_compose() -> dict[str, object]:
+    document = yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def parse_environment_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            name, value = line.split("=", 1)
+            values[name] = value
+    return values
+
+
+def test_runtime_uses_airflow_three_local_executor_topology() -> None:
+    compose = load_compose()
+    services = compose["services"]
+    assert isinstance(services, dict)
+    assert set(services) == {
+        "postgres",
+        "airflow-init",
+        "airflow-api-server",
+        "airflow-scheduler",
+        "airflow-dag-processor",
+        "airflow-triggerer",
+        "airflow-cli",
+    }
+    assert services["airflow-api-server"]["command"] == "api-server"
+    assert services["airflow-dag-processor"]["command"] == "dag-processor"
+    common_environment = compose["x-airflow-common"]["environment"]
+    assert common_environment["AIRFLOW__CORE__EXECUTOR"] == "LocalExecutor"
+    assert common_environment["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
+    assert "redis" not in services
+    assert "airflow-worker" not in services
+
+
+def test_runtime_versions_and_build_contexts_are_pinned() -> None:
+    compose = load_compose()
+    airflow_build = compose["x-airflow-common"]["build"]
+    postgres_build = compose["services"]["postgres"]["build"]
+    assert airflow_build["dockerfile"] == "infra/airflow/Dockerfile"
+    assert airflow_build["args"]["AIRFLOW_VERSION"] == "${AIRFLOW_VERSION:-3.3.0}"
+    assert airflow_build["args"]["PYTHON_VERSION"] == "${AIRFLOW_PYTHON_VERSION:-3.12}"
+    assert postgres_build["dockerfile"] == "infra/postgres/Dockerfile"
+    assert postgres_build["args"]["POSTGRES_VERSION"] == "${POSTGRES_VERSION:-16.11}"
+    airflow_dockerfile = (INFRA_ROOT / "airflow" / "Dockerfile").read_text(encoding="utf-8")
+    postgres_dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM apache/airflow:${AIRFLOW_VERSION}-python${PYTHON_VERSION}" in airflow_dockerfile
+    assert '"apache-airflow==${AIRFLOW_VERSION}"' in airflow_dockerfile
+    assert "FROM postgres:${POSTGRES_VERSION}-bookworm" in postgres_dockerfile
+
+
+def test_administrative_ports_fail_safe_to_loopback() -> None:
+    compose = load_compose()
+    services = compose["services"]
+    assert services["postgres"]["ports"] == [
+        "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    ]
+    assert services["airflow-api-server"]["ports"] == [
+        "${AIRFLOW_API_BIND_ADDRESS:-127.0.0.1}:${AIRFLOW_API_PORT:-8080}:8080"
+    ]
+
+
+def test_database_bootstrap_declares_separate_bounded_roles() -> None:
+    bootstrap = (INFRA_ROOT / "postgres" / "init" / "10-create-runtime-databases.sh").read_text(
+        encoding="utf-8"
+    )
+    for role in {
+        "airflow_metadata",
+        "property_tax_migrator",
+        "property_tax_ingestion",
+        "property_tax_api",
+    }:
+        assert (
+            f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
+            in bootstrap
+        )
+    assert "CREATE DATABASE airflow OWNER airflow_metadata" in bootstrap
+    assert "CREATE DATABASE property_tax OWNER property_tax_migrator" in bootstrap
+    assert "REVOKE CONNECT ON DATABASE property_tax FROM PUBLIC" in bootstrap
+    assert "CREATE TABLE" not in bootstrap
+
+
+def test_example_environment_contains_no_secret_values() -> None:
+    values = parse_environment_file(INFRA_ROOT / ".env.example")
+    assert SECRET_VARIABLES.isdisjoint(values)
+    assert values["AIRFLOW_VERSION"] == "3.3.0"
+    assert values["POSTGRES_VERSION"] == "16.11"
+
+
+def test_bitwarden_bootstrap_writes_only_the_host_access_boundary(tmp_path: Path) -> None:
+    environment_file = tmp_path / "runtime.env"
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    completed = subprocess.run(
+        [
+            str(INFRA_ROOT / "scripts" / "bootstrap-env.sh"),
+            str(environment_file),
+            str(bitwarden_environment_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": os.environ["PATH"],
+            "BWS_ACCESS_TOKEN": "test-access-token",
+            "BWS_PROJECT_ID": "test-project-id",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    values = parse_environment_file(environment_file)
+    bitwarden_values = parse_environment_file(bitwarden_environment_file)
+    assert SECRET_VARIABLES.isdisjoint(values)
+    assert values["AIRFLOW_UID"] == str(os.getuid())
+    assert bitwarden_values == {
+        "BWS_ACCESS_TOKEN": "test-access-token",
+        "BWS_PROJECT_ID": "test-project-id",
+    }
+    assert stat.S_IMODE(environment_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(bitwarden_environment_file.stat().st_mode) == 0o600
+
+
+def test_bitwarden_wrapper_does_not_inherit_access_token_into_compose() -> None:
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    compose = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "bws run" in wrapper
+    assert '--project-id "$BWS_PROJECT_ID"' in wrapper
+    assert "--no-inherit-env" in wrapper
+    assert "8#$bitwarden_file_mode & 077" in wrapper
+    assert "BWS_ACCESS_TOKEN" not in compose
