@@ -16,6 +16,7 @@ set -euo pipefail
 : "${MAX_MODEL_INPUT_CHARS:?MAX_MODEL_INPUT_CHARS is required}"
 : "${MAX_INPUT_BYTES:?MAX_INPUT_BYTES is required}"
 : "${MAX_WORKSPACE_SNAPSHOT_BYTES:?MAX_WORKSPACE_SNAPSHOT_BYTES is required}"
+: "${TARGET_MODEL_INPUT_CHARS:?TARGET_MODEL_INPUT_CHARS is required}"
 
 # Provider routing is resolved from the trusted request before any credential is
 # read, so only the selected provider's key and endpoint ever reach the model.
@@ -150,6 +151,7 @@ python3 - "$PROMPT_PATH" "$IMPLEMENTATION_PACKET_PATH" "$IMPLEMENTATION_MANIFEST
   "$IMPLEMENTATION_TASK_PLAN_PATH" "$IMPLEMENTATION_SCHEMA_PATH" "$IMPLEMENTATION_COMMAND_POLICY_PATH" \
   "$WORKSPACE_PATH" "$MODEL_WORKSPACE" "$MODEL_PROMPT" "$PROMPT_PROVENANCE" \
   "$MAX_MODEL_INPUT_CHARS" "$MAX_INPUT_BYTES" "$MAX_WORKSPACE_SNAPSHOT_BYTES" \
+  "$TARGET_MODEL_INPUT_CHARS" \
   "$LANE_EVIDENCE" "$CODEX_PROVIDER" <<'PY'
 import json
 import pathlib
@@ -161,7 +163,7 @@ sys.path.insert(0, "tools/countyforge-runner/src")
 (
     prompt_path, packet_path, manifest_path, task_path, schema_path, command_policy_path,
     workspace_path, model_root, output, provenance_path, max_chars, max_bytes,
-    max_snapshot_bytes, lane_evidence_path, provider,
+    max_snapshot_bytes, target_chars, lane_evidence_path, provider,
 ) = sys.argv[1:]
 
 
@@ -211,7 +213,11 @@ try:
         "command_policy": pathlib.Path(command_policy_path).read_text(encoding="utf-8"),
     }
     instructions = pathlib.Path(prompt_path).read_text(encoding="utf-8")
-    budget = PromptBudget(maximum_model_input_chars=int(max_chars), max_input_bytes=int(max_bytes))
+    budget = PromptBudget(
+        maximum_model_input_chars=int(max_chars),
+        max_input_bytes=int(max_bytes),
+        operational_target_model_input_chars=int(target_chars),
+    )
 except (OSError, UnicodeError, ValueError, ImportError) as error:
     fail("implementation_prompt_preparation_failed", error_type=type(error).__name__)
 

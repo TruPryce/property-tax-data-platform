@@ -75,3 +75,14 @@
 - [x] 11.11 Materialize the model workspace from the same bounded set as the prompt and enforce the declared snapshot byte bound.
 - [x] 11.12 Carry the adapter disposition through lane evidence into canonical terminal state.
 - [x] 11.13 Capture the model command status so ceiling drift stays reachable on a nonzero provider exit, and sanitize evidence on every path.
+
+## 12. Finishable single-shot implementation requests
+
+- [x] 12.1 Discover the model event stream independently of the implementation result so a run that produced no result still retains evidence.
+- [x] 12.2 Upload a bounded model-event summary on every outcome and record absence explicitly rather than by omission.
+- [x] 12.3 Classify a corroborated `timed_out` runner result as `implementation_model_timed_out` without overriding any more specific cause.
+- [x] 12.8 Require the full corroborated timeout shape, and fail closed through the existing failure paths when the envelope, mode, exit code, or summary disagree.
+- [x] 12.4 Declare an operational source-selection target below the hard ceiling and record both bounds in prompt provenance.
+- [x] 12.5 Order source selection so the approved package, its siblings, and its build config precede unrelated services, tools, and documentation.
+- [x] 12.6 Allow approved-path material to exceed the operational target up to the hard ceiling, recording the pressure and still failing closed at the ceiling.
+- [x] 12.7 Resolve implementation reasoning effort to `high` in the trusted policy and profile, with no retry at another effort and no provider fallback.

@@ -99,6 +99,11 @@ class PromptBudget:
 
     maximum_model_input_chars: int
     max_input_bytes: int
+    # Run 30722542853 admitted a near-ceiling prompt and then spent the entire
+    # one-hour budget without producing a result.  The hard ceiling stays a
+    # fail-safe; source selection aims at this smaller operational target so the
+    # single-shot request is one the model can actually finish.
+    operational_target_model_input_chars: int = 350_000
     per_file_max_chars: int = 200_000
 
 
@@ -115,7 +120,11 @@ class PromptBuild:
 
         return {
             "contract_version": 1,
-            "maximum_model_input_chars": budget.maximum_model_input_chars,
+            "hard_maximum_model_input_chars": budget.maximum_model_input_chars,
+            "operational_target_model_input_chars": (budget.operational_target_model_input_chars),
+            "operational_target_exceeded": (
+                measured_length(self.prompt) > budget.operational_target_model_input_chars
+            ),
             "mandatory_chars": self.mandatory_chars,
             "source_chars": self.source_chars,
             "total_chars": measured_length(self.prompt),
@@ -165,11 +174,27 @@ def under_approved_root(relative: str, roots: Sequence[str]) -> bool:
     return any(relative == root or relative.startswith(root + "/") for root in roots)
 
 
+# Repo-level configuration the approved package is built and checked by; small,
+# closed, and named rather than pattern-matched so no large lockfile qualifies.
+_ROOT_CONFIG = frozenset({"pyproject.toml", "Makefile", "setup.cfg", "ruff.toml", "mypy.ini"})
+
+
+def _siblings(roots: Sequence[str]) -> frozenset[str]:
+    """Directories holding the approved roots — sibling packages of the same kind."""
+
+    return frozenset(root.rsplit("/", 1)[0] for root in roots if "/" in root)
+
+
 def _priority(relative: str, roots: Sequence[str]) -> int:
     """Lower sorts first: implementation-relevant context before the rest.
 
     Ordering is a pure function of the path and the trusted task plan, so two
-    builds over the same workspace select the same files.
+    builds over the same workspace select the same files.  Under the operational
+    target the tail of this ladder is no longer reached, so the ranks below it
+    are what the model actually sees: the approved package, then its sibling
+    packages and the config that builds them.  Unrelated services, tools, and
+    the documentation tree rank last deliberately — run 30722542853 spent an
+    hour on a prompt largely made of them.
     """
 
     under_root = under_approved_root(relative, roots)
@@ -178,13 +203,17 @@ def _priority(relative: str, roots: Sequence[str]) -> int:
         return 0 if relative.endswith((".py", ".sql", ".toml", ".cfg")) else 1
     if under_root:
         return 2
-    if relative.startswith("libs/") or relative.startswith("services/"):
+    if relative in _ROOT_CONFIG:
         return 3
-    if relative.startswith("tests/"):
+    if any(relative.startswith(parent + "/") for parent in _siblings(roots)):
         return 4
-    if relative.startswith("docs/") or relative.endswith((".md", ".toml")):
+    if relative.startswith("libs/"):
         return 5
-    return 6
+    if relative.startswith("tests/"):
+        return 6
+    if relative.startswith(("services/", "tools/")):
+        return 7
+    return 8
 
 
 def select_source_files(
@@ -240,7 +269,11 @@ def build_implementation_prompt(
 
     files, omitted = select_source_files(workspace, task_plan=task_plan)
     roots = _approved_roots(task_plan)
-    remaining = budget.maximum_model_input_chars - mandatory_chars - _NOTICE_RESERVE_CHARS
+    hard_remaining = budget.maximum_model_input_chars - mandatory_chars - _NOTICE_RESERVE_CHARS
+    remaining = min(
+        hard_remaining,
+        budget.operational_target_model_input_chars - mandatory_chars - _NOTICE_RESERVE_CHARS,
+    )
     included: list[str] = []
     source_sections: list[str] = []
     source_chars = 0
@@ -268,6 +301,13 @@ def build_implementation_prompt(
             omitted.append((relative, "per_file_limit_exceeded"))
             continue
         if source_chars + measured > remaining:
+            if approved and source_chars + measured <= hard_remaining:
+                # Approved material outranks the operational target, but never
+                # the hard ceiling.
+                source_sections.append(block)
+                source_chars += measured
+                included.append(relative)
+                continue
             if approved:
                 raise KernelError(
                     "implementation_prompt_budget_exceeded",

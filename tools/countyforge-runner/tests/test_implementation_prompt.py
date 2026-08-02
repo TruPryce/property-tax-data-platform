@@ -30,8 +30,14 @@ def _task_plan(*allowed: str) -> dict[str, object]:
     return {"tasks": [{"task_id": "1.1", "allowed_paths": list(allowed) or ["libs/pkg"]}]}
 
 
-def _budget(chars: int = CEILING, byte_limit: int = 10_000_000) -> PromptBudget:
-    return PromptBudget(maximum_model_input_chars=chars, max_input_bytes=byte_limit)
+def _budget(
+    chars: int = CEILING, byte_limit: int = 10_000_000, target: int | None = None
+) -> PromptBudget:
+    return PromptBudget(
+        maximum_model_input_chars=chars,
+        max_input_bytes=byte_limit,
+        operational_target_model_input_chars=chars if target is None else target,
+    )
 
 
 def _workspace(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -402,3 +408,127 @@ def test_budget_pressure_is_reported_as_evidence(tmp_path: Path) -> None:
     assert provenance["source_context_elided"] is True
     assert 0.0 < provenance["budget_utilisation"] <= 1.0
     assert provenance["total_chars"] >= provenance["total_code_points"]
+
+
+TARGET = 350_000
+
+
+def test_the_operational_target_bounds_the_prompt_while_the_ceiling_stays_the_fail_safe(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(
+        tmp_path,
+        {
+            "libs/pkg/core.py": "a" * 40_000,
+            **{f"services/other/mod{index}.py": "b" * 40_000 for index in range(20)},
+        },
+    )
+    build = build_implementation_prompt(
+        instructions="instructions",
+        contracts=_contracts(),
+        workspace=workspace,
+        task_plan=_task_plan("libs/pkg"),
+        budget=_budget(chars=CEILING, target=TARGET),
+    )
+    provenance = build.provenance(_budget(chars=CEILING, target=TARGET))
+    assert provenance["total_chars"] <= TARGET
+    assert provenance["operational_target_exceeded"] is False
+    assert provenance["hard_maximum_model_input_chars"] == CEILING
+    assert provenance["operational_target_model_input_chars"] == TARGET
+    # Unrelated services were dropped by the target, and the model is told so.
+    assert omitted_by_reason(build.omitted)["character_budget_exceeded"] > 0
+    assert "libs/pkg/core.py" in build.included
+
+
+def test_approved_material_may_exceed_the_target_and_the_pressure_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """The target orders selection; it never silently drops the task's own files."""
+
+    workspace = _workspace(
+        tmp_path,
+        {f"libs/pkg/part{index}.py": "a" * 60_000 for index in range(9)},
+    )
+    budget = _budget(chars=CEILING, target=TARGET)
+    build = build_implementation_prompt(
+        instructions="instructions",
+        contracts=_contracts(),
+        workspace=workspace,
+        task_plan=_task_plan("libs/pkg"),
+        budget=budget,
+    )
+    provenance = build.provenance(budget)
+    assert len(build.included) == 9
+    assert not [path for path, _ in build.omitted if path.startswith("libs/pkg/")]
+    assert provenance["total_chars"] > TARGET
+    assert provenance["total_chars"] <= CEILING
+    assert provenance["operational_target_exceeded"] is True
+
+
+def test_approved_material_beyond_the_hard_ceiling_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(
+        tmp_path,
+        {f"libs/pkg/part{index}.py": "a" * 150_000 for index in range(9)},
+    )
+    with pytest.raises(KernelError) as raised:
+        build_implementation_prompt(
+            instructions="instructions",
+            contracts=_contracts(),
+            workspace=workspace,
+            task_plan=_task_plan("libs/pkg"),
+            budget=_budget(chars=1_000_000, target=TARGET),
+        )
+    assert raised.value.code == "implementation_prompt_budget_exceeded"
+    assert raised.value.exit_code == 2
+    assert "aaaa" not in json.dumps(raised.value.details)
+
+
+def test_the_target_orders_the_approved_package_ahead_of_unrelated_trees(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(
+        tmp_path,
+        {
+            "libs/pkg/core.py": "approved",
+            "libs/sibling/core.py": "sibling",
+            "pyproject.toml": "root config",
+            "services/unrelated/app.py": "unrelated",
+            "tools/unrelated/cli.py": "unrelated",
+            "docs/handbook.md": "docs",
+        },
+    )
+    files, _ = select_source_files(workspace, task_plan=_task_plan("libs/pkg"))
+    order = [path.relative_to(workspace).as_posix() for path in files]
+    assert order.index("libs/pkg/core.py") == 0
+    assert order.index("pyproject.toml") < order.index("libs/sibling/core.py")
+    assert order.index("libs/sibling/core.py") < order.index("services/unrelated/app.py")
+    assert order.index("libs/sibling/core.py") < order.index("tools/unrelated/cli.py")
+    assert order.index("services/unrelated/app.py") < order.index("docs/handbook.md")
+
+
+def test_this_repository_at_issue_17_scale_lands_far_below_the_provider_ceiling() -> None:
+    """The real regression: a real workspace, the real configured budget."""
+
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )["model_input"]
+    budget = PromptBudget(
+        maximum_model_input_chars=profile["maximum_model_input_chars"],
+        max_input_bytes=10_000_000,
+        operational_target_model_input_chars=profile["operational_target_model_input_chars"],
+    )
+    build = build_implementation_prompt(
+        instructions=Path(profile["prompt_path"]).read_text(encoding="utf-8"),
+        contracts=_contracts(),
+        workspace=Path.cwd(),
+        task_plan=_task_plan("libs/property-tax-adapters"),
+        budget=budget,
+    )
+    provenance = build.provenance(budget)
+    assert provenance["total_chars"] <= profile["operational_target_model_input_chars"]
+    # Materially below the ceiling, not merely under it.
+    assert provenance["total_chars"] < profile["maximum_model_input_chars"] // 2
+    assert provenance["budget_utilisation"] < 0.4
+    assert [path for path in build.included if path.startswith("libs/property-tax-adapters/")]

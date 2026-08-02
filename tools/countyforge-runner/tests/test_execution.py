@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -565,6 +566,9 @@ def test_implementation_profile_mounts_match_adapter_and_provenance_contract() -
         "mode": "bounded_stdin",
         "prompt_path": ".ai/prompts/countyforge-implement.v1.md",
         "maximum_model_input_chars": 950_000,
+        # The hard ceiling is the fail-safe; selection aims at the smaller
+        # target so the one-shot request is one the model can finish.
+        "operational_target_model_input_chars": 350_000,
         "workspace_snapshot_max_bytes": 4 * 1024 * 1024,
         "contract_inputs": [
             "packet",
@@ -771,3 +775,20 @@ def test_unexpected_cli_failure_is_sanitized_json(
     result = json.loads(capsys.readouterr().out)
     assert result["disposition"] == "internal_error"
     assert "/private/host/path" not in json.dumps(result)
+
+
+def test_the_executor_supplies_every_environment_variable_the_adapter_requires() -> None:
+    """A `${VAR:?}` guard the executor never sets fails only at provider time."""
+
+    adapter = Path(".ai/codex/09-run-countyforge-implement-docker.sh").read_text(encoding="utf-8")
+    required = set(re.findall(r'^: "\$\{([A-Z0-9_]+):\?', adapter, re.MULTILINE))
+    assert "TARGET_MODEL_INPUT_CHARS" in required
+    executor = Path("tools/countyforge-runner/src/countyforge_runner/executor.py").read_text(
+        encoding="utf-8"
+    )
+    supplied = set(re.findall(r'"([A-Z0-9_]+)":\s', executor)) | set(
+        re.findall(r'environment\["([A-Z0-9_]+)"\]', executor)
+    )
+    # Names the workflow or the profile allowlist provides rather than the executor.
+    external = {"RUNNER_TEMP", "GITHUB_TOKEN", "PROVIDER_SECRET_VALUE"}
+    assert not (required - supplied - external), sorted(required - supplied - external)

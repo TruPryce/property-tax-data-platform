@@ -1009,7 +1009,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           python3 - "$RUNNER_TEMP/sanitized-implementation-evidence" "$RUNNER_TEMP" <<'PY'
-          import hashlib, json, pathlib, shutil, sys
+          import json, pathlib, shutil, sys
           destination = pathlib.Path(sys.argv[1])
           runner_temp = pathlib.Path(sys.argv[2])
           candidates = list(pathlib.Path("trusted/.ai/reviews/countyforge/implement").rglob("countyforge-implementation-result.json"))
@@ -1027,15 +1027,22 @@ jobs:
               output = destination / "countyforge-implementation-result.sanitized.json"
               output.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
               break
-          for source in candidates:
-              events = source.with_name("countyforge-implementation-model-events.ndjson")
-              if events.is_file():
-                  raw = events.read_bytes()
-                  (destination / "countyforge-implementation-model-events.summary.json").write_text(
-                      json.dumps({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "raw_content_omitted": True}) + "\n",
-                      encoding="utf-8",
-                  )
-                  break
+          # Discovery is independent of the implementation result: a timed-out run
+          # has no result, and that is exactly the run whose events explain the
+          # hour. Absence is recorded explicitly rather than by omission.
+          sys.path.insert(0, "trusted/tools/countyforge-runner/src")
+          from countyforge_runner.model_events import find_model_events, summarize_model_events
+
+          (destination / "countyforge-implementation-model-events.summary.json").write_text(
+              json.dumps(
+                  summarize_model_events(
+                      find_model_events(pathlib.Path("trusted/.ai/reviews/countyforge/implement"))
+                  ),
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           for name in ("countyforge-result.json", "countyforge-exit-code"):
               source = runner_temp / name
               if source.is_file():
@@ -1247,7 +1254,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sanitized-implementation-evidence"
           python3 - "$RUNNER_TEMP/sanitized-implementation-evidence" "$RUNNER_TEMP" <<'PY'
-          import hashlib, json, pathlib, shutil, sys
+          import json, pathlib, shutil, sys
           destination = pathlib.Path(sys.argv[1])
           runner_temp = pathlib.Path(sys.argv[2])
           candidates = list(pathlib.Path("trusted/.ai/reviews/countyforge/implement").rglob("countyforge-implementation-result.json"))
@@ -1265,15 +1272,22 @@ jobs:
               output = destination / "countyforge-implementation-result.sanitized.json"
               output.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
               break
-          for source in candidates:
-              events = source.with_name("countyforge-implementation-model-events.ndjson")
-              if events.is_file():
-                  raw = events.read_bytes()
-                  (destination / "countyforge-implementation-model-events.summary.json").write_text(
-                      json.dumps({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "raw_content_omitted": True}) + "\n",
-                      encoding="utf-8",
-                  )
-                  break
+          # Discovery is independent of the implementation result: a timed-out run
+          # has no result, and that is exactly the run whose events explain the
+          # hour. Absence is recorded explicitly rather than by omission.
+          sys.path.insert(0, "trusted/tools/countyforge-runner/src")
+          from countyforge_runner.model_events import find_model_events, summarize_model_events
+
+          (destination / "countyforge-implementation-model-events.summary.json").write_text(
+              json.dumps(
+                  summarize_model_events(
+                      find_model_events(pathlib.Path("trusted/.ai/reviews/countyforge/implement"))
+                  ),
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           for name in ("countyforge-result.json", "countyforge-exit-code"):
               source = runner_temp / name
               if source.is_file():

@@ -321,6 +321,37 @@ def _runner_reports_success(document: JsonObject) -> bool:
     )
 
 
+#: The captured exit code a timed-out implementation run must report.
+TIMEOUT_EXIT_CODE = 5
+
+
+def _runner_reports_timeout(document: JsonObject, exit_code: int | None) -> bool:
+    """A timeout counts only when every part of the evidence corroborates it.
+
+    A dedicated disposition is a claim about *why* an hour produced nothing, so
+    it demands the same internal consistency as a success.  `timed_out` paired
+    with a successful exit, an unrelated failure code, or `ok: true` is evidence
+    contradicting itself; it must fall through to the inconsistent-result and
+    failure paths rather than be reported as a clean timeout.
+
+    The summary is required, not merely non-contradicting.  The runner emits one
+    on every path, so its absence means the document is not the artifact this
+    classification claims to be reading -- exactly as `_runner_reports_success`
+    treats a missing summary on the success path.
+    """
+
+    summary = document.get("summary")
+    return (
+        document.get("ok") is False
+        and document.get("mode") == "implement"
+        and document.get("disposition") == "timed_out"
+        and exit_code == TIMEOUT_EXIT_CODE
+        and isinstance(summary, dict)
+        and summary.get("disposition") == "timed_out"
+        and summary.get("exit_code") == TIMEOUT_EXIT_CODE
+    )
+
+
 def classify_implementation_lane(
     *,
     selected_provider: str,
@@ -382,6 +413,15 @@ def classify_implementation_lane(
             reason="runner_exit_code_missing",
         )
     disposition = runner.get("disposition")
+    if _runner_reports_timeout(runner, exit_code):
+        # The request was admitted and ran; it simply did not finish. That is
+        # neither provider infrastructure nor a model producing a bad result,
+        # and it is checked only after every earlier, more specific cause.
+        return _lane_failure(
+            "implementation_model_timed_out",
+            provider=selected_provider,
+            runner_exit_code=exit_code,
+        )
     if exit_code != 0 or runner.get("ok") is not True:
         # The runner ran and reported; a nonzero exit with an adapter-level
         # disposition is the container or provider failing, not the model.

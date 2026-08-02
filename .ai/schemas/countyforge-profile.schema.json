@@ -159,6 +159,7 @@
         "contract_inputs",
         "maximum_model_input_chars",
         "mode",
+        "operational_target_model_input_chars",
         "prompt_path",
         "workspace_snapshot_max_bytes"
       ],
@@ -191,6 +192,11 @@
           }
         },
         "maximum_model_input_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "operational_target_model_input_chars": {
           "type": "integer",
           "minimum": 1,
           "maximum": 1048576

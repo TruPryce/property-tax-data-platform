@@ -22,7 +22,7 @@
       "profile_version": 1,
       "provider": "sakana",
       "model_ref": "sakana.fugu-ultra",
-      "reasoning_effort": "xhigh"
+      "reasoning_effort": "high"
     },
     "fix": {
       "profile_id": "fix.targeted-write.v1",
