@@ -1,0 +1,14 @@
+## Tasks
+
+<!-- countyforge-task: 1.1 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.1 1.1 (blocking; high risk; no prerequisite) — In collin-cad-source-contract, obtain and record maintainer-approved answers for D1–D4 and independently derived fixture provenance. No property_tax_adapters implementation begins while any decision remains unresolved [sources: 714534bcff3cb21530465c55, a8d0164e015d086c00140812].
+<!-- countyforge-task: 1.2 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.2 2.1 (high risk; prerequisite 1.1 and maintainer approval) — In property_tax_adapters, implement the approved exact Access NUMERIC decoder without a binary floating-point intermediate and reject every unsupported representation defined by the contract [sources: 76e21fb4c68b6f87724edaac, a8d0164e015d086c00140812].
+<!-- countyforge-task: 1.3 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.3 2.2 (high risk; prerequisite 1.1 and maintainer approval) — In property_tax_adapters and collin-cad-source-contract, implement approved structural descriptors, fail-closed fingerprinting, and typed Collin source records while retaining source identifiers, row provenance, and repeated physical rows [sources: 7676ed46a8bb877ba7fdaac0, a8d0164e015d086c00140812].
+<!-- countyforge-task: 1.4 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.4 3.1 (high risk; prerequisites 2.1 and 2.2) — In property_tax_adapters, convert each validated synthetic record into distinct current and certified observations using the approved year, status, value-family, and provenance rules; do not create an account roll-up or canonical tax-collection fact [sources: a8d0164e015d086c00140812, 1f68cbd53a026079a9b30f8d].
+<!-- countyforge-task: 1.5 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.5 3.2 (medium risk; prerequisite 3.1) — Add independent synthetic contract tests for zero, positive, negative, scaled, precision-boundary, multiword, year, monetary, structural-drift, repeated-row, dual-observation, and diagnostic-safety cases [sources: 515a41057d446a949cae5adc, 7676ed46a8bb877ba7fdaac0].
+<!-- countyforge-task: 1.6 paths=libs,services,dags,docs,tools,tests,README.md,CONTRIBUTING.md checks=repo.check risk=normal prerequisites=- -->
+- [ ] 1.6 4.1 (medium risk; prerequisite 3.2) — Document decoder provenance, dual-release semantics, unresolved identity, privacy and source-license boundaries, resource limitations, rollback, and explicit non-production-ready status, then run the repository make check gate [sources: 12eb90de41980a9b5226022f, 05e1317dff1c2a0b0cdc4827].
