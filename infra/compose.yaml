@@ -58,7 +58,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    mem_limit: ${POSTGRES_MEMORY_LIMIT:-5g}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
     restart: unless-stopped
 
   airflow-init:
@@ -67,9 +67,18 @@ services:
     command:
       - -c
       - |
+        set -euo pipefail
         mkdir -p /opt/airflow/logs
         chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
-        exec /entrypoint airflow version
+        # The upstream entrypoint runs `airflow db migrate || true` and
+        # `airflow users create ... || true`, so it cannot fail. Without the
+        # checks below this service exits 0 on a failed migration and
+        # service_completed_successfully lets every other service start against
+        # an empty metadata database.
+        /entrypoint airflow version
+        airflow db check
+        airflow db check-migrations -t 60
+        airflow users list --output plain | grep -qw "${AIRFLOW_ADMIN_USERNAME:?AIRFLOW_ADMIN_USERNAME is required}"
     environment:
       <<: *airflow-common-environment
       _AIRFLOW_DB_MIGRATE: "true"
@@ -113,7 +122,7 @@ services:
         condition: service_completed_successfully
       airflow-api-server:
         condition: service_healthy
-    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY_LIMIT:-6g}
+    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY_LIMIT:-4g}
     restart: unless-stopped
 
   airflow-dag-processor:

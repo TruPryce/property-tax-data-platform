@@ -39,6 +39,53 @@ read_configuration_value() {
   printf '%s' "${matching_line#*=}"
 }
 
+# Administrative ports must stay on loopback or the Tailscale CGNAT range
+# (100.64.0.0/10). Docker publishes ports through its own iptables chain ahead of
+# the host INPUT rules, so ufw will not contain a mistake here.
+require_private_bind_address() {
+  local variable_name="$1"
+  local bind_address
+  bind_address="$(read_configuration_value "$variable_name" "$compose_environment_file")"
+
+  # Unset or empty falls through to the compose default of 127.0.0.1.
+  [[ -z "$bind_address" ]] && return 0
+  [[ "$bind_address" == localhost || "$bind_address" == "::1" ]] && return 0
+  if [[ "$bind_address" =~ ^127\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    return 0
+  fi
+  if [[ "$bind_address" =~ ^100\.([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+    if (( BASH_REMATCH[1] >= 64 && BASH_REMATCH[1] <= 127 )); then
+      return 0
+    fi
+  fi
+
+  echo "$variable_name must bind to loopback or a Tailscale address, got: $bind_address" >&2
+  echo "administrative ports must not be published on a public interface" >&2
+  exit 2
+}
+
+require_private_bind_address POSTGRES_BIND_ADDRESS
+require_private_bind_address AIRFLOW_API_BIND_ADDRESS
+
+# `docker compose config` renders every resolved Bitwarden value to stdout.
+# Refuse the forms that would print them rather than relying on the operator to
+# remember --quiet.
+if [[ "${1:-}" == "config" ]]; then
+  config_output_is_bounded=false
+  for argument in "$@"; do
+    case "$argument" in
+      --quiet | -q | --services | --volumes | --profiles | --images | --hash)
+        config_output_is_bounded=true
+        ;;
+    esac
+  done
+  if [[ "$config_output_is_bounded" == false ]]; then
+    echo "refusing to render the full compose configuration: it contains resolved secrets" >&2
+    echo "use 'config --quiet' to validate, or '--services'/'--volumes' to inspect names" >&2
+    exit 2
+  fi
+fi
+
 BWS_ACCESS_TOKEN="$(read_configuration_value BWS_ACCESS_TOKEN "$bitwarden_environment_file")"
 BWS_PROJECT_ID="$(read_configuration_value BWS_PROJECT_ID "$bitwarden_environment_file")"
 

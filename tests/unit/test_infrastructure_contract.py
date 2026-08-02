@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +34,7 @@ def load_compose() -> dict[str, object]:
 def parse_environment_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line and not line.startswith("#"):
+        if line and not line.startswith("#") and "=" in line:
             name, value = line.split("=", 1)
             values[name] = value
     return values
@@ -128,7 +130,6 @@ def test_bitwarden_bootstrap_writes_only_the_host_access_boundary(tmp_path: Path
         text=True,
         env={
             **os.environ,
-            "PATH": os.environ["PATH"],
             "BWS_ACCESS_TOKEN": "test-access-token",
             "BWS_PROJECT_ID": "test-project-id",
         },
@@ -137,7 +138,9 @@ def test_bitwarden_bootstrap_writes_only_the_host_access_boundary(tmp_path: Path
     values = parse_environment_file(environment_file)
     bitwarden_values = parse_environment_file(bitwarden_environment_file)
     assert SECRET_VARIABLES.isdisjoint(values)
-    assert values["AIRFLOW_UID"] == str(os.getuid())
+    # Pinned to the image UID rather than the invoking user: deriving this from
+    # `id -u` runs every Airflow service as root when bootstrapped under sudo.
+    assert values["AIRFLOW_UID"] == "50000"
     assert bitwarden_values == {
         "BWS_ACCESS_TOKEN": "test-access-token",
         "BWS_PROJECT_ID": "test-project-id",
@@ -154,3 +157,79 @@ def test_bitwarden_wrapper_does_not_inherit_access_token_into_compose() -> None:
     assert "--no-inherit-env" in wrapper
     assert "8#$bitwarden_file_mode & 077" in wrapper
     assert "BWS_ACCESS_TOKEN" not in compose
+
+
+def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
+    compose = load_compose()
+    command = compose["services"]["airflow-init"]["command"]
+    script = "".join(command)
+    # The upstream entrypoint swallows migration and user-creation failures, so
+    # the gate depends on these explicit checks running afterwards.
+    assert "airflow db check" in script
+    assert "airflow db check-migrations" in script
+    assert "airflow users list" in script
+    assert "set -euo pipefail" in script
+    assert "exec /entrypoint" not in script
+
+
+def test_wrapper_rejects_administrative_ports_on_public_interfaces() -> None:
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    assert "require_private_bind_address POSTGRES_BIND_ADDRESS" in wrapper
+    assert "require_private_bind_address AIRFLOW_API_BIND_ADDRESS" in wrapper
+    # Loopback plus the Tailscale CGNAT range 100.64.0.0/10.
+    assert "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" in wrapper
+    assert "BASH_REMATCH[1] >= 64 && BASH_REMATCH[1] <= 127" in wrapper
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_a_public_bind_address(tmp_path: Path) -> None:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text("POSTGRES_BIND_ADDRESS=0.0.0.0\n", encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(
+        "BWS_ACCESS_TOKEN=test-access-token\nBWS_PROJECT_ID=test-project-id\n", encoding="utf-8"
+    )
+    bitwarden_environment_file.chmod(0o600)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "ps"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+    assert completed.returncode == 2
+    assert "must bind to loopback or a Tailscale address" in completed.stderr
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_to_render_resolved_secrets(tmp_path: Path) -> None:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text("POSTGRES_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(
+        "BWS_ACCESS_TOKEN=test-access-token\nBWS_PROJECT_ID=test-project-id\n", encoding="utf-8"
+    )
+    bitwarden_environment_file.chmod(0o600)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "config"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+    assert completed.returncode == 2
+    assert "it contains resolved secrets" in completed.stderr

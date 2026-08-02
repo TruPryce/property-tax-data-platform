@@ -33,6 +33,27 @@ AIRFLOW_JWT_SECRET
 AIRFLOW_ADMIN_PASSWORD
 ```
 
+The five database passwords MUST be generated from `[A-Za-z0-9]` only. Compose
+interpolates `AIRFLOW_DB_PASSWORD` into a SQLAlchemy URL, so a generator's
+default punctuation silently corrupts the connection: `p@ss/w0rd` parses as host
+`ss` with password `p`. The failure surfaces as an authentication error against a
+credential that is correct everywhere you would think to look, because the
+PostgreSQL bootstrap quotes the same value safely. Use 32 or more characters to
+offset the reduced alphabet:
+
+```bash
+LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40; echo
+```
+
+`AIRFLOW_FERNET_KEY` must be a real Fernet key, not random text:
+
+```bash
+python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+`AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, and `AIRFLOW_ADMIN_PASSWORD` are
+never placed in a URL and may use the full alphabet.
+
 The machine-account access token is the only bootstrap credential stored on the VPS. Export it and the Bitwarden project ID without placing the token in shell history:
 
 ```bash
@@ -55,7 +76,19 @@ From the repository root:
 
 The wrapper authenticates `bws` with the access token, requests only the configured project, and uses `--no-inherit-env` before starting trusted Docker Compose. Bitwarden runtime secrets reach Compose by their exact names; `BWS_ACCESS_TOKEN` does not. Neither the access token nor a resolved value is passed into a container unless the Compose service explicitly requires that runtime value.
 
-The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Set bind addresses only to an approved Tailscale address on the Akamai host.
+## Administrative Access
+
+The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Keep both on loopback and publish the Airflow UI with `tailscale serve`:
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
+```
+
+This terminates TLS with a tailnet certificate, keeps the container off the tailnet interface, and records access against a tailnet identity. Binding a container port directly to the Tailscale address also works, but it serves plaintext, and Docker fails to start the service after a reboot whenever it wins the race against `tailscaled` assigning the address.
+
+PostgreSQL has no tailnet listener. Reach it by connecting to the host over Tailscale and using a local client.
+
+The wrapper refuses any `POSTGRES_BIND_ADDRESS` or `AIRFLOW_API_BIND_ADDRESS` outside loopback and the Tailscale CGNAT range `100.64.0.0/10`. This is the only enforcement point: Docker publishes ports through its own iptables chain ahead of the host `INPUT` rules, so a `ufw` policy will not contain a misconfiguration here. Tailnet ACLs still have to restrict which devices may reach the administrative surface, and neither port may be exposed with `tailscale funnel`.
 
 Inspect health without printing configuration or credentials:
 
@@ -85,7 +118,11 @@ The PostgreSQL bootstrap creates no Silver or Gold tables. Schema, object privil
 
 ## Production Boundary
 
-This foundation does not configure Tailscale, TLS, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images. The machine access token is a separate bootstrap credential and must remain in the root-readable `.bws.env` file and approved off-host recovery custody.
+This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
+
+The machine access token is a separate bootstrap credential. On the host it lives only in `.bws.env`, owned by the invoking user with mode `0600`; the wrapper refuses to run if that file grants any group or world permission. Because the token cannot bootstrap itself from Secrets Manager, a second copy belongs in the Bitwarden vault alongside the other escrowed recovery material, and the credentials guarding that vault belong in offline custody.
+
+Rotating a database password in Bitwarden does not reach PostgreSQL: `postgres/init/10-create-runtime-databases.sh` runs only against an empty data directory. A rotation must also `ALTER ROLE ... PASSWORD` on the running cluster, and rotating `AIRFLOW_FERNET_KEY` strands existing encrypted connections unless the previous key is retained in the comma-separated list Airflow accepts for that setting.
 
 ## Validation
 
