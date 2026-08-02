@@ -135,3 +135,10 @@ The control plane SHALL locate the provider model-event stream independently of 
 #### Scenario: A timed-out run retains its event evidence
 - **WHEN** the implementation lane ends with model events present and no implementation result written
 - **THEN** the sanitized evidence contains a bounded event summary, no raw event stream, and no reasoning, source, or credential content
+
+### Requirement: Single-sourced image capability identity
+The implementation image's capability identity SHALL have exactly one source per dimension. Provider, model reference, reasoning effort, and Codex CLI version SHALL come from the same resolved request the runner consumes. The profile digest SHALL be computed from the immutable trusted profile using the runner kernel's own canonicalisation, so image construction and runtime verification share one computation rather than two agreeing implementations. The trusted workflow MUST NOT state any identity value as its own literal. The image builder MUST refuse to build when any identity dimension is absent rather than supplying a default, and the runtime identity comparison MUST remain a single conjunction that refuses the run on any one mismatch.
+
+#### Scenario: A policy change that never reached the image is refused
+- **WHEN** the trusted policy resolves a reasoning effort, model reference, provider, Codex version, or profile digest that differs from the built image's labels
+- **THEN** the adapter refuses before prompt assembly or any provider invocation, and no image can be produced without every dimension stated

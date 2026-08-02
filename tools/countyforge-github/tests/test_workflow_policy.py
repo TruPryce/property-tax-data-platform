@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -2042,3 +2044,330 @@ def test_the_timeout_reduction_leaves_the_sandbox_posture_untouched() -> None:
         assert flag in _IMPLEMENT_ADAPTER
     assert "--disable shell_tool" in _IMPLEMENT_ADAPTER
     assert "--disable unified_exec" in _IMPLEMENT_ADAPTER
+
+
+_IMAGE_BUILDER = Path(".ai/codex/10-build-countyforge-implement-image.sh").read_text(
+    encoding="utf-8"
+)
+#: Every dimension the adapter compares between the image and the resolved run.
+CAPABILITY_IDENTITY = (
+    ("org.countyforge.profile", "implement.workspace-write.v1"),
+    ("org.countyforge.profile-sha256", "$EXPECTED_PROFILE_SHA"),
+    ("org.countyforge.provider", "$CODEX_PROVIDER"),
+    ("org.countyforge.model-ref", "$CODEX_MODEL_REF"),
+    ("org.countyforge.reasoning-effort", "$CODEX_REASONING_EFFORT"),
+    ("org.countyforge.codex-cli", "$EXPECTED_CODEX_VERSION"),
+)
+
+
+def _build_step(provider: str) -> str:
+    return next(
+        str(item["run"])
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if "10-build-countyforge-implement-image.sh" in str(item.get("run", ""))
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_the_image_build_receives_every_resolved_identity_dimension(provider: str) -> None:
+    """Run 30761542806 built `xhigh` while the policy resolved `high`."""
+
+    run = _build_step(provider)
+    for name, source in (
+        ("CODEX_PROVIDER", ".provider.id"),
+        ("CODEX_MODEL_REF", ".provider.model_ref"),
+        ("CODEX_REASONING_EFFORT", ".reasoning_effort"),
+        ("CODEX_VERSION", ".provider.codex_cli_version"),
+    ):
+        assert f"""{name}="$(jq -er '{source}' "$RUNNER_TEMP/countyforge-request.json")\"""" in run
+    assert "COUNTYFORGE_PROFILE_SHA256" in run
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_no_independent_identity_literal_exists_in_the_build_step(provider: str) -> None:
+    """Policy cannot drift from the image if the workflow states no value itself."""
+
+    run = _build_step(provider)
+    body = "\n".join(line for line in run.splitlines() if not line.strip().startswith("#"))
+    for literal in ("xhigh", "high", "openai.gpt-5.6", "sakana.fugu-ultra", "0.144.6"):
+        assert f"={literal}" not in body, literal
+        assert f'="{literal}"' not in body, literal
+    # The provider name survives only as an artifact/lane name, never as a build
+    # input: the input is read from the resolved request.
+    assert "CODEX_PROVIDER=openai" not in body
+    assert "CODEX_PROVIDER=sakana" not in body
+
+
+def test_the_resolved_request_carries_every_dimension_the_build_reads() -> None:
+    """The request the runner consumes is the one source of truth."""
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-run-request.schema.json").read_text(encoding="utf-8")
+    )
+    assert "reasoning_effort" in schema["required"]
+    assert "provider" in schema["required"]
+    provider = schema["properties"]["provider"]
+    fields = (provider.get("properties") or {}) or (
+        next(
+            (branch.get("properties") or {})
+            for branch in provider.get("oneOf", []) + provider.get("anyOf", [])
+            if branch.get("type") == "object"
+        )
+    )
+    for name in ("id", "model_ref", "codex_cli_version"):
+        assert name in fields, name
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "CODEX_PROVIDER",
+        "CODEX_MODEL_REF",
+        "CODEX_REASONING_EFFORT",
+        "CODEX_VERSION",
+        "COUNTYFORGE_PROFILE_SHA256",
+    ],
+)
+def test_a_missing_identity_dimension_fails_the_build_before_docker(missing: str) -> None:
+    """Execute the builder: a default here is a silent disagreement with policy."""
+
+    supplied = {
+        "CODEX_PROVIDER": "sakana",
+        "CODEX_MODEL_REF": "sakana.fugu-ultra",
+        "CODEX_REASONING_EFFORT": "high",
+        "CODEX_VERSION": "0.144.6",
+        "COUNTYFORGE_PROFILE_SHA256": "0" * 64,
+    }
+    del supplied[missing]
+    completed = subprocess.run(
+        ["bash", ".ai/codex/10-build-countyforge-implement-image.sh"],
+        env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"), **supplied},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert missing in completed.stderr
+    assert "docker build" not in completed.stdout
+
+
+def test_the_builder_declares_no_default_for_any_identity_dimension() -> None:
+    for name in (
+        "CODEX_PROVIDER",
+        "CODEX_MODEL_REF",
+        "CODEX_REASONING_EFFORT",
+        "CODEX_VERSION",
+    ):
+        assert f"${{{name}:?" in _IMAGE_BUILDER, name
+        assert f"${{{name}:-" not in _IMAGE_BUILDER, name
+    assert "${CODEX_REASONING_EFFORT:-xhigh}" not in _IMAGE_BUILDER
+
+
+def test_the_runtime_identity_comparison_covers_every_labelled_dimension() -> None:
+    """The comparison caught this defect; it must not be weakened."""
+
+    for label, expected in CAPABILITY_IDENTITY:
+        assert f'"{label}"' in _IMPLEMENT_ADAPTER, label
+        assert f'--label "{label}=' in _IMAGE_BUILDER, label
+        assert expected in _IMPLEMENT_ADAPTER, expected
+    # One conjunction, so any single mismatch refuses the run.
+    identity = _IMPLEMENT_ADAPTER[
+        _IMPLEMENT_ADAPTER.index('if [ "$IMAGE_PROFILE_ID"') : _IMPLEMENT_ADAPTER.index(
+            "error: image capability profile identity"
+        )
+    ]
+    assert "||" in identity
+    assert "&&" not in identity
+    # One `!=` per dimension, including the profile id's literal comparison.
+    assert identity.count("!=") == len(CAPABILITY_IDENTITY)
+
+
+def test_the_two_profile_codex_version_fields_cannot_drift_apart() -> None:
+    """The image is labelled from one field and compared against the other."""
+
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["container"]["codex_cli_version"] == profile["minimum_codex_cli_version"]
+
+
+def test_the_identity_fix_introduces_no_fallback_widening_or_longer_deadline() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 3600
+    assert profile["budgets"]["defaults"]["attempts"] == 1
+    assert profile["network"]["policy"] == "provider_only"
+    assert profile["model_tools"] == ["structured_file_bundle"]
+    for flag in ("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true"):
+        assert flag in _IMPLEMENT_ADAPTER
+    for provider in _IMPLEMENTATION_LANES:
+        body = "\n".join(
+            line for line in _build_step(provider).splitlines() if not line.strip().startswith("#")
+        )
+        assert "||" not in body
+
+
+#: Stands in for `docker image inspect`. The adapter calls it two ways:
+#: `docker image inspect <image>` as an availability probe (no --format, must
+#: succeed), and `docker image inspect <image> --format '{{ index .Config.Labels
+#: "<key>" }}'`, where the template is positional argument 5.
+_DOCKER_LABEL_STUB = r"""#!/usr/bin/env bash
+if [ "${4:-}" != "--format" ]; then exit 0; fi
+template="$5"
+key="${template#*Labels \"}"
+key="${key%%\"*}"
+KEY="$key" python3 -c 'import json, os
+labels = json.loads(os.environ["STUB_LABELS"])
+print(labels.get(os.environ["KEY"], ""), end="")'
+"""
+
+
+def _run_identity_check(
+    tmp_path: Path, labels: dict[str, str], resolved: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Execute the adapter's real identity comparison against stubbed labels."""
+
+    start = _IMPLEMENT_ADAPTER.index("if ! docker image inspect")
+    end = _IMPLEMENT_ADAPTER.index('IMAGE_ID="$(docker image inspect')
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "docker").write_text(_DOCKER_LABEL_STUB, encoding="utf-8")
+    (stub / "docker").chmod(0o755)
+    script = tmp_path / "identity.sh"
+    script.write_text("set -euo pipefail\n" + _IMPLEMENT_ADAPTER[start:end], encoding="utf-8")
+    return subprocess.run(
+        ["bash", str(script)],
+        env={
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "STUB_LABELS": json.dumps(labels),
+            "CODEX_IMAGE": "countyforge-implement-agent:sakana-v1",
+            **resolved,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_RESOLVED = {
+    "CODEX_PROVIDER": "sakana",
+    "CODEX_MODEL_REF": "sakana.fugu-ultra",
+    "CODEX_REASONING_EFFORT": "high",
+    "EXPECTED_PROFILE_SHA": "a" * 64,
+    "EXPECTED_CODEX_VERSION": "0.144.6",
+}
+
+
+def _labels(**overrides: str) -> dict[str, str]:
+    labels = {
+        "org.countyforge.profile": "implement.workspace-write.v1",
+        "org.countyforge.profile-sha256": "a" * 64,
+        "org.countyforge.provider": "sakana",
+        "org.countyforge.model-ref": "sakana.fugu-ultra",
+        "org.countyforge.reasoning-effort": "high",
+        "org.countyforge.codex-cli": "0.144.6",
+    }
+    labels.update({key.replace("_", "-"): value for key, value in overrides.items()})
+    return labels
+
+
+def test_an_image_matching_the_resolved_identity_is_accepted(tmp_path: Path) -> None:
+    """The positive case proves the stub works; without it the negatives are vacuous."""
+
+    completed = _run_identity_check(tmp_path, _labels(), _RESOLVED)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        # The exact drift from run 30761542806.
+        {"org.countyforge.reasoning-effort": "xhigh"},
+        {"org.countyforge.provider": "openai"},
+        {"org.countyforge.model-ref": "sakana.fugu"},
+        {"org.countyforge.profile-sha256": "b" * 64},
+        {"org.countyforge.codex-cli": "0.144.5"},
+        {"org.countyforge.profile": "review.packet-only.v1"},
+        {"org.countyforge.reasoning-effort": ""},
+    ],
+)
+def test_any_single_identity_mismatch_refuses_the_run(
+    tmp_path: Path, override: dict[str, str]
+) -> None:
+    labels = _labels()
+    labels.update(override)
+    completed = _run_identity_check(tmp_path, labels, _RESOLVED)
+    assert completed.returncode == 2
+    # Refused by the identity comparison itself, not by a broken harness.
+    assert "image capability profile identity does not match" in completed.stderr
+
+
+def test_a_matching_identity_lets_the_run_reach_prompt_assembly_and_the_model() -> None:
+    """Identity is a gate before the work, not a replacement for it."""
+
+    identity = _IMPLEMENT_ADAPTER.index("error: image capability profile identity")
+    assembly = _IMPLEMENT_ADAPTER.index('python3 - "$PROMPT_PATH"')
+    invocation = _IMPLEMENT_ADAPTER.index("docker run --rm")
+    assert identity < assembly < invocation
+    # And the credential preflight still precedes all three.
+    assert _IMPLEMENT_ADAPTER.index("the selected implementation provider credential") < identity
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_the_profile_digest_is_computed_not_request_sourced(provider: str) -> None:
+    """The request carries no profile digest, so it cannot be its source.
+
+    `profile` in the run request is `{id, version}` only. Claiming the digest is
+    request-sourced would describe a field that does not exist; it is computed
+    from the immutable trusted profile instead, and the requirement is that the
+    computation is shared with the runtime rather than duplicated.
+    """
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-run-request.schema.json").read_text(encoding="utf-8")
+    )
+    profile_fields = schema["properties"]["profile"]["properties"]
+    assert set(profile_fields) == {"id", "version"}
+    assert not [name for name in profile_fields if "sha" in name.lower()]
+
+    run = _build_step(provider)
+    assert "COUNTYFORGE_PROFILE_SHA256" in run
+    assert ".profile.sha256" not in run
+    # Computed from the checked-out profile, via the kernel's own function.
+    assert "from countyforge_runner.contracts import document_sha256" in run
+    assert ".ai/profiles/implement.workspace-write.v1.json" in run
+    # No second implementation of the canonicalisation lives in the workflow.
+    assert "sort_keys=True" not in run
+    assert "hashlib" not in run
+
+
+def test_image_construction_and_runtime_verification_share_one_digest_computation() -> None:
+    """Execute the workflow's digest step and compare it to the resolver's value."""
+
+    run = _build_step("sakana")
+    start = run.index('export COUNTYFORGE_PROFILE_SHA256="$(')
+    body = run[run.index("<<'PY'", start) + len("<<'PY'") : run.index("\nPY\n", start)]
+    completed = subprocess.run(
+        ["python3", "-", ".ai/profiles/implement.workspace-write.v1.json"],
+        input=textwrap.dedent(body),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    workflow_digest = completed.stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{64}", workflow_digest)
+
+    sys.path.insert(0, "tools/countyforge-runner/src")
+    from countyforge_runner.contracts import document_sha256
+
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    # The resolver labels evidence with exactly this value, and the adapter
+    # compares the image label against it.
+    assert workflow_digest == document_sha256(profile)
+    assert 'EXPECTED_PROFILE_SHA="${COUNTYFORGE_PROFILE_SHA256:?' in _IMPLEMENT_ADAPTER
+    assert '"$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA"' in _IMPLEMENT_ADAPTER

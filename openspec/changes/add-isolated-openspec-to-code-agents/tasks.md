@@ -86,3 +86,5 @@
 - [x] 12.5 Order source selection so the approved package, its siblings, and its build config precede unrelated services, tools, and documentation.
 - [x] 12.6 Allow approved-path material to exceed the operational target up to the hard ceiling, recording the pressure and still failing closed at the ceiling.
 - [x] 12.7 Resolve implementation reasoning effort to `high` in the trusted policy and profile, with no retry at another effort and no provider fallback.
+- [x] 12.9 Derive provider, model reference, reasoning effort, and Codex CLI version from the resolved request, and compute the profile digest from the immutable trusted profile with the kernel's own canonicalisation, so each dimension has exactly one source.
+- [x] 12.10 Refuse to build an implementation image when provider, model reference, reasoning effort, Codex version, or profile digest is absent.

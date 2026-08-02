@@ -960,14 +960,26 @@ jobs:
             --workspace "$RUNNER_TEMP/countyforge-workspace" \
             --workspace-binding "$RUNNER_TEMP/countyforge-workspace-binding.json" \
             > "$RUNNER_TEMP/countyforge-request.json"
+          # The profile digest is not request-sourced: it is computed from the
+          # immutable trusted profile. It must be the *same* computation the
+          # runner performs, so it calls the kernel's own canonicalisation
+          # rather than reimplementing it -- a second implementation here is the
+          # same drift shape that labelled an image `xhigh` in run 30761542806.
           export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
-          import hashlib, json, sys
-          document = json.loads(open(sys.argv[1], encoding="utf-8").read())
-          payload = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-          print(hashlib.sha256(payload).hexdigest())
+          import json, sys
+          sys.path.insert(0, "tools/countyforge-runner/src")
+          from countyforge_runner.contracts import document_sha256
+          print(document_sha256(json.loads(open(sys.argv[1], encoding="utf-8").read())))
           PY
           )"
-          CODEX_PROVIDER=openai CODEX_MODEL_REF=openai.gpt-5.6 \
+          # Every identity dimension the adapter checks at runtime comes from the
+          # resolved request the runner consumes, so the image producer and the
+          # runtime consumer cannot disagree. Run 30761542806 failed the identity
+          # check because the effort was a literal here and a stale default there.
+          CODEX_PROVIDER="$(jq -er '.provider.id' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_MODEL_REF="$(jq -er '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_REASONING_EFFORT="$(jq -er '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_VERSION="$(jq -er '.provider.codex_cli_version' "$RUNNER_TEMP/countyforge-request.json")" \
             ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
@@ -1205,14 +1217,26 @@ jobs:
             --workspace "$RUNNER_TEMP/countyforge-workspace" \
             --workspace-binding "$RUNNER_TEMP/countyforge-workspace-binding.json" \
             > "$RUNNER_TEMP/countyforge-request.json"
+          # The profile digest is not request-sourced: it is computed from the
+          # immutable trusted profile. It must be the *same* computation the
+          # runner performs, so it calls the kernel's own canonicalisation
+          # rather than reimplementing it -- a second implementation here is the
+          # same drift shape that labelled an image `xhigh` in run 30761542806.
           export COUNTYFORGE_PROFILE_SHA256="$(python3 - .ai/profiles/implement.workspace-write.v1.json <<'PY'
-          import hashlib, json, sys
-          document = json.loads(open(sys.argv[1], encoding="utf-8").read())
-          payload = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-          print(hashlib.sha256(payload).hexdigest())
+          import json, sys
+          sys.path.insert(0, "tools/countyforge-runner/src")
+          from countyforge_runner.contracts import document_sha256
+          print(document_sha256(json.loads(open(sys.argv[1], encoding="utf-8").read())))
           PY
           )"
-          CODEX_PROVIDER=sakana CODEX_MODEL_REF=sakana.fugu-ultra \
+          # Every identity dimension the adapter checks at runtime comes from the
+          # resolved request the runner consumes, so the image producer and the
+          # runtime consumer cannot disagree. Run 30761542806 failed the identity
+          # check because the effort was a literal here and a stale default there.
+          CODEX_PROVIDER="$(jq -er '.provider.id' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_MODEL_REF="$(jq -er '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_REASONING_EFFORT="$(jq -er '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_VERSION="$(jq -er '.provider.codex_cli_version' "$RUNNER_TEMP/countyforge-request.json")" \
             ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
