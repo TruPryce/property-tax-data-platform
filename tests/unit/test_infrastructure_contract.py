@@ -254,6 +254,18 @@ def test_secret_creation_splits_on_the_first_delimiter_only() -> None:
     assert '"${secret_line#*=}"' in code
 
 
+def test_job_healthchecks_expand_the_container_hostname() -> None:
+    compose = load_compose()
+    for service in ("airflow-scheduler", "airflow-dag-processor", "airflow-triggerer"):
+        test = compose["services"][service]["healthcheck"]["test"]
+        assert test[0] == "CMD-SHELL", service
+        # `$$` is the Compose escape that reaches the shell as a single `$`.
+        # Single quotes around it reach the shell literally, so the check would
+        # compare against the string "${HOSTNAME}" and never match a live job.
+        assert '"$${HOSTNAME}"' in test[1], service
+        assert "'$${HOSTNAME}'" not in test[1], service
+
+
 def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
     compose = load_compose()
     command = compose["services"]["airflow-init"]["command"]
