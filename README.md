@@ -19,6 +19,7 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 | Pre-commit and CI secret and source-artifact scanning | Scaffolded |
 | CountyForge mode-aware runner kernel | Review, read-only plan, and isolated implementation executors; fix/validate remain fail closed |
 | CountyForge GitHub control plane | Authorized comment commands, canonical status, cancel/retry, packet review, bounded OpenSpec planning, and trusted draft implementation publication |
+| Airflow and PostgreSQL runtime foundation | Airflow 3.3 and PostgreSQL 16 Compose topology; production recovery controls remain open |
 | Dallas, Collin, Tarrant, Denton, Rockwall, and Ellis source registry | Scaffolded |
 | Hexagonal Python package boundaries | Scaffolded |
 | Immutable Bronze acquisition | Specified, not implemented |
@@ -34,6 +35,7 @@ Spec-driven ingestion, normalization, validation, and publication of county appr
 | [`dags/`](dags/README.md) | Thin Airflow inbound adapters |
 | [`libs/`](libs/README.md) | Reusable domain, application, and outbound-adapter packages |
 | [`services/`](services/README.md) | Runtime composition and deployable process entry points |
+| [`infra/`](infra/README.md) | Version-pinned Airflow and PostgreSQL container foundation |
 | [`tools/`](tools/README.md) | Repository developer-platform packages, including CountyForge |
 | [`docs/`](docs/README.md) | Architecture, source, decision, and operations reference |
 | [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/config.yml) | Structured work intake |
