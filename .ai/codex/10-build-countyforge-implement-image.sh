@@ -8,19 +8,25 @@ set -euo pipefail
 # a pull token, before the model was ever invoked.  Pulling it would have
 # required package credentials this job must never hold.
 
-PROVIDER="${CODEX_PROVIDER:-openai}"
-REASONING_EFFORT="${CODEX_REASONING_EFFORT:-xhigh}"
-CODEX_VERSION="${CODEX_VERSION:-0.144.6}"
-MODEL_REF="${CODEX_MODEL_REF:-}"
+# Every capability-identity dimension is a required input, never a default.  The
+# adapter compares each one against the resolved runtime request before invoking
+# the model, so a default here is a silent disagreement with the trusted policy
+# rather than a convenience: run 30761542806 built `xhigh` from this script's
+# stale default while the policy resolved `high`, and the run failed the identity
+# check in 0.13 seconds without ever reaching prompt assembly.  Refusing to build
+# an image whose identity was not stated turns that class of drift into a build
+# failure at the producer instead of a run failure at the consumer.
+PROVIDER="${CODEX_PROVIDER:?CODEX_PROVIDER is required}"
+REASONING_EFFORT="${CODEX_REASONING_EFFORT:?CODEX_REASONING_EFFORT is required}"
+CODEX_VERSION="${CODEX_VERSION:?CODEX_VERSION is required}"
+MODEL_REF="${CODEX_MODEL_REF:?CODEX_MODEL_REF is required}"
 case "$PROVIDER" in
   openai)
     IMAGE="${CODEX_IMAGE:-countyforge-implement-agent:openai-v1}"
-    MODEL_REF="${MODEL_REF:-openai.gpt-5.6}"
     PROVIDER_URL=""
     ;;
   sakana)
     IMAGE="${CODEX_IMAGE:-countyforge-implement-agent:sakana-v1}"
-    MODEL_REF="${MODEL_REF:-sakana.fugu-ultra}"
     PROVIDER_URL="https://api.sakana.ai/v1"
     ;;
   *) echo "error: CODEX_PROVIDER must be openai or sakana" >&2; exit 2 ;;

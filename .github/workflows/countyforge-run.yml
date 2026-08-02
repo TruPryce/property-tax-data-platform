@@ -967,7 +967,14 @@ jobs:
           print(hashlib.sha256(payload).hexdigest())
           PY
           )"
-          CODEX_PROVIDER=openai CODEX_MODEL_REF=openai.gpt-5.6 \
+          # Every identity dimension the adapter checks at runtime comes from the
+          # resolved request the runner consumes, so the image producer and the
+          # runtime consumer cannot disagree. Run 30761542806 failed the identity
+          # check because the effort was a literal here and a stale default there.
+          CODEX_PROVIDER="$(jq -er '.provider.id' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_MODEL_REF="$(jq -er '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_REASONING_EFFORT="$(jq -er '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_VERSION="$(jq -er '.provider.codex_cli_version' "$RUNNER_TEMP/countyforge-request.json")" \
             ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
@@ -1212,7 +1219,14 @@ jobs:
           print(hashlib.sha256(payload).hexdigest())
           PY
           )"
-          CODEX_PROVIDER=sakana CODEX_MODEL_REF=sakana.fugu-ultra \
+          # Every identity dimension the adapter checks at runtime comes from the
+          # resolved request the runner consumes, so the image producer and the
+          # runtime consumer cannot disagree. Run 30761542806 failed the identity
+          # check because the effort was a literal here and a stale default there.
+          CODEX_PROVIDER="$(jq -er '.provider.id' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_MODEL_REF="$(jq -er '.provider.model_ref' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_REASONING_EFFORT="$(jq -er '.reasoning_effort' "$RUNNER_TEMP/countyforge-request.json")" \
+          CODEX_VERSION="$(jq -er '.provider.codex_cli_version' "$RUNNER_TEMP/countyforge-request.json")" \
             ./.ai/codex/10-build-countyforge-implement-image.sh
       - name: Invoke implementation model with selected provider only
         env:
