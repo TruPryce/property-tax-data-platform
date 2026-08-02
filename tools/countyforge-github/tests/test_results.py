@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from countyforge_github.results import (
+    TIMEOUT_EXIT_CODE,
     classify_implementation_lane,
     normalize_publication_result,
     resolve_terminal_result,
@@ -897,4 +898,111 @@ def test_timeout_never_overrides_infrastructure_or_freeze_failures(tmp_path: Pat
             **_lane_inputs(tmp_path, freeze_outcome="failure")  # type: ignore[arg-type]
         )["disposition"]
         == "implementation_freeze_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("document", "exit_code", "expected"),
+    [
+        # A clean exit contradicts the claim that the hour ran out.
+        (
+            {"ok": True, "mode": "implement", "disposition": "timed_out"},
+            "0\n",
+            "implementation_model_failed",
+        ),
+        (
+            {"ok": False, "mode": "implement", "disposition": "timed_out"},
+            "0\n",
+            "implementation_model_failed",
+        ),
+        # A nonzero exit that is not the timeout code is some other failure.
+        (
+            {"ok": False, "mode": "implement", "disposition": "timed_out"},
+            "1\n",
+            "implementation_model_failed",
+        ),
+        (
+            {"ok": False, "mode": "implement", "disposition": "timed_out"},
+            "137\n",
+            "implementation_model_failed",
+        ),
+        # `ok: true` contradicts a failure disposition.
+        (
+            {"ok": True, "mode": "implement", "disposition": "timed_out"},
+            "5\n",
+            "implementation_model_failed",
+        ),
+        # The wrong mode is not this lane's evidence at all.
+        (
+            {"ok": False, "mode": "review", "disposition": "timed_out"},
+            "5\n",
+            "implementation_model_failed",
+        ),
+        # A summary that disagrees with the envelope is self-contradicting.
+        (
+            {
+                "ok": False,
+                "mode": "implement",
+                "disposition": "timed_out",
+                "summary": {"disposition": "completed", "exit_code": 5},
+            },
+            "5\n",
+            "implementation_model_failed",
+        ),
+        (
+            {
+                "ok": False,
+                "mode": "implement",
+                "disposition": "timed_out",
+                "summary": {"disposition": "timed_out", "exit_code": 0},
+            },
+            "5\n",
+            "implementation_model_failed",
+        ),
+    ],
+)
+def test_uncorroborated_timeout_evidence_never_earns_the_timeout_disposition(
+    tmp_path: Path, document: dict[str, object], exit_code: str, expected: str
+) -> None:
+    """`timed_out` is a claim about an hour; it must be corroborated, not asserted."""
+
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        result_path=_write(tmp_path / "runner.json", json.dumps(document)),
+        exit_code_path=_write(tmp_path / "exit", exit_code),
+    )
+    assert classified["disposition"] == expected
+    assert classified["disposition"] != "implementation_model_timed_out"
+    assert classified["ok"] is False
+
+
+def test_the_corroborated_timeout_shape_is_the_only_one_accepted(tmp_path: Path) -> None:
+    """Envelope, mode, disposition, captured exit code, and summary must all agree."""
+
+    document = {
+        "ok": False,
+        "mode": "implement",
+        "disposition": "timed_out",
+        "summary": {"disposition": "timed_out", "exit_code": TIMEOUT_EXIT_CODE},
+    }
+    assert (
+        classify_implementation_lane(
+            selected_provider="sakana",
+            lane_results={"openai": "skipped", "sakana": "failure"},
+            result_path=_write(tmp_path / "runner.json", json.dumps(document)),
+            exit_code_path=_write(tmp_path / "exit", f"{TIMEOUT_EXIT_CODE}\n"),
+        )["disposition"]
+        == "implementation_model_timed_out"
+    )
+    # A summary is corroborating evidence when present, not a requirement.
+    del document["summary"]
+    assert (
+        classify_implementation_lane(
+            selected_provider="sakana",
+            lane_results={"openai": "skipped", "sakana": "failure"},
+            result_path=_write(tmp_path / "runner2.json", json.dumps(document)),
+            exit_code_path=_write(tmp_path / "exit2", f"{TIMEOUT_EXIT_CODE}\n"),
+        )["disposition"]
+        == "implementation_model_timed_out"
     )

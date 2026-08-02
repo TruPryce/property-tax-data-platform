@@ -80,7 +80,8 @@
 
 - [x] 12.1 Discover the model event stream independently of the implementation result so a run that produced no result still retains evidence.
 - [x] 12.2 Upload a bounded model-event summary on every outcome and record absence explicitly rather than by omission.
-- [x] 12.3 Classify a valid runner result carrying `timed_out` as `implementation_model_timed_out` without overriding any more specific cause.
+- [x] 12.3 Classify a corroborated `timed_out` runner result as `implementation_model_timed_out` without overriding any more specific cause.
+- [x] 12.8 Require the full corroborated timeout shape, and fail closed through the existing failure paths when the envelope, mode, exit code, or summary disagree.
 - [x] 12.4 Declare an operational source-selection target below the hard ceiling and record both bounds in prompt provenance.
 - [x] 12.5 Order source selection so the approved package, its siblings, and its build config precede unrelated services, tools, and documentation.
 - [x] 12.6 Allow approved-path material to exceed the operational target up to the hard ceiling, recording the pressure and still failing closed at the ceiling.
