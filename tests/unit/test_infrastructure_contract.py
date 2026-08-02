@@ -184,6 +184,76 @@ def test_generated_secrets_are_url_safe_and_cover_the_runtime_contract() -> None
         assert len(value) >= 32, name
 
 
+BWS_STUB = """#!/usr/bin/env bash
+if [[ "$1" == "secret" && "$2" == "list" ]]; then
+  python3 -c '
+import json, os
+path = os.environ["STUB_LOG"]
+stored = []
+if os.path.exists(path):
+    for line in open(path):
+        line = line.rstrip("\\n")
+        if "=" in line:
+            key, value = line.split("=", 1)
+            stored.append({"id": key, "key": key, "value": value})
+print(json.dumps(stored))
+'
+  exit 0
+fi
+if [[ "$1" == "secret" && "$2" == "create" ]]; then
+  shift 4
+  printf '%s=%s\\n' "$1" "$2" >>"$STUB_LOG"
+  exit 0
+fi
+exit 1
+"""
+
+
+def test_bitwarden_creation_round_trips_every_value_intact(tmp_path: Path) -> None:
+    """Guards the whole create-then-read-back path against value corruption.
+
+    `IFS='=' read` drops a trailing delimiter under bash, which truncated the
+    Fernet key's base64 padding and stored a key Airflow could not decode. The
+    secret was created successfully, so only reading the value back catches it.
+    """
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    stub = stub_directory / "bws"
+    stub.write_text(BWS_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    stub_log = tmp_path / "created.env"
+
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh"), "--bws", "test-project"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_directory}:{os.environ['PATH']}",
+            "STUB_LOG": str(stub_log),
+            "BWS_ACCESS_TOKEN": "test-access-token",
+            "SECRET_CREATE_DELAY_SECONDS": "0",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "verified 9 secrets" in completed.stderr
+
+    stored = parse_environment_file(stub_log)
+    assert set(stored) == SECRET_VARIABLES
+    assert len(base64.urlsafe_b64decode(stored["AIRFLOW_FERNET_KEY"])) == 32
+
+
+def test_secret_creation_splits_on_the_first_delimiter_only() -> None:
+    generator = (INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in generator.splitlines() if not line.lstrip().startswith("#"))
+    # `IFS='=' read -r name value` is the construct that silently truncated the
+    # Fernet key under bash; substring extraction is delimiter-safe.
+    assert "IFS='=' read" not in code
+    assert '"${secret_line%%=*}"' in code
+    assert '"${secret_line#*=}"' in code
+
+
 def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
     compose = load_compose()
     command = compose["services"]["airflow-init"]["command"]

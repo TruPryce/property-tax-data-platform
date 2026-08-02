@@ -81,6 +81,47 @@ emit_secrets() {
   printf 'AIRFLOW_FERNET_KEY=%s\n' "$(fernet_key)"
 }
 
+# Reads the project back and checks the shape of what was actually stored. A
+# value that arrives corrupted still creates a secret, so the runtime would only
+# discover the problem when Airflow refused to decrypt a connection.
+verify_stored_secrets() {
+  echo "verifying stored secrets" >&2
+  bws secret list "$project_id" -o json | python3 -c '
+import base64, json, sys
+
+expected = set(sys.argv[1:])
+stored = {s["key"]: s["value"] for s in json.load(sys.stdin)}
+
+problems = []
+missing = expected - set(stored)
+if missing:
+    problems.append(f"missing: {sorted(missing)}")
+
+for name, value in stored.items():
+    if name not in expected:
+        continue
+    if name == "AIRFLOW_FERNET_KEY":
+        try:
+            decoded = base64.urlsafe_b64decode(value)
+        except Exception as error:
+            problems.append(f"{name}: not url-safe base64 ({error})")
+            continue
+        if len(decoded) != 32:
+            problems.append(f"{name}: decodes to {len(decoded)} bytes, expected 32")
+    elif not (value.isalnum() and value.isascii()):
+        problems.append(f"{name}: must be alphanumeric to survive URL interpolation")
+    elif len(value) < 32:
+        problems.append(f"{name}: only {len(value)} characters")
+
+if problems:
+    print("stored secrets failed verification:", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    sys.exit(1)
+print(f"verified {len(expected)} secrets", file=sys.stderr)
+' "${SECRET_NAMES[@]}" AIRFLOW_FERNET_KEY
+}
+
 case "$output_mode" in
   print)
     emit_secrets
@@ -99,17 +140,57 @@ case "$output_mode" in
     echo "load them into Bitwarden, then remove the file" >&2
     ;;
   bws)
-    if ! command -v bws >/dev/null 2>&1; then
-      echo "required command is unavailable: bws" >&2
-      exit 2
-    fi
+    for command_name in bws jq; do
+      if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "required command is unavailable: $command_name" >&2
+        exit 2
+      fi
+    done
     if [[ -z "${BWS_ACCESS_TOKEN:-}" ]]; then
       echo "BWS_ACCESS_TOKEN is required and must have write access" >&2
       exit 2
     fi
-    while IFS='=' read -r secret_name secret_value; do
-      bws secret create --output none "$secret_name" "$secret_value" "$project_id"
+
+    # Bitwarden throttles bursts of writes, and a duplicate key would leave the
+    # project with two secrets of the same name for `bws run` to choose between.
+    # Skipping names that already exist keeps a resumed or repeated run safe.
+    existing_secret_names="$(bws secret list "$project_id" -o json | jq -r '.[].key')"
+
+    created_count=0
+    skipped_count=0
+    # Split on the first `=` by substring rather than `IFS='=' read`: bash drops
+    # a trailing IFS delimiter, which silently truncated the Fernet key's base64
+    # padding and stored a value Airflow could not decode.
+    while IFS= read -r secret_line; do
+      secret_name="${secret_line%%=*}"
+      secret_value="${secret_line#*=}"
+
+      if grep -qxF "$secret_name" <<<"$existing_secret_names"; then
+        echo "skipped $secret_name: already present in the project" >&2
+        skipped_count=$((skipped_count + 1))
+        continue
+      fi
+
+      attempt=1
+      while true; do
+        if creation_error="$(bws secret create --output none \
+          "$secret_name" "$secret_value" "$project_id" 2>&1)"; then
+          break
+        fi
+        if (( attempt >= 5 )); then
+          echo "failed to create $secret_name after $attempt attempts:" >&2
+          echo "$creation_error" >&2
+          exit 1
+        fi
+        sleep "$attempt"
+        attempt=$((attempt + 1))
+      done
       echo "created $secret_name" >&2
+      created_count=$((created_count + 1))
+      sleep "${SECRET_CREATE_DELAY_SECONDS:-1}"
     done < <(emit_secrets)
+
+    echo "created $created_count secret(s), skipped $skipped_count already present" >&2
+    verify_stored_secrets
     ;;
 esac
