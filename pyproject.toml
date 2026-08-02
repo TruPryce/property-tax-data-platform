@@ -39,7 +39,7 @@ countyforge-github = { workspace = true }
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 pythonpath = ["."]
-testpaths = ["tests"]
+testpaths = ["tests", "libs/property-tax-adapters/tests"]
 
 [tool.ruff]
 line-length = 100
