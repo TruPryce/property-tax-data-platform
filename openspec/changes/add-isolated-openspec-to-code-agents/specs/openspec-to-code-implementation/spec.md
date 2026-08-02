@@ -121,3 +121,17 @@ The control plane SHALL emit sanitized low-cardinality events for eligibility, p
 #### Scenario: Provider secret is absent from publication
 - **WHEN** workflow policy and artifact checks inspect the implementation publication job
 - **THEN** no provider credential or model workspace is present and only trusted sanitized evidence is published
+
+### Requirement: Finishable implementation requests
+The bounded model input SHALL be sized so a single-shot implementation request is one the model can complete inside its declared wall-clock budget. Trusted configuration MUST declare both a hard provider ceiling and a smaller operational source-selection target, and prompt provenance MUST record both. Source selection MUST order the approved package, its sibling packages, and its build configuration ahead of unrelated services, tools, and documentation. Approved-path material MAY exceed the operational target up to the hard ceiling, and that pressure MUST be recorded; approved-path material MUST NOT be silently dropped, and material exceeding the hard ceiling MUST still fail closed before any provider activity. The trusted policy SHALL pin exactly one provider, model, and reasoning effort per command; a failed or unfinished run MUST NOT be retried at another effort or routed to another provider.
+
+#### Scenario: A run that exhausts its wall clock is classified as a timeout
+- **WHEN** a valid runner result reports disposition `timed_out` and no more specific credential, prompt-budget, preparation, ceiling-drift, provider-infrastructure, freeze, or trusted-validation failure was observed
+- **THEN** the lane records `implementation_model_timed_out`, the terminal state is failed, and no lane is retried or re-routed
+
+### Requirement: Preserved model-event evidence
+The control plane SHALL locate the provider model-event stream independently of any other artifact, so a run that produced no implementation result still yields evidence of what its budget was spent on. A bounded summary MUST be uploaded on every outcome, and the absence of a stream MUST be recorded as explicit evidence. The summary MUST carry only bounded facts; raw model reasoning, prompt or source content, provider credentials, and arbitrary event payloads MUST NOT be uploaded.
+
+#### Scenario: A timed-out run retains its event evidence
+- **WHEN** the implementation lane ends with model events present and no implementation result written
+- **THEN** the sanitized evidence contains a bounded event summary, no raw event stream, and no reasoning, source, or credential content

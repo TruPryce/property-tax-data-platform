@@ -382,6 +382,15 @@ def classify_implementation_lane(
             reason="runner_exit_code_missing",
         )
     disposition = runner.get("disposition")
+    if disposition == "timed_out":
+        # The request was admitted and ran; it simply did not finish. That is
+        # neither provider infrastructure nor a model producing a bad result,
+        # and it is checked only after every earlier, more specific cause.
+        return _lane_failure(
+            "implementation_model_timed_out",
+            provider=selected_provider,
+            runner_exit_code=exit_code,
+        )
     if exit_code != 0 or runner.get("ok") is not True:
         # The runner ran and reported; a nonzero exit with an adapter-level
         # disposition is the container or provider failing, not the model.

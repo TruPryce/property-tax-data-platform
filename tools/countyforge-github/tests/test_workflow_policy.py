@@ -1838,3 +1838,207 @@ def test_the_model_invocation_status_is_captured_not_aborted_on() -> None:
     )
     # Evidence is sanitized on every path, including the failure paths.
     assert _IMPLEMENT_ADAPTER.count("scan_evidence_for_credential") >= 3
+
+
+def test_the_trusted_policy_pins_implementation_to_one_provider_model_and_effort() -> None:
+    """`xhigh` bought reasoning depth the one-hour budget could not pay for."""
+
+    selection = json.loads(
+        Path(".ai/policies/countyforge-github-execution.v1.json").read_text(encoding="utf-8")
+    )["commands"]["implement"]
+    assert selection["provider"] == "sakana"
+    assert selection["model_ref"] == "sakana.fugu-ultra"
+    assert selection["reasoning_effort"] == "high"
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["default_reasoning_effort"] == "high"
+    assert selection["reasoning_effort"] in profile["reasoning_efforts"]
+
+
+def test_no_lane_retries_at_another_effort_or_falls_back_to_another_provider() -> None:
+    """One attempt, one provider, one effort: a retry would hide the cause."""
+
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["budgets"]["defaults"]["attempts"] == 1
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 3600
+    workflow = Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    for absent in ("fallback_provider", "retry_reasoning_effort", "max-attempts", "retries:"):
+        assert absent not in workflow
+    # Each lane runs only for the one provider the trusted policy resolved, so a
+    # failed lane has no sibling that could pick the work up.
+    for provider, job in _IMPLEMENTATION_LANES.items():
+        condition = str(_implementation_jobs()[job]["if"])
+        assert f"'{provider}'" in condition
+        other = "sakana" if provider == "openai" else "openai"
+        assert f"'{other}'" not in condition
+    # The adapter invokes the model container exactly once (the other `docker
+    # run` is the egress proxy sidecar) and never re-runs it on failure.
+    assert _IMPLEMENT_ADAPTER.count("docker run --rm") == 1
+    assert "MODEL_STATUS" in _IMPLEMENT_ADAPTER
+    assert _IMPLEMENT_ADAPTER.count('docker run -d --name "$PROXY_NAME"') == 1
+    assert "xhigh" not in _IMPLEMENT_ADAPTER
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_every_outcome_uploads_a_bounded_model_event_summary(provider: str) -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if item.get("name") == "Prepare sanitized implementation evidence"
+    )
+    assert step["if"] == "always()"
+    run = str(step["run"])
+    assert "from countyforge_runner.model_events import" in run
+    # Discovery must not hang off the result file: the timed-out run has none.
+    assert "find_model_events(pathlib.Path(" in run
+    assert "source.with_name" not in run
+    assert ".ndjson" not in run
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_the_sanitizer_summarises_a_timed_out_run_that_produced_no_result(
+    tmp_path: Path, provider: str
+) -> None:
+    """Execute the step against run 30722542853's shape: events, no result."""
+
+    step = next(
+        item
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if item.get("name") == "Prepare sanitized implementation evidence"
+    )
+    trusted = tmp_path / "trusted"
+    (trusted / "tools/countyforge-runner").mkdir(parents=True)
+    (trusted / "tools/countyforge-runner/src").symlink_to(
+        Path("tools/countyforge-runner/src").resolve()
+    )
+    events = trusted / ".ai/reviews/countyforge/implement/run-30722542853"
+    events.mkdir(parents=True)
+    secret = "sk-live-0123456789abcdefghijklmnop"  # pragma: allowlist secret
+    (events / "countyforge-implementation-model-events.ndjson").write_text(
+        json.dumps({"type": "response.created", "timestamp": "2026-07-31T10:00:00Z"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "response.reasoning.delta",
+                "timestamp": "2026-07-31T10:59:41Z",
+                "delta": "internal chain of thought",
+                "authorization": f"Bearer {secret}",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert not list(trusted.rglob("countyforge-implementation-result.json"))
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "countyforge-exit-code").write_text("5\n", encoding="utf-8")
+    completed = subprocess.run(
+        ["bash", "-e", "-c", str(step["run"])],
+        cwd=tmp_path,
+        env={**os.environ, "RUNNER_TEMP": str(temp)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    destination = temp / "sanitized-implementation-evidence"
+    summary_path = destination / "countyforge-implementation-model-events.summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["model_events_present"] is True
+    assert summary["event_count"] == 2
+    assert summary["last_event_type"] == "response.reasoning.delta"
+    assert summary["raw_content_omitted"] is True
+    # Nothing raw was uploaded: no event stream, no reasoning, no credential.
+    assert not list(destination.rglob("*.ndjson"))
+    uploaded = "".join(
+        path.read_text(encoding="utf-8") for path in destination.rglob("*") if path.is_file()
+    )
+    for absent in (secret, "Bearer ", "internal chain of thought"):
+        assert absent not in uploaded
+
+
+@pytest.mark.parametrize("provider", ["openai", "sakana"])
+def test_absent_events_are_still_uploaded_as_explicit_evidence(
+    tmp_path: Path, provider: str
+) -> None:
+    step = next(
+        item
+        for item in _implementation_jobs()[_IMPLEMENTATION_LANES[provider]]["steps"]
+        if item.get("name") == "Prepare sanitized implementation evidence"
+    )
+    (tmp_path / "trusted/tools/countyforge-runner").mkdir(parents=True)
+    (tmp_path / "trusted/tools/countyforge-runner/src").symlink_to(
+        Path("tools/countyforge-runner/src").resolve()
+    )
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    completed = subprocess.run(
+        ["bash", "-e", "-c", str(step["run"])],
+        cwd=tmp_path,
+        env={**os.environ, "RUNNER_TEMP": str(temp)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(
+        (
+            temp
+            / "sanitized-implementation-evidence"
+            / "countyforge-implementation-model-events.summary.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert summary == {
+        "contract_version": 1,
+        "model_events_present": False,
+        "raw_content_omitted": True,
+    }
+
+
+def test_the_prompt_budget_declares_both_the_ceiling_and_the_operational_target() -> None:
+    model_input = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )["model_input"]
+    assert model_input["maximum_model_input_chars"] == 950_000
+    assert model_input["operational_target_model_input_chars"] == 350_000
+    assert (
+        model_input["operational_target_model_input_chars"]
+        < (model_input["maximum_model_input_chars"])
+    )
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-profile.schema.json").read_text(encoding="utf-8")
+    )
+    required = schema["properties"]["model_input"]["required"]
+    assert "operational_target_model_input_chars" in required
+    assert "maximum_model_input_chars" in required
+    # Both numbers travel to the adapter and into recorded provenance.
+    assert "TARGET_MODEL_INPUT_CHARS" in _IMPLEMENT_ADAPTER
+    builder = Path(
+        "tools/countyforge-runner/src/countyforge_runner/implementation_prompt.py"
+    ).read_text(encoding="utf-8")
+    assert '"hard_maximum_model_input_chars"' in builder
+    assert '"operational_target_model_input_chars"' in builder
+    assert '"operational_target_exceeded"' in builder
+
+
+def test_the_timeout_reduction_leaves_the_sandbox_posture_untouched() -> None:
+    profile = json.loads(
+        Path(".ai/profiles/implement.workspace-write.v1.json").read_text(encoding="utf-8")
+    )
+    assert profile["network"]["policy"] == "provider_only"
+    assert profile["network"]["destinations"] == ["selected_provider_api"]
+    assert profile["model_tools"] == ["structured_file_bundle"]
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 3600
+    for flag in (
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        "--network",
+        "--interactive",
+    ):
+        assert flag in _IMPLEMENT_ADAPTER
+    assert "--disable shell_tool" in _IMPLEMENT_ADAPTER
+    assert "--disable unified_exec" in _IMPLEMENT_ADAPTER

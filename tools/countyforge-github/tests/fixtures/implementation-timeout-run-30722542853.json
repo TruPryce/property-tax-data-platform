@@ -1,0 +1,26 @@
+{
+  "run_id": 30722542853,
+  "provider": "sakana",
+  "runner_result": {
+    "ok": false,
+    "mode": "implement",
+    "disposition": "timed_out",
+    "summary": {
+      "disposition": "timed_out",
+      "exit_code": 5,
+      "duration_seconds": 3600.3889874160004,
+      "effective_budgets": { "wall_clock_seconds": 3600, "attempts": 1 }
+    }
+  },
+  "runner_exit_code": 5,
+  "lane_evidence": {
+    "provider": "sakana",
+    "runner_exit_code": 5,
+    "runner_result_present": true,
+    "implementation_result_present": false,
+    "freeze_outcome": "failure",
+    "frozen_bundle_present": false
+  },
+  "model_events_present_in_run_dir": true,
+  "model_events_retained_in_artifact": false
+}

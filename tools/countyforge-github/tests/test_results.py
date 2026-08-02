@@ -821,3 +821,80 @@ def test_an_adapter_disposition_never_upgrades_a_lane_to_success(tmp_path: Path)
         **_lane_inputs(tmp_path, adapter_disposition="implementation_prompt_budget_exceeded")  # type: ignore[arg-type]
     )
     assert classified["ok"] is False
+
+
+_TIMEOUT_FIXTURE = (
+    Path("tools/countyforge-github/tests/fixtures") / "implementation-timeout-run-30722542853.json"
+)
+
+
+def test_the_run_30722542853_timeout_classifies_and_survives_to_terminal_state(
+    tmp_path: Path,
+) -> None:
+    """One hour spent, no result: admitted and ran, but did not finish."""
+
+    fixture = json.loads(_TIMEOUT_FIXTURE.read_text(encoding="utf-8"))
+    summary = fixture["runner_result"]["summary"]
+    assert summary["duration_seconds"] > summary["effective_budgets"]["wall_clock_seconds"]
+    runner = _write(tmp_path / "runner.json", json.dumps(fixture["runner_result"]))
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        result_path=runner,
+        exit_code_path=_write(tmp_path / "exit", f"{fixture['runner_exit_code']}\n"),
+        implementation_result_present=fixture["lane_evidence"]["implementation_result_present"],
+        freeze_outcome=fixture["lane_evidence"]["freeze_outcome"],
+        frozen_bundle_present=fixture["lane_evidence"]["frozen_bundle_present"],
+    )
+    assert classified["disposition"] == "implementation_model_timed_out"
+    assert resolve_terminal_result(
+        command="implement",
+        result_path=runner,
+        exit_code_path=_write(tmp_path / "exit2", "5\n"),
+        lane_path=_write(tmp_path / "lane.json", json.dumps(classified)),
+    ) == {"ok": True, "state": "failed", "disposition": "implementation_model_timed_out"}
+
+
+@pytest.mark.parametrize(
+    "adapter_disposition",
+    [
+        "implementation_provider_credential_missing",
+        "implementation_prompt_budget_exceeded",
+        "implementation_prompt_preparation_failed",
+        "implementation_prompt_ceiling_drift",
+    ],
+)
+def test_timeout_never_overrides_a_more_specific_adapter_cause(
+    tmp_path: Path, adapter_disposition: str
+) -> None:
+    runner = _write(
+        tmp_path / "runner.json",
+        json.dumps({"ok": False, "mode": "implement", "disposition": "timed_out"}),
+    )
+    classified = classify_implementation_lane(
+        selected_provider="sakana",
+        lane_results={"openai": "skipped", "sakana": "failure"},
+        result_path=runner,
+        exit_code_path=_write(tmp_path / "exit", "5\n"),
+        adapter_disposition=adapter_disposition,
+    )
+    assert classified["disposition"] == adapter_disposition
+
+
+def test_timeout_never_overrides_infrastructure_or_freeze_failures(tmp_path: Path) -> None:
+    # No runner result at all is still infrastructure, not a timeout.
+    assert (
+        classify_implementation_lane(
+            selected_provider="sakana",
+            lane_results={"openai": "skipped", "sakana": "failure"},
+            result_path=None,
+        )["disposition"]
+        == "implementation_provider_infrastructure_failed"
+    )
+    # A successful runner whose freeze failed is still a freeze failure.
+    assert (
+        classify_implementation_lane(
+            **_lane_inputs(tmp_path, freeze_outcome="failure")  # type: ignore[arg-type]
+        )["disposition"]
+        == "implementation_freeze_failed"
+    )
