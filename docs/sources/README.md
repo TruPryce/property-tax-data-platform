@@ -2,6 +2,10 @@
 
 The code registry at [`property_tax_adapters.sources.texas.registry`](../../libs/property-tax-adapters/src/property_tax_adapters/sources/texas/registry.py) is the maintained list of initial county source definitions. The [normalization specification](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/county-appraisal-normalization/spec.md) defines shared adapter behavior. Evidence-backed county differences belong in the thin [Dallas](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/dallas-cad-source-contract/spec.md), [Collin](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/collin-cad-source-contract/spec.md), [Denton](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/denton-cad-source-contract/spec.md), [Ellis](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/ellis-cad-source-contract/spec.md), and [Rockwall](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/rockwall-cad-source-contract/spec.md) source contracts.
 
+The [Dallas parser foundation](dallas-parser-foundation.md) documents the first adapter-local,
+synthetic-only implementation boundary. It remains non-production and does not add acquisition,
+persistence, orchestration, or publication behavior.
+
 Source work begins with the GitHub source-onboarding Issue form. Before implementation, verify:
 
 - the publisher is the official appraisal district or county;
@@ -19,4 +23,5 @@ Add a county source-contract capability only after its spike establishes source 
 
 - [Documentation hub](../README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
+- [Dallas parser foundation](dallas-parser-foundation.md)
 - [Architecture](../architecture/README.md)
