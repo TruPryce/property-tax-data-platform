@@ -33,7 +33,10 @@ SECRET_NAMES=(
   AIRFLOW_ADMIN_PASSWORD
 )
 
-SECRET_LENGTH=48
+# 64 characters because AIRFLOW_JWT_SECRET is the HMAC key for HS512, which
+# warns below 64 bytes per RFC 7518 section 3.2. One length for every value
+# keeps the generator from having to reason about which is which.
+SECRET_LENGTH=64
 
 output_mode=print
 output_path=""
