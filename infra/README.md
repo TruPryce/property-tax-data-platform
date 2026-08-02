@@ -80,20 +80,26 @@ The wrapper authenticates `bws` with the access token, requests only the configu
 
 ## Administrative Access
 
-The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Keep both on loopback and publish the Airflow UI with `tailscale serve`.
+Both services default to loopback. PostgreSQL stays there: reach it by connecting to the host over Tailscale and using a local client, rather than publishing port `5432` to the tailnet.
 
-This requires HTTPS certificates to be enabled for the tailnet first, under **DNS → HTTPS Certificates** in the Tailscale admin console. Without it `tailscale status --json` reports `CertDomains: None` and the `--https` form fails.
+The Airflow UI is published by setting `AIRFLOW_API_BIND_ADDRESS` in `infra/.env` to the host's Tailscale address, which serves the UI at `http://<tailscale-ip>:8080`. Two consequences follow from binding a container port to that address:
+
+Docker has no ordering dependency on `tailscaled`, so after a reboot `docker-proxy` can try to bind the address before `tailscaled` has assigned it and fail with *cannot assign requested address*. `restart: unless-stopped` does not recover this, because the container fails at start rather than crashing later. Allow the bind to precede the address:
+
+```bash
+echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf
+sudo sysctl --system
+```
+
+The UI is also served over plain HTTP. Tailscale encrypts the transport between nodes, so this is not exposed traffic, but the session cookie is unencrypted on each node's loopback and browsers treat the origin as insecure.
+
+`tailscale serve` avoids both points by keeping the container on loopback and terminating TLS with a tailnet certificate:
 
 ```bash
 sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
-tailscale serve status
 ```
 
-The UI is then reachable on the tailnet at `https://<host>.<tailnet>.ts.net`, and the configuration persists across reboots in the `tailscaled` state.
-
-This terminates TLS with a tailnet certificate, keeps the container off the tailnet interface, and records access against a tailnet identity. Binding a container port directly to the Tailscale address also works, but it serves plaintext, and Docker fails to start the service after a reboot whenever it wins the race against `tailscaled` assigning the address.
-
-PostgreSQL has no tailnet listener. Reach it by connecting to the host over Tailscale and using a local client.
+That requires HTTPS certificates enabled for the tailnet under **DNS → HTTPS Certificates** in the admin console; without it `tailscale status --json` reports `CertDomains: None` and the `--https` form fails.
 
 The wrapper refuses any `POSTGRES_BIND_ADDRESS` or `AIRFLOW_API_BIND_ADDRESS` outside loopback and the Tailscale CGNAT range `100.64.0.0/10`. This is the only enforcement point: Docker publishes ports through its own iptables chain ahead of the host `INPUT` rules, so a `ufw` policy will not contain a misconfiguration here.
 

@@ -48,7 +48,7 @@
 - [ ] 5.3 Configure concurrency, retries, task timeouts, release-level locking, and XCom-safe identifiers
 - [ ] 5.4 Add structured logs, run metrics, freshness metrics, failure diagnostics, and secret redaction
 - [ ] 5.5 Document environment connection names, deployment prerequisites, runbooks, and release recovery procedures
-- [ ] 5.6 Provision the Akamai Dallas Ubuntu 24.04 runtime with Tailscale administration and isolated PostgreSQL, Airflow, worker, and API roles
+- [x] 5.6 Provision the Akamai Dallas Ubuntu 24.04 runtime with Tailscale administration and isolated PostgreSQL, Airflow, worker, and API roles
 - [ ] 5.7 Configure encrypted S3 locations for Bronze, exports, remote logs, PostgreSQL physical backups, and WAL with least-privilege policies and lifecycle rules
 - [ ] 5.8 Implement backup and WAL schedules, lag and age alerts, integrity checks, and recorded point-in-time restore exercises
 - [ ] 5.9 Automate and exercise a clean-host rebuild, accept RPO/RTO and retention, and only then disable the Linode backup add-on
