@@ -33,6 +33,29 @@ AIRFLOW_JWT_SECRET
 AIRFLOW_ADMIN_PASSWORD
 ```
 
+Generate the values rather than composing them by hand:
+
+```bash
+./infra/scripts/generate-runtime-secrets.sh --write ~/runtime-secrets.env
+```
+
+Every value except the Fernet key is 48 alphanumeric characters. Compose
+interpolates `AIRFLOW_DB_PASSWORD` into a SQLAlchemy URL, where a generator's
+default punctuation silently corrupts the connection — `p@ss/w0rd` parses as host
+`ss` with password `p`. That failure surfaces as an authentication error against
+a credential that looks correct everywhere you would think to check, because the
+PostgreSQL bootstrap quotes the same value safely. `AIRFLOW_FERNET_KEY` is 32
+random bytes in url-safe base64, which is what Airflow validates before it will
+decrypt a stored connection.
+
+Load the file into the Bitwarden project and delete it. Secrets can also be
+created directly with a write-capable machine account, which must not be the
+read-only account the runtime uses:
+
+```bash
+BWS_ACCESS_TOKEN=... ./infra/scripts/generate-runtime-secrets.sh --bws "$BWS_PROJECT_ID"
+```
+
 The machine-account access token is the only bootstrap credential stored on the VPS. Export it and the Bitwarden project ID without placing the token in shell history:
 
 ```bash
@@ -55,7 +78,49 @@ From the repository root:
 
 The wrapper authenticates `bws` with the access token, requests only the configured project, and uses `--no-inherit-env` before starting trusted Docker Compose. Bitwarden runtime secrets reach Compose by their exact names; `BWS_ACCESS_TOKEN` does not. Neither the access token nor a resolved value is passed into a container unless the Compose service explicitly requires that runtime value.
 
-The Airflow API defaults to `http://127.0.0.1:8080`; PostgreSQL defaults to loopback port `5432`. Set bind addresses only to an approved Tailscale address on the Akamai host.
+## Administrative Access
+
+Both services default to loopback. PostgreSQL stays there: reach it by connecting to the host over Tailscale and using a local client, rather than publishing port `5432` to the tailnet.
+
+The Airflow UI is published by setting `AIRFLOW_API_BIND_ADDRESS` in `infra/.env` to the host's Tailscale address, which serves the UI at `http://<tailscale-ip>:8080`. Two consequences follow from binding a container port to that address:
+
+Docker has no ordering dependency on `tailscaled`, so after a reboot `docker-proxy` can try to bind the address before `tailscaled` has assigned it and fail with *cannot assign requested address*. `restart: unless-stopped` does not recover this, because the container fails at start rather than crashing later. Allow the bind to precede the address:
+
+```bash
+echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf
+sudo sysctl --system
+```
+
+The UI is also served over plain HTTP. Tailscale encrypts the transport between nodes, so this is not exposed traffic, but the session cookie is unencrypted on each node's loopback and browsers treat the origin as insecure.
+
+`tailscale serve` avoids both points by keeping the container on loopback and terminating TLS with a tailnet certificate:
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
+```
+
+That requires HTTPS certificates enabled for the tailnet under **DNS → HTTPS Certificates** in the admin console; without it `tailscale status --json` reports `CertDomains: None` and the `--https` form fails.
+
+The wrapper refuses any `POSTGRES_BIND_ADDRESS` or `AIRFLOW_API_BIND_ADDRESS` outside loopback and the Tailscale CGNAT range `100.64.0.0/10`. This is the only enforcement point: Docker publishes ports through its own iptables chain ahead of the host `INPUT` rules, so a `ufw` policy will not contain a misconfiguration here.
+
+Reaching the tailnet is not authorization to administer the platform. Tailscale's default policy accepts every source to every destination, so the administrative surface needs an explicit rule:
+
+```json
+{
+  "tagOwners": {
+    "tag:platform-runtime": ["autogroup:admin"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["tag:platform-runtime:443"]
+    }
+  ]
+}
+```
+
+Neither port may be exposed with `tailscale funnel`, which would publish it to the public internet.
 
 Inspect health without printing configuration or credentials:
 
@@ -85,7 +150,11 @@ The PostgreSQL bootstrap creates no Silver or Gold tables. Schema, object privil
 
 ## Production Boundary
 
-This foundation does not configure Tailscale, TLS, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images. The machine access token is a separate bootstrap credential and must remain in the root-readable `.bws.env` file and approved off-host recovery custody.
+This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
+
+The machine access token is a separate bootstrap credential. On the host it lives only in `.bws.env`, owned by the invoking user with mode `0600`; the wrapper refuses to run if that file grants any group or world permission. Because the token cannot bootstrap itself from Secrets Manager, a second copy belongs in the Bitwarden vault alongside the other escrowed recovery material, and the credentials guarding that vault belong in offline custody.
+
+Rotating a database password in Bitwarden does not reach PostgreSQL: `postgres/init/10-create-runtime-databases.sh` runs only against an empty data directory. A rotation must also `ALTER ROLE ... PASSWORD` on the running cluster, and rotating `AIRFLOW_FERNET_KEY` strands existing encrypted connections unless the previous key is retained in the comma-separated list Airflow accepts for that setting.
 
 ## Validation
 

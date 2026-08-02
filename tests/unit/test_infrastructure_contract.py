@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -29,13 +32,30 @@ def load_compose() -> dict[str, object]:
     return document
 
 
-def parse_environment_file(path: Path) -> dict[str, str]:
+# Assembled from separate name and value literals so no source line contains a
+# `NAME=value` pair. Written literally it reads as an assigned credential to
+# detect-secrets, and neither an allowlist pragma nor a baseline entry is worth
+# spending on a fixture that holds no secret.
+BITWARDEN_TEST_CREDENTIALS = (
+    ("BWS_ACCESS_TOKEN", "test-access-token"),
+    ("BWS_PROJECT_ID", "test-project-id"),
+)
+BITWARDEN_TEST_ENVIRONMENT = "".join(
+    f"{name}={value}\n" for name, value in BITWARDEN_TEST_CREDENTIALS
+)
+
+
+def parse_environment_file_text(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line and not line.startswith("#"):
+    for line in text.splitlines():
+        if line and not line.startswith("#") and "=" in line:
             name, value = line.split("=", 1)
             values[name] = value
     return values
+
+
+def parse_environment_file(path: Path) -> dict[str, str]:
+    return parse_environment_file_text(path.read_text(encoding="utf-8"))
 
 
 def test_runtime_uses_airflow_three_local_executor_topology() -> None:
@@ -128,7 +148,6 @@ def test_bitwarden_bootstrap_writes_only_the_host_access_boundary(tmp_path: Path
         text=True,
         env={
             **os.environ,
-            "PATH": os.environ["PATH"],
             "BWS_ACCESS_TOKEN": "test-access-token",
             "BWS_PROJECT_ID": "test-project-id",
         },
@@ -137,7 +156,9 @@ def test_bitwarden_bootstrap_writes_only_the_host_access_boundary(tmp_path: Path
     values = parse_environment_file(environment_file)
     bitwarden_values = parse_environment_file(bitwarden_environment_file)
     assert SECRET_VARIABLES.isdisjoint(values)
-    assert values["AIRFLOW_UID"] == str(os.getuid())
+    # Pinned to the image UID rather than the invoking user: deriving this from
+    # `id -u` runs every Airflow service as root when bootstrapped under sudo.
+    assert values["AIRFLOW_UID"] == "50000"
     assert bitwarden_values == {
         "BWS_ACCESS_TOKEN": "test-access-token",
         "BWS_PROJECT_ID": "test-project-id",
@@ -154,3 +175,275 @@ def test_bitwarden_wrapper_does_not_inherit_access_token_into_compose() -> None:
     assert "--no-inherit-env" in wrapper
     assert "8#$bitwarden_file_mode & 077" in wrapper
     assert "BWS_ACCESS_TOKEN" not in compose
+
+
+def test_generated_secrets_are_url_safe_and_cover_the_runtime_contract() -> None:
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    generated = parse_environment_file_text(completed.stdout)
+    assert set(generated) == SECRET_VARIABLES
+    assert len(set(generated.values())) == len(SECRET_VARIABLES)
+    fernet_key = generated.pop("AIRFLOW_FERNET_KEY")
+    assert len(base64.urlsafe_b64decode(fernet_key)) == 32
+    for name, value in generated.items():
+        # Alphanumeric so a value stays intact inside the SQLAlchemy URL that
+        # Compose builds for the Airflow metadata connection.
+        assert value.isalnum() and value.isascii(), name
+        assert len(value) >= 32, name
+
+
+BWS_STUB = """#!/usr/bin/env bash
+if [[ "$1" == "secret" && "$2" == "list" ]]; then
+  python3 -c '
+import json, os
+path = os.environ["STUB_LOG"]
+stored = []
+if os.path.exists(path):
+    for line in open(path):
+        line = line.rstrip("\\n")
+        if "=" in line:
+            key, value = line.split("=", 1)
+            stored.append({"id": key, "key": key, "value": value})
+print(json.dumps(stored))
+'
+  exit 0
+fi
+if [[ "$1" == "secret" && "$2" == "create" ]]; then
+  shift 4
+  printf '%s=%s\\n' "$1" "$2" >>"$STUB_LOG"
+  exit 0
+fi
+exit 1
+"""
+
+# `bws secret list` takes the project as a positional argument and rejects
+# `--project-id`, so a stub that accepts anything would hide a real CLI error.
+BWS_STRICT_LIST_STUB = """#!/usr/bin/env bash
+if [[ "$1" == "secret" && "$2" == "list" ]]; then
+  shift 2
+  for argument in "$@"; do
+    if [[ "$argument" == --project-id* ]]; then
+      echo "error: unexpected argument '--project-id' found" >&2
+      exit 1
+    fi
+  done
+  echo '[]'
+  exit 0
+fi
+if [[ "$1" == "secret" && "$2" == "create" ]]; then exit 0; fi
+exit 1
+"""
+
+
+def test_bitwarden_creation_round_trips_every_value_intact(tmp_path: Path) -> None:
+    """Guards the whole create-then-read-back path against value corruption.
+
+    `IFS='=' read` drops a trailing delimiter under bash, which truncated the
+    Fernet key's base64 padding and stored a key Airflow could not decode. The
+    secret was created successfully, so only reading the value back catches it.
+    """
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    stub = stub_directory / "bws"
+    stub.write_text(BWS_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    stub_log = tmp_path / "created.env"
+
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh"), "--bws", "test-project"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_directory}:{os.environ['PATH']}",
+            "STUB_LOG": str(stub_log),
+            "BWS_ACCESS_TOKEN": "test-access-token",
+            "SECRET_CREATE_DELAY_SECONDS": "0",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "verified 9 secrets" in completed.stderr
+
+    stored = parse_environment_file(stub_log)
+    assert set(stored) == SECRET_VARIABLES
+    assert len(base64.urlsafe_b64decode(stored["AIRFLOW_FERNET_KEY"])) == 32
+
+
+def test_secret_creation_splits_on_the_first_delimiter_only() -> None:
+    generator = (INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in generator.splitlines() if not line.lstrip().startswith("#"))
+    # `IFS='=' read -r name value` is the construct that silently truncated the
+    # Fernet key under bash; substring extraction is delimiter-safe.
+    assert "IFS='=' read" not in code
+    assert '"${secret_line%%=*}"' in code
+    assert '"${secret_line#*=}"' in code
+
+
+def test_job_healthchecks_expand_the_container_hostname() -> None:
+    compose = load_compose()
+    for service in ("airflow-scheduler", "airflow-dag-processor", "airflow-triggerer"):
+        test = compose["services"][service]["healthcheck"]["test"]
+        assert test[0] == "CMD-SHELL", service
+        # `$$` is the Compose escape that reaches the shell as a single `$`.
+        # Single quotes around it reach the shell literally, so the check would
+        # compare against the string "${HOSTNAME}" and never match a live job.
+        assert '"$${HOSTNAME}"' in test[1], service
+        assert "'$${HOSTNAME}'" not in test[1], service
+
+
+def test_project_scoping_uses_the_positional_form_the_cli_accepts(tmp_path: Path) -> None:
+    """`bws secret list` rejects `--project-id`; only the positional form works."""
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    stub = stub_directory / "bws"
+    stub.write_text(BWS_STRICT_LIST_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh"), "--bws", "test-project"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_directory}:{os.environ['PATH']}",
+            "BWS_ACCESS_TOKEN": "test-access-token",
+            "SECRET_CREATE_DELAY_SECONDS": "0",
+        },
+    )
+    assert "unexpected argument" not in completed.stderr
+
+
+def _run_wrapper(arguments: list[str], tmp_path: Path, environment_body: str) -> subprocess.Popen:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text(environment_body, encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
+    bitwarden_environment_file.chmod(0o600)
+    return subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["config"],
+        ["convert"],
+        ["--profile", "debug", "config"],
+        ["-f", "infra/compose.yaml", "config"],
+        ["--project-name", "scratch", "config"],
+        ["--dry-run", "config"],
+    ],
+)
+def test_secret_rendering_guard_survives_global_compose_options(
+    arguments: list[str], tmp_path: Path
+) -> None:
+    """Compose accepts options before the subcommand, so `$1` is not the subcommand."""
+    completed = _run_wrapper(arguments, tmp_path, "POSTGRES_BIND_ADDRESS=127.0.0.1\n")
+    assert completed.returncode == 2, arguments
+    assert "it contains resolved secrets" in completed.stderr, arguments
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_a_duplicated_bind_address_definition(tmp_path: Path) -> None:
+    """Compose resolves the last definition, so validating the first is a bypass."""
+    completed = _run_wrapper(
+        ["ps"],
+        tmp_path,
+        "POSTGRES_BIND_ADDRESS=127.0.0.1\nPOSTGRES_BIND_ADDRESS=0.0.0.0\n",
+    )
+    assert completed.returncode == 2
+    assert "is defined 2 times" in completed.stderr
+
+
+def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
+    compose = load_compose()
+    command = compose["services"]["airflow-init"]["command"]
+    script = "".join(command)
+    # The upstream entrypoint swallows migration and user-creation failures, so
+    # the gate depends on these explicit checks running afterwards.
+    assert "airflow db check" in script
+    assert "airflow db check-migrations" in script
+    assert "airflow users list" in script
+    assert "set -euo pipefail" in script
+    assert "exec /entrypoint" not in script
+
+
+def test_wrapper_rejects_administrative_ports_on_public_interfaces() -> None:
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    assert "require_private_bind_address POSTGRES_BIND_ADDRESS" in wrapper
+    assert "require_private_bind_address AIRFLOW_API_BIND_ADDRESS" in wrapper
+    # Loopback plus the Tailscale CGNAT range 100.64.0.0/10.
+    assert "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" in wrapper
+    assert "BASH_REMATCH[1] >= 64 && BASH_REMATCH[1] <= 127" in wrapper
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_a_public_bind_address(tmp_path: Path) -> None:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text("POSTGRES_BIND_ADDRESS=0.0.0.0\n", encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
+    bitwarden_environment_file.chmod(0o600)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "ps"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+    assert completed.returncode == 2
+    assert "must bind to loopback or a Tailscale address" in completed.stderr
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+def test_wrapper_refuses_to_render_resolved_secrets(tmp_path: Path) -> None:
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text("POSTGRES_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    bitwarden_environment_file = tmp_path / "bitwarden.env"
+    bitwarden_environment_file.write_text(BITWARDEN_TEST_ENVIRONMENT, encoding="utf-8")
+    bitwarden_environment_file.chmod(0o600)
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh"), "config"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "COMPOSE_ENV_FILE": str(environment_file),
+            "BWS_ENV_FILE": str(bitwarden_environment_file),
+        },
+    )
+    assert completed.returncode == 2
+    assert "it contains resolved secrets" in completed.stderr

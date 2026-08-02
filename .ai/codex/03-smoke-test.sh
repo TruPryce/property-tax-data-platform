@@ -77,16 +77,26 @@ fail() { echo "SMOKE TEST FAILED: $1" >&2; exit 1; }
 # it here also makes the runner reuse it instead of re-fetching.
 resolve_provider_key() {
   if [ -n "${!PROVIDER_CREDENTIAL:-}" ]; then printf '%s' "${!PROVIDER_CREDENTIAL}"; return 0; fi
-  local token bws_bin
+  local token bws_bin project_id
+  local -a scope=()
   token="${BWS_ACCESS_TOKEN:-${BITWARDEN_TOKEN:-}}"
   if [ -z "$token" ] && [ -f "$REPO_ROOT/.env" ] \
     && git -C "$REPO_ROOT" check-ignore -q -- .env; then
     token="$(grep -E '^BITWARDEN_TOKEN=' "$REPO_ROOT/.env" | cut -d= -f2- || true)"
   fi
+  # Same project scoping as the runner, so the smoke test exercises the real
+  # lookup rather than a broader one that happens to find the same secret.
+  project_id="${BWS_PROJECT_ID:-${BITWARDEN_PROJECT_ID:-}}"
+  if [ -z "$project_id" ] && [ -f "$REPO_ROOT/.env" ] \
+    && git -C "$REPO_ROOT" check-ignore -q -- .env; then
+    project_id="$(grep -m 1 -E '^(BWS|BITWARDEN)_PROJECT_ID=' "$REPO_ROOT/.env" \
+      | cut -d= -f2- || true)"
+  fi
+  [ -n "$project_id" ] && scope=("$project_id")
   bws_bin="$(command -v bws || true)"
   [ -z "$bws_bin" ] && [ -x "$HOME/.local/bin/bws" ] && bws_bin="$HOME/.local/bin/bws"
   if [ -n "$token" ] && [ -n "$bws_bin" ]; then
-    BWS_ACCESS_TOKEN="$token" "$bws_bin" secret list -o json 2>/dev/null \
+    BWS_ACCESS_TOKEN="$token" "$bws_bin" secret list "${scope[@]}" -o json 2>/dev/null \
       | jq -r --arg k "$PROVIDER_SECRET_NAME" '.[] | select(.key==$k) | .value' \
       | head -n1
   fi

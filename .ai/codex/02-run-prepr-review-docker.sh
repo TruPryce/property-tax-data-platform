@@ -777,18 +777,34 @@ error: $REPO_ROOT/.env is NOT git-ignored; refusing to read a secret token from 
 EOF
     fi
   fi
+  # Scope the lookup to the review project. The project ID is an identifier, not
+  # a credential, so an unreadable .env is skipped rather than fatal. Without it
+  # `bws secret list` enumerates every secret the machine account can reach,
+  # which is only safe while that account happens to be scoped correctly.
+  bws_project_id="${BWS_PROJECT_ID:-${BITWARDEN_PROJECT_ID:-}}"
+  if [ -z "$bws_project_id" ] && [ -f "$REPO_ROOT/.env" ] \
+    && git -C "$REPO_ROOT" check-ignore -q -- .env; then
+    bws_project_id="$(grep -m 1 -E '^(BWS|BITWARDEN)_PROJECT_ID=' "$REPO_ROOT/.env" \
+      | cut -d= -f2- || true)"
+  fi
+  bws_scope=()
+  [ -n "$bws_project_id" ] && bws_scope=("$bws_project_id")
+
   BWS_BIN="$(command -v bws || true)"
   [ -z "$BWS_BIN" ] && [ -x "$HOME/.local/bin/bws" ] && BWS_BIN="$HOME/.local/bin/bws"
   if [ -n "$bws_token" ] && [ -n "$BWS_BIN" ]; then
+    if [ -z "$bws_project_id" ]; then
+      echo "warning: no BWS_PROJECT_ID set; the Bitwarden lookup is not scoped to a project" >&2
+    fi
     echo "==> Fetching selected provider credential from Bitwarden Secrets Manager"
-    fetched_provider_key="$(BWS_ACCESS_TOKEN="$bws_token" "$BWS_BIN" secret list -o json 2>/dev/null \
+    fetched_provider_key="$(BWS_ACCESS_TOKEN="$bws_token" "$BWS_BIN" secret list "${bws_scope[@]}" -o json 2>/dev/null \
       | jq -r --arg k "$PROVIDER_SECRET_NAME" '.[] | select(.key==$k) | .value' \
       | head -n1)"
     printf -v "$PROVIDER_CREDENTIAL" '%s' "$fetched_provider_key"
     export "$PROVIDER_CREDENTIAL"
     unset fetched_provider_key
   fi
-  unset bws_token
+  unset bws_token bws_project_id bws_scope
 fi
 
 if [ -z "${!PROVIDER_CREDENTIAL:-}" ]; then

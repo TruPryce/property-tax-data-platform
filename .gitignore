@@ -21,6 +21,12 @@ tmp/
 .env
 .env.*
 !.env.example
+# `.env.*` does not match `.bws.env`, so the Bitwarden access token needs its
+# own rule at every depth rather than relying on infra/.gitignore.
+.bws.env
+**/.bws.env
+!.bws.env.example
+!**/.bws.env.example
 *.pem
 *.key
 *credentials*.json

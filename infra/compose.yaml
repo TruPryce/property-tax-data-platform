@@ -58,7 +58,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    mem_limit: ${POSTGRES_MEMORY_LIMIT:-5g}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
     restart: unless-stopped
 
   airflow-init:
@@ -67,9 +67,24 @@ services:
     command:
       - -c
       - |
+        set -euo pipefail
         mkdir -p /opt/airflow/logs
         chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
-        exec /entrypoint airflow version
+        # The upstream entrypoint runs `airflow db migrate || true` and
+        # `airflow users create ... || true`, so it cannot fail. Without the
+        # checks below this service exits 0 on a failed migration and
+        # service_completed_successfully lets every other service start against
+        # an empty metadata database.
+        /entrypoint airflow version
+        # This service runs as root so it can chown the log volume, and root's
+        # HOME excludes the airflow user's site-packages. Every airflow command
+        # therefore has to go through /entrypoint. Clearing the two init flags
+        # stops it from repeating the migration and user creation on each call.
+        export _AIRFLOW_DB_MIGRATE= _AIRFLOW_WWW_USER_CREATE=
+        /entrypoint airflow db check
+        /entrypoint airflow db check-migrations -t 60
+        /entrypoint airflow users list --output plain \
+          | grep -qw "${AIRFLOW_ADMIN_USERNAME:?AIRFLOW_ADMIN_USERNAME is required}"
     environment:
       <<: *airflow-common-environment
       _AIRFLOW_DB_MIGRATE: "true"
@@ -102,7 +117,10 @@ services:
     <<: *airflow-common
     command: scheduler
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname '$${HOSTNAME}'"]
+      # Double quotes: single quotes reach the shell literally and stop
+      # $HOSTNAME expanding, so the check compares against the string
+      # "${HOSTNAME}" and reports a healthy scheduler as unhealthy forever.
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -113,14 +131,14 @@ services:
         condition: service_completed_successfully
       airflow-api-server:
         condition: service_healthy
-    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY_LIMIT:-6g}
+    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY_LIMIT:-4g}
     restart: unless-stopped
 
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname '$${HOSTNAME}'"]
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
       retries: 5
@@ -136,7 +154,7 @@ services:
     <<: *airflow-common
     command: triggerer
     healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname '$${HOSTNAME}'"]
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
       retries: 5
