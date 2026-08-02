@@ -33,26 +33,28 @@ AIRFLOW_JWT_SECRET
 AIRFLOW_ADMIN_PASSWORD
 ```
 
-The five database passwords MUST be generated from `[A-Za-z0-9]` only. Compose
-interpolates `AIRFLOW_DB_PASSWORD` into a SQLAlchemy URL, so a generator's
-default punctuation silently corrupts the connection: `p@ss/w0rd` parses as host
-`ss` with password `p`. The failure surfaces as an authentication error against a
-credential that is correct everywhere you would think to look, because the
-PostgreSQL bootstrap quotes the same value safely. Use 32 or more characters to
-offset the reduced alphabet:
+Generate the values rather than composing them by hand:
 
 ```bash
-LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40; echo
+./infra/scripts/generate-runtime-secrets.sh --write ~/runtime-secrets.env
 ```
 
-`AIRFLOW_FERNET_KEY` must be a real Fernet key, not random text:
+Every value except the Fernet key is 48 alphanumeric characters. Compose
+interpolates `AIRFLOW_DB_PASSWORD` into a SQLAlchemy URL, where a generator's
+default punctuation silently corrupts the connection — `p@ss/w0rd` parses as host
+`ss` with password `p`. That failure surfaces as an authentication error against
+a credential that looks correct everywhere you would think to check, because the
+PostgreSQL bootstrap quotes the same value safely. `AIRFLOW_FERNET_KEY` is 32
+random bytes in url-safe base64, which is what Airflow validates before it will
+decrypt a stored connection.
+
+Load the file into the Bitwarden project and delete it. Secrets can also be
+created directly with a write-capable machine account, which must not be the
+read-only account the runtime uses:
 
 ```bash
-python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+BWS_ACCESS_TOKEN=... ./infra/scripts/generate-runtime-secrets.sh --bws "$BWS_PROJECT_ID"
 ```
-
-`AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, and `AIRFLOW_ADMIN_PASSWORD` are
-never placed in a URL and may use the full alphabet.
 
 The machine-account access token is the only bootstrap credential stored on the VPS. Export it and the Bitwarden project ID without placing the token in shell history:
 

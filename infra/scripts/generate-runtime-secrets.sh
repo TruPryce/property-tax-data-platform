@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Generates the nine runtime secret values the Compose topology requires.
+#
+# Values are alphanumeric apart from the Fernet key. That is not decoration:
+# Compose interpolates AIRFLOW_DB_PASSWORD into a SQLAlchemy URL, where a
+# generator's default punctuation silently reparses the host and password, while
+# the PostgreSQL bootstrap quotes the same value safely. The remaining values
+# reach Airflow as plain environment variables or quoted arguments, so a single
+# alphabet keeps every value safe in every position at the cost of nothing but
+# length.
+#
+#   ./infra/scripts/generate-runtime-secrets.sh
+#       Print `NAME=value` lines for manual entry into the Bitwarden project.
+#
+#   ./infra/scripts/generate-runtime-secrets.sh --write PATH
+#       Write those lines to a new mode-0600 file instead.
+#
+#   BWS_ACCESS_TOKEN=... ./infra/scripts/generate-runtime-secrets.sh --bws PROJECT_ID
+#       Create the secrets directly in a Bitwarden Secrets Manager project. This
+#       needs a machine account with write access, which is deliberately not the
+#       read-only account the runtime wrapper uses.
+
+SECRET_NAMES=(
+  POSTGRES_SUPERUSER_PASSWORD
+  AIRFLOW_DB_PASSWORD
+  PROPERTY_TAX_MIGRATOR_PASSWORD
+  PROPERTY_TAX_INGESTION_PASSWORD
+  PROPERTY_TAX_API_PASSWORD
+  AIRFLOW_API_SECRET_KEY
+  AIRFLOW_JWT_SECRET
+  AIRFLOW_ADMIN_PASSWORD
+)
+
+SECRET_LENGTH=48
+
+output_mode=print
+output_path=""
+project_id=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    --write)
+      output_mode=write
+      output_path="${2:?--write requires a path}"
+      shift 2
+      ;;
+    --bws)
+      output_mode=bws
+      project_id="${2:?--bws requires a project ID}"
+      shift 2
+      ;;
+    *)
+      echo "unrecognized argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# `head -c` closes the pipe and leaves `tr` killed by SIGPIPE, which pipefail
+# would otherwise report as a failure.
+alphanumeric_secret() {
+  (
+    set +o pipefail
+    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$SECRET_LENGTH"
+  )
+}
+
+# A Fernet key is 32 random bytes in url-safe base64, which is what Airflow
+# validates before it will decrypt any stored connection.
+fernet_key() {
+  head -c 32 /dev/urandom | base64 | tr '+/' '-_'
+}
+
+emit_secrets() {
+  local secret_name
+  for secret_name in "${SECRET_NAMES[@]}"; do
+    printf '%s=%s\n' "$secret_name" "$(alphanumeric_secret)"
+  done
+  printf 'AIRFLOW_FERNET_KEY=%s\n' "$(fernet_key)"
+}
+
+case "$output_mode" in
+  print)
+    emit_secrets
+    ;;
+  write)
+    if [[ -e "$output_path" ]]; then
+      echo "refusing to replace an existing file: $output_path" >&2
+      exit 2
+    fi
+    (
+      umask 077
+      emit_secrets >"$output_path"
+    )
+    chmod 0600 "$output_path"
+    echo "wrote 9 secrets to $output_path with mode 0600" >&2
+    echo "load them into Bitwarden, then remove the file" >&2
+    ;;
+  bws)
+    if ! command -v bws >/dev/null 2>&1; then
+      echo "required command is unavailable: bws" >&2
+      exit 2
+    fi
+    if [[ -z "${BWS_ACCESS_TOKEN:-}" ]]; then
+      echo "BWS_ACCESS_TOKEN is required and must have write access" >&2
+      exit 2
+    fi
+    while IFS='=' read -r secret_name secret_value; do
+      bws secret create --output none "$secret_name" "$secret_value" "$project_id"
+      echo "created $secret_name" >&2
+    done < <(emit_secrets)
+    ;;
+esac

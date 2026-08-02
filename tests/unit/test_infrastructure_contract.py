@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import stat
@@ -31,13 +32,17 @@ def load_compose() -> dict[str, object]:
     return document
 
 
-def parse_environment_file(path: Path) -> dict[str, str]:
+def parse_environment_file_text(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if line and not line.startswith("#") and "=" in line:
             name, value = line.split("=", 1)
             values[name] = value
     return values
+
+
+def parse_environment_file(path: Path) -> dict[str, str]:
+    return parse_environment_file_text(path.read_text(encoding="utf-8"))
 
 
 def test_runtime_uses_airflow_three_local_executor_topology() -> None:
@@ -157,6 +162,26 @@ def test_bitwarden_wrapper_does_not_inherit_access_token_into_compose() -> None:
     assert "--no-inherit-env" in wrapper
     assert "8#$bitwarden_file_mode & 077" in wrapper
     assert "BWS_ACCESS_TOKEN" not in compose
+
+
+def test_generated_secrets_are_url_safe_and_cover_the_runtime_contract() -> None:
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    generated = parse_environment_file_text(completed.stdout)
+    assert set(generated) == SECRET_VARIABLES
+    assert len(set(generated.values())) == len(SECRET_VARIABLES)
+    fernet_key = generated.pop("AIRFLOW_FERNET_KEY")
+    assert len(base64.urlsafe_b64decode(fernet_key)) == 32
+    for name, value in generated.items():
+        # Alphanumeric so a value stays intact inside the SQLAlchemy URL that
+        # Compose builds for the Airflow metadata connection.
+        assert value.isalnum() and value.isascii(), name
+        assert len(value) >= 32, name
 
 
 def test_initialization_fails_closed_on_an_unmigrated_metadata_database() -> None:
