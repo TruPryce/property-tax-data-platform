@@ -56,6 +56,18 @@ def _refusal(document: dict[str, Any], **kwargs: Any) -> str:
 # --------------------------------------------------------------------------
 
 
+def _collect(comments: list[dict[str, Any]], **overrides: Any):
+    """Collect with an authorized maintainer unless a test says otherwise.
+
+    `authorized_author_ids` has no default in production: an empty allowlist
+    authorizes nobody, so a test that omitted it would silently assert on an
+    empty package rather than on the behaviour it names.
+    """
+
+    overrides.setdefault("authorized_author_ids", [AUTHOR_ID])
+    return collect_decision_input(comments, **overrides)
+
+
 def _part(
     part: int,
     total: int,
@@ -86,7 +98,7 @@ def _four_parts() -> list[dict[str, Any]]:
 
 
 def test_1_a_four_part_decision_package_is_assembled_whole() -> None:
-    collected = collect_decision_input(_four_parts(), issue_number=18)
+    collected = _collect(_four_parts(), issue_number=18)
     assert [part.part for part in collected.parts] == [1, 2, 3, 4]
     assert collected.input_id == "collin-1"
     text = collected.text()
@@ -104,7 +116,7 @@ def test_1_a_four_part_decision_package_is_assembled_whole() -> None:
 def test_2_a_missing_part_fails_closed_rather_than_planning_from_a_fragment() -> None:
     parts = [comment for comment in _four_parts() if "part=3/4" not in comment["body"]]
     with pytest.raises(ControlPlaneError) as raised:
-        collect_decision_input(parts, issue_number=18)
+        _collect(parts, issue_number=18)
     assert raised.value.code == INCOMPLETE
     assert raised.value.details["reason"] == "missing_part"
     assert raised.value.details["missing"] == [3]
@@ -113,17 +125,17 @@ def test_2_a_missing_part_fails_closed_rather_than_planning_from_a_fragment() ->
 def test_3_a_duplicate_part_number_fails() -> None:
     parts = [*_four_parts(), _part(2, 4, "a second D2", comment_id=2000)]
     with pytest.raises(ControlPlaneError) as raised:
-        collect_decision_input(parts, issue_number=18)
+        _collect(parts, issue_number=18)
     assert raised.value.details["reason"] == "duplicate_part"
 
 
 def test_4_a_part_edited_after_the_trigger_fails_closed() -> None:
-    bound = collect_decision_input(_four_parts(), issue_number=18)
+    bound = _collect(_four_parts(), issue_number=18)
     provenance = [part.provenance() for part in bound.parts]
     edited = _four_parts()
     edited[2]["body"] = edited[2]["body"] + "\n\nreconsidered after the run started"
     edited[2]["updated_at"] = "2026-07-31T09:00:00Z"
-    reread = collect_decision_input(edited, issue_number=18)
+    reread = _collect(edited, issue_number=18)
     with pytest.raises(ControlPlaneError) as raised:
         assert_unedited_since_trigger(reread, provenance)
     assert raised.value.details["reason"] == "part_edited_after_trigger"
@@ -134,10 +146,10 @@ def test_5_an_oversized_part_is_excluded_with_a_reason_never_truncated() -> None
     parts = _four_parts()
     parts[1] = _part(2, 4, "x" * 30_000, comment_id=1002)
     with pytest.raises(ControlPlaneError) as raised:
-        collect_decision_input(parts, issue_number=18, max_part_bytes=24_000)
+        _collect(parts, issue_number=18, max_part_bytes=24_000)
     # Excluded, so the package is incomplete; it is never half-included.
     assert raised.value.details["reason"] == "missing_part"
-    partial = collect_decision_input([parts[1]], issue_number=18, max_part_bytes=24_000)
+    partial = _collect([parts[1]], issue_number=18, max_part_bytes=24_000)
     assert partial.parts == []
     assert partial.excluded[0]["reason"] == EXCLUDED_TOO_LARGE
     assert partial.excluded[0]["byte_length"] == 30_000
@@ -146,7 +158,7 @@ def test_5_an_oversized_part_is_excluded_with_a_reason_never_truncated() -> None
 def test_6_the_total_decision_budget_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     parts = [_part(index, 4, "y" * 5_000, comment_id=1000 + index) for index in range(1, 5)]
     with pytest.raises(ControlPlaneError) as raised:
-        collect_decision_input(parts, issue_number=18, max_total_bytes=10_000)
+        _collect(parts, issue_number=18, max_total_bytes=10_000)
     assert raised.value.details["reason"] == "total_budget_exceeded"
     assert raised.value.details["total_byte_length"] == 20_000
 
@@ -156,9 +168,7 @@ def test_7_bot_status_and_command_comments_are_never_decision_content() -> None:
     bot = _part(1, 1, "status", comment_id=9001, input_id="bot", author_id=41898282)
     bot["user"]["type"] = "Bot"
     command = _part(1, 1, "/countyforge plan", comment_id=9002, input_id="cmd")
-    collected = collect_decision_input(
-        [*parts, bot, command], issue_number=18, trusted_bot_id=41898282
-    )
+    collected = _collect([*parts, bot, command], issue_number=18, trusted_bot_id=41898282)
     assert collected.input_id == "collin-1"
     assert len(collected.parts) == 4
     reasons = {item["reason"] for item in collected.excluded}
@@ -170,9 +180,7 @@ def test_an_unauthorized_author_and_a_foreign_issue_are_excluded() -> None:
     parts = _four_parts()
     stranger = _part(1, 1, "decision", comment_id=8001, input_id="other", author_id=999)
     foreign = _part(1, 1, "decision", comment_id=8002, input_id="foreign", issue=43)
-    collected = collect_decision_input(
-        [*parts, stranger, foreign], issue_number=18, authorized_author_ids=[AUTHOR_ID]
-    )
+    collected = _collect([*parts, stranger, foreign], issue_number=18)
     reasons = {item["reason"] for item in collected.excluded}
     assert reasons >= {"author_not_authorized", "issue_number_mismatch"}
     assert len(collected.parts) == 4
@@ -183,7 +191,7 @@ def test_an_older_decision_package_is_recorded_as_superseded_not_merged() -> Non
         _part(index, 2, f"old D{index}", comment_id=500 + index, input_id="collin-0")
         for index in range(1, 3)
     ]
-    collected = collect_decision_input([*older, *_four_parts()], issue_number=18)
+    collected = _collect([*older, *_four_parts()], issue_number=18)
     assert collected.input_id == "collin-1"
     superseded = [item for item in collected.excluded if item["reason"] == EXCLUDED_SUPERSEDED]
     assert {item["part"] for item in superseded} == {1, 2}
@@ -201,7 +209,7 @@ def test_only_the_exact_versioned_marker_selects_a_comment() -> None:
 
 def test_a_comment_posted_after_the_trigger_is_not_part_of_the_package() -> None:
     parts = [*_four_parts(), _part(5, 5, "late", comment_id=99_999)]
-    collected = collect_decision_input(parts, issue_number=18, comment_id_upper_bound=1004)
+    collected = _collect(parts, issue_number=18, comment_id_upper_bound=1004)
     assert [part.part for part in collected.parts] == [1, 2, 3, 4]
     assert any(item["reason"] == "posted_after_trigger" for item in collected.excluded)
 
@@ -658,6 +666,8 @@ def test_a_four_part_decision_package_survives_packet_construction(tmp_path: Pat
         trigger={
             "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
             "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            # Decision content counts only from the actor the trigger authorized.
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
         },
         issue={
             "number": 18,
@@ -686,3 +696,170 @@ def test_a_four_part_decision_package_survives_packet_construction(tmp_path: Pat
     assert len(comment_sources) == 4
     for source in comment_sources:
         assert source["truncated"] is False
+
+
+def test_an_unauthorized_commenter_cannot_supply_or_supersede_the_package(
+    tmp_path: Path,
+) -> None:
+    """Review 4843364924, blocker 1.
+
+    The marker selects a comment; it never confers trust. A stranger posting a
+    newer, complete, well-formed package must not displace the maintainer's --
+    and with no authorized actor at all, nothing is selected.
+    """
+
+    import subprocess
+
+    from countyforge_github.planning import build_planning_packet
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    maintainer = [
+        _part(index, 4, f"## D{index} — maintainer decision", comment_id=1000 + index)
+        for index in range(1, 5)
+    ]
+    # Newer, complete, correctly marked -- and from someone else.
+    stranger = [
+        _part(
+            index,
+            2,
+            f"## D{index} — stranger decision",
+            comment_id=5000 + index,
+            input_id="stranger-package",
+            author_id=99_999,
+        )
+        for index in range(1, 3)
+    ]
+    issue = {
+        "number": 18,
+        "title": "feature: add Collin CAD Access decoder foundation",
+        "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+        "labels": [],
+    }
+
+    def build(actor: dict[str, object] | None, output: Path) -> dict[str, object]:
+        trigger: dict[str, object] = {
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+        }
+        if actor is not None:
+            trigger["actor"] = actor
+        info = build_planning_packet(
+            trigger=trigger,
+            issue=issue,
+            contract_root=root,
+            output_dir=output,
+            run_id=f"authorization-{output.name}",
+            comments=[*maintainer, *stranger],
+        )
+        return json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+
+    authorized = build(
+        {"id": AUTHOR_ID, "login": "maintainer", "type": "User"}, tmp_path / "authorized"
+    )
+    package = authorized["decision_input"]
+    assert package["decision_input_present"] is True
+    assert package["input_id"] == "collin-1"
+    assert package["included_part_count"] == 4
+    assert 99_999 not in {item["author_id"] for item in package["included_parts"]}
+    assert any(item["reason"] == "author_not_authorized" for item in package["excluded"])
+
+    # No authorized actor: an empty allowlist authorizes nobody, not everybody.
+    anonymous = build(None, tmp_path / "anonymous")
+    assert anonymous["decision_input"]["decision_input_present"] is False
+    assert anonymous["decision_input"]["included_part_count"] == 0
+
+
+def test_publication_refuses_a_decision_edited_after_the_packet(tmp_path: Path) -> None:
+    """Review 4843364924, blocker 2: nothing re-checked the bound digests."""
+
+    from countyforge_github.planning import _assert_decision_input_unchanged
+
+    parts = _collect(_four_parts(), issue_number=18).parts
+    manifest = {
+        "decision_input": {
+            "decision_input_present": True,
+            "included_parts": [part.provenance() for part in parts],
+        }
+    }
+
+    class _Github:
+        def __init__(self, comments: list[dict[str, Any]]) -> None:
+            self._comments = comments
+
+        def list_comments(self, repository: str, target_number: int) -> list[dict[str, Any]]:
+            assert target_number == 18
+            return self._comments
+
+    # Unchanged: publication proceeds.
+    _assert_decision_input_unchanged(
+        _Github(_four_parts()),
+        repository="TruPryce/property-tax-data-platform",
+        issue_number=18,
+        manifest=manifest,
+    )
+
+    edited = _four_parts()
+    edited[2]["body"] += "\n\nreconsidered after the packet was built"
+    edited[2]["updated_at"] = "2026-08-02T09:00:00Z"
+    with pytest.raises(ControlPlaneError) as raised:
+        _assert_decision_input_unchanged(
+            _Github(edited),
+            repository="TruPryce/property-tax-data-platform",
+            issue_number=18,
+            manifest=manifest,
+        )
+    assert raised.value.details["reason"] == "part_edited_after_trigger"
+
+    # A deleted part is equally disqualifying.
+    with pytest.raises(ControlPlaneError) as raised:
+        _assert_decision_input_unchanged(
+            _Github(_four_parts()[:3]),
+            repository="TruPryce/property-tax-data-platform",
+            issue_number=18,
+            manifest=manifest,
+        )
+    assert raised.value.code == "incomplete_decision_input"
+
+
+def test_an_unreadable_comment_list_refuses_rather_than_skipping_the_check() -> None:
+    from countyforge_github.planning import _assert_decision_input_unchanged
+
+    parts = _collect(_four_parts(), issue_number=18).parts
+
+    class _Broken:
+        def list_comments(self, repository: str, target_number: int) -> list[dict[str, Any]]:
+            raise RuntimeError("transport failure")
+
+    with pytest.raises(ControlPlaneError) as raised:
+        _assert_decision_input_unchanged(
+            _Broken(),
+            repository="TruPryce/property-tax-data-platform",
+            issue_number=18,
+            manifest={
+                "decision_input": {
+                    "decision_input_present": True,
+                    "included_parts": [part.provenance() for part in parts],
+                }
+            },
+        )
+    assert raised.value.code == "decision_input_unverifiable"
+
+
+def test_publication_invokes_the_edit_check_before_the_first_git_object() -> None:
+    """A tested helper nobody calls proves nothing; pin the call site.
+
+    The behavioural proof is `test_publication_refuses_a_decision_edited_after_
+    the_packet`; this asserts the live publisher reaches it, and reaches it
+    before any Git object exists.
+    """
+
+    source = Path("tools/countyforge-github/src/countyforge_github/planning.py").read_text(
+        encoding="utf-8"
+    )
+    body = source[source.index("\ndef publish_plan(") :]
+    call = body.index("_assert_decision_input_unchanged(")
+    for stage in ("create_blobs", "create_tree", "create_commit", "create_ref"):
+        assert call < body.index(f'progress.enter("{stage}")'), stage
+    # And after the packet/manifest have been validated, so it reads bound facts.
+    assert body.index('progress.enter("validate_provenance")') < call

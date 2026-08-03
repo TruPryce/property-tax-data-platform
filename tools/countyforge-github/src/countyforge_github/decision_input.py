@@ -150,7 +150,7 @@ def collect_decision_input(
     comments: Iterable[JsonObject],
     *,
     issue_number: int,
-    authorized_author_ids: Sequence[int] = (),
+    authorized_author_ids: Sequence[int],
     trusted_bot_id: int | None = None,
     comment_id_upper_bound: int | None = None,
     max_parts: int = MAX_PARTS,
@@ -158,6 +158,10 @@ def collect_decision_input(
     max_total_bytes: int = MAX_TOTAL_DECISION_BYTES,
 ) -> DecisionInput:
     """Assemble the newest complete decision package, or refuse to plan.
+
+    `authorized_author_ids` is required and is not defaulted: an empty
+    allowlist authorizes nobody.  The marker selects a comment; it never confers
+    trust, and the author must independently be one the trigger authorized.
 
     `comment_id_upper_bound` is the trigger boundary: a part created after the
     trigger is not part of the package the trigger referred to.  A part *edited*
@@ -190,7 +194,10 @@ def collect_decision_input(
         if int(match.group("issue")) != issue_number:
             excluded.append({"comment_id": comment_id, "reason": "issue_number_mismatch"})
             continue
-        if authorized_author_ids and author_id not in set(authorized_author_ids):
+        if author_id not in set(authorized_author_ids):
+            # Fail closed. An empty allowlist means *no* author is authorized,
+            # not "skip the check": otherwise any commenter could post a newer
+            # complete package and supersede the maintainer's.
             excluded.append({"comment_id": comment_id, "reason": "author_not_authorized"})
             continue
         if comment_id_upper_bound is not None and comment_id > comment_id_upper_bound:

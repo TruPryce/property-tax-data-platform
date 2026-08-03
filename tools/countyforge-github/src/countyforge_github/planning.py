@@ -30,7 +30,12 @@ from countyforge_runner.errors import KernelError
 from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
-from countyforge_github.decision_input import MARKER, MAX_PART_BYTES, collect_decision_input
+from countyforge_github.decision_input import (
+    MARKER,
+    MAX_PART_BYTES,
+    assert_unedited_since_trigger,
+    collect_decision_input,
+)
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning_scope import resolve_planning_scope
 from countyforge_github.planning_semantics import validate_planning_semantics
@@ -482,9 +487,20 @@ def build_planning_packet(
     # A marked decision package is assembled whole or refused; ordinary comments
     # keep the existing bound.  Assembling here means the packet the model reads
     # and the manifest a reviewer reads describe the same decision input.
+    # Only the actor the trigger already authorized may supply decision content.
+    # Without this the marker alone would be enough for any commenter to post a
+    # newer complete package and supersede the maintainer's.
+    actor = trigger.get("actor")
+    authorized_author_ids: list[int] = []
+    if isinstance(actor, dict):
+        try:
+            authorized_author_ids.append(int(actor.get("id", 0)))
+        except (TypeError, ValueError):
+            authorized_author_ids = []
     decision_input = collect_decision_input(
         comment_records,
         issue_number=int(issue.get("number", 0)),
+        authorized_author_ids=[value for value in authorized_author_ids if value > 0],
         trusted_bot_id=trusted_bot_id,
         comment_id_upper_bound=comment_id_upper_bound,
     )
@@ -1010,6 +1026,46 @@ def _publish_ref(
     return head_sha, True
 
 
+def _assert_decision_input_unchanged(
+    github: Any,
+    *,
+    repository: str,
+    issue_number: int,
+    manifest: JsonObject,
+) -> None:
+    """Re-read the decision package and refuse if it moved since the packet.
+
+    The packet binds each part's author, comment ID, digest, and `updated_at`.
+    Nothing checked them again, so a maintainer could edit a decision after
+    packet construction and the run would publish against evidence that no
+    longer exists.  This runs before the first Git object is created.
+    """
+
+    bound = manifest.get("decision_input")
+    if not isinstance(bound, dict) or bound.get("decision_input_present") is not True:
+        return
+    parts = [item for item in bound.get("included_parts") or [] if isinstance(item, dict)]
+    if not parts:
+        return
+    try:
+        comments = github.list_comments(repository, int(issue_number))
+    except Exception as error:  # noqa: BLE001 - re-raised as a bounded refusal
+        raise ControlPlaneError(
+            "decision_input_unverifiable",
+            "The bound decision input could not be re-read before publication.",
+            {"reason": type(error).__name__},
+        ) from None
+    authorized = sorted({int(item.get("author_id", 0)) for item in parts})
+    upper_bound = max(int(item.get("comment_id", 0)) for item in parts)
+    observed = collect_decision_input(
+        comments,
+        issue_number=int(issue_number),
+        authorized_author_ids=authorized,
+        comment_id_upper_bound=upper_bound,
+    )
+    assert_unedited_since_trigger(observed, parts)
+
+
 def publish_plan(
     github: Any,
     *,
@@ -1111,6 +1167,12 @@ def publish_plan(
             result,
             contract_root=publication_root,
             source_ids={str(source["source_id"]) for source in packet["sources"]},
+        )
+        _assert_decision_input_unchanged(
+            github,
+            repository=repository,
+            issue_number=issue,
+            manifest=manifest,
         )
         progress.enter("resolve_predecessor")
         change = str(result["proposed_change_name"])
