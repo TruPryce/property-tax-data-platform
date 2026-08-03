@@ -22,6 +22,8 @@ from countyforge_github.decision_input import (
     collect_decision_input,
 )
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.planning import validate_planning_result
+from countyforge_github.planning_scope import POLICY_PATH, resolve_planning_scope
 from countyforge_github.planning_semantics import (
     SEMANTIC_DISPOSITION,
     validate_planning_semantics,
@@ -528,3 +530,159 @@ def test_a_v1_planning_result_is_readable_but_not_republishable() -> None:
     """Migration: old results are not silently upgraded into new ones."""
 
     assert _refusal(_result(contract_version=1)) == "contract_version_unsupported"
+
+
+# --------------------------------------------------------------------------
+# Review 4840228618 — the ceiling and the boundary must be trusted, and must
+# apply on the live call path, not only when a test passes them by hand.
+# --------------------------------------------------------------------------
+
+
+def test_the_live_path_refuses_a_narrow_but_unapproved_write_scope(tmp_path: Path) -> None:
+    """Blocker 1: the model authored both sides of the subset check.
+
+    A denylist stops `libs`; it cannot tell that `services/foo/` is the wrong
+    narrow scope. The ceiling now comes from committed policy, so a plan that
+    declares an unapproved scope is refused through `validate_planning_result`
+    with no `declared_scope` argument -- the way every live caller invokes it.
+    """
+
+    for scope in (
+        ["services/collin-api/"],
+        ["libs/property-tax-domain/"],
+        ["libs/property-tax-application/"],
+        ["dags/collin/"],
+    ):
+        document = _result(declared_write_scope=scope)
+        for task in document["task_slices"]:
+            task["write_paths"] = list(scope)
+        with pytest.raises(ControlPlaneError) as raised:
+            # No declared_scope: exactly the live signature.
+            validate_planning_result(document, contract_root=CONTRACT_ROOT)
+        assert raised.value.code == SEMANTIC_DISPOSITION
+        assert raised.value.details["reason"] == "declared_scope_exceeds_caller_ceiling"
+
+
+def test_the_live_path_requires_the_issue_43_boundary(tmp_path: Path) -> None:
+    """Blocker 2: `required_cross_issues` defaulted to empty in production."""
+
+    document = _result(cross_issue_dependencies=[])
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert raised.value.details["reason"] == "cross_issue_boundary_absent"
+    assert raised.value.details["issue"] == 43
+
+
+def test_the_collin_plan_passes_the_live_path_with_no_hand_passed_scope() -> None:
+    scope = validate_planning_result(_result(), contract_root=CONTRACT_ROOT)
+    assert scope["resolved_from"] == "issue:18"
+    assert scope["required_cross_issues"] == [43]
+    assert "libs/property-tax-adapters/" in scope["write_roots"]
+    # Bound into provenance, so the ceiling a run was judged against is auditable.
+    assert scope["policy_path"] == POLICY_PATH
+
+
+def test_the_trusted_ceiling_comes_from_committed_policy_not_from_the_plan() -> None:
+    resolved = resolve_planning_scope(
+        CONTRACT_ROOT, issue_number=18, capability="collin-cad-source-contract"
+    )
+    assert resolved.resolved_from == "issue:18"
+    assert set(resolved.write_roots) == {
+        "libs/property-tax-adapters/",
+        "tests/",
+        "docs/engineering/",
+        "docs/sources/",
+    }
+    assert resolved.required_cross_issues == (43,)
+    # The issue a maintainer filed outranks the capability the model chose.
+    conflicting = resolve_planning_scope(
+        CONTRACT_ROOT, issue_number=18, capability="dallas-cad-source-contract"
+    )
+    assert conflicting.required_cross_issues == (43,)
+
+
+def test_an_unknown_issue_and_capability_collapse_to_the_change_directory() -> None:
+    """Fail closed: an unpoliced plan may write its own change and nothing else."""
+
+    resolved = resolve_planning_scope(
+        CONTRACT_ROOT, issue_number=9_999, capability="never-declared", change_name="add-thing"
+    )
+    assert resolved.resolved_from == "default"
+    assert resolved.write_roots == ("openspec/changes/add-thing/",)
+    assert resolved.required_cross_issues == ()
+
+
+def test_a_missing_scope_policy_refuses_rather_than_defaulting_open(tmp_path: Path) -> None:
+    with pytest.raises(ControlPlaneError) as raised:
+        resolve_planning_scope(tmp_path, issue_number=18)
+    assert raised.value.code == "planning_scope_policy_missing"
+
+
+def test_the_materializer_binds_the_resolved_ceiling_into_its_manifest(tmp_path: Path) -> None:
+    import shutil
+
+    from countyforge_github.planning import materialize_plan
+
+    shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
+    document = _result()
+    document["declared_write_scope"] = ["libs/property-tax-adapters/", "tests/"]
+    for task in document["task_slices"]:
+        task["write_paths"] = ["libs/property-tax-adapters/"]
+    manifest = materialize_plan(
+        document,
+        publication_root=tmp_path,
+        issue_number=18,
+        run_id="scope-provenance",
+    )
+    assert manifest["planning_scope"]["resolved_from"] == "issue:18"
+    assert manifest["planning_scope"]["required_cross_issues"] == [43]
+    assert manifest["implementation_eligibility"] is False
+
+
+def test_a_four_part_decision_package_survives_packet_construction(tmp_path: Path) -> None:
+    """The live path that clipped issue #18's decisions at 4,000 characters."""
+
+    import subprocess
+
+    from countyforge_github.planning import build_planning_packet
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    long_bodies = [f"## D{index} — " + ("decision detail. " * 500) for index in range(1, 5)]
+    comments = [
+        _part(index, 4, long_bodies[index - 1], comment_id=1000 + index) for index in range(1, 5)
+    ]
+    assert all(len(body.encode()) > 4_000 for body in long_bodies)
+
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="decision-input-fixture",
+        comments=comments,
+    )
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    package = manifest["decision_input"]
+    assert package["decision_input_present"] is True
+    assert package["included_part_count"] == 4
+    assert package["truncated"] is False
+    assert [item["part"] for item in package["included_parts"]] == [1, 2, 3, 4]
+    for item in package["included_parts"]:
+        assert item["byte_length"] > 4_000  # would have been clipped before
+        assert len(item["body_sha256"]) == 64
+
+    # And the packet the model reads carries each part whole, not clipped.
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    comment_sources = [source for source in packet["sources"] if source["category"] == "comment"]
+    assert len(comment_sources) == 4
+    for source in comment_sources:
+        assert source["truncated"] is False

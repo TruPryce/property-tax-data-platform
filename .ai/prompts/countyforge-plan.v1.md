@@ -44,9 +44,32 @@ Plan for this repository's actual boundaries and current six-county scope:
 - Propose one kebab-case change name and only these materialized planning artifacts beneath
   `openspec/changes/<change-name>/`: `.openspec.yaml`, `proposal.md`, `design.md`, `tasks.md`, and
   one `specs/<capability>/spec.md`.
-- Make acceptance criteria observable and repository-specific. Order task slices by dependency and
-  name the affected package or contract. Include only checks supported by the packet and repository,
-  such as `make check`, `make runner-contract-tests`, or the narrower CountyForge check targets.
+- Name exactly one `affected_capabilities` entry: the domain capability this change alters, with
+  `change_type` `ADDED`, `MODIFIED`, or `REMOVED`. It is the capability the issue is about, never
+  `issue-to-openspec-planning`, which is the planner's own capability. `MODIFIED` and `REMOVED`
+  require a capability that already exists under `openspec/specs/`.
+- Write each `requirements` entry as an obligation plus a way to observe it. `normative_rule` must
+  contain SHALL, MUST, SHALL NOT, or MUST NOT and must state the specific behaviour. Give at least
+  one scenario with concrete `given`, `when`, and `then` content. Text such as "satisfy this
+  criterion", "the implementation is evaluated", or "demonstrably satisfied" is rejected, and two
+  requirements may not share the same scenario.
+- Give every `task_slices` entry its own `write_paths`: the narrowest repository-relative directory
+  prefixes that task needs. Broad aliases such as `libs`, `services`, `dags`, `tools`, `docs`, or
+  root documents are rejected, as are `.github/`, `.ai/`, and `openspec/specs/`. Every task path
+  must sit inside `declared_write_scope`, which must itself sit inside the trusted policy ceiling
+  for this issue; a scope wider than that ceiling is refused whatever the plan declares.
+- State `prerequisites` for every task: decision IDs such as `D1`, and earlier task IDs such as
+  `1.1`. Every reference must exist, dependencies must precede dependents, the graph must be
+  acyclic, and a dependency named in a task's own description must also appear in its
+  `prerequisites`. Use an empty list, never a placeholder, when a task truly has none.
+- Record every maintainer decision in `planning_decisions` with its `decision_id`, `status`, and
+  `requires_human_merge: true`. A decision may be `resolved_for_draft` for the purpose of drafting;
+  it is accepted only when an authorized maintainer merges the generated change.
+- Declare `cross_issue_dependencies` for every issue whose boundary constrains this one, with the
+  areas it owns. A task whose scope or description reaches into a declared boundary is refused.
+- Order task slices by dependency and name the affected package or contract. Include only checks
+  supported by the packet and repository, such as `make check`, `make runner-contract-tests`, or
+  the narrower CountyForge check targets.
 - State data migration, backfill, rollback, source-license, privacy, and compatibility concerns when
   the issue affects schemas, county sources, release semantics, publication, or runtime behavior.
 - Cite every material repository fact or issue claim with an exact packet `source_id`. Citations
@@ -59,5 +82,5 @@ Plan for this repository's actual boundaries and current six-county scope:
 - Propose only OpenSpec planning files. Never emit application source, DAG, migration, infrastructure, workflow, policy, provider, secret, or production-configuration paths.
 - Keep `implementation_eligibility` false. Blocking unresolved decisions belong in `blocked_reasons` and must prevent implementation.
 - Every material claim must cite a packet `source_id`; do not invent decisions or facts absent from the packet.
-- Return every schema field, using empty arrays where appropriate. Return JSON only; do not wrap it
-  in Markdown fences or add commentary.
+- Emit `contract_version: 2`. Return every schema field, using empty arrays where appropriate.
+  Return JSON only; do not wrap it in Markdown fences or add commentary.

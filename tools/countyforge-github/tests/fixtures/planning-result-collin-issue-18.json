@@ -67,15 +67,17 @@
     }
   ],
   "files_to_create": [
-    "libs/property-tax-adapters/src/property_tax_adapters/sources/texas/collin_numeric.py",
-    "docs/sources/collin-cad-access-decoder.md"
+    "openspec/changes/add-collin-cad-access-decoder-foundation/proposal.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/design.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/tasks.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/specs/collin-cad-source-contract/spec.md"
   ],
-  "files_to_modify": [
-    "libs/property-tax-adapters/src/property_tax_adapters/sources/texas/collin.py"
-  ],
+  "files_to_modify": [],
   "proposed_files": [
-    "libs/property-tax-adapters/src/property_tax_adapters/sources/texas/collin_numeric.py",
-    "docs/sources/collin-cad-access-decoder.md"
+    "openspec/changes/add-collin-cad-access-decoder-foundation/proposal.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/design.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/tasks.md",
+    "openspec/changes/add-collin-cad-access-decoder-foundation/specs/collin-cad-source-contract/spec.md"
   ],
   "task_slices": [
     {
@@ -320,5 +322,6 @@
     "docs/engineering/",
     "docs/sources/",
     "openspec/changes/add-collin-cad-access-decoder-foundation/"
-  ]
+  ],
+  "unresolved_decisions": []
 }

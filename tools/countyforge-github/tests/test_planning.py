@@ -58,7 +58,15 @@ def _result() -> dict[str, object]:
             }
         ],
         "affected_capabilities": [{"name": "collin-cad-source-contract", "change_type": "ADDED"}],
-        "cross_issue_dependencies": [],
+        # Trusted policy binds `collin-cad-source-contract` to issue 43, so the
+        # live gate requires the boundary rather than accepting its absence.
+        "cross_issue_dependencies": [
+            {
+                "issue_number": 43,
+                "relationship": "blocked_by",
+                "boundary": ["shared vendor-neutral source records"],
+            }
+        ],
         "declared_write_scope": ["openspec/changes/add-safe-planning/"],
         "files_to_create": ["openspec/changes/add-safe-planning/proposal.md"],
         "files_to_modify": [],
@@ -554,6 +562,11 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     result["files_to_create"] = ["openspec/changes/harden-github-workflow-policy/proposal.md"]
     result["files_to_modify"] = []
     result["proposed_files"] = result["files_to_create"]
+    # The change's own directory moves with its name; the trusted ceiling grants
+    # exactly that directory, so the declared scope has to follow it.
+    result["declared_write_scope"] = ["openspec/changes/harden-github-workflow-policy/"]
+    for task in result["task_slices"]:
+        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/"]
     validate_planning_result(result, contract_root=Path.cwd())
 
 

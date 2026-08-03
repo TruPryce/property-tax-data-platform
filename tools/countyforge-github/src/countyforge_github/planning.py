@@ -30,7 +30,9 @@ from countyforge_runner.errors import KernelError
 from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
+from countyforge_github.decision_input import MARKER, MAX_PART_BYTES, collect_decision_input
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.planning_scope import resolve_planning_scope
 from countyforge_github.planning_semantics import validate_planning_semantics
 from countyforge_github.redaction import redact_untrusted_text
 
@@ -291,9 +293,20 @@ def planning_context_fingerprint(
         comment_id_upper_bound=comment_id_upper_bound,
         trusted_bot_id=trusted_bot_id,
     ):
-        raw_comment = str(comment.get("body", ""))[:4000]
-        comment_body, _ = redact_untrusted_text(raw_comment)
-        comment_records.append({"id": int(comment.get("id", 0)), "body": comment_body})
+        raw_body = str(comment.get("body", ""))
+        # A marked decision part is bounded by its own contract and is carried
+        # whole. Clipping one silently is what made a complete D1-D4 package
+        # read as incomplete on issue #18; an oversized part is excluded with a
+        # recorded reason instead, inside `collect_decision_input`.
+        limit = MAX_PART_BYTES if MARKER.search(raw_body) else 4000
+        comment_body, _ = redact_untrusted_text(raw_body[:limit])
+        comment_records.append(
+            {
+                "id": int(comment.get("id", 0)),
+                "body": comment_body,
+                "decision_part": bool(MARKER.search(raw_body)),
+            }
+        )
     return hashlib.sha256(
         canonical_bytes({"issue": issue_record, "comments": comment_records})
     ).hexdigest()
@@ -466,14 +479,28 @@ def build_planning_packet(
             "planning_context_mismatch",
             "Planning context changed between intake and packet preparation.",
         )
+    # A marked decision package is assembled whole or refused; ordinary comments
+    # keep the existing bound.  Assembling here means the packet the model reads
+    # and the manifest a reviewer reads describe the same decision input.
+    decision_input = collect_decision_input(
+        comment_records,
+        issue_number=int(issue.get("number", 0)),
+        trusted_bot_id=trusted_bot_id,
+        comment_id_upper_bound=comment_id_upper_bound,
+    )
+    decision_part_ids = {part.comment_id for part in decision_input.parts}
     bounded_comments: list[str] = []
     comment_redactions = 0
     comment_redaction_counts: list[int] = []
+    comment_limits: list[int] = []
     for comment in comment_records:
-        bounded, redactions = redact_untrusted_text(str(comment.get("body", ""))[:4000])
+        raw = str(comment.get("body", ""))
+        limit = MAX_PART_BYTES if int(comment.get("id", 0)) in decision_part_ids else 4000
+        bounded, redactions = redact_untrusted_text(raw[:limit])
         bounded_comments.append(bounded)
         comment_redactions += redactions
         comment_redaction_counts.append(redactions)
+        comment_limits.append(limit)
     comment_contents = [f"COMMENT (untrusted):\n{text}" for text in bounded_comments]
     comment_content_bytes = sum(len(content.encode()) for content in comment_contents)
     context_budget = max(limits.max_total_bytes - issue_content_bytes - comment_content_bytes, 1)
@@ -493,8 +520,13 @@ def build_planning_packet(
         "redaction_count": title_redactions + body_redactions,
     }
     comment_sources: list[JsonObject] = []
-    for comment, _text, comment_content, redactions in zip(
-        comment_records, bounded_comments, comment_contents, comment_redaction_counts, strict=True
+    for comment, _text, comment_content, redactions, limit in zip(
+        comment_records,
+        bounded_comments,
+        comment_contents,
+        comment_redaction_counts,
+        comment_limits,
+        strict=True,
     ):
         path = f"github://issue/{issue.get('number', 0)}/comment/{comment.get('id', 0)}"
         comment_sources.append(
@@ -505,7 +537,9 @@ def build_planning_packet(
                 "sha256": hashlib.sha256(comment_content.encode()).hexdigest(),
                 "bytes": len(comment_content.encode("utf-8")),
                 "content": comment_content,
-                "truncated": len(str(comment.get("body", ""))) > 4000,
+                # Against the bound that was applied: a marked decision part
+                # is carried whole, so reporting it clipped would be false.
+                "truncated": len(str(comment.get("body", ""))) > limit,
                 "selection_reason": "bounded issue discussion",
                 "untrusted": True,
                 "redacted": redactions > 0,
@@ -574,6 +608,9 @@ def build_planning_packet(
             for source in packet["sources"]
         ],
         "redaction_count": packet["redactions"]["count"],
+        # Every part that was carried, and every one that was not, with its
+        # reason.  Exclusion is evidence; silence was the original defect.
+        "decision_input": decision_input.manifest_entry(),
         "excluded_candidates": [
             {
                 "path": str(candidate["path"]),
@@ -609,14 +646,22 @@ def validate_planning_result(
     *,
     contract_root: Path,
     source_ids: set[str] | None = None,
-    declared_scope: Sequence[str] = (),
-    required_cross_issues: Iterable[int] = (),
-) -> None:
+    declared_scope: Sequence[str] | None = None,
+    required_cross_issues: Iterable[int] | None = None,
+) -> JsonObject:
     """Validate the strict contract *and* what the contract cannot express.
 
     Semantic validation runs here rather than only at publication, so the local
     plan check, the GitHub plan-validation job, and publication all reach it
     through the one function they already share.
+
+    `declared_scope` and `required_cross_issues` default to the *trusted* policy
+    ceiling, never to "whatever the plan said".  An earlier version defaulted
+    them to empty, which let the provider author both sides of the write-scope
+    subset check and let a plan pass by omitting the cross-issue boundary that
+    bound it.  A caller may narrow the ceiling; it cannot widen it.
+
+    Returns the bounded scope provenance so publication can bind it.
     """
 
     for field in ("files_to_create", "files_to_modify", "proposed_files"):
@@ -701,12 +746,30 @@ def validate_planning_result(
                 raise ControlPlaneError(
                     "invalid_plan_citation", "Planning output cites an unknown packet source."
                 )
+    capabilities = result.get("affected_capabilities")
+    capability = ""
+    if isinstance(capabilities, list) and len(capabilities) == 1:
+        entry = capabilities[0]
+        capability = str(entry.get("name", "")) if isinstance(entry, dict) else ""
+    scope = resolve_planning_scope(
+        contract_root,
+        issue_number=int(result.get("originating_issue", 0) or 0),
+        capability=capability,
+        change_name=str(result.get("proposed_change_name", "")),
+    )
+    effective_scope = list(scope.write_roots) if declared_scope is None else list(declared_scope)
+    effective_issues = (
+        list(scope.required_cross_issues)
+        if required_cross_issues is None
+        else list(required_cross_issues)
+    )
     validate_planning_semantics(
         result,
         contract_root=contract_root,
-        declared_scope=declared_scope,
-        required_cross_issues=required_cross_issues,
+        declared_scope=effective_scope,
+        required_cross_issues=effective_issues,
     )
+    return scope.provenance()
 
 
 def planning_branch(issue_number: int, change_name: str) -> str:
@@ -739,7 +802,7 @@ def materialize_plan(
 ) -> JsonObject:
     """Render a validated plan using trusted templates, never a model patch."""
 
-    validate_planning_result(result, contract_root=publication_root)
+    scope_provenance = validate_planning_result(result, contract_root=publication_root)
     change = str(result["proposed_change_name"])
     change_root = publication_root / "openspec" / "changes" / change
     spec_capability = _spec_capability(result)
@@ -779,6 +842,7 @@ def materialize_plan(
         "change_name": change,
         "issue_number": issue_number,
         "run_id": run_id,
+        "planning_scope": scope_provenance,
         "files": [f"openspec/changes/{change}/{key}" for key in files],
         "implementation_eligibility": False,
     }
