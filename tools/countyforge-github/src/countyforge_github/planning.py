@@ -14,7 +14,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,6 +31,7 @@ from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.planning_semantics import validate_planning_semantics
 from countyforge_github.redaction import redact_untrusted_text
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -70,13 +71,113 @@ _TRUSTED_COUNTYFORGE_MARKERS = (
 
 
 def _spec_capability(result: JsonObject) -> str:
-    """Return the bounded capability directory shared by all publication paths."""
+    """Return the affected capability, or refuse to guess one.
+
+    PR #46 materialized `specs/issue-to-openspec-planning/spec.md` for a change
+    to `collin-cad-source-contract`, because an unusable value fell through to
+    the planner's own capability.  A change filed against the wrong capability
+    is worse than no change: it reads as a decision about the planner.
+    """
 
     capabilities = result.get("affected_capabilities")
-    candidate = str(capabilities[0]) if isinstance(capabilities, list) and capabilities else ""
-    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", candidate):
-        return candidate
-    return "issue-to-openspec-planning"
+    if not isinstance(capabilities, list) or len(capabilities) != 1:
+        raise ControlPlaneError(
+            "planning_semantic_validation_failed",
+            "The planning result must name exactly one affected capability.",
+            {"reason": "affected_capability_ambiguous", "count": len(capabilities or [])},
+        )
+    entry = capabilities[0]
+    candidate = str(entry.get("name", "")) if isinstance(entry, dict) else ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", candidate):
+        raise ControlPlaneError(
+            "planning_semantic_validation_failed",
+            "The planning result names no usable affected capability.",
+            {"reason": "affected_capability_malformed"},
+        )
+    return candidate
+
+
+def _capability_change_type(result: JsonObject) -> str:
+    capabilities = result.get("affected_capabilities")
+    entry = capabilities[0] if isinstance(capabilities, list) and capabilities else {}
+    return str(entry.get("change_type", "MODIFIED")) if isinstance(entry, dict) else "MODIFIED"
+
+
+def _decision_lines(result: JsonObject) -> str:
+    """Render decisions with their status, so a draft never reads as accepted."""
+
+    decisions = [
+        entry for entry in result.get("planning_decisions") or [] if isinstance(entry, dict)
+    ]
+    if not decisions:
+        return "- None recorded."
+    return "\n".join(
+        f"- **{entry.get('decision_id', '?')}** ({entry.get('status', 'proposed')}, "
+        f"requires human merge): {str(entry.get('decision_text', '')).strip()}"
+        for entry in sorted(decisions, key=lambda item: str(item.get("decision_id", "")))
+    )
+
+
+def _boundary_lines(result: JsonObject) -> str:
+    """Render cross-issue boundaries so the limits travel with the change."""
+
+    dependencies = [
+        entry for entry in result.get("cross_issue_dependencies") or [] if isinstance(entry, dict)
+    ]
+    if not dependencies:
+        return "- None recorded."
+    lines: list[str] = []
+    for entry in sorted(dependencies, key=lambda item: int(item.get("issue_number", 0))):
+        boundary = ", ".join(str(item) for item in entry.get("boundary") or [])
+        lines.append(
+            f"- #{entry.get('issue_number')} ({entry.get('relationship', 'related_to')}): "
+            f"out of scope here and owned there: {boundary}"
+        )
+    return "\n".join(lines)
+
+
+def _render_requirement(requirement: JsonObject) -> str:
+    """Render the authored normative rule and its observable scenarios."""
+
+    lines = [
+        f"### Requirement: {_markdown_heading(str(requirement.get('title', '')))}",
+        "",
+        str(requirement.get("normative_rule", "")).strip(),
+        "",
+    ]
+    for scenario in requirement.get("scenarios") or []:
+        if not isinstance(scenario, dict):
+            continue
+        lines.append(f"#### Scenario: {_markdown_heading(str(scenario.get('name', '')))}")
+        for given in scenario.get("given") or []:
+            lines.append(f"- **GIVEN** {str(given).strip()}")
+        lines.append(f"- **WHEN** {str(scenario.get('when', '')).strip()}")
+        for then in scenario.get("then") or []:
+            lines.append(f"- **THEN** {str(then).strip()}")
+        lines.append("")
+    source_ids = ", ".join(str(item) for item in requirement.get("source_ids") or [])
+    if source_ids:
+        lines.append(f"[source_ids: {source_ids}]")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_task(task: JsonObject) -> str:
+    """Render declared scope and ordering verbatim; infer nothing."""
+
+    task_id = str(task.get("task_id", ""))
+    paths = ",".join(str(item) for item in task.get("write_paths") or [])
+    checks = ",".join(str(item) for item in task.get("validation_checks") or [])
+    prerequisites = ",".join(str(item) for item in task.get("prerequisites") or []) or "-"
+    title = str(task.get("title", "")).replace(chr(10), " ").replace(chr(13), " ")
+    description = str(task.get("description", "")).replace(chr(10), " ").replace(chr(13), " ")
+    source_ids = ", ".join(str(item) for item in task.get("source_ids") or [])
+    citation = f" [source_ids: {source_ids}]" if source_ids else ""
+    return (
+        f"<!-- countyforge-task: {task_id} paths={paths} checks={checks} "
+        f"risk={task.get('risk', 'normal')} prerequisites={prerequisites} -->\n"
+        f"- [ ] {task_id} {title} — {description}{citation}"[:2048]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,8 +605,20 @@ def build_planning_packet(
 
 
 def validate_planning_result(
-    result: JsonObject, *, contract_root: Path, source_ids: set[str] | None = None
+    result: JsonObject,
+    *,
+    contract_root: Path,
+    source_ids: set[str] | None = None,
+    declared_scope: Sequence[str] = (),
+    required_cross_issues: Iterable[int] = (),
 ) -> None:
+    """Validate the strict contract *and* what the contract cannot express.
+
+    Semantic validation runs here rather than only at publication, so the local
+    plan check, the GitHub plan-validation job, and publication all reach it
+    through the one function they already share.
+    """
+
     for field in ("files_to_create", "files_to_modify", "proposed_files"):
         values = result.get(field, [])
         if isinstance(values, list):
@@ -588,6 +701,12 @@ def validate_planning_result(
                 raise ControlPlaneError(
                     "invalid_plan_citation", "Planning output cites an unknown packet source."
                 )
+    validate_planning_semantics(
+        result,
+        contract_root=contract_root,
+        declared_scope=declared_scope,
+        required_cross_issues=required_cross_issues,
+    )
 
 
 def planning_branch(issue_number: int, change_name: str) -> str:
@@ -632,28 +751,15 @@ def materialize_plan(
         )
     for path in (change_root, spec_root):
         path.mkdir(parents=True, exist_ok=True)
-    proposal = f"""## Why\n\n{result["problem_statement"]}\n\n## Outcome\n\n{result["desired_outcome"]}\n\n## Scope\n\n- Originating issue: #{issue_number}\n- CountyForge planning run: `{run_id}`\n- Affected capabilities: {", ".join(result["affected_capabilities"])}\n\n## Constraints\n\n{chr(10).join(f"- {item}" for item in result["security_privacy_considerations"])}\n\n## Non-goals\n\n{chr(10).join(f"- {item}" for item in result["non_goals"])}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\nThis draft requires human maintainer approval before implementation.\n"""
+    proposal = f"""## Why\n\n{result["problem_statement"]}\n\n## Outcome\n\n{result["desired_outcome"]}\n\n## Scope\n\n- Originating issue: #{issue_number}\n- CountyForge planning run: `{run_id}`\n- Affected capability: {_spec_capability(result)} ({_capability_change_type(result)})\n\n## Constraints\n\n{chr(10).join(f"- {item}" for item in result["security_privacy_considerations"])}\n\n## Non-goals\n\n{chr(10).join(f"- {item}" for item in result["non_goals"])}\n\n## Decisions\n\n{_decision_lines(result)}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Cross-issue boundaries\n\n{_boundary_lines(result)}\n\nThis draft requires human maintainer approval before implementation. No decision recorded here is accepted until an authorized maintainer merges this change.\n"""
     citation_lines = "\n".join(
         f"- `{citation['source_id']}`: {citation['excerpt']}"
         for citation in result["evidence_citations"]
     )
-    design = f"""## Current-state evidence\n\n{citation_lines or "- See the bound planning packet."}\n\n## Proposed architecture\n\n{result["desired_outcome"]}\n\n## Dependency direction\n\nThe implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.\n\n## Trust boundaries\n\nIssue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.\n\n## Data and contract changes\n\nThe planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.\n\n## Alternatives considered\n\nNo alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.\n\n## Decisions and assumptions\n\n{chr(10).join(f"- {item}" for item in result["assumptions"]) or "- None recorded."}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Risks and compatibility\n\n{chr(10).join(f"- {item}" for item in result["risks"])}\n{chr(10).join(f"- {item}" for item in result["migration_compatibility_concerns"])}\n\n## Rollout and failure recovery\n\nValidation commands: {", ".join(result["validation_commands"])}. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.\n\n## Testing strategy\n\nRun the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.\n"""
-    task_paths = ",".join(_IMPLEMENTATION_TASK_PATHS)
-    tasks = (
-        "## Tasks\n\n"
-        + "\n".join(
-            (
-                f"<!-- countyforge-task: 1.{index} paths={task_paths} "
-                f"checks={_IMPLEMENTATION_TASK_CHECK} risk=normal prerequisites=- -->\n"
-                f"- [ ] 1.{index} {str(task).replace(chr(10), ' ').replace(chr(13), ' ')[:1024]}"
-            )
-            for index, task in enumerate(result["task_slices"], 1)
-        )
-        + "\n"
-    )
-    spec = "## ADDED Requirements\n\n" + "\n".join(
-        f"### Requirement: {_markdown_heading(criterion)}\n\nThe implementation SHALL satisfy this criterion.\n\n#### Scenario: Acceptance\n- **WHEN** the implementation is evaluated\n- **THEN** the criterion is demonstrably satisfied\n"
-        for criterion in result["acceptance_criteria"]
+    design = f"""## Current-state evidence\n\n{citation_lines or "- See the bound planning packet."}\n\n## Proposed architecture\n\n{result["desired_outcome"]}\n\n## Dependency direction\n\nThe implementation must preserve the repository dependency direction and keep planning tooling outside production domain, application, adapter, and DAG packages.\n\n## Trust boundaries\n\nIssue and comment text is untrusted evidence. The planning model receives only the frozen packet and schema, has no repository-write mount or Git credentials, and cannot approve its own plan. Trusted publication code validates and materializes the bounded result.\n\n## Data and contract changes\n\nThe planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.\n\n## Alternatives considered\n\nNo alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.\n\n## Decisions and assumptions\n\n{_decision_lines(result)}\n\n{chr(10).join(f"- {item}" for item in result["assumptions"]) or "- None recorded."}\n\n## Cross-issue boundaries\n\n{_boundary_lines(result)}\n\n## Unresolved decisions\n\n{chr(10).join(f"- {item}" for item in result["unresolved_decisions"]) or "- None recorded."}\n\n## Risks and compatibility\n\n{chr(10).join(f"- {item}" for item in result["risks"])}\n{chr(10).join(f"- {item}" for item in result["migration_compatibility_concerns"])}\n\n## Rollout and failure recovery\n\nValidation commands: {", ".join(result["validation_commands"])}. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.\n\n## Testing strategy\n\nRun the trusted deterministic validation commands recorded in the plan, plus the repository OpenSpec, documentation-link, and artifact-policy gates before publication.\n"""
+    tasks = "## Tasks\n\n" + "\n".join(_render_task(task) for task in result["task_slices"]) + "\n"
+    spec = f"## {_capability_change_type(result)} Requirements\n\n" + "\n".join(
+        _render_requirement(requirement) for requirement in result["requirements"]
     )
     files = {
         ".openspec.yaml": f"schema: spec-driven\ncreated: 2026-07-21\nissue: {issue_number}\nparent: {parent_issue}\ncapability: {spec_capability}\n",

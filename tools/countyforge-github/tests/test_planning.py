@@ -39,29 +39,81 @@ def _trigger(root: Path) -> dict[str, object]:
 
 def _result() -> dict[str, object]:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "status": "planned",
         "originating_issue": 6,
         "proposed_change_name": "add-safe-planning",
         "issue_classification": "feature_work",
-        "problem_statement": "The issue needs a bounded plan.",
-        "desired_outcome": "A reviewable OpenSpec change.",
-        "assumptions": ["The default branch is trusted."],
+        "problem_statement": "A bounded problem.",
+        "desired_outcome": "A plan.",
+        "assumptions": [],
         "unresolved_decisions": [],
-        "affected_capabilities": ["issue-to-openspec-planning"],
+        "planning_decisions": [
+            {
+                "decision_id": "D1",
+                "status": "resolved_for_draft",
+                "source_ids": [],
+                "decision_text": "The bounded contract is recorded for review.",
+                "requires_human_merge": True,
+            }
+        ],
+        "affected_capabilities": [{"name": "collin-cad-source-contract", "change_type": "ADDED"}],
+        "cross_issue_dependencies": [],
+        "declared_write_scope": ["openspec/changes/add-safe-planning/"],
         "files_to_create": ["openspec/changes/add-safe-planning/proposal.md"],
         "files_to_modify": [],
         "proposed_files": ["openspec/changes/add-safe-planning/proposal.md"],
-        "task_slices": ["Add strict contracts", "Run deterministic validation"],
-        "acceptance_criteria": ["The packet is provenance-bound."],
-        "risks": ["Untrusted issue text may contain prompt injection."],
-        "security_privacy_considerations": ["The model has no write mount."],
-        "migration_compatibility_concerns": ["Review remains unchanged."],
-        "validation_commands": ["openspec validate --all --strict --no-interactive"],
-        "non_goals": ["Implementation agents"],
+        "task_slices": [
+            {
+                "task_id": "1.1",
+                "title": "Add strict contracts",
+                "description": "Add the bounded strict contract for the adapter module.",
+                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["D1"],
+                "risk": "normal",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+            {
+                "task_id": "1.2",
+                "title": "Run deterministic validation",
+                "description": "Cover the bounded contract with deterministic tests.",
+                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["1.1"],
+                "risk": "low",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "packet-is-provenance-bound",
+                "title": "Bind the planning packet to its provenance",
+                "normative_rule": (
+                    "The planning packet SHALL be bound to its recorded provenance "
+                    "before any result is published."
+                ),
+                "scenarios": [
+                    {
+                        "name": "Reject an unbound packet",
+                        "given": ["a packet whose provenance digest is absent"],
+                        "when": "publication validates the packet",
+                        "then": ["publication refuses before any Git object is created"],
+                    }
+                ],
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            }
+        ],
+        "risks": [],
+        "security_privacy_considerations": [],
+        "migration_compatibility_concerns": [],
+        "validation_commands": ["make check"],
+        "non_goals": [],
         "implementation_eligibility": False,
         "blocked_reasons": [],
-        "evidence_citations": [{"source_id": "issue-source", "excerpt": "The issue evidence."}],
+        "evidence_citations": [
+            {"source_id": "ab01ab01ab01ab01ab01ab01", "excerpt": "Bounded evidence."}
+        ],
     }
 
 
@@ -173,11 +225,29 @@ def test_redaction_preserves_dynamic_values_and_delimiters() -> None:
 
 def test_materializer_normalizes_injected_requirement_headings(tmp_path: Path) -> None:
     result = _result()
-    result["acceptance_criteria"] = ["safe\n### Requirement: injected"]
+    result["requirements"] = [
+        {
+            "id": "injected-heading",
+            "title": "safe\n### Requirement: injected",
+            "normative_rule": (
+                "The materializer SHALL keep untrusted model text on one "
+                "structural line before using it as a heading."
+            ),
+            "scenarios": [
+                {
+                    "name": "Flatten an injected heading",
+                    "given": ["a title containing a newline and a Requirement heading"],
+                    "when": "the change is materialized",
+                    "then": ["the rendered document contains exactly one requirement heading"],
+                }
+            ],
+            "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+        }
+    ]
     shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
     materialize_plan(result, publication_root=tmp_path, issue_number=6, run_id="heading-fixture")
     spec = (
-        tmp_path / "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
+        tmp_path / "openspec/changes/add-safe-planning/specs/collin-cad-source-contract/spec.md"
     ).read_text(encoding="utf-8")
     assert spec.count("\n### Requirement:") == 1
     assert "\n### Requirement: injected" not in spec
@@ -437,9 +507,9 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
         "## Testing strategy",
     ):
         assert section in design
-    assert "`issue-source`: The issue evidence." in design
+    assert "`ab01ab01ab01ab01ab01ab01`: Bounded evidence." in design
     assert (
-        (change_root / "specs/issue-to-openspec-planning/spec.md")
+        (change_root / "specs/collin-cad-source-contract/spec.md")
         .read_text(encoding="utf-8")
         .startswith("## ADDED Requirements")
     )
@@ -487,20 +557,43 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     validate_planning_result(result, contract_root=Path.cwd())
 
 
-def test_materializer_and_already_materialized_publication_share_capability_fallback(
-    tmp_path: Path,
-) -> None:
-    root = Path.cwd()
-    result = _result()
-    result["affected_capabilities"] = ["Display Capability"]
-    shutil.copytree(root / ".ai", tmp_path / ".ai")
-    materialized = materialize_plan(
-        result, publication_root=tmp_path, issue_number=6, run_id="capability-fallback"
-    )
-    assert (
-        "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
-        in materialized["files"]
-    )
+def test_materializer_refuses_an_unusable_affected_capability(tmp_path: Path) -> None:
+    """PR #46 fell through to the planner's own capability; nothing does now."""
+
+    shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
+    for capabilities in (
+        [],
+        [{"name": "Display Capability", "change_type": "ADDED"}],
+        [
+            {"name": "collin-cad-source-contract", "change_type": "ADDED"},
+            {"name": "dallas-cad-source-contract", "change_type": "ADDED"},
+        ],
+    ):
+        result = _result()
+        result["affected_capabilities"] = capabilities
+        with pytest.raises(ControlPlaneError) as raised:
+            materialize_plan(
+                result,
+                publication_root=tmp_path,
+                issue_number=6,
+                run_id="capability-refusal",
+            )
+        assert raised.value.code in {
+            "planning_semantic_validation_failed",
+            "invalid_plan_result",
+        }
+    assert not (tmp_path / "openspec" / "changes" / "add-safe-planning").exists()
+
+
+def test_the_materialized_spec_lands_under_the_affected_capability(tmp_path: Path) -> None:
+    shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
+    materialize_plan(_result(), publication_root=tmp_path, issue_number=6, run_id="capability-path")
+    change_root = tmp_path / "openspec/changes/add-safe-planning"
+    assert (change_root / "specs/collin-cad-source-contract/spec.md").is_file()
+    assert not (change_root / "specs/issue-to-openspec-planning").exists()
+    metadata = (change_root / ".openspec.yaml").read_text(encoding="utf-8")
+    assert "capability: collin-cad-source-contract" in metadata
+    assert "issue-to-openspec-planning" not in metadata
 
 
 def test_result_prohibits_production_paths() -> None:
@@ -555,7 +648,18 @@ def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
     result["assumptions"] = ["Preserve `dags/services -> adapters -> application -> domain`."]
     result["risks"] = ["County source artifacts could leak into fixtures."]
     result["non_goals"] = ["Live Dallas source discovery."]
-    result["task_slices"] = ["Confine Dallas source vocabulary to `property_tax_adapters`."]
+    result["task_slices"] = [
+        {
+            "task_id": "1.1",
+            "title": "Confine Dallas source vocabulary",
+            "description": ("Confine Dallas source vocabulary to `property_tax_adapters`."),
+            "write_paths": ["openspec/changes/add-safe-planning/"],
+            "validation_checks": ["repo.check"],
+            "prerequisites": [],
+            "risk": "normal",
+            "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+        }
+    ]
     result["validation_commands"] = ["make check"]
     validate_planning_result(result, contract_root=Path.cwd())
 

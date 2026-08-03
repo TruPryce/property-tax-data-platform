@@ -6,7 +6,7 @@ UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
 	countyforge-request-fixtures countyforge-github-check countyforge-command-fixtures \
 	countyforge-workflow-policy-tests countyforge-plan-check countyforge-plan-fixtures \
-	countyforge-plan-policy-tests countyforge-plan-image countyforge-plan-image-compatibility \
+	countyforge-plan-policy-tests countyforge-plan-semantic-tests countyforge-plan-image countyforge-plan-image-compatibility \
 	countyforge-implement-check \
 	countyforge-implement-fixtures countyforge-implement-policy-tests codex-image-openai codex-smoke-openai
 
@@ -175,6 +175,9 @@ countyforge-plan-fixtures:
 countyforge-plan-policy-tests:
 	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py tools/countyforge-github/tests/test_requests.py -q
 
+countyforge-plan-semantic-tests:
+	$(UV) run pytest tools/countyforge-github/tests/test_planning_semantics.py tools/countyforge-github/tests/test_planning.py -q
+
 countyforge-plan-image:
 	./.ai/codex/07-build-countyforge-plan-image.sh
 
@@ -196,7 +199,7 @@ countyforge-implement-policy-tests:
 	$(UV) run pytest tools/countyforge-github/tests/test_workflow_policy.py tools/countyforge-github/tests/test_requests.py -q
 
 # Free and deterministic: no Docker, provider, secret-manager, or collector call.
-runner-contract-tests: countyforge-runner-check countyforge-github-check \
+runner-contract-tests: countyforge-runner-check countyforge-github-check countyforge-plan-semantic-tests \
 	countyforge-command-fixtures countyforge-workflow-policy-tests countyforge-plan-check \
 	countyforge-plan-fixtures countyforge-plan-policy-tests countyforge-implement-check \
 	countyforge-implement-fixtures countyforge-implement-policy-tests
