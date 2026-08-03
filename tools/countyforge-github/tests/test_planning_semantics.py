@@ -1443,3 +1443,85 @@ def test_the_observed_output_fact_reaches_classification_from_the_workflow() -> 
     )
     assert '"--model-output-observed"' in cli_source
     assert "model_output_observed=(" in cli_source
+
+
+def _ceiling_packet(context_count: int, *, issue_bytes: int = 3_000) -> dict[str, Any]:
+    """Long context paths make each exclusion record expensive to record."""
+
+    long_path = "docs/engineering/" + ("deeply-nested-directory-name/" * 6) + "document.md"
+    return {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * issue_bytes,
+                "bytes": issue_bytes,
+                "path": "github://issue/18",
+            },
+            *[
+                {
+                    "source_id": f"ctx{index}",
+                    "category": "adr",
+                    "content": "c" * 120,
+                    "bytes": 120,
+                    "path": f"{long_path}?{index}",
+                }
+                for index in range(context_count)
+            ],
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+
+
+def test_the_returned_packet_is_measured_with_its_own_exclusion_evidence() -> None:
+    """Shedding a source frees its content and then costs a `packet_ceiling`
+    record. Measuring only the surviving sources declared a packet fitting and
+    then returned it over the ceiling -- here by 4,164 bytes."""
+
+    from countyforge_github.planning import (
+        ContextLimits,
+        _fit_packet_to_ceiling,
+        _serialized_size,
+    )
+
+    packet = _ceiling_packet(24)
+    limits = ContextLimits(max_total_bytes=6_000)
+    assert _serialized_size(packet) > limits.max_total_bytes
+    with pytest.raises(ControlPlaneError) as raised:
+        _fit_packet_to_ceiling(packet, limits, frozenset())
+    # Refused rather than returned oversized: the records cost more than the
+    # content they freed, so no split of these sources fits.
+    assert raised.value.code == "planning_packet_ceiling_exceeded"
+    assert raised.value.details["shed_source_count"] == 24
+    assert raised.value.details["serialized_bytes"] > limits.max_total_bytes
+
+
+@pytest.mark.parametrize("ceiling", list(range(9_400, 12_800, 400)))
+def test_no_ceiling_leaves_the_returned_packet_over_the_limit(ceiling: int) -> None:
+    """Sweep the boundary rather than testing one value with comfortable headroom.
+
+    Every ceiling either yields a packet within it -- exclusion evidence
+    included -- or refuses. Neither may return an oversized document.
+    """
+
+    from countyforge_github.planning import (
+        ContextLimits,
+        _fit_packet_to_ceiling,
+        _serialized_size,
+    )
+
+    packet = _ceiling_packet(24)
+    limits = ContextLimits(max_total_bytes=ceiling)
+    try:
+        fitted = _fit_packet_to_ceiling(packet, limits, frozenset())
+    except ControlPlaneError as error:
+        assert error.code == "planning_packet_ceiling_exceeded"
+        return
+    assert _serialized_size(fitted) <= ceiling
+    # The evidence of what was dropped is present and counted in the measurement.
+    shed = [
+        item
+        for item in fitted["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert len(fitted["sources"]) + len(shed) == len(packet["sources"])

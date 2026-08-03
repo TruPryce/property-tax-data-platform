@@ -468,14 +468,38 @@ def _serialized_size(packet: JsonObject) -> int:
     return len(canonical_bytes(packet)) + 1
 
 
+def _with_exclusions(
+    packet: JsonObject, kept: list[JsonObject], shed: list[JsonObject]
+) -> JsonObject:
+    """The exact document that would be returned for this kept/shed split."""
+
+    selection = dict(packet.get("selection") or {})
+    selection["selected_files"] = sum(
+        1 for source in kept if str(source.get("category")) in _SHEDDABLE_CATEGORIES
+    )
+    excluded = list(selection.get("excluded_candidates") or [])
+    excluded.extend(
+        {"path": str(source.get("path", "")), "reason_code": "packet_ceiling"} for source in shed
+    )
+    selection["excluded_candidates"] = excluded
+    return {**packet, "sources": kept, "selection": selection}
+
+
 def _fit_packet_to_ceiling(
     packet: JsonObject, limits: ContextLimits, mandatory_source_ids: frozenset[str]
 ) -> JsonObject:
     """Drop optional context until the serialized packet fits, or refuse.
 
-    Returns the packet unchanged when it already fits.  Raises when mandatory
-    content alone exceeds the ceiling, because the alternative -- shortening a
-    decision -- would hand the model a fragment that reads like the whole thing.
+    Every measurement is taken on the document that would actually be returned,
+    exclusion evidence included.  Measuring only the surviving sources meant each
+    shed source removed its content and then added a `packet_ceiling` record, and
+    with long paths the records cost more than the content they freed: a packet
+    could be declared fitting at 239,950 bytes and returned above the ceiling.
+
+    Returns the packet unchanged when it already fits.  Raises when what remains
+    still does not fit, because the alternative -- shortening a decision or
+    dropping the evidence of what was dropped -- trades a bounded refusal for a
+    silent misrepresentation.
     """
 
     if _serialized_size(packet) <= limits.max_total_bytes:
@@ -492,7 +516,6 @@ def _fit_packet_to_ceiling(
         or str(source.get("source_id")) in mandatory_source_ids
     ]
     optional = [source for source in sources if source not in mandatory]
-    shed: list[JsonObject] = []
     # Least valuable first, and largest first within that, so the fewest sources
     # are lost.
     order = sorted(
@@ -505,32 +528,25 @@ def _fit_packet_to_ceiling(
         ),
     )
     kept = list(sources)
+    shed: list[JsonObject] = []
+    trimmed = _with_exclusions(packet, kept, shed)
     for candidate in order:
-        if _serialized_size({**packet, "sources": kept}) <= limits.max_total_bytes:
+        if _serialized_size(trimmed) <= limits.max_total_bytes:
             break
         kept = [source for source in kept if source is not candidate]
         shed.append(candidate)
-    trimmed: JsonObject = {**packet, "sources": kept}
+        trimmed = _with_exclusions(packet, kept, shed)
     if _serialized_size(trimmed) > limits.max_total_bytes:
         raise ControlPlaneError(
             "planning_packet_ceiling_exceeded",
-            "The mandatory planning packet content exceeds the bounded ceiling.",
+            "The bounded planning packet cannot be reduced within its ceiling.",
             {
                 "serialized_bytes": _serialized_size(trimmed),
                 "max_total_bytes": limits.max_total_bytes,
                 "mandatory_source_count": len(mandatory),
+                "shed_source_count": len(shed),
             },
         )
-    selection = dict(trimmed.get("selection") or {})
-    selection["selected_files"] = sum(
-        1 for source in kept if str(source.get("category")) in _SHEDDABLE_CATEGORIES
-    )
-    excluded = list(selection.get("excluded_candidates") or [])
-    excluded.extend(
-        {"path": str(source.get("path", "")), "reason_code": "packet_ceiling"} for source in shed
-    )
-    selection["excluded_candidates"] = excluded
-    trimmed["selection"] = selection
     return trimmed
 
 
