@@ -450,6 +450,90 @@ def _select_files(
     return selected, excluded
 
 
+#: Sources the packet may drop to fit its ceiling, least valuable first.  The
+#: issue and the maintainer's decision parts are absent by design: a plan built
+#: on half a decision is the failure this contract exists to prevent.
+_SHEDDABLE_CATEGORIES = (
+    "adr",
+    "architecture",
+    "validation",
+    "agent_guidance",
+    "openspec",
+    "source_contract",
+    "context_candidate",
+)
+
+
+def _serialized_size(packet: JsonObject) -> int:
+    return len(canonical_bytes(packet)) + 1
+
+
+def _fit_packet_to_ceiling(
+    packet: JsonObject, limits: ContextLimits, mandatory_source_ids: frozenset[str]
+) -> JsonObject:
+    """Drop optional context until the serialized packet fits, or refuse.
+
+    Returns the packet unchanged when it already fits.  Raises when mandatory
+    content alone exceeds the ceiling, because the alternative -- shortening a
+    decision -- would hand the model a fragment that reads like the whole thing.
+    """
+
+    if _serialized_size(packet) <= limits.max_total_bytes:
+        return packet
+    sources = list(packet.get("sources") or [])
+    # Mandatory is the issue plus the maintainer's decision parts, named
+    # explicitly.  An ordinary issue comment shares the `comment` category with a
+    # decision part but is ordinary evidence, and shedding it is preferable to
+    # refusing a legitimate maximum-size decision package.
+    mandatory = [
+        source
+        for source in sources
+        if str(source.get("category")) == "issue"
+        or str(source.get("source_id")) in mandatory_source_ids
+    ]
+    optional = [source for source in sources if source not in mandatory]
+    shed: list[JsonObject] = []
+    # Least valuable first, and largest first within that, so the fewest sources
+    # are lost.
+    order = sorted(
+        optional,
+        key=lambda source: (
+            _SHEDDABLE_CATEGORIES.index(str(source.get("category")))
+            if str(source.get("category")) in _SHEDDABLE_CATEGORIES
+            else len(_SHEDDABLE_CATEGORIES) + 1,
+            -int(source.get("bytes", 0) or 0),
+        ),
+    )
+    kept = list(sources)
+    for candidate in order:
+        if _serialized_size({**packet, "sources": kept}) <= limits.max_total_bytes:
+            break
+        kept = [source for source in kept if source is not candidate]
+        shed.append(candidate)
+    trimmed: JsonObject = {**packet, "sources": kept}
+    if _serialized_size(trimmed) > limits.max_total_bytes:
+        raise ControlPlaneError(
+            "planning_packet_ceiling_exceeded",
+            "The mandatory planning packet content exceeds the bounded ceiling.",
+            {
+                "serialized_bytes": _serialized_size(trimmed),
+                "max_total_bytes": limits.max_total_bytes,
+                "mandatory_source_count": len(mandatory),
+            },
+        )
+    selection = dict(trimmed.get("selection") or {})
+    selection["selected_files"] = sum(
+        1 for source in kept if str(source.get("category")) in _SHEDDABLE_CATEGORIES
+    )
+    excluded = list(selection.get("excluded_candidates") or [])
+    excluded.extend(
+        {"path": str(source.get("path", "")), "reason_code": "packet_ceiling"} for source in shed
+    )
+    selection["excluded_candidates"] = excluded
+    trimmed["selection"] = selection
+    return trimmed
+
+
 def build_planning_packet(
     *,
     trigger: JsonObject,
@@ -645,6 +729,18 @@ def build_planning_packet(
             "count": title_redactions + body_redactions + comment_redactions,
         },
     }
+    # The ceiling has to be measured on what is actually sent.  Bounding selected
+    # *content* left JSON framing, source metadata, digests, and provenance
+    # unaccounted for: a maximum decision package plus ordinary comments
+    # serialized to 245,614 bytes against a 240,000-byte ceiling, and run
+    # 30836072011 shipped 262,974.  Optional repository context and ordinary
+    # comments are shed until it fits; mandatory content -- the issue and the
+    # maintainer's decision parts -- is never truncated to make room.
+    mandatory_source_ids = frozenset(
+        _source_id("comment", f"github://issue/{issue.get('number', 0)}/comment/{part.comment_id}")
+        for part in decision_input.parts
+    )
+    packet = _fit_packet_to_ceiling(packet, limits, mandatory_source_ids)
     packet_schema = load_json_object(
         contract_root / ".ai/schemas/countyforge-planning-packet.schema.json",
         kind="planning packet schema",

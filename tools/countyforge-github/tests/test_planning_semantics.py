@@ -1312,3 +1312,134 @@ def test_turn_lifecycle_events_alone_do_not_count_as_model_output() -> None:
     assert summary["output_event_observed"] is False
     assert summary["provider_error_observed"] is False
     stream.unlink()
+
+
+def test_the_packet_ceiling_is_measured_on_the_serialized_packet(tmp_path: Path) -> None:
+    """Bounding selected content left JSON framing unaccounted for.
+
+    A maximum decision package plus ordinary comments serialized to 245,614
+    bytes against a 240,000-byte ceiling. The ceiling is now measured on what is
+    actually written, optional context is shed to fit, and the maintainer's
+    decision parts are never shortened to make room.
+    """
+
+    import subprocess
+
+    from countyforge_github.decision_input import MAX_TOTAL_DECISION_BYTES
+    from countyforge_github.planning import ContextLimits, build_planning_packet
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    per_part = MAX_TOTAL_DECISION_BYTES // 7
+    comments = [
+        {
+            "id": 2000 + index,
+            "body": (
+                f"<!-- countyforge-plan-input:v1 issue=18 input=big part={index}/7 -->\n\n"
+                + "x" * per_part
+            ),
+            "updated_at": "2026-08-01T00:00:00Z",
+            "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        }
+        for index in range(1, 8)
+    ]
+    comments += [
+        {
+            "id": 3000 + index,
+            "body": "z" * 4_000,
+            "updated_at": "2026-08-01T00:00:00Z",
+            "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        }
+        for index in range(1, 10)
+    ]
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard it." + "y" * 19_500,
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="serialized-ceiling",
+        comments=comments,
+    )
+    size = Path(info["packet_path"]).stat().st_size
+    assert size <= ContextLimits().max_total_bytes
+
+    package = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))["decision_input"]
+    assert package["included_part_count"] == 7
+    assert package["truncated"] is False
+
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    shed = [
+        item
+        for item in packet["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert shed, "the ceiling should have shed optional context, not passed by luck"
+    # Every decision part still reached the packet whole.
+    decision_sources = [
+        source
+        for source in packet["sources"]
+        if source["category"] == "comment" and not source["truncated"]
+    ]
+    assert len(decision_sources) >= 7
+
+
+def test_mandatory_content_over_the_ceiling_refuses_rather_than_truncating() -> None:
+    """A plan built on half a decision is the failure this contract prevents."""
+
+    from countyforge_github.planning import ContextLimits, _fit_packet_to_ceiling
+
+    limits = ContextLimits()
+    packet = {
+        "sources": [
+            {"source_id": "issue", "category": "issue", "content": "i" * 200_000, "bytes": 200_000},
+            {
+                "source_id": "part1",
+                "category": "comment",
+                "content": "d" * 200_000,
+                "bytes": 200_000,
+            },
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+    with pytest.raises(ControlPlaneError) as raised:
+        _fit_packet_to_ceiling(packet, limits, frozenset({"part1"}))
+    assert raised.value.code == "planning_packet_ceiling_exceeded"
+    assert raised.value.details["max_total_bytes"] == limits.max_total_bytes
+
+
+def test_the_observed_output_fact_reaches_classification_from_the_workflow() -> None:
+    """The parameter had no production caller, so the disposition was unreachable."""
+
+    import yaml
+    from countyforge_github.cli import main as cli_main
+
+    del cli_main
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    prep = workflow["jobs"]["implementation-publication-prep"]["steps"]
+    run = next(
+        str(step["run"])
+        for step in prep
+        if "classify-implementation-lane" in str(step.get("run", ""))
+    )
+    assert "countyforge-implementation-model-events.summary.json" in run
+    assert "--model-output-observed" in run
+    # Only when the stream exists: absent evidence must stay unknown.
+    assert ".model_events_present == true" in run
+    assert ".output_event_observed" in run
+
+    cli_source = Path("tools/countyforge-github/src/countyforge_github/cli.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"--model-output-observed"' in cli_source
+    assert "model_output_observed=(" in cli_source

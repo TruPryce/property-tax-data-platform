@@ -217,13 +217,14 @@
               },
               "reason_code": {
                 "enum": [
-                  "outside_root",
-                  "symlink_escape",
-                  "non_regular",
-                  "file_limit",
                   "byte_limit",
-                  "unapproved",
-                  "external_reference"
+                  "external_reference",
+                  "file_limit",
+                  "non_regular",
+                  "outside_root",
+                  "packet_ceiling",
+                  "symlink_escape",
+                  "unapproved"
                 ]
               }
             }

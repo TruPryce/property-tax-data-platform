@@ -145,7 +145,7 @@ def test_packet_bounds_and_untrusted_label(tmp_path: Path) -> None:
         contract_root=root,
         output_dir=tmp_path,
         run_id="plan-fixture",
-        limits=ContextLimits(max_files=2, max_file_bytes=100, max_total_bytes=200),
+        limits=ContextLimits(max_files=2, max_file_bytes=100, operational_target_bytes=200),
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
     assert packet["issue"]["untrusted"] is True
@@ -166,7 +166,7 @@ def test_packet_issue_source_bound_includes_title_prefix(tmp_path: Path) -> None
         contract_root=root,
         output_dir=tmp_path,
         run_id="plan-bound-fixture",
-        limits=ContextLimits(max_files=1, max_file_bytes=100, max_total_bytes=200),
+        limits=ContextLimits(max_files=1, max_file_bytes=100, operational_target_bytes=200),
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
     issue_source = packet["sources"][0]
@@ -550,7 +550,7 @@ def test_manifest_records_excluded_candidates_and_adrs_are_selected(tmp_path: Pa
         contract_root=root,
         output_dir=tmp_path / "bounded",
         run_id="manifest-bounded-fixture",
-        limits=ContextLimits(max_files=1, max_file_bytes=100, max_total_bytes=200),
+        limits=ContextLimits(max_files=1, max_file_bytes=100, operational_target_bytes=200),
     )
     bounded_manifest = json.loads(Path(bounded["manifest_path"]).read_text(encoding="utf-8"))
     assert bounded_manifest["excluded_candidates"]
