@@ -191,7 +191,16 @@ def _render_task(task: JsonObject) -> str:
 class ContextLimits:
     max_files: int = 48
     max_file_bytes: int = 20_000
+    #: Hard fail-safe.  Retained; nothing may exceed it.
     max_total_bytes: int = 240_000
+    #: What repository context selection actually aims at.  Run 30836072011 sent
+    #: a 262,974-byte packet to `fugu-ultra` at `xhigh`, and the provider
+    #: accepted the turn and emitted nothing but `thread.started` and
+    #: `turn.started` before the 1,800-second deadline killed it.  A planner does
+    #: not need a quarter of a megabyte of repository prose to turn four explicit
+    #: decisions into a structured delta, so selection stops here and the ceiling
+    #: stays a fail-safe rather than a target.
+    operational_target_bytes: int = 160_000
     max_issue_bytes: int = 20_000
 
 
@@ -349,7 +358,31 @@ def _bounded_text(path: Path, limits: ContextLimits) -> tuple[str, bool, int, st
     return content, truncated, len(raw), digest
 
 
-def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], list[JsonObject]]:
+_CATEGORY_RANK = {
+    "openspec": 0,
+    "source_contract": 1,
+    "agent_guidance": 2,
+    "architecture": 3,
+    "adr": 4,
+    "validation": 5,
+}
+
+
+def _context_priority(category: str, relative: str, relevance: Sequence[str]) -> tuple[int, int]:
+    """Lower sorts first: what this issue is about, before general background.
+
+    `relevance` is derived from the issue itself, so the ordering is a pure
+    function of trusted inputs rather than of the filesystem's alphabet.
+    """
+
+    lowered = relative.casefold()
+    matched = 0 if any(term and term in lowered for term in relevance) else 1
+    return (matched, _CATEGORY_RANK.get(category, 6))
+
+
+def _select_files(
+    root: Path, limits: ContextLimits, relevance: Sequence[str] = ()
+) -> tuple[list[JsonObject], list[JsonObject]]:
     """Select only stable, trusted documentation/contracts from the contract root."""
 
     candidates: list[tuple[str, str, Path]] = []
@@ -376,7 +409,11 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
     selected: list[JsonObject] = []
     excluded: list[JsonObject] = []
     total = 0
-    for category, relative, candidate in sorted(candidates, key=lambda item: item[1]):
+    # Alphabetical order filled the packet with whatever sorted first, so an
+    # unrelated ADR could crowd out the capability the issue is actually about.
+    for category, relative, candidate in sorted(
+        candidates, key=lambda item: (_context_priority(item[0], item[1], relevance), item[1])
+    ):
         if len(selected) >= limits.max_files:
             excluded.append({"path": relative, "reason_code": "file_limit"})
             continue
@@ -392,7 +429,8 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
             excluded.append({"path": relative, "reason_code": "outside_root"})
             continue
         content, truncated, raw_bytes, digest = _bounded_text(resolved, limits)
-        if total + len(content.encode("utf-8")) > limits.max_total_bytes:
+        budget = min(limits.operational_target_bytes, limits.max_total_bytes)
+        if total + len(content.encode("utf-8")) > budget:
             excluded.append({"path": relative, "reason_code": "byte_limit"})
             continue
         total += len(content.encode("utf-8"))
@@ -520,9 +558,24 @@ def build_planning_packet(
         comment_limits.append(limit)
     comment_contents = [f"COMMENT (untrusted):\n{text}" for text in bounded_comments]
     comment_content_bytes = sum(len(content.encode()) for content in comment_contents)
-    context_budget = max(limits.max_total_bytes - issue_content_bytes - comment_content_bytes, 1)
+    # The decision package and the issue come first; repository context fills
+    # what remains of the operational target, not of the hard ceiling.
+    context_budget = max(
+        min(limits.operational_target_bytes, limits.max_total_bytes)
+        - issue_content_bytes
+        - comment_content_bytes,
+        1,
+    )
     selection_limits = replace(limits, max_total_bytes=context_budget)
-    selected, excluded = _select_files(contract_root.resolve(strict=True), selection_limits)
+    # Relevance comes from the issue a maintainer filed, never from model output.
+    relevance = tuple(
+        term
+        for term in re.findall(r"[a-z][a-z0-9-]{3,}", str(issue.get("title", "")).casefold())
+        if term not in {"feature", "issue", "add", "the", "and", "for", "with", "foundation"}
+    )[:6]
+    selected, excluded = _select_files(
+        contract_root.resolve(strict=True), selection_limits, relevance
+    )
     issue_source: JsonObject = {
         "source_id": _source_id("issue", f"issue-{issue.get('number', 0)}"),
         "category": "issue",

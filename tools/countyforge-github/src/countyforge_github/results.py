@@ -324,6 +324,13 @@ def _runner_reports_success(document: JsonObject) -> bool:
 #: The captured exit code a timed-out implementation run must report.
 TIMEOUT_EXIT_CODE = 5
 
+#: A timeout that produced no observable model output is a different problem
+#: from one that stopped mid-generation: the first points at a stalled or
+#: still-reasoning provider, the second at a request too large to finish.
+#: Reporting them alike is what made run 30836072011 look like a budget question.
+TIMED_OUT_NO_PROGRESS = "implementation_model_timed_out_no_progress"
+TIMED_OUT_AFTER_PROGRESS = "implementation_model_timed_out"
+
 
 def _runner_reports_timeout(document: JsonObject, exit_code: int | None) -> bool:
     """A timeout counts only when every part of the evidence corroborates it.
@@ -363,6 +370,7 @@ def classify_implementation_lane(
     freeze_outcome: str | None = None,
     frozen_bundle_present: bool | None = None,
     adapter_disposition: str | None = None,
+    model_output_observed: bool | None = None,
 ) -> JsonObject:
     """Classify which implementation provider lane owns a run's outcome.
 
@@ -417,10 +425,20 @@ def classify_implementation_lane(
         # The request was admitted and ran; it simply did not finish. That is
         # neither provider infrastructure nor a model producing a bad result,
         # and it is checked only after every earlier, more specific cause.
+        # Unknown is not the same as none: without event evidence the stable
+        # disposition stands rather than asserting a progress claim we cannot
+        # support. The split reports only what the event summary actually saw.
+        if model_output_observed is None:
+            return _lane_failure(
+                TIMED_OUT_AFTER_PROGRESS,
+                provider=selected_provider,
+                runner_exit_code=exit_code,
+            )
         return _lane_failure(
-            "implementation_model_timed_out",
+            TIMED_OUT_AFTER_PROGRESS if model_output_observed else TIMED_OUT_NO_PROGRESS,
             provider=selected_provider,
             runner_exit_code=exit_code,
+            model_output_observed=bool(model_output_observed),
         )
     if exit_code != 0 or runner.get("ok") is not True:
         # The runner ran and reported; a nonzero exit with an adapter-level

@@ -1171,3 +1171,144 @@ def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
     with pytest.raises(ControlPlaneError) as raised:
         validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert raised.value.details["reason"] == "task_path_outside_declared_scope"
+
+
+# --------------------------------------------------------------------------
+# Run 30836072011 — the plan lane spent its whole 1,800-second budget having
+# emitted only `thread.started` and `turn.started`.
+# --------------------------------------------------------------------------
+
+
+def test_the_plan_lane_reasoning_effort_is_high_and_the_clock_is_unchanged() -> None:
+    """Reduce the request, not the deadline: a longer clock hides the cause."""
+
+    policy = json.loads(
+        Path(".ai/policies/countyforge-github-execution.v1.json").read_text(encoding="utf-8")
+    )
+    assert policy["commands"]["plan"]["reasoning_effort"] == "high"
+    profile = json.loads(Path(".ai/profiles/plan.read-only.v1.json").read_text(encoding="utf-8"))
+    assert profile["default_reasoning_effort"] == "high"
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 1800
+    assert profile["budgets"]["defaults"]["attempts"] == 1
+
+
+def test_the_planning_packet_aims_at_the_operational_target(tmp_path: Path) -> None:
+    """Run 30836072011 sent 262,974 bytes; the ceiling stays the fail-safe."""
+
+    import subprocess
+
+    from countyforge_github.planning import ContextLimits, build_planning_packet
+
+    limits = ContextLimits()
+    assert limits.operational_target_bytes < limits.max_total_bytes
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="operational-target",
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    # The target bounds selected *content*; the serialized packet adds JSON
+    # structure on top, so the two are asserted separately rather than conflated.
+    content_bytes = sum(
+        len(str(source.get("content", "")).encode("utf-8")) for source in packet["sources"]
+    )
+    assert content_bytes <= limits.operational_target_bytes
+    size = Path(info["packet_path"]).stat().st_size
+    assert size <= limits.max_total_bytes
+    # Materially smaller than the run that timed out, not merely under a ceiling.
+    assert size < 262_974
+
+
+def test_repository_context_is_ordered_by_relevance_to_the_issue(tmp_path: Path) -> None:
+    """Alphabetical order let an unrelated ADR crowd out the capability spec."""
+
+    from countyforge_github.planning import ContextLimits, _select_files
+
+    root = Path.cwd()
+    selected, _ = _select_files(root, ContextLimits(), ("collin",))
+    paths = [str(item["path"]) for item in selected]
+    collin = [index for index, path in enumerate(paths) if "collin" in path.casefold()]
+    if collin:
+        unrelated = [
+            index
+            for index, path in enumerate(paths)
+            if "collin" not in path.casefold() and path.startswith("docs/decisions/")
+        ]
+        if unrelated:
+            assert min(collin) < min(unrelated)
+
+
+def test_a_timeout_with_no_observed_output_is_reported_distinctly(tmp_path: Path) -> None:
+    """`thread.started` + `turn.started` is an accepted turn, not progress.
+
+    Reporting a stalled provider and a too-large request alike is what made run
+    30836072011 read as a budget question.
+    """
+
+    from countyforge_github.results import (
+        TIMED_OUT_AFTER_PROGRESS,
+        TIMED_OUT_NO_PROGRESS,
+        classify_implementation_lane,
+    )
+
+    document = {
+        "ok": False,
+        "mode": "implement",
+        "disposition": "timed_out",
+        "summary": {"disposition": "timed_out", "exit_code": 5},
+    }
+    result_path = tmp_path / "runner.json"
+    result_path.write_text(json.dumps(document), encoding="utf-8")
+    exit_path = tmp_path / "exit"
+    exit_path.write_text("5\n", encoding="utf-8")
+
+    def classify(observed: bool | None) -> str:
+        return str(
+            classify_implementation_lane(
+                selected_provider="sakana",
+                lane_results={"openai": "skipped", "sakana": "failure"},
+                result_path=result_path,
+                exit_code_path=exit_path,
+                model_output_observed=observed,
+            )["disposition"]
+        )
+
+    assert classify(False) == TIMED_OUT_NO_PROGRESS
+    assert classify(True) == TIMED_OUT_AFTER_PROGRESS
+    # Unknown must not assert a progress claim the evidence cannot support.
+    assert classify(None) == TIMED_OUT_AFTER_PROGRESS
+
+
+def test_turn_lifecycle_events_alone_do_not_count_as_model_output() -> None:
+    """The exact stream run 30836072011 produced."""
+
+    from countyforge_runner.model_events import summarize_model_events
+
+    stream = Path("/tmp/countyforge-turn-only.ndjson")
+    stream.write_text(
+        json.dumps({"type": "thread.started", "thread_id": "019fc8a2"})
+        + "\n"
+        + json.dumps({"type": "turn.started"})
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = summarize_model_events(stream)
+    assert summary["event_count"] == 2
+    assert summary["last_event_type"] == "turn.started"
+    assert summary["output_event_observed"] is False
+    assert summary["provider_error_observed"] is False
+    stream.unlink()

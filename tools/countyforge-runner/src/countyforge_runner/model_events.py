@@ -20,6 +20,13 @@ from pathlib import Path
 from countyforge_runner.contracts import JsonObject
 
 EVENT_STREAM_NAME = "countyforge-implementation-model-events.ndjson"
+#: Plan and review lanes name their stream differently; discovery accepts any of
+#: them so one summarizer serves every lane.
+EVENT_STREAM_NAMES = (
+    EVENT_STREAM_NAME,
+    "countyforge-plan-model-events.ndjson",
+    "countyforge-review-model-events.ndjson",
+)
 
 # Event *types* are a small closed vocabulary from the provider; any other field
 # may carry model or source text and is never read.
@@ -32,8 +39,11 @@ def find_model_events(root: Path) -> Path | None:
 
     if not root.is_dir():
         return None
-    matches = sorted(root.rglob(EVENT_STREAM_NAME))
-    return matches[0] if matches else None
+    for name in EVENT_STREAM_NAMES:
+        matches = sorted(root.rglob(name))
+        if matches:
+            return matches[0]
+    return None
 
 
 def _safe_field(event: object, key: str, limit: int) -> str | None:
@@ -86,6 +96,10 @@ def summarize_model_events(path: Path | None) -> JsonObject:
             last_type = kind
             lowered = kind.casefold()
             provider_error = provider_error or "error" in lowered
+            # `thread.started` and `turn.started` mean the provider accepted the
+            # turn, not that the model produced anything.  Run 30836072011 spent
+            # its entire 30-minute budget having emitted exactly those two, so
+            # they must not count as progress.
             output_observed = output_observed or any(
                 token in lowered for token in ("message", "output", "item", "delta")
             )
