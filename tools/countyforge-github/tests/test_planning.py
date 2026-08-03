@@ -1458,3 +1458,120 @@ def test_publication_is_blocked_before_any_git_object_when_a_decision_moves(
         "create_pull_request",
     ):
         assert stage not in progress.completed
+
+
+def test_the_collin_issue_18_path_produces_a_valid_draft_planning_pull_request(
+    tmp_path: Path,
+) -> None:
+    """The stated completion criterion, end to end on one controlled path.
+
+    Four marked D1-D4 comments through real packet construction, the Collin
+    result through real validation and materialization, and the real
+    `publish_plan` to a draft pull request.
+    """
+
+    root = Path.cwd()
+    author_id = 4242
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    decisions = [
+        _decision_part(
+            index,
+            4,
+            f"## D{index} — Collin decision {index}\n\nBounded maintainer decision text.",
+            comment_id=900 + index,
+            author_id=author_id,
+        )
+        for index in range(1, 5)
+    ]
+    # The marker is issue-scoped; these are issue 18's decisions.
+    decisions = [
+        {**comment, "body": comment["body"].replace("issue=6", "issue=18")} for comment in decisions
+    ]
+    packet_dir = tmp_path / "packet"
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": author_id, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=packet_dir,
+        run_id="collin-issue-18",
+        comments=decisions,
+    )
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    package = manifest["decision_input"]
+    assert package["included_part_count"] == 4
+    assert package["truncated"] is False
+
+    result = json.loads(
+        Path(
+            "tools/countyforge-github/tests/fixtures/planning-result-collin-issue-18.json"
+        ).read_text(encoding="utf-8")
+    )
+    packet_document = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    packet_sources = [source["source_id"] for source in packet_document["sources"]]
+    for citation in result["evidence_citations"]:
+        citation["source_id"] = packet_sources[0]
+    for entry in (*result["task_slices"], *result["requirements"], *result["planning_decisions"]):
+        if entry.get("source_ids"):
+            entry["source_ids"] = [packet_sources[0]]
+
+    publication_root = tmp_path / "publication"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+    github = _CommentingGitHub(decisions)
+    published = publish_plan(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        default_branch="main",
+        target_sha=sha,
+        issue_number=18,
+        run_id="collin-issue-18",
+        result=result,
+        publication_root=publication_root,
+        planning_packet_path=Path(info["packet_path"]),
+        context_manifest_path=Path(info["manifest_path"]),
+    )
+
+    assert published["action"] == "created"
+    # Eligibility is a property of the plan, pinned false by the trusted envelope.
+    assert result["implementation_eligibility"] is False
+    # The pull request exists and is a draft.
+    assert len(github.pull_requests) == 1
+    assert github.pull_requests[0]["draft"] is True
+
+    change_root = publication_root / "openspec/changes/add-collin-cad-access-decoder-foundation"
+    metadata = (change_root / ".openspec.yaml").read_text(encoding="utf-8")
+    assert "capability: collin-cad-source-contract" in metadata
+    assert "issue-to-openspec-planning" not in metadata
+    assert (change_root / "specs/collin-cad-source-contract/spec.md").is_file()
+
+    spec = (change_root / "specs/collin-cad-source-contract/spec.md").read_text(encoding="utf-8")
+    for absent in ("satisfy this criterion", "demonstrably satisfied", "Scenario: Acceptance"):
+        assert absent not in spec
+    assert "SHALL decode every supported Access NUMERIC representation" in spec
+    assert "**GIVEN**" in spec and "**WHEN**" in spec and "**THEN**" in spec
+
+    tasks = (change_root / "tasks.md").read_text(encoding="utf-8")
+    assert "prerequisites=D1" in tasks
+    assert "prerequisites=D2,D4" in tasks
+    assert "prerequisites=1.1,1.2,D3" in tasks
+    assert "prerequisites=1.1,1.2,1.3" in tasks
+    assert "prerequisites=-" not in tasks
+    assert "paths=libs,services,dags" not in tasks
+    for forbidden in ("services/", "dags/", "tools/", ".github/", ".ai/"):
+        assert f"paths={forbidden}" not in tasks
+    assert "tests/" not in tasks
+
+    proposal = (change_root / "proposal.md").read_text(encoding="utf-8")
+    assert "#43" in proposal
+    assert "requires human maintainer approval" in proposal
+    for identifier in ("D1", "D2", "D3", "D4"):
+        assert identifier in proposal
+    assert not result["blocked_reasons"]

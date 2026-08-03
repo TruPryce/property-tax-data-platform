@@ -31,7 +31,7 @@ from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
 from countyforge_github.decision_input import (
-    MAX_PART_BYTES,
+    MAX_MARKED_COMMENT_BYTES,
     assert_unedited_since_trigger,
     collect_decision_input,
     decision_marker,
@@ -304,7 +304,7 @@ def planning_context_fingerprint(
         # read as incomplete on issue #18; an oversized part is excluded with a
         # recorded reason instead, inside `collect_decision_input`.
         marked = decision_marker(raw_body) is not None
-        limit = MAX_PART_BYTES if marked else 4000
+        limit = MAX_MARKED_COMMENT_BYTES if marked else 4000
         comment_body, _ = redact_untrusted_text(raw_body[:limit])
         comment_records.append(
             {
@@ -512,7 +512,7 @@ def build_planning_packet(
     comment_limits: list[int] = []
     for comment in comment_records:
         raw = str(comment.get("body", ""))
-        limit = MAX_PART_BYTES if int(comment.get("id", 0)) in decision_part_ids else 4000
+        limit = MAX_MARKED_COMMENT_BYTES if int(comment.get("id", 0)) in decision_part_ids else 4000
         bounded, redactions = redact_untrusted_text(raw[:limit])
         bounded_comments.append(bounded)
         comment_redactions += redactions

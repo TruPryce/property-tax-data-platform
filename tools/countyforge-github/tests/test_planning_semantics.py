@@ -18,6 +18,8 @@ from countyforge_github.decision_input import (
     EXCLUDED_TOO_LARGE,
     INCOMPLETE,
     MARKER,
+    MAX_MARKED_COMMENT_BYTES,
+    MAX_PART_BYTES,
     assert_unedited_since_trigger,
     collect_decision_input,
     decision_marker,
@@ -598,7 +600,6 @@ def test_the_trusted_ceiling_comes_from_committed_policy_not_from_the_plan() -> 
     assert resolved.resolved_from == "issue:18"
     assert set(resolved.write_roots) == {
         "libs/property-tax-adapters/",
-        "tests/",
         "docs/engineering/",
         "docs/sources/",
     }
@@ -634,7 +635,7 @@ def test_the_materializer_binds_the_resolved_ceiling_into_its_manifest(tmp_path:
 
     shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
     document = _result()
-    document["declared_write_scope"] = ["libs/property-tax-adapters/", "tests/"]
+    document["declared_write_scope"] = ["libs/property-tax-adapters/"]
     for task in document["task_slices"]:
         task["write_paths"] = ["libs/property-tax-adapters/"]
     manifest = materialize_plan(
@@ -977,3 +978,196 @@ def test_every_path_uses_the_same_marker_predicate(tmp_path: Path) -> None:
     assert package["included_part_count"] == 1
     assert [item["comment_id"] for item in package["included_parts"]] == [7004]
     assert 7003 not in {item.get("comment_id") for item in package["excluded"]}
+
+
+# --------------------------------------------------------------------------
+# Review 4845xxxxx — one byte bound, one strict policy, one narrow issue scope.
+# --------------------------------------------------------------------------
+
+
+def _packet_with_payload(tmp_path: Path, payload: str, *, run: str) -> dict[str, Any]:
+    import subprocess
+
+    from countyforge_github.planning import build_planning_packet
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    comment = {
+        "id": 1001,
+        "body": f"{_MARKER_LINE}\n\n{payload}",
+        "updated_at": "2026-08-01T00:00:00Z",
+        "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+    }
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path / run,
+        run_id=run,
+        comments=[comment],
+    )
+    return {
+        "manifest": json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8")),
+        "packet": json.loads(Path(info["packet_path"]).read_text(encoding="utf-8")),
+    }
+
+
+def test_a_part_at_the_exact_documented_bound_reaches_the_model_whole(
+    tmp_path: Path,
+) -> None:
+    """The collector accepted 24,000 bytes and the packet schema capped content
+    at 20,000 characters, so a part inside the documented limit died later under
+    an unrelated schema error -- neither carried nor excluded. One bound now."""
+
+    payload = "x" * MAX_PART_BYTES
+    result = _packet_with_payload(tmp_path, payload, run="exact-bound")
+    package = result["manifest"]["decision_input"]
+    assert package["included_part_count"] == 1
+    assert package["included_parts"][0]["byte_length"] == MAX_PART_BYTES
+    assert package["truncated"] is False
+    source = next(item for item in result["packet"]["sources"] if item["category"] == "comment")
+    assert source["truncated"] is False
+    assert payload in source["content"]
+
+
+def test_a_part_one_byte_over_the_bound_is_excluded_with_the_stable_reason(
+    tmp_path: Path,
+) -> None:
+    payload = "x" * (MAX_PART_BYTES + 1)
+    result = _packet_with_payload(tmp_path, payload, run="one-over")
+    package = result["manifest"]["decision_input"]
+    assert package["decision_input_present"] is False
+    assert package["excluded"][0]["reason"] == EXCLUDED_TOO_LARGE
+    assert package["excluded"][0]["byte_length"] == MAX_PART_BYTES + 1
+
+
+def test_a_multibyte_part_is_bounded_by_bytes_not_characters(tmp_path: Path) -> None:
+    """`é` is two bytes: half as many characters fit, and the packet must still
+    hold the whole part rather than failing on its character bound."""
+
+    payload = "é" * (MAX_PART_BYTES // 2)
+    assert len(payload.encode("utf-8")) == MAX_PART_BYTES
+    result = _packet_with_payload(tmp_path, payload, run="multibyte")
+    package = result["manifest"]["decision_input"]
+    assert package["included_part_count"] == 1
+    assert package["included_parts"][0]["byte_length"] == MAX_PART_BYTES
+    source = next(item for item in result["packet"]["sources"] if item["category"] == "comment")
+    assert source["truncated"] is False
+    assert payload in source["content"]
+
+
+def test_the_packet_source_bound_admits_a_maximum_decision_part() -> None:
+    """Pin the relationship so the two bounds cannot drift apart again."""
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-planning-packet.schema.json").read_text(encoding="utf-8")
+    )
+    content_max = schema["properties"]["sources"]["items"]["properties"]["content"]["maxLength"]
+    # Marker, the `COMMENT (untrusted):\n` prefix, and separating newlines ride
+    # along with the payload.  Bytes >= characters for UTF-8, so bounding the
+    # payload in bytes bounds its character length too.
+    overhead = len("COMMENT (untrusted):\n") + 8
+    assert content_max >= MAX_MARKED_COMMENT_BYTES + overhead
+
+
+# --- Strict trusted policy ------------------------------------------------
+
+
+def _policy_root(tmp_path: Path, policy: dict[str, Any]) -> Path:
+    import shutil
+
+    root = tmp_path / "contract"
+    (root / ".ai/policies").mkdir(parents=True, exist_ok=True)
+    (root / ".ai/schemas").mkdir(parents=True, exist_ok=True)
+    (root / POLICY_PATH).write_text(json.dumps(policy), encoding="utf-8")
+    shutil.copy(
+        Path(".ai/schemas/countyforge-planning-scope.schema.json"),
+        root / ".ai/schemas/countyforge-planning-scope.schema.json",
+    )
+    return root
+
+
+_VALID_POLICY: dict[str, Any] = {
+    "contract_version": 1,
+    "default_write_roots": [],
+    "issues": {
+        "18": {
+            "write_roots": ["libs/property-tax-adapters/"],
+            "required_cross_issues": [43],
+        }
+    },
+}
+
+
+def test_the_trusted_policy_is_validated_strictly(tmp_path: Path) -> None:
+    scope = resolve_planning_scope(_policy_root(tmp_path / "ok", _VALID_POLICY), issue_number=18)
+    assert scope.required_cross_issues == (43,)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [
+        ({"contract_version": 999}, "unsupported_version"),
+        ({"unknown_field": True}, "unknown_field"),
+        ({"issues": {"18": {"write_roots": ["/etc/passwd"]}}}, "absolute_root"),
+        ({"issues": {"18": {"write_roots": ["libs/../../etc"]}}}, "escaping_root"),
+        (
+            {"issues": {"18": {"write_roots": ["libs/"], "required_cross_issues": ["43"]}}},
+            "string_cross_issue",
+        ),
+        (
+            {"issues": {"18": {"write_roots": ["libs/"], "unexpected": 1}}},
+            "unknown_entry_field",
+        ),
+        ({"issues": {"18": {"required_cross_issues": [43]}}}, "missing_write_roots"),
+    ],
+)
+def test_an_invalid_policy_fails_closed_rather_than_dropping_the_requirement(
+    tmp_path: Path, mutation: dict[str, Any], label: str
+) -> None:
+    """`"43"` as a string was silently discarded, which *removed* the issue-43
+    requirement. A policy that cannot be trusted must refuse, not degrade."""
+
+    policy = {**copy.deepcopy(_VALID_POLICY), **copy.deepcopy(mutation)}
+    with pytest.raises(ControlPlaneError) as raised:
+        resolve_planning_scope(_policy_root(tmp_path / label, policy), issue_number=18)
+    assert raised.value.code == "planning_scope_policy_invalid"
+
+
+# --- Issue 18 scope -------------------------------------------------------
+
+
+def test_issue_18_does_not_authorize_the_root_test_tree() -> None:
+    """The adapter suite is at `libs/property-tax-adapters/tests/`, inside the
+    adapter root. Root `tests/` holds repository architecture, infrastructure,
+    and artifact tests a county decoder has no business rewriting."""
+
+    policy = json.loads(Path(POLICY_PATH).read_text(encoding="utf-8"))
+    for entry in (policy["issues"]["18"], policy["capabilities"]["collin-cad-source-contract"]):
+        assert "tests/" not in entry["write_roots"]
+    assert Path("libs/property-tax-adapters/tests").is_dir()
+
+    document = _result()
+    assert "tests/" not in document["declared_write_scope"]
+    for task in document["task_slices"]:
+        assert "tests/" not in task["write_paths"]
+    # And the narrowed fixture still passes the live gate.
+    scope = validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert "tests/" not in scope["write_roots"]
+
+
+def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
+    document = _result()
+    document["task_slices"][0]["write_paths"] = ["libs/property-tax-adapters/", "tests/"]
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert raised.value.details["reason"] == "task_path_outside_declared_scope"

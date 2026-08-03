@@ -47,7 +47,16 @@ MARKER = re.compile(
 
 #: Bounds. Every one of these is a refusal boundary, never a truncation point.
 MAX_PARTS = 12
+#: The payload, measured after the marker.
 MAX_PART_BYTES = 24_000
+#: The whole comment, marker included.  `MAX_PART_BYTES` bounds the payload, so
+#: anything applying a bound to the raw body -- the packet, the fingerprint --
+#: must leave room for the marker too, or a part at exactly the documented
+#: payload limit gets clipped by the very code meant to carry it whole.  The
+#: marker is bounded by its own expression: 9 issue digits, a 64-character input
+#: id, and 3+3 part digits, comfortably under this margin.
+MAX_MARKER_BYTES = 256
+MAX_MARKED_COMMENT_BYTES = MAX_PART_BYTES + MAX_MARKER_BYTES
 MAX_TOTAL_DECISION_BYTES = 160_000
 
 INCOMPLETE = "incomplete_decision_input"

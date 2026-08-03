@@ -18,6 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from countyforge_runner.contracts import validate_document
+from countyforge_runner.errors import KernelError
+
 from countyforge_github.contracts import JsonObject, load_json_object
 from countyforge_github.errors import ControlPlaneError
 
@@ -82,6 +85,26 @@ def resolve_planning_scope(
             {"policy_path": POLICY_PATH},
         )
     policy = load_json_object(policy_file, kind="planning scope policy")
+    # Strict, like every other versioned trusted-root document.  Parsing alone
+    # let `"required_cross_issues": ["43"]` through: the string was dropped by
+    # the integer filter below, so a typo silently *removed* the issue-43
+    # requirement instead of failing closed -- the worst possible direction for
+    # a policy whose whole job is to bound a generated plan.
+    try:
+        validate_document(
+            policy,
+            load_json_object(
+                contract_root / ".ai/schemas/countyforge-planning-scope.schema.json",
+                kind="planning scope schema",
+            ),
+            kind="planning scope policy",
+        )
+    except KernelError as error:
+        raise ControlPlaneError(
+            "planning_scope_policy_invalid",
+            "The trusted planning scope policy does not satisfy its strict contract.",
+            {"policy_path": POLICY_PATH, "detail": error.details.get("path", "")},
+        ) from None
     issues = policy.get("issues")
     capabilities = policy.get("capabilities")
     entry: JsonObject | None = None

@@ -186,7 +186,7 @@ clipped.
 | The author must be the actor who triggered the run | Excluded, `author_not_authorized` |
 | Parts must be contiguous `1/N … N/N` with one declared total | Refused, `missing_part` / `conflicting_total` |
 | No duplicate part numbers | Refused, `duplicate_part` |
-| At most 12 parts, 24,000 bytes per part, 160,000 bytes total | Oversized part excluded, `comment_too_large`; total over budget refused |
+| At most 12 parts, 24,000 payload bytes per part (measured after the marker), 160,000 bytes total | Oversized part excluded, `comment_too_large`; total over budget refused |
 | Parts must exist before the triggering command | Excluded, `posted_after_trigger` |
 
 Nothing is ever silently truncated. Every exclusion is recorded in the context

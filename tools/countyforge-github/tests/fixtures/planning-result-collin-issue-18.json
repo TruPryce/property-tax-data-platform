@@ -85,8 +85,7 @@
       "title": "Implement the exact Access NUMERIC decoder",
       "description": "Decode the packed sign, scale, and multiword magnitude into Decimal without binary floating-point conversion, and cover it with independently authored literal vectors.",
       "write_paths": [
-        "libs/property-tax-adapters/",
-        "tests/"
+        "libs/property-tax-adapters/"
       ],
       "validation_checks": [
         "repo.check"
@@ -104,8 +103,7 @@
       "title": "Implement the structural fingerprint and typed Collin source record",
       "description": "Add the deterministic structural fingerprint, identifier validation, bounded diagnostics, and the county-specific typed source record, failing closed for every structure the contract declares incompatible.",
       "write_paths": [
-        "libs/property-tax-adapters/",
-        "tests/"
+        "libs/property-tax-adapters/"
       ],
       "validation_checks": [
         "repo.check"
@@ -125,8 +123,7 @@
       "title": "Emit distinct current and certified observations",
       "description": "Building on tasks 1.1 and 1.2, emit distinct current and certified adapter-layer observations with exact values and approved year, status, identifier, and row provenance, preserving every physical row.",
       "write_paths": [
-        "libs/property-tax-adapters/",
-        "tests/"
+        "libs/property-tax-adapters/"
       ],
       "validation_checks": [
         "repo.check"
@@ -146,7 +143,7 @@
       "title": "Add adapter contract tests and engineering documentation",
       "description": "Covering tasks 1.1, 1.2 and 1.3, document fixture provenance, malformed-input behaviour, dual-release semantics, row preservation, licensing, compatibility limits, and explicit non-production status.",
       "write_paths": [
-        "tests/",
+        "libs/property-tax-adapters/",
         "docs/engineering/",
         "docs/sources/"
       ],
@@ -318,7 +315,6 @@
   ],
   "declared_write_scope": [
     "libs/property-tax-adapters/",
-    "tests/",
     "docs/engineering/",
     "docs/sources/",
     "openspec/changes/add-collin-cad-access-decoder-foundation/"
