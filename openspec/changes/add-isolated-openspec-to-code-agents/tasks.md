@@ -43,6 +43,14 @@
 - [x] 7.3 Add end-to-end retry packet fixtures and run the deterministic CountyForge, workflow-policy, OpenSpec, documentation, and `prepr-no-ai` gates.
 - [x] 7.4 Reconcile the 16-comment selection contract and cover selected, older unselected, and post-cutoff mutations.
 
+## 8. Merged-planning approval binding correction
+
+- [x] 8.1 Bind the approved change to its issue through committed `.openspec.yaml` metadata read from the trusted branch, not through mutable pull-request prose.
+- [x] 8.2 Recognize both `#<number>` and canonical `/issues/<number>` body references, recorded as a non-authoritative consistency signal.
+- [x] 8.3 Preserve every existing merged/merge-SHA, prefix, containment, post-merge-modification, bounded-compare, and human-merger check.
+- [x] 8.4 Publish a linked literal issue reference in the generated planning pull-request body for operator clarity.
+- [x] 8.5 Add producer/consumer contract fixtures over the exact generated body and change metadata so the two cannot drift again.
+
 ## 9. Provider-routed implementation execution
 
 - [x] 9.1 Declare both implementation providers, their pinned images, and their credentials in `implement.workspace-write.v1`.

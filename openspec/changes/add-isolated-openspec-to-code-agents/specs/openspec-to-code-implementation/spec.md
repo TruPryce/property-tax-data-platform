@@ -1,7 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Accepted-plan implementation eligibility
-The control plane SHALL allow `implement <change>` only when the exact change exists and validates on the trusted default branch, identifies the originating issue, has no unresolved blocking decisions, and its planning PR was merged by an authorized human maintainer whose immutable GitHub actor type is `User`. The request MUST bind an immutable trusted base SHA and semantic implementation revision. Reactions, labels, draft branches, bot output, and issue prose MUST NOT establish approval.
+The control plane SHALL allow `implement <change>` only when the exact change exists and validates on the trusted default branch, identifies the originating issue, has no unresolved blocking decisions, and its planning PR was merged by an authorized human maintainer whose immutable GitHub actor type is `User`. The request MUST bind an immutable trusted base SHA and semantic implementation revision. Reactions, labels, draft branches, bot output, and issue prose MUST NOT establish approval. The change-to-issue binding SHALL be read from committed metadata -- `openspec/changes/<change>/.openspec.yaml` must declare exactly one `issue:` matching the requested issue -- on the trusted branch or the verified merged tree. Mutable pull-request body prose MUST NOT be that binding; a body issue reference MAY be recorded as a consistency signal and MUST recognize both a bare `#<number>` and the canonical `/issues/<number>` URL.
+
+#### Scenario: Accept either published issue-reference style
+- **WHEN** a merged planning pull request references its issue only by canonical URL and the committed change metadata declares that issue
+- **THEN** approval resolves from the committed binding, and no single body-prose formatting style is required
+
+#### Scenario: Refuse a body that contradicts committed metadata
+- **WHEN** a merged pull request body claims the requested issue but the committed change metadata declares another issue, is absent, or is ambiguous
+- **THEN** approval fails closed and implementation is refused
 
 #### Scenario: Draft planning change is refused
 - **WHEN** an authorized maintainer requests implementation for a planning change that exists only on an unmerged or draft branch
