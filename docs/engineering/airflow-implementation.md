@@ -19,8 +19,20 @@ exceeds it is OOM-killed, and the scheduler dies with it.
 | `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG` | 2 | two concurrent tasks per DAG |
 | `AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG` | 1 | no overlapping runs of the same DAG |
 
-**Budget roughly 1 GiB peak RSS per task.** If a task needs more, reduce parallelism deliberately and
-say so in the pull request; do not discover the limit in production.
+**The scheduler's own footprint comes out of that same 4 GiB before any task runs.** Measured on the
+deployed runtime it sits at 288 MiB idle with a 400 MiB peak, so the budget is not `4096 / 4`:
+
+```text
+(4096 MiB limit - 400 MiB scheduler) / 4 concurrent tasks ≈ 900 MiB peak RSS per task
+```
+
+**Budget 900 MiB peak RSS per task at the current parallelism of 4.** Four tasks each sitting on a
+full 1 GiB would exceed the container limit and take the scheduler down with them, which is the
+failure mode where every task passes its own benchmark and the runtime still dies.
+
+A task that genuinely needs more memory buys it by lowering `AIRFLOW__CORE__PARALLELISM` — at 3 the
+same arithmetic allows about 1.2 GiB each. Make that trade deliberately in the pull request rather
+than discovering the ceiling in production, and re-measure the scheduler baseline if it grows.
 
 `dags/` is mounted read-only at `/opt/airflow/dags`. DAG code cannot write beside itself. Remote
 logging is off, so task logs land in a named volume and are not durable — do not treat them as
