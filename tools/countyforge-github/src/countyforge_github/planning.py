@@ -31,10 +31,10 @@ from countyforge_runner.planning_policy import validate_planning_payload
 
 from countyforge_github.contracts import ControlContracts, load_json_object
 from countyforge_github.decision_input import (
-    MARKER,
     MAX_PART_BYTES,
     assert_unedited_since_trigger,
     collect_decision_input,
+    decision_marker,
 )
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning_scope import resolve_planning_scope
@@ -303,13 +303,14 @@ def planning_context_fingerprint(
         # whole. Clipping one silently is what made a complete D1-D4 package
         # read as incomplete on issue #18; an oversized part is excluded with a
         # recorded reason instead, inside `collect_decision_input`.
-        limit = MAX_PART_BYTES if MARKER.search(raw_body) else 4000
+        marked = decision_marker(raw_body) is not None
+        limit = MAX_PART_BYTES if marked else 4000
         comment_body, _ = redact_untrusted_text(raw_body[:limit])
         comment_records.append(
             {
                 "id": int(comment.get("id", 0)),
                 "body": comment_body,
-                "decision_part": bool(MARKER.search(raw_body)),
+                "decision_part": marked,
             }
         )
     return hashlib.sha256(

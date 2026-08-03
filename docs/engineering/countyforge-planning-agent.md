@@ -181,6 +181,7 @@ clipped.
 | Rule | Behaviour when violated |
 |---|---|
 | The marker must match exactly, including `:v1` | The comment is ordinary evidence, not a decision part |
+| The marker must **open the comment** (leading blank lines are fine) | The comment is ordinary evidence: quoting the marker in prose or inside a fenced example never selects it |
 | `issue=` must match the issue being planned | Excluded, `issue_number_mismatch` |
 | The author must be the actor who triggered the run | Excluded, `author_not_authorized` |
 | Parts must be contiguous `1/N … N/N` with one declared total | Refused, `missing_part` / `conflicting_total` |

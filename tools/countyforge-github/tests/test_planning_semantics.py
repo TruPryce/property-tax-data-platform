@@ -20,6 +20,7 @@ from countyforge_github.decision_input import (
     MARKER,
     assert_unedited_since_trigger,
     collect_decision_input,
+    decision_marker,
 )
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning import validate_planning_result
@@ -863,3 +864,116 @@ def test_publication_invokes_the_edit_check_before_the_first_git_object() -> Non
         assert call < body.index(f'progress.enter("{stage}")'), stage
     # And after the packet/manifest have been validated, so it reads bound facts.
     assert body.index('progress.enter("validate_provenance")') < call
+
+
+# --------------------------------------------------------------------------
+# Review 4845338099 — the marker must open the comment, not appear inside it.
+# --------------------------------------------------------------------------
+
+
+_MARKER_LINE = "<!-- countyforge-plan-input:v1 issue=18 input=collin-1 part=1/1 -->"
+
+
+def test_the_marker_must_open_the_comment() -> None:
+    """First line only. Leading blank lines carry no content, so they are fine."""
+
+    assert decision_marker(f"{_MARKER_LINE}\n\n## D1 — body") is not None
+    assert decision_marker(f"\n\n{_MARKER_LINE}\n\n## D1 — body") is not None
+
+
+def test_leading_prose_before_the_marker_is_not_a_decision_part() -> None:
+    """The payload starts after the marker, so a mid-body marker would discard
+    everything before it -- silently, which is the failure this contract exists
+    to remove. Such a comment is ordinary evidence instead."""
+
+    body = f"Some earlier thinking that must not be thrown away.\n\n{_MARKER_LINE}\n\n## D1 — body"
+    assert decision_marker(body) is None
+    collected = _collect(
+        [
+            {
+                "id": 7001,
+                "body": body,
+                "updated_at": "2026-08-01T00:00:00Z",
+                "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+            }
+        ],
+        issue_number=18,
+    )
+    assert collected.parts == []
+    assert collected.excluded == []
+
+
+def test_a_marker_quoted_inside_a_fenced_example_is_not_a_decision_part() -> None:
+    """Documentation and review comments quote this marker routinely."""
+
+    body = (
+        "Here is how the convention works:\n\n"
+        "```markdown\n"
+        f"{_MARKER_LINE}\n"
+        "```\n\n"
+        "Please use it next time."
+    )
+    assert decision_marker(body) is None
+    collected = _collect(
+        [
+            {
+                "id": 7002,
+                "body": body,
+                "updated_at": "2026-08-01T00:00:00Z",
+                "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+            }
+        ],
+        issue_number=18,
+    )
+    assert collected.parts == []
+
+
+def test_every_path_uses_the_same_marker_predicate(tmp_path: Path) -> None:
+    """Fingerprinting, collection, and packet construction must agree.
+
+    If one path treated a quoted marker as a decision part, that comment would be
+    bounded at 24,000 bytes in the fingerprint while being ordinary evidence in
+    the packet -- two descriptions of one comment.
+    """
+
+    import subprocess
+
+    from countyforge_github import planning
+    from countyforge_github.planning import build_planning_packet
+
+    # No path may reach for an unanchored search of its own.
+    for module in (planning, __import__("countyforge_github.decision_input", fromlist=["x"])):
+        source = Path(module.__file__ or "").read_text(encoding="utf-8")
+        assert "MARKER.search" not in source, module.__name__
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    quoted = {
+        "id": 7003,
+        "body": f"As a reminder, the marker looks like:\n\n{_MARKER_LINE}\n",
+        "updated_at": "2026-08-01T00:00:00Z",
+        "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+    }
+    real = _part(1, 1, "## D1 — the actual decision", comment_id=7004)
+
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="marker-consistency",
+        comments=[quoted, real],
+    )
+    package = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))["decision_input"]
+    assert package["included_part_count"] == 1
+    assert [item["comment_id"] for item in package["included_parts"]] == [7004]
+    assert 7003 not in {item.get("comment_id") for item in package["excluded"]}

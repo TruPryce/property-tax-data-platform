@@ -33,8 +33,13 @@ from countyforge_github.errors import ControlPlaneError
 MARKER_VERSION = "v1"
 #: Exact marker only. A near-miss is not a decision part; it is a comment that
 #: happens to mention the convention, and it is treated as ordinary evidence.
+#:
+#: Anchored: the payload is everything *after* the marker, so a marker found
+#: mid-body would silently discard everything before it -- the same
+#: quiet-truncation failure this whole contract exists to remove. A comment that
+#: quotes the marker in prose or inside a fenced example is ordinary evidence.
 MARKER = re.compile(
-    r"<!--\s*countyforge-plan-input:v1\s+"
+    r"\A\s*<!--\s*countyforge-plan-input:v1\s+"
     r"issue=(?P<issue>[0-9]{1,9})\s+"
     r"input=(?P<input>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\s+"
     r"part=(?P<part>[0-9]{1,3})/(?P<total>[0-9]{1,3})\s*-->"
@@ -49,6 +54,17 @@ INCOMPLETE = "incomplete_decision_input"
 EXCLUDED_TOO_LARGE = "comment_too_large"
 EXCLUDED_SUPERSEDED = "superseded_decision_input"
 EXCLUDED_TOTAL_BUDGET = "total_decision_input_budget_exceeded"
+
+
+def decision_marker(body: str) -> re.Match[str] | None:
+    """The one predicate for "is this comment a decision part".
+
+    Every path -- context fingerprinting, decision collection, and packet
+    construction -- must agree on this, or a comment could be bounded as a
+    decision part in one place and as ordinary evidence in another.
+    """
+
+    return MARKER.match(body)
 
 
 def _fail(reason: str, **details: object) -> NoReturn:
@@ -174,7 +190,7 @@ def collect_decision_input(
     totals: dict[str, set[int]] = {}
     for comment in comments:
         body = str(comment.get("body", ""))
-        match = MARKER.search(body)
+        match = decision_marker(body)
         if match is None:
             continue
         try:
