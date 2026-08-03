@@ -52,4 +52,5 @@ openspec status --change bootstrap-six-county-appraisal-platform
 - [`libs/property-tax-adapters/AGENTS.md`](libs/property-tax-adapters/AGENTS.md)
 - [`services/AGENTS.md`](services/AGENTS.md)
 - [`infra/AGENTS.md`](infra/AGENTS.md)
+- [`infra/postgres/AGENTS.md`](infra/postgres/AGENTS.md)
 - [`docs/AGENTS.md`](docs/AGENTS.md)

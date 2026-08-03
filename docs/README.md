@@ -7,6 +7,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [Architecture](architecture/README.md) | Package boundaries and end-to-end data flow |
 | [Sources](sources/README.md) | Official-source onboarding and verification |
 | [Decisions](decisions/README.md) | Stable architecture decision records |
+| [Airflow implementation](engineering/airflow-implementation.md) | Runtime limits, memory budget, test collection, and definition of done for Airflow-executed work |
 | [Engineering review](engineering/pre-pr-review-contract.md) | Pre-PR review loop, severity, and verdict contract |
 | [Review artifacts](engineering/review-artifact-contract.md) | Immutable per-run evidence and pointer rules |
 | [Runner observability](engineering/codex-runner-observability.md) | Local event, metrics, and validation contract |

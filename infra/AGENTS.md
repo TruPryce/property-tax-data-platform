@@ -15,5 +15,6 @@
 ## Related
 
 - [Infrastructure overview](README.md)
+- [PostgreSQL migration agent guidance](postgres/AGENTS.md)
 - [Runtime operations contract](../openspec/changes/bootstrap-six-county-appraisal-platform/specs/platform-runtime-operations/spec.md)
 - [Root agent guidance](../AGENTS.md)

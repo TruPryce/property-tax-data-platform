@@ -166,6 +166,7 @@ make infra-check
 ## Related
 
 - [Infrastructure agent guidance](AGENTS.md)
+- [PostgreSQL schema and migrations](postgres/README.md)
 - [Operations documentation](../docs/operations/README.md)
 - [Independent runtime decision](../docs/decisions/0001-independent-akamai-runtime.md)
 - [Airflow DAG guidance](../dags/README.md)
