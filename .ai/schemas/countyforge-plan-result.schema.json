@@ -1,47 +1,471 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/TruPryce/property-tax-data-platform/.ai/schemas/countyforge-plan-result.schema.json",
-  "title": "CountyForge Plan Result",
+  "title": "CountyForge plan result (trusted envelope)",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "contract_version", "status", "originating_issue", "proposed_change_name",
-    "issue_classification", "problem_statement", "desired_outcome", "assumptions",
-    "unresolved_decisions", "affected_capabilities", "files_to_create", "files_to_modify",
-    "proposed_files", "task_slices", "acceptance_criteria", "risks",
-    "security_privacy_considerations", "migration_compatibility_concerns",
-    "validation_commands", "non_goals", "implementation_eligibility", "blocked_reasons",
-    "evidence_citations"
+    "affected_capabilities",
+    "assumptions",
+    "blocked_reasons",
+    "contract_version",
+    "cross_issue_dependencies",
+    "declared_write_scope",
+    "desired_outcome",
+    "evidence_citations",
+    "files_to_create",
+    "files_to_modify",
+    "implementation_eligibility",
+    "issue_classification",
+    "migration_compatibility_concerns",
+    "non_goals",
+    "originating_issue",
+    "planning_decisions",
+    "problem_statement",
+    "proposed_change_name",
+    "proposed_files",
+    "requirements",
+    "risks",
+    "security_privacy_considerations",
+    "status",
+    "task_slices",
+    "unresolved_decisions",
+    "validation_commands"
   ],
   "properties": {
-    "contract_version": {"const": 1},
-    "status": {"enum": ["planned", "blocked", "profile_not_implemented"]},
-    "originating_issue": {"type": "integer", "minimum": 1},
-    "proposed_change_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 96},
-    "issue_classification": {"enum": ["source_onboarding", "feature_work", "defect", "architecture_decision"]},
-    "problem_statement": {"$ref": "#/$defs/text"},
-    "desired_outcome": {"$ref": "#/$defs/text"},
-    "assumptions": {"$ref": "#/$defs/strings"},
-    "unresolved_decisions": {"$ref": "#/$defs/strings"},
-    "affected_capabilities": {"$ref": "#/$defs/strings"},
-    "files_to_create": {"$ref": "#/$defs/paths"},
-    "files_to_modify": {"$ref": "#/$defs/paths"},
-    "proposed_files": {"$ref": "#/$defs/paths"},
-    "task_slices": {"$ref": "#/$defs/strings"},
-    "acceptance_criteria": {"$ref": "#/$defs/strings"},
-    "risks": {"$ref": "#/$defs/strings"},
-    "security_privacy_considerations": {"$ref": "#/$defs/strings"},
-    "migration_compatibility_concerns": {"$ref": "#/$defs/strings"},
-    "validation_commands": {"$ref": "#/$defs/strings"},
-    "non_goals": {"$ref": "#/$defs/strings"},
-    "implementation_eligibility": {"const": false},
-    "blocked_reasons": {"$ref": "#/$defs/strings"},
-    "evidence_citations": {"$ref": "#/$defs/citations"}
+    "contract_version": {
+      "type": "integer",
+      "enum": [
+        2
+      ]
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "blocked",
+        "profile_not_implemented"
+      ]
+    },
+    "originating_issue": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proposed_change_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "maxLength": 96
+    },
+    "issue_classification": {
+      "enum": [
+        "source_onboarding",
+        "feature_work",
+        "defect",
+        "architecture_decision"
+      ]
+    },
+    "problem_statement": {
+      "$ref": "#/$defs/text"
+    },
+    "desired_outcome": {
+      "$ref": "#/$defs/text"
+    },
+    "assumptions": {
+      "$ref": "#/$defs/strings"
+    },
+    "unresolved_decisions": {
+      "$ref": "#/$defs/strings"
+    },
+    "planning_decisions": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/planning_decision"
+      }
+    },
+    "affected_capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/affected_capability"
+      }
+    },
+    "cross_issue_dependencies": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/cross_issue_dependency"
+      }
+    },
+    "declared_write_scope": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/?$"
+      }
+    },
+    "files_to_create": {
+      "$ref": "#/$defs/paths"
+    },
+    "files_to_modify": {
+      "$ref": "#/$defs/paths"
+    },
+    "proposed_files": {
+      "$ref": "#/$defs/paths"
+    },
+    "task_slices": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/task_slice"
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    },
+    "risks": {
+      "$ref": "#/$defs/strings"
+    },
+    "security_privacy_considerations": {
+      "$ref": "#/$defs/strings"
+    },
+    "migration_compatibility_concerns": {
+      "$ref": "#/$defs/strings"
+    },
+    "validation_commands": {
+      "$ref": "#/$defs/strings"
+    },
+    "non_goals": {
+      "$ref": "#/$defs/strings"
+    },
+    "implementation_eligibility": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "blocked_reasons": {
+      "$ref": "#/$defs/strings"
+    },
+    "evidence_citations": {
+      "$ref": "#/$defs/citations"
+    }
   },
   "$defs": {
-    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
-    "strings": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 1000}},
-    "paths": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))openspec/changes/[a-z0-9]+(?:-[a-z0-9]+)*(?:/.*)?$", "maxLength": 240}},
-    "citations": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source_id", "excerpt"], "properties": {"source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"}, "excerpt": {"type": "string", "minLength": 1, "maxLength": 500}}}}
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "strings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1200
+      }
+    },
+    "paths": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/?$"
+      }
+    },
+    "citations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "excerpt"
+        ],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8,64}$"
+          },
+          "excerpt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1200
+          }
+        }
+      }
+    },
+    "affected_capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "change_type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "change_type": {
+          "enum": [
+            "ADDED",
+            "MODIFIED",
+            "REMOVED"
+          ]
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "given",
+        "when",
+        "then"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 200
+        },
+        "given": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 400
+          }
+        },
+        "when": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 400
+        },
+        "then": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 400
+          }
+        }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "normative_rule",
+        "scenarios",
+        "source_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 200
+        },
+        "normative_rule": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 1200,
+          "pattern": "(?:SHALL NOT|MUST NOT|SHALL|MUST)"
+        },
+        "scenarios": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/scenario"
+          }
+        },
+        "source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8,64}$"
+          }
+        }
+      }
+    },
+    "task_slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "title",
+        "description",
+        "write_paths",
+        "validation_checks",
+        "prerequisites",
+        "risk",
+        "source_ids"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^[0-9]{1,3}\\.[0-9]{1,3}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 4000
+        },
+        "write_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/?$"
+          }
+        },
+        "validation_checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "prerequisites": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "pattern": "(?:D[0-9]{1,3})|(?:[0-9]{1,3}\\.[0-9]{1,3})"
+          }
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ]
+        },
+        "source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8,64}$"
+          }
+        }
+      }
+    },
+    "planning_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "status",
+        "source_ids",
+        "decision_text",
+        "requires_human_merge"
+      ],
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^D[0-9]{1,3}$"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "resolved_for_draft",
+            "blocked"
+          ]
+        },
+        "source_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8,64}$"
+          }
+        },
+        "decision_text": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 4000
+        },
+        "requires_human_merge": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        }
+      }
+    },
+    "cross_issue_dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_number",
+        "relationship",
+        "boundary"
+      ],
+      "properties": {
+        "issue_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "relationship": {
+          "enum": [
+            "blocked_by",
+            "depends_on",
+            "related_to"
+          ]
+        },
+        "boundary": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 400
+          }
+        }
+      }
+    }
   }
 }

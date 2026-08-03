@@ -4,17 +4,224 @@
   "title": "CountyForge Planning Context Manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract_version", "run_id", "repository_full_name", "issue_number", "target_sha", "packet_sha256", "sources"],
+  "required": [
+    "contract_version",
+    "issue_number",
+    "packet_sha256",
+    "repository_full_name",
+    "run_id",
+    "sources",
+    "target_sha"
+  ],
   "properties": {
-    "contract_version": {"const": 1},
-    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
-    "repository_full_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
-    "issue_number": {"type": "integer", "minimum": 1},
-    "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "packet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "planning_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "redaction_count": {"type": "integer", "minimum": 0, "maximum": 256},
-    "sources": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source_id", "path", "category", "sha256", "bytes", "truncated"], "properties": {"source_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,96}$"}, "path": {"type": "string", "maxLength": 240}, "category": {"type": "string", "maxLength": 64}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "truncated": {"type": "boolean"}, "redacted": {"type": "boolean"}, "redaction_count": {"type": "integer", "minimum": 0, "maximum": 256}}}},
-    "excluded_candidates": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["path", "category", "reason_code"], "properties": {"path": {"type": "string", "maxLength": 240}, "category": {"type": "string", "maxLength": 64}, "reason_code": {"type": "string", "enum": ["file_limit", "byte_limit", "symlink_escape", "non_regular", "outside_root"]}}}}
+    "contract_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "repository_full_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "target_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "packet_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "planning_context_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "redaction_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 256
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "path",
+          "category",
+          "sha256",
+          "bytes",
+          "truncated"
+        ],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,96}$"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "category": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "redaction_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 256
+          }
+        }
+      }
+    },
+    "excluded_candidates": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "category",
+          "reason_code"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "category": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "file_limit",
+              "byte_limit",
+              "symlink_escape",
+              "non_regular",
+              "outside_root"
+            ]
+          }
+        }
+      }
+    },
+    "decision_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "decision_input_present",
+        "input_id",
+        "declared_total",
+        "included_part_count",
+        "included_parts",
+        "excluded",
+        "total_byte_length",
+        "truncated"
+      ],
+      "properties": {
+        "contract_version": {
+          "type": "integer"
+        },
+        "decision_input_present": {
+          "type": "boolean"
+        },
+        "input_id": {
+          "type": "string"
+        },
+        "declared_total": {
+          "type": "integer"
+        },
+        "included_part_count": {
+          "type": "integer"
+        },
+        "included_parts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "issue_number",
+              "input_id",
+              "part",
+              "total",
+              "comment_id",
+              "author_id",
+              "author_login",
+              "updated_at",
+              "body_sha256",
+              "byte_length"
+            ],
+            "properties": {
+              "issue_number": {
+                "type": "integer"
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "part": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              },
+              "comment_id": {
+                "type": "integer"
+              },
+              "author_id": {
+                "type": "integer"
+              },
+              "author_login": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "body_sha256": {
+                "type": "string"
+              },
+              "byte_length": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "total_byte_length": {
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    }
   }
 }

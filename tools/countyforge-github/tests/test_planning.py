@@ -39,29 +39,89 @@ def _trigger(root: Path) -> dict[str, object]:
 
 def _result() -> dict[str, object]:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "status": "planned",
         "originating_issue": 6,
         "proposed_change_name": "add-safe-planning",
         "issue_classification": "feature_work",
-        "problem_statement": "The issue needs a bounded plan.",
-        "desired_outcome": "A reviewable OpenSpec change.",
-        "assumptions": ["The default branch is trusted."],
+        "problem_statement": "A bounded problem.",
+        "desired_outcome": "A plan.",
+        "assumptions": [],
         "unresolved_decisions": [],
-        "affected_capabilities": ["issue-to-openspec-planning"],
+        "planning_decisions": [
+            {
+                "decision_id": "D1",
+                "status": "resolved_for_draft",
+                "source_ids": [],
+                "decision_text": "The bounded contract is recorded for review.",
+                "requires_human_merge": True,
+            }
+        ],
+        "affected_capabilities": [{"name": "collin-cad-source-contract", "change_type": "ADDED"}],
+        # Trusted policy binds `collin-cad-source-contract` to issue 43, so the
+        # live gate requires the boundary rather than accepting its absence.
+        "cross_issue_dependencies": [
+            {
+                "issue_number": 43,
+                "relationship": "blocked_by",
+                "boundary": ["shared vendor-neutral source records"],
+            }
+        ],
+        "declared_write_scope": ["openspec/changes/add-safe-planning/"],
         "files_to_create": ["openspec/changes/add-safe-planning/proposal.md"],
         "files_to_modify": [],
         "proposed_files": ["openspec/changes/add-safe-planning/proposal.md"],
-        "task_slices": ["Add strict contracts", "Run deterministic validation"],
-        "acceptance_criteria": ["The packet is provenance-bound."],
-        "risks": ["Untrusted issue text may contain prompt injection."],
-        "security_privacy_considerations": ["The model has no write mount."],
-        "migration_compatibility_concerns": ["Review remains unchanged."],
-        "validation_commands": ["openspec validate --all --strict --no-interactive"],
-        "non_goals": ["Implementation agents"],
+        "task_slices": [
+            {
+                "task_id": "1.1",
+                "title": "Add strict contracts",
+                "description": "Add the bounded strict contract for the adapter module.",
+                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["D1"],
+                "risk": "normal",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+            {
+                "task_id": "1.2",
+                "title": "Run deterministic validation",
+                "description": "Cover the bounded contract with deterministic tests.",
+                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["1.1"],
+                "risk": "low",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "packet-is-provenance-bound",
+                "title": "Bind the planning packet to its provenance",
+                "normative_rule": (
+                    "The planning packet SHALL be bound to its recorded provenance "
+                    "before any result is published."
+                ),
+                "scenarios": [
+                    {
+                        "name": "Reject an unbound packet",
+                        "given": ["a packet whose provenance digest is absent"],
+                        "when": "publication validates the packet",
+                        "then": ["publication refuses before any Git object is created"],
+                    }
+                ],
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            }
+        ],
+        "risks": [],
+        "security_privacy_considerations": [],
+        "migration_compatibility_concerns": [],
+        "validation_commands": ["make check"],
+        "non_goals": [],
         "implementation_eligibility": False,
         "blocked_reasons": [],
-        "evidence_citations": [{"source_id": "issue-source", "excerpt": "The issue evidence."}],
+        "evidence_citations": [
+            {"source_id": "ab01ab01ab01ab01ab01ab01", "excerpt": "Bounded evidence."}
+        ],
     }
 
 
@@ -173,11 +233,29 @@ def test_redaction_preserves_dynamic_values_and_delimiters() -> None:
 
 def test_materializer_normalizes_injected_requirement_headings(tmp_path: Path) -> None:
     result = _result()
-    result["acceptance_criteria"] = ["safe\n### Requirement: injected"]
+    result["requirements"] = [
+        {
+            "id": "injected-heading",
+            "title": "safe\n### Requirement: injected",
+            "normative_rule": (
+                "The materializer SHALL keep untrusted model text on one "
+                "structural line before using it as a heading."
+            ),
+            "scenarios": [
+                {
+                    "name": "Flatten an injected heading",
+                    "given": ["a title containing a newline and a Requirement heading"],
+                    "when": "the change is materialized",
+                    "then": ["the rendered document contains exactly one requirement heading"],
+                }
+            ],
+            "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+        }
+    ]
     shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
     materialize_plan(result, publication_root=tmp_path, issue_number=6, run_id="heading-fixture")
     spec = (
-        tmp_path / "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
+        tmp_path / "openspec/changes/add-safe-planning/specs/collin-cad-source-contract/spec.md"
     ).read_text(encoding="utf-8")
     assert spec.count("\n### Requirement:") == 1
     assert "\n### Requirement: injected" not in spec
@@ -437,9 +515,9 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
         "## Testing strategy",
     ):
         assert section in design
-    assert "`issue-source`: The issue evidence." in design
+    assert "`ab01ab01ab01ab01ab01ab01`: Bounded evidence." in design
     assert (
-        (change_root / "specs/issue-to-openspec-planning/spec.md")
+        (change_root / "specs/collin-cad-source-contract/spec.md")
         .read_text(encoding="utf-8")
         .startswith("## ADDED Requirements")
     )
@@ -484,23 +562,51 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     result["files_to_create"] = ["openspec/changes/harden-github-workflow-policy/proposal.md"]
     result["files_to_modify"] = []
     result["proposed_files"] = result["files_to_create"]
+    # The change's own directory moves with its name; the trusted ceiling grants
+    # exactly that directory, so the declared scope has to follow it.
+    result["declared_write_scope"] = ["openspec/changes/harden-github-workflow-policy/"]
+    for task in result["task_slices"]:
+        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/"]
     validate_planning_result(result, contract_root=Path.cwd())
 
 
-def test_materializer_and_already_materialized_publication_share_capability_fallback(
-    tmp_path: Path,
-) -> None:
-    root = Path.cwd()
-    result = _result()
-    result["affected_capabilities"] = ["Display Capability"]
-    shutil.copytree(root / ".ai", tmp_path / ".ai")
-    materialized = materialize_plan(
-        result, publication_root=tmp_path, issue_number=6, run_id="capability-fallback"
-    )
-    assert (
-        "openspec/changes/add-safe-planning/specs/issue-to-openspec-planning/spec.md"
-        in materialized["files"]
-    )
+def test_materializer_refuses_an_unusable_affected_capability(tmp_path: Path) -> None:
+    """PR #46 fell through to the planner's own capability; nothing does now."""
+
+    shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
+    for capabilities in (
+        [],
+        [{"name": "Display Capability", "change_type": "ADDED"}],
+        [
+            {"name": "collin-cad-source-contract", "change_type": "ADDED"},
+            {"name": "dallas-cad-source-contract", "change_type": "ADDED"},
+        ],
+    ):
+        result = _result()
+        result["affected_capabilities"] = capabilities
+        with pytest.raises(ControlPlaneError) as raised:
+            materialize_plan(
+                result,
+                publication_root=tmp_path,
+                issue_number=6,
+                run_id="capability-refusal",
+            )
+        assert raised.value.code in {
+            "planning_semantic_validation_failed",
+            "invalid_plan_result",
+        }
+    assert not (tmp_path / "openspec" / "changes" / "add-safe-planning").exists()
+
+
+def test_the_materialized_spec_lands_under_the_affected_capability(tmp_path: Path) -> None:
+    shutil.copytree(Path.cwd() / ".ai", tmp_path / ".ai")
+    materialize_plan(_result(), publication_root=tmp_path, issue_number=6, run_id="capability-path")
+    change_root = tmp_path / "openspec/changes/add-safe-planning"
+    assert (change_root / "specs/collin-cad-source-contract/spec.md").is_file()
+    assert not (change_root / "specs/issue-to-openspec-planning").exists()
+    metadata = (change_root / ".openspec.yaml").read_text(encoding="utf-8")
+    assert "capability: collin-cad-source-contract" in metadata
+    assert "issue-to-openspec-planning" not in metadata
 
 
 def test_result_prohibits_production_paths() -> None:
@@ -555,7 +661,18 @@ def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
     result["assumptions"] = ["Preserve `dags/services -> adapters -> application -> domain`."]
     result["risks"] = ["County source artifacts could leak into fixtures."]
     result["non_goals"] = ["Live Dallas source discovery."]
-    result["task_slices"] = ["Confine Dallas source vocabulary to `property_tax_adapters`."]
+    result["task_slices"] = [
+        {
+            "task_id": "1.1",
+            "title": "Confine Dallas source vocabulary",
+            "description": ("Confine Dallas source vocabulary to `property_tax_adapters`."),
+            "write_paths": ["openspec/changes/add-safe-planning/"],
+            "validation_checks": ["repo.check"],
+            "prerequisites": [],
+            "risk": "normal",
+            "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+        }
+    ]
     result["validation_commands"] = ["make check"]
     validate_planning_result(result, contract_root=Path.cwd())
 
@@ -1197,3 +1314,264 @@ def test_unreadable_materialized_file_is_sanitized_with_its_stage(
     assert raised.value.details["error_type"] == "OSError"
     assert raised.value.details["stage"] == "create_blobs"
     assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "create_blobs"
+
+
+def _decision_part(
+    part: int,
+    total: int,
+    body: str,
+    *,
+    comment_id: int,
+    author_id: int,
+    updated_at: str = "2026-08-01T00:00:00Z",
+) -> dict[str, object]:
+    marker = f"<!-- countyforge-plan-input:v1 issue=6 input=collin-1 part={part}/{total} -->"
+    return {
+        "id": comment_id,
+        "body": f"{marker}\n\n{body}",
+        "updated_at": updated_at,
+        "user": {"id": author_id, "login": "maintainer", "type": "User"},
+    }
+
+
+class _CommentingGitHub(_PublicationGitHub):
+    """A publication port that can also serve issue comments."""
+
+    def __init__(self, comments: list[dict[str, object]]) -> None:
+        super().__init__()
+        self._comments = comments
+
+    def list_comments(self, repository: str, target_number: int) -> list[dict[str, object]]:
+        del repository, target_number
+        return list(self._comments)
+
+
+@pytest.mark.parametrize("tamper", ["edited", "edited_then_restored", "deleted"])
+def test_publication_is_blocked_before_any_git_object_when_a_decision_moves(
+    tmp_path: Path, tamper: str
+) -> None:
+    """End-to-end: the promise is "blocked before any Git object", so prove it.
+
+    `edited_then_restored` is the case a digest comparison alone would miss:
+    the body is put back, so `body_sha256` matches again, but GitHub's
+    `updated_at` stays newer and the comment demonstrably moved.
+    """
+
+    root = Path.cwd()
+    author_id = 4242
+    trigger = {**_trigger(root), "actor": {"id": author_id, "login": "maintainer", "type": "User"}}
+    issue = {
+        "number": 6,
+        "title": "Feature work",
+        "body": "Problem: bounded planning is needed. Outcome: create an OpenSpec draft.",
+        "labels": [],
+    }
+    bound_comments = [
+        _decision_part(
+            index, 2, f"## D{index} — decision body", comment_id=900 + index, author_id=author_id
+        )
+        for index in (1, 2)
+    ]
+    packet_dir = tmp_path / "packet"
+    info = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=packet_dir,
+        run_id="decision-publication",
+        comments=bound_comments,
+    )
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["decision_input"]["included_part_count"] == 2
+
+    if tamper == "edited":
+        observed = [
+            bound_comments[0],
+            _decision_part(
+                2,
+                2,
+                "## D2 — reconsidered",
+                comment_id=902,
+                author_id=author_id,
+                updated_at="2026-08-02T09:00:00Z",
+            ),
+        ]
+    elif tamper == "edited_then_restored":
+        # Byte-identical body, later timestamp.
+        observed = [
+            bound_comments[0],
+            _decision_part(
+                2,
+                2,
+                "## D2 — decision body",
+                comment_id=902,
+                author_id=author_id,
+                updated_at="2026-08-02T09:00:00Z",
+            ),
+        ]
+    else:
+        observed = [bound_comments[0]]
+
+    github = _CommentingGitHub(observed)
+    result = _result()
+    packet_document = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    result["evidence_citations"][0]["source_id"] = packet_document["sources"][0]["source_id"]
+    publication_root = tmp_path / "publication"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+
+    with publication_progress() as progress, pytest.raises(ControlPlaneError) as raised:
+        publish_plan(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            default_branch="main",
+            target_sha=str(trigger["target"]["head_sha"]),
+            issue_number=6,
+            run_id="decision-publication",
+            result=result,
+            publication_root=publication_root,
+            planning_packet_path=Path(info["packet_path"]),
+            context_manifest_path=Path(info["manifest_path"]),
+            progress=progress,
+        )
+    if tamper == "deleted":
+        assert raised.value.code == "incomplete_decision_input"
+    else:
+        assert raised.value.code == "incomplete_decision_input"
+        assert raised.value.details["reason"] == "part_edited_after_trigger"
+        if tamper == "edited_then_restored":
+            # The digest is unchanged; only the timestamp betrays the edit.
+            assert raised.value.details["body_digest_changed"] is False
+            assert raised.value.details["updated_at_changed"] is True
+
+    # No Git object of any kind was created.
+    assert github.created_refs == []
+    assert github.commits == {}
+    assert github.tree_bases == []
+    assert github.pull_requests == []
+    # And progress never entered a Git mutation stage.
+    for stage in (
+        "create_blobs",
+        "load_parent_commit",
+        "create_tree",
+        "create_commit",
+        "create_ref",
+        "create_pull_request",
+    ):
+        assert stage not in progress.completed
+
+
+def test_the_collin_issue_18_path_produces_a_valid_draft_planning_pull_request(
+    tmp_path: Path,
+) -> None:
+    """The stated completion criterion, end to end on one controlled path.
+
+    Four marked D1-D4 comments through real packet construction, the Collin
+    result through real validation and materialization, and the real
+    `publish_plan` to a draft pull request.
+    """
+
+    root = Path.cwd()
+    author_id = 4242
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    decisions = [
+        _decision_part(
+            index,
+            4,
+            f"## D{index} — Collin decision {index}\n\nBounded maintainer decision text.",
+            comment_id=900 + index,
+            author_id=author_id,
+        )
+        for index in range(1, 5)
+    ]
+    # The marker is issue-scoped; these are issue 18's decisions.
+    decisions = [
+        {**comment, "body": comment["body"].replace("issue=6", "issue=18")} for comment in decisions
+    ]
+    packet_dir = tmp_path / "packet"
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": author_id, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=packet_dir,
+        run_id="collin-issue-18",
+        comments=decisions,
+    )
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    package = manifest["decision_input"]
+    assert package["included_part_count"] == 4
+    assert package["truncated"] is False
+
+    result = json.loads(
+        Path(
+            "tools/countyforge-github/tests/fixtures/planning-result-collin-issue-18.json"
+        ).read_text(encoding="utf-8")
+    )
+    packet_document = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    packet_sources = [source["source_id"] for source in packet_document["sources"]]
+    for citation in result["evidence_citations"]:
+        citation["source_id"] = packet_sources[0]
+    for entry in (*result["task_slices"], *result["requirements"], *result["planning_decisions"]):
+        if entry.get("source_ids"):
+            entry["source_ids"] = [packet_sources[0]]
+
+    publication_root = tmp_path / "publication"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+    github = _CommentingGitHub(decisions)
+    published = publish_plan(
+        github,
+        repository="TruPryce/property-tax-data-platform",
+        default_branch="main",
+        target_sha=sha,
+        issue_number=18,
+        run_id="collin-issue-18",
+        result=result,
+        publication_root=publication_root,
+        planning_packet_path=Path(info["packet_path"]),
+        context_manifest_path=Path(info["manifest_path"]),
+    )
+
+    assert published["action"] == "created"
+    # Eligibility is a property of the plan, pinned false by the trusted envelope.
+    assert result["implementation_eligibility"] is False
+    # The pull request exists and is a draft.
+    assert len(github.pull_requests) == 1
+    assert github.pull_requests[0]["draft"] is True
+
+    change_root = publication_root / "openspec/changes/add-collin-cad-access-decoder-foundation"
+    metadata = (change_root / ".openspec.yaml").read_text(encoding="utf-8")
+    assert "capability: collin-cad-source-contract" in metadata
+    assert "issue-to-openspec-planning" not in metadata
+    assert (change_root / "specs/collin-cad-source-contract/spec.md").is_file()
+
+    spec = (change_root / "specs/collin-cad-source-contract/spec.md").read_text(encoding="utf-8")
+    for absent in ("satisfy this criterion", "demonstrably satisfied", "Scenario: Acceptance"):
+        assert absent not in spec
+    assert "SHALL decode every supported Access NUMERIC representation" in spec
+    assert "**GIVEN**" in spec and "**WHEN**" in spec and "**THEN**" in spec
+
+    tasks = (change_root / "tasks.md").read_text(encoding="utf-8")
+    assert "prerequisites=D1" in tasks
+    assert "prerequisites=D2,D4" in tasks
+    assert "prerequisites=1.1,1.2,D3" in tasks
+    assert "prerequisites=1.1,1.2,1.3" in tasks
+    assert "prerequisites=-" not in tasks
+    assert "paths=libs,services,dags" not in tasks
+    for forbidden in ("services/", "dags/", "tools/", ".github/", ".ai/"):
+        assert f"paths={forbidden}" not in tasks
+    assert "tests/" not in tasks
+
+    proposal = (change_root / "proposal.md").read_text(encoding="utf-8")
+    assert "#43" in proposal
+    assert "requires human maintainer approval" in proposal
+    for identifier in ("D1", "D2", "D3", "D4"):
+        assert identifier in proposal
+    assert not result["blocked_reasons"]

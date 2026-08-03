@@ -147,9 +147,85 @@ Use `make countyforge-plan-check`, `make countyforge-plan-fixtures`, and
 `make countyforge-plan-policy-tests`. These are deterministic and do not call a provider. Plan
 image construction and paid calls remain explicitly opt-in.
 
+## Supplying maintainer decisions
+
+A planning run reads issue text as untrusted evidence. When a decision package is
+too large for one comment, split it across several comments carrying this exact
+marker as the first line:
+
+```markdown
+<!-- countyforge-plan-input:v1 issue=18 input=collin-decoder-decisions-1 part=1/4 -->
+
+## D1 — Access NUMERIC physical contract
+...
+```
+
+Then post the command on its own, in a separate comment:
+
+```
+/countyforge plan
+```
+
+Do not put the command inside a decision part: a comment containing a
+`/countyforge` line is excluded from decision content.
+
+### What the marker does and does not do
+
+It changes **selection**, not trust. A marked comment is still untrusted
+evidence; nothing in it becomes policy, and the planner cannot accept its own
+decisions. What the marker buys is that parts are assembled whole rather than
+clipped.
+
+### Rules
+
+| Rule | Behaviour when violated |
+|---|---|
+| The marker must match exactly, including `:v1` | The comment is ordinary evidence, not a decision part |
+| The marker must **open the comment** (leading blank lines are fine) | The comment is ordinary evidence: quoting the marker in prose or inside a fenced example never selects it |
+| `issue=` must match the issue being planned | Excluded, `issue_number_mismatch` |
+| The author must be the actor who triggered the run | Excluded, `author_not_authorized` |
+| Parts must be contiguous `1/N … N/N` with one declared total | Refused, `missing_part` / `conflicting_total` |
+| No duplicate part numbers | Refused, `duplicate_part` |
+| At most 12 parts, 24,000 payload bytes per part (measured after the marker), 160,000 bytes total | Oversized part excluded, `comment_too_large`; total over budget refused |
+| Parts must exist before the triggering command | Excluded, `posted_after_trigger` |
+
+Nothing is ever silently truncated. Every exclusion is recorded in the context
+manifest with its reason, alongside each included part's comment ID, author,
+content digest, and `updated_at`.
+
+### Supersession
+
+Posting a second complete package with a different `input=` identifier replaces
+the first: the newest package wins and the older one is recorded as
+`superseded_decision_input`. Packages are never merged, so two rounds of
+decisions cannot be spliced into one.
+
+### Editing a decision after triggering a run
+
+Don't. The packet binds each part's digest and timestamp, and publication
+re-reads the comments and compares both before creating any Git object. An edit
+— **including editing a comment and restoring its original text**, which leaves
+the digest identical but the timestamp newer — fails the run with
+`part_edited_after_trigger`. Deleting a bound part fails it too.
+
+If you need to change a decision, let the run finish or fail, then post a new
+package with a new `input=` identifier and trigger again.
+
+## Trusted planning scope
+
+`.ai/policies/countyforge-planning-scope.v1.json` declares, per issue and per
+capability, the maximum write roots a generated plan may claim and the
+cross-issue boundaries it must state. A plan may narrow that ceiling; nothing it
+emits can widen it.
+
+An issue absent from the policy collapses to the change's own OpenSpec directory.
+That is deliberate: a forgotten entry produces a refusal rather than a wide
+grant. Add the issue to the policy before planning work that touches a package.
+
 ## Related
 
 - [Runner kernel](countyforge-runner-kernel.md)
 - [GitHub control plane](countyforge-github-control-plane.md)
 - [GitHub operations](../operations/countyforge-github-operations.md)
 - [ADR-0007](../decisions/0007-issue-to-openspec-planning.md)
+- [ADR-0009](../decisions/0009-maintainer-decision-input-and-planning-semantics.md)

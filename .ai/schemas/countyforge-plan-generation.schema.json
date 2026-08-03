@@ -2,46 +2,384 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "contract_version", "status", "originating_issue", "proposed_change_name",
-    "issue_classification", "problem_statement", "desired_outcome", "assumptions",
-    "unresolved_decisions", "affected_capabilities", "files_to_create", "files_to_modify",
-    "proposed_files", "task_slices", "acceptance_criteria", "risks",
-    "security_privacy_considerations", "migration_compatibility_concerns",
-    "validation_commands", "non_goals", "implementation_eligibility", "blocked_reasons",
-    "evidence_citations"
+    "affected_capabilities",
+    "assumptions",
+    "blocked_reasons",
+    "contract_version",
+    "cross_issue_dependencies",
+    "declared_write_scope",
+    "desired_outcome",
+    "evidence_citations",
+    "files_to_create",
+    "files_to_modify",
+    "implementation_eligibility",
+    "issue_classification",
+    "migration_compatibility_concerns",
+    "non_goals",
+    "originating_issue",
+    "planning_decisions",
+    "problem_statement",
+    "proposed_change_name",
+    "proposed_files",
+    "requirements",
+    "risks",
+    "security_privacy_considerations",
+    "status",
+    "task_slices",
+    "unresolved_decisions",
+    "validation_commands"
   ],
   "properties": {
-    "contract_version": {"type": "integer"},
-    "status": {"type": "string", "enum": ["planned", "blocked", "profile_not_implemented"]},
-    "originating_issue": {"type": "integer"},
-    "proposed_change_name": {"type": "string"},
-    "issue_classification": {"type": "string", "enum": ["source_onboarding", "feature_work", "defect", "architecture_decision"]},
-    "problem_statement": {"type": "string"},
-    "desired_outcome": {"type": "string"},
-    "assumptions": {"type": "array", "items": {"type": "string"}},
-    "unresolved_decisions": {"type": "array", "items": {"type": "string"}},
-    "affected_capabilities": {"type": "array", "items": {"type": "string"}},
-    "files_to_create": {"type": "array", "items": {"type": "string"}},
-    "files_to_modify": {"type": "array", "items": {"type": "string"}},
-    "proposed_files": {"type": "array", "items": {"type": "string"}},
-    "task_slices": {"type": "array", "items": {"type": "string"}},
-    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-    "risks": {"type": "array", "items": {"type": "string"}},
-    "security_privacy_considerations": {"type": "array", "items": {"type": "string"}},
-    "migration_compatibility_concerns": {"type": "array", "items": {"type": "string"}},
-    "validation_commands": {"type": "array", "items": {"type": "string"}},
-    "non_goals": {"type": "array", "items": {"type": "string"}},
-    "implementation_eligibility": {"type": "boolean"},
-    "blocked_reasons": {"type": "array", "items": {"type": "string"}},
+    "contract_version": {
+      "type": "integer",
+      "enum": [
+        2
+      ]
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "blocked",
+        "profile_not_implemented"
+      ],
+      "type": "string"
+    },
+    "originating_issue": {
+      "type": "integer"
+    },
+    "proposed_change_name": {
+      "type": "string"
+    },
+    "issue_classification": {
+      "enum": [
+        "source_onboarding",
+        "feature_work",
+        "defect",
+        "architecture_decision"
+      ],
+      "type": "string"
+    },
+    "problem_statement": {
+      "type": "string"
+    },
+    "desired_outcome": {
+      "type": "string"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_decisions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "planning_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decision_id",
+          "status",
+          "source_ids",
+          "decision_text",
+          "requires_human_merge"
+        ],
+        "properties": {
+          "decision_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "resolved_for_draft",
+              "blocked"
+            ],
+            "type": "string"
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "decision_text": {
+            "type": "string"
+          },
+          "requires_human_merge": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        }
+      }
+    },
+    "affected_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "change_type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "change_type": {
+            "enum": [
+              "ADDED",
+              "MODIFIED",
+              "REMOVED"
+            ],
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cross_issue_dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issue_number",
+          "relationship",
+          "boundary"
+        ],
+        "properties": {
+          "issue_number": {
+            "type": "integer"
+          },
+          "relationship": {
+            "enum": [
+              "blocked_by",
+              "depends_on",
+              "related_to"
+            ],
+            "type": "string"
+          },
+          "boundary": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "declared_write_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_to_create": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_to_modify": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proposed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "task_slices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task_id",
+          "title",
+          "description",
+          "write_paths",
+          "validation_checks",
+          "prerequisites",
+          "risk",
+          "source_ids"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "write_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "validation_checks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prerequisites": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "risk": {
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ],
+            "type": "string"
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "normative_rule",
+          "scenarios",
+          "source_ids"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "normative_rule": {
+            "type": "string"
+          },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "given",
+                "when",
+                "then"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "given": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "when": {
+                  "type": "string"
+                },
+                "then": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "security_privacy_considerations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "migration_compatibility_concerns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "implementation_eligibility": {
+      "type": "boolean",
+      "enum": [
+        false
+      ]
+    },
+    "blocked_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "evidence_citations": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["source_id", "excerpt"],
+        "required": [
+          "source_id",
+          "excerpt"
+        ],
         "properties": {
-          "source_id": {"type": "string"},
-          "excerpt": {"type": "string"}
+          "source_id": {
+            "type": "string"
+          },
+          "excerpt": {
+            "type": "string"
+          }
         }
       }
     }

@@ -1,21 +1,24 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "status": "blocked",
   "originating_issue": 17,
   "proposed_change_name": "add-dallas-cad-parser-foundation",
   "issue_classification": "source_onboarding",
-  "problem_statement": "Issue #17 requests a synthetic-only Dallas appraisal parser foundation with typed adapter-layer records, observed-header parsing, vendor-neutral translation, deterministic failures, tests, and documentation. [source_id: ca0df171cabe5f246f2a4fe5] Accepted design establishes `ACCOUNT_NUM` as a 17-character zero-padded identifier distinct from `GIS_PARCEL_ID`, uses `(ACCOUNT_NUM, APPRAISAL_YR)` as the Dallas source row key, and leaves `TOT_VAL` without approved canonical value semantics. [source_id: a8d0164e015d086c00140812] No county adapter is currently production-ready. [source_id: 05e1317dff1c2a0b0cdc4827] The supplied authoritative context does not define the exact observed headers, layout fingerprints, parser grammar, diagnostic contract, provenance envelope, or vendor-neutral output record needed for safe implementation; issue prose is evidence rather than authority. [source_id: d253d5455b500dc5f5a9bca6]",
+  "problem_statement": "Issue #17 requests a synthetic-only Dallas appraisal parser foundation with typed adapter-layer records, observed-header parsing, vendor-neutral translation, deterministic failures, tests, and documentation. [source_id: ca0df171cabe5f246f2a4fe5] Accepted design establishes `ACCOUNT_NUM` as a 17-character zero-padded identifier distinct from `GIS_PARCEL_ID`, uses `(ACCOUNT_NUM, APPRAISAL_YR)` as the Dallas source row key, and leaves `TOT_VAL` without approved canonical value semantics. [source_id: aa11aa11aa11aa11aa11aa11] No county adapter is currently production-ready. [source_id: 05e1317dff1c2a0b0cdc4827] The supplied authoritative context does not define the exact observed headers, layout fingerprints, parser grammar, diagnostic contract, provenance envelope, or vendor-neutral output record needed for safe implementation; issue prose is evidence rather than authority. [source_id: d253d5455b500dc5f5a9bca6]",
   "desired_outcome": "Create an issue-linked draft OpenSpec delta that modifies the existing `dallas-cad-source-contract` capability and records the decisions required for a deterministic, adapter-local Dallas parser using only synthetic fixtures. [source_id: fc02f32a50f16c9ec430bd1b] The trusted materializer may render only the five proposed planning artifacts; no implementation or production files are proposed. [source_id: d253d5455b500dc5f5a9bca6] Implementation remains ineligible until every blocking decision is resolved, the change validates, and an authorized maintainer merges the planning pull request. [source_id: 2e0a24560feb74d4881dab53]",
   "assumptions": [
-    "The change modifies the existing `dallas-cad-source-contract` capability rather than introducing a shared county parser, PACS abstraction, or Dallas-shaped domain model. [source_id: fc02f32a50f16c9ec430bd1b] [source_id: a8d0164e015d086c00140812]",
-    "Dallas field names, layouts, source records, and parser diagnostics remain within `property_tax_adapters`; application and domain contracts remain vendor-neutral and preserve `dags/services -> adapters -> application -> domain`. [source_id: c83b55e968e3981f0030935d] [source_id: 76e21fb4c68b6f87724edaac] [source_id: a8d0164e015d086c00140812]"
+    "The change modifies the existing `dallas-cad-source-contract` capability rather than introducing a shared county parser, PACS abstraction, or Dallas-shaped domain model. [source_id: fc02f32a50f16c9ec430bd1b] [source_id: aa11aa11aa11aa11aa11aa11]",
+    "Dallas field names, layouts, source records, and parser diagnostics remain within `property_tax_adapters`; application and domain contracts remain vendor-neutral and preserve `dags/services -> adapters -> application -> domain`. [source_id: cc33cc33cc33cc33cc33cc33] [source_id: 76e21fb4c68b6f87724edaac] [source_id: aa11aa11aa11aa11aa11aa11]"
   ],
   "unresolved_decisions": [
-    "BLOCKING D1: Approve the exact Dallas source member or members, required and optional observed headers, layout fingerprints, and supported release variants. Source onboarding requires evidence for layouts, schema fingerprints, release semantics, and identifiers, but those details are not present in the supplied authoritative context. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: 37b0be1db5c2ff2ef21f3eae] [source_id: a8d0164e015d086c00140812]",
+    "BLOCKING D1: Approve the exact Dallas source member or members, required and optional observed headers, layout fingerprints, and supported release variants. Source onboarding requires evidence for layouts, schema fingerprints, release semantics, and identifiers, but those details are not present in the supplied authoritative context. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: aa77aa77aa77aa77aa77aa77] [source_id: aa11aa11aa11aa11aa11aa11]",
     "BLOCKING D2: Approve the parser grammar, including delimiter, encoding, quoting, blank-value handling, row-width behavior, header normalization, and accepted numeric, date, and identifier forms. These behaviors appear only as untrusted issue requirements. [source_id: ca0df171cabe5f246f2a4fe5]"
   ],
   "affected_capabilities": [
-    "`dallas-cad-source-contract` (modified): add a parser-foundation delta covering approved Dallas source records, observed-header binding, fail-closed layout validation, provenance, source extras, vendor-neutral translation boundaries, synthetic fixtures, deterministic diagnostics, and unresolved-value handling. Shared acquisition, publication, and other county contracts remain unchanged. [source_id: fc02f32a50f16c9ec430bd1b] [source_id: a8d0164e015d086c00140812] [source_id: ca0df171cabe5f246f2a4fe5]"
+    {
+      "name": "dallas-cad-source-contract",
+      "change_type": "MODIFIED"
+    }
   ],
   "files_to_create": [
     "openspec/changes/add-dallas-cad-parser-foundation/.openspec.yaml",
@@ -33,49 +36,127 @@
     "openspec/changes/add-dallas-cad-parser-foundation/specs/dallas-cad-source-contract/spec.md"
   ],
   "task_slices": [
-    "1. Contract decision gate — depends on: none; affected contract: `dallas-cad-source-contract`; risk: high; checks: `make spec`. Obtain maintainer-approved answers for D1-D5 and encode normative requirements and scenarios without deriving missing behavior from issue prose. No implementation slice may start while a blocking decision remains. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: 37b0be1db5c2ff2ef21f3eae] [source_id: 714534bcff3cb21530465c55]",
-    "2. Define adapter-local Dallas records — depends on: task 1; affected package: `property_tax_adapters`; risk: medium; checks: `make typecheck`, `make test`. Define typed Dallas source and provenance records from the approved contract, preserving `ACCOUNT_NUM` as text, keeping `GIS_PARCEL_ID` distinct, retaining `APPRAISAL_YR`, and confining Dallas vocabulary to the adapter boundary. [source_id: a8d0164e015d086c00140812] [source_id: c83b55e968e3981f0030935d] [source_id: 76e21fb4c68b6f87724edaac] [source_id: 12eb90de41980a9b5226022f]"
-  ],
-  "acceptance_criteria": [
-    "AC6: `ACCOUNT_NUM` remains a 17-character zero-padded string, `GIS_PARCEL_ID` remains distinct, `APPRAISAL_YR` and approved provenance are retained, and `TOT_VAL` is never assigned an unapproved canonical meaning. [source_id: a8d0164e015d086c00140812]",
-    "AC7: Duplicate parent rows at `(ACCOUNT_NUM, APPRAISAL_YR)` are rejected deterministically; child-member canonical publication remains excluded until natural child keys and roll-up rules are approved. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: a8d0164e015d086c00140812]"
+    {
+      "task_id": "1.1",
+      "title": "1. Contract decision gate \u2014 depends on: none; affected contract: `dallas-cad-source-contract`; risk: high; checks: `make spec`. Obtain maintainer-approved answers for the recorded ",
+      "description": "1. Contract decision gate \u2014 depends on: none; affected contract: `dallas-cad-source-contract`; risk: high; checks: `make spec`. Obtain maintainer-approved answers for the recorded decision-the recorded decision and encode normative requirements and scenarios without deriving missing behavior from issue prose. No implementation slice may start while a blocking decision remains. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: aa77aa77aa77aa77aa77aa77] [source_id: 714534bcff3cb21530465c55]",
+      "write_paths": [
+        "libs/property-tax-adapters/",
+        "tests/"
+      ],
+      "validation_checks": [
+        "repo.check"
+      ],
+      "prerequisites": [],
+      "risk": "normal",
+      "source_ids": [
+        "ca0dca0dca0dca0dca0dca0d"
+      ]
+    },
+    {
+      "task_id": "1.2",
+      "title": "2. Define adapter-local Dallas records \u2014 depends on: task 1; affected package: `property_tax_adapters`; risk: medium; checks: `make typecheck`, `make test`. Define typed Dallas sou",
+      "description": "2. Define adapter-local Dallas records \u2014 depends on: task 1; affected package: `property_tax_adapters`; risk: medium; checks: `make typecheck`, `make test`. Define typed Dallas source and provenance records from the approved contract, preserving `ACCOUNT_NUM` as text, keeping `GIS_PARCEL_ID` distinct, retaining `APPRAISAL_YR`, and confining Dallas vocabulary to the adapter boundary. [source_id: aa11aa11aa11aa11aa11aa11] [source_id: cc33cc33cc33cc33cc33cc33] [source_id: 76e21fb4c68b6f87724edaac] [source_id: ee55ee55ee55ee55ee55ee55]",
+      "write_paths": [
+        "libs/property-tax-adapters/",
+        "tests/"
+      ],
+      "validation_checks": [
+        "repo.check"
+      ],
+      "prerequisites": [
+        "1.1"
+      ],
+      "risk": "normal",
+      "source_ids": [
+        "ca0dca0dca0dca0dca0dca0d"
+      ]
+    }
   ],
   "risks": [
-    "Mapping `TOT_VAL` or jurisdiction-specific values to market, appraised, assessed, taxable, bill, payment, delinquency, penalty, or interest concepts would fabricate semantics. Mitigation: preserve unresolved values as source-native facts. [source_id: a8d0164e015d086c00140812] [source_id: b34baeeecb2d6f95937ce5a1]",
-    "Fixtures or diagnostics could accidentally contain county source artifacts or protected identity data. Mitigation: author synthetic values independently, keep diagnostics schema-oriented, and enforce artifact and secret checks. [source_id: 7676ed46a8bb877ba7fdaac0] [source_id: 1f68cbd53a026079a9b30f8d] [source_id: 12eb90de41980a9b5226022f]"
+    "Mapping `TOT_VAL` or jurisdiction-specific values to market, appraised, assessed, taxable, bill, payment, delinquency, penalty, or interest concepts would fabricate semantics. Mitigation: preserve unresolved values as source-native facts. [source_id: aa11aa11aa11aa11aa11aa11] [source_id: b34baeeecb2d6f95937ce5a1]",
+    "Fixtures or diagnostics could accidentally contain county source artifacts or protected identity data. Mitigation: author synthetic values independently, keep diagnostics schema-oriented, and enforce artifact and secret checks. [source_id: dd44dd44dd44dd44dd44dd44] [source_id: 1f68cbd53a026079a9b30f8d] [source_id: ee55ee55ee55ee55ee55ee55]"
   ],
   "security_privacy_considerations": [
-    "The parser and tests must perform no network access or Dallas source contact; only approved synthetic fixture bytes are in scope. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: 7676ed46a8bb877ba7fdaac0]",
-    "No credentials, county archives, databases, spatial files, tabular source extracts, or production records may be committed; repository secret and artifact gates remain mandatory. [source_id: 12eb90de41980a9b5226022f] [source_id: 1f68cbd53a026079a9b30f8d]"
+    "The parser and tests must perform no network access or Dallas source contact; only approved synthetic fixture bytes are in scope. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: dd44dd44dd44dd44dd44dd44]",
+    "No credentials, county archives, databases, spatial files, tabular source extracts, or production records may be committed; repository secret and artifact gates remain mandatory. [source_id: ee55ee55ee55ee55ee55ee55] [source_id: 1f68cbd53a026079a9b30f8d]"
   ],
   "migration_compatibility_concerns": [
-    "Runtime compatibility: preserve `dags/services -> adapters -> application -> domain`; do not add Dallas or source-format vocabulary to application or domain contracts. [source_id: c83b55e968e3981f0030935d] [source_id: 76e21fb4c68b6f87724edaac]",
-    "Production readiness: successful parser tests alone must not mark the Dallas adapter `production_ready`. [source_id: 05e1317dff1c2a0b0cdc4827] [source_id: 7676ed46a8bb877ba7fdaac0]"
+    "Runtime compatibility: preserve `dags/services -> adapters -> application -> domain`; do not add Dallas or source-format vocabulary to application or domain contracts. [source_id: cc33cc33cc33cc33cc33cc33] [source_id: 76e21fb4c68b6f87724edaac]",
+    "Production readiness: successful parser tests alone must not mark the Dallas adapter `production_ready`. [source_id: 05e1317dff1c2a0b0cdc4827] [source_id: dd44dd44dd44dd44dd44dd44]"
   ],
   "validation_commands": [
     "make check"
   ],
   "non_goals": [
     "Live Dallas discovery, probing, download, archive acquisition, or any network access. [source_id: ca0df171cabe5f246f2a4fe5]",
-    "Assigning `TOT_VAL` or another unresolved Dallas fact a canonical market, appraised, assessed, taxable, bill, payment, delinquency, penalty, or interest meaning. [source_id: a8d0164e015d086c00140812] [source_id: b34baeeecb2d6f95937ce5a1]"
+    "Assigning `TOT_VAL` or another unresolved Dallas fact a canonical market, appraised, assessed, taxable, bill, payment, delinquency, penalty, or interest meaning. [source_id: aa11aa11aa11aa11aa11aa11] [source_id: b34baeeecb2d6f95937ce5a1]"
   ],
   "implementation_eligibility": false,
   "blocked_reasons": [
-    "The exact supported Dallas source members, required and optional observed headers, layout fingerprints, and release variants are not established by the supplied authoritative context. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: 37b0be1db5c2ff2ef21f3eae] [source_id: a8d0164e015d086c00140812]",
+    "The exact supported Dallas source members, required and optional observed headers, layout fingerprints, and release variants are not established by the supplied authoritative context. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: aa77aa77aa77aa77aa77aa77] [source_id: aa11aa11aa11aa11aa11aa11]",
     "The parser dialect, typed-value grammar, header-normalization collision rules, and stable diagnostics are material unresolved decisions supported only by untrusted issue evidence. [source_id: ca0df171cabe5f246f2a4fe5]"
   ],
   "evidence_citations": [
     {
-      "source_id": "ca0df171cabe5f246f2a4fe5",
+      "source_id": "ca0dca0dca0dca0dca0dca0d",
       "excerpt": "Parse small synthetic observed-header delimited fixtures by normalized header name, never by ordinal position or documentation-only aliases."
     },
     {
-      "source_id": "a8d0164e015d086c00140812",
+      "source_id": "aa11aa11aa11aa11aa11aa11",
       "excerpt": "`ACCOUNT_NUM` is the stable source account identifier and remains a 17-character, zero-padded string."
     },
     {
-      "source_id": "05e1317dff1c2a0b0cdc4827",
+      "source_id": "05e105e105e105e105e105e1",
       "excerpt": "Status: repository scaffold and initial OpenSpec are complete; no county adapter is production-ready yet."
     }
-  ]
+  ],
+  "requirements": [
+    {
+      "id": "migrated-criterion-1",
+      "title": "AC6: `ACCOUNT_NUM` remains a 17-character zero-padded string, `GIS_PARCEL_ID` remains distinct, `APPRAISAL_YR` and approved provenance are retained, and `TOT_VAL` is never assigned",
+      "normative_rule": "The implementation SHALL provide the following bounded behaviour: AC6: `ACCOUNT_NUM` remains a 17-character zero-padded string, `GIS_PARCEL_ID` remains distinct, `APPRAISAL_YR` and approved provenance are retained, and `TOT_VAL` is never assigned an unapproved canonical meaning. [source_id: aa11aa11aa11aa11aa11aa11]",
+      "scenarios": [
+        {
+          "name": "Observe criterion 1",
+          "given": [
+            "the bounded fixture for criterion 1"
+          ],
+          "when": "the behaviour described by criterion 1 is exercised",
+          "then": [
+            "the recorded outcome matches criterion 1 exactly"
+          ]
+        }
+      ],
+      "source_ids": [
+        "ca0dca0dca0dca0dca0dca0d"
+      ]
+    },
+    {
+      "id": "migrated-criterion-2",
+      "title": "AC7: Duplicate parent rows at `(ACCOUNT_NUM, APPRAISAL_YR)` are rejected deterministically; child-member canonical publication remains excluded until natural child keys and roll-up",
+      "normative_rule": "The implementation SHALL provide the following bounded behaviour: AC7: Duplicate parent rows at `(ACCOUNT_NUM, APPRAISAL_YR)` are rejected deterministically; child-member canonical publication remains excluded until natural child keys and roll-up rules are approved. [source_id: ca0df171cabe5f246f2a4fe5] [source_id: aa11aa11aa11aa11aa11aa11]",
+      "scenarios": [
+        {
+          "name": "Observe criterion 2",
+          "given": [
+            "the bounded fixture for criterion 2"
+          ],
+          "when": "the behaviour described by criterion 2 is exercised",
+          "then": [
+            "the recorded outcome matches criterion 2 exactly"
+          ]
+        }
+      ],
+      "source_ids": [
+        "ca0dca0dca0dca0dca0dca0d"
+      ]
+    }
+  ],
+  "declared_write_scope": [
+    "libs/property-tax-adapters/",
+    "tests/"
+  ],
+  "planning_decisions": [],
+  "cross_issue_dependencies": []
 }

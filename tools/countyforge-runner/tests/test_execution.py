@@ -19,29 +19,81 @@ from countyforge_runner.resolver import Kernel
 
 def _valid_plan_document() -> JsonObject:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "status": "planned",
         "originating_issue": 1,
         "proposed_change_name": "safe-plan",
         "issue_classification": "feature_work",
         "problem_statement": "A bounded problem.",
         "desired_outcome": "A plan.",
-        "assumptions": ["Trusted contracts"],
+        "assumptions": [],
         "unresolved_decisions": [],
-        "affected_capabilities": ["runner"],
-        "files_to_create": ["openspec/changes/safe-plan/proposal.md"],
+        "planning_decisions": [
+            {
+                "decision_id": "D1",
+                "status": "resolved_for_draft",
+                "source_ids": [],
+                "decision_text": "The bounded contract is recorded for review.",
+                "requires_human_merge": True,
+            }
+        ],
+        "affected_capabilities": [{"name": "collin-cad-source-contract", "change_type": "ADDED"}],
+        "cross_issue_dependencies": [],
+        "declared_write_scope": ["libs/property-tax-adapters/", "tests/"],
+        "files_to_create": ["libs/property-tax-adapters/src/pkg/module.py"],
         "files_to_modify": [],
-        "proposed_files": ["openspec/changes/safe-plan/proposal.md"],
-        "task_slices": ["Write contracts"],
-        "acceptance_criteria": ["It validates"],
-        "risks": ["Injection"],
-        "security_privacy_considerations": ["Read-only"],
-        "migration_compatibility_concerns": ["None"],
-        "validation_commands": ["openspec validate"],
-        "non_goals": ["Implementation"],
+        "proposed_files": ["libs/property-tax-adapters/src/pkg/module.py"],
+        "task_slices": [
+            {
+                "task_id": "1.1",
+                "title": "Add strict contracts",
+                "description": "Add the bounded strict contract for the adapter module.",
+                "write_paths": ["libs/property-tax-adapters/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["D1"],
+                "risk": "normal",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+            {
+                "task_id": "1.2",
+                "title": "Run deterministic validation",
+                "description": "Cover the bounded contract with deterministic tests.",
+                "write_paths": ["tests/"],
+                "validation_checks": ["repo.check"],
+                "prerequisites": ["1.1"],
+                "risk": "low",
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "packet-is-provenance-bound",
+                "title": "Bind the planning packet to its provenance",
+                "normative_rule": (
+                    "The planning packet SHALL be bound to its recorded provenance "
+                    "before any result is published."
+                ),
+                "scenarios": [
+                    {
+                        "name": "Reject an unbound packet",
+                        "given": ["a packet whose provenance digest is absent"],
+                        "when": "publication validates the packet",
+                        "then": ["publication refuses before any Git object is created"],
+                    }
+                ],
+                "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+            }
+        ],
+        "risks": [],
+        "security_privacy_considerations": [],
+        "migration_compatibility_concerns": [],
+        "validation_commands": ["make check"],
+        "non_goals": [],
         "implementation_eligibility": False,
         "blocked_reasons": [],
-        "evidence_citations": [{"source_id": "s", "excerpt": "evidence"}],
+        "evidence_citations": [
+            {"source_id": "ab01ab01ab01ab01ab01ab01", "excerpt": "Bounded evidence."}
+        ],
     }
 
 
@@ -351,17 +403,10 @@ def test_plan_dispatches_read_only_adapter_with_one_provider_credential(
         'test "$EXPECTED_GENERATION_SCHEMA_SHA256" != "$EXPECTED_OUTPUT_SCHEMA_SHA256"\n'
         'mkdir -p "$OUT_DIR"\n'
         "cat > \"$OUT_DIR/countyforge-plan-result.json\" <<'JSON'\n"
-        '{"contract_version":1,"status":"planned","originating_issue":1,"proposed_change_name":"safe-plan",'
-        '"issue_classification":"feature_work","problem_statement":"A bounded problem.",'
-        '"desired_outcome":"A plan.","assumptions":["Trusted contracts"],'
-        '"unresolved_decisions":[],"affected_capabilities":["runner"],'
-        '"files_to_create":["openspec/changes/safe-plan/proposal.md"],'
-        '"files_to_modify":[],"proposed_files":["openspec/changes/safe-plan/proposal.md"],'
-        '"task_slices":["Write contracts"],"acceptance_criteria":["It validates"],'
-        '"risks":["Injection"],'
-        '"security_privacy_considerations":["Read-only"],'
-        '"migration_compatibility_concerns":["None"],"validation_commands":["openspec validate"],'
-        '"non_goals":["Implementation"],"implementation_eligibility":false,"blocked_reasons":[],"evidence_citations":[{"source_id":"s","excerpt":"evidence"}]}\n'
+        # Generated from the one v2 fixture, so the embedded literal cannot
+        # drift from the contract the rest of the suite validates against.
+        + json.dumps(_valid_plan_document())
+        + "\n"
         "JSON",
         encoding="utf-8",
     )

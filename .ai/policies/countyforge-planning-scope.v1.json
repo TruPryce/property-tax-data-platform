@@ -1,0 +1,73 @@
+{
+  "contract_version": 1,
+  "description": "Trusted maximum write roots and required cross-issue boundaries for planning. Committed policy, not model output: a generated plan may narrow these, never widen them.",
+  "default_write_roots": [],
+  "issues": {
+    "18": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/engineering/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ],
+      "note": "Collin CAD Access decoder foundation. Shared bounded release parsing and vendor-neutral source records are owned by issue 43."
+    },
+    "19": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ]
+    },
+    "20": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ]
+    },
+    "21": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ]
+    },
+    "22": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ]
+    }
+  },
+  "capabilities": {
+    "collin-cad-source-contract": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/engineering/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": [
+        43
+      ]
+    },
+    "dallas-cad-source-contract": {
+      "write_roots": [
+        "libs/property-tax-adapters/",
+        "docs/sources/"
+      ],
+      "required_cross_issues": []
+    }
+  }
+}
