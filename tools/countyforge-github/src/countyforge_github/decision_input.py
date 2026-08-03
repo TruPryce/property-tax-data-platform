@@ -309,13 +309,22 @@ def assert_unedited_since_trigger(
         previous = bound.get(part.comment_id)
         if previous is None:
             _fail("part_not_bound_to_trigger", comment_id=part.comment_id, part=part.part)
-        if str(previous.get("body_sha256")) != part.body_sha256:
+        # Both, not either.  A maintainer can edit a comment and restore its
+        # original text: the digest matches again, but GitHub's `updated_at`
+        # stays newer, and the run would otherwise publish against a comment
+        # that demonstrably moved after the packet bound it.  The provenance
+        # records both facts, so both are enforced.
+        digest_changed = str(previous.get("body_sha256")) != part.body_sha256
+        timestamp_changed = str(previous.get("updated_at", "")) != part.updated_at
+        if digest_changed or timestamp_changed:
             _fail(
                 "part_edited_after_trigger",
                 comment_id=part.comment_id,
                 part=part.part,
                 bound_updated_at=str(previous.get("updated_at", "")),
                 observed_updated_at=part.updated_at,
+                body_digest_changed=digest_changed,
+                updated_at_changed=timestamp_changed,
             )
     for comment_id in sorted(set(bound) - {part.comment_id for part in decision_input.parts}):
         _fail("bound_part_disappeared", comment_id=comment_id)

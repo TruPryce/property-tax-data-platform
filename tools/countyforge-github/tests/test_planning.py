@@ -1314,3 +1314,147 @@ def test_unreadable_materialized_file_is_sanitized_with_its_stage(
     assert raised.value.details["error_type"] == "OSError"
     assert raised.value.details["stage"] == "create_blobs"
     assert json.loads(progress_path.read_text(encoding="utf-8"))["stage"] == "create_blobs"
+
+
+def _decision_part(
+    part: int,
+    total: int,
+    body: str,
+    *,
+    comment_id: int,
+    author_id: int,
+    updated_at: str = "2026-08-01T00:00:00Z",
+) -> dict[str, object]:
+    marker = f"<!-- countyforge-plan-input:v1 issue=6 input=collin-1 part={part}/{total} -->"
+    return {
+        "id": comment_id,
+        "body": f"{marker}\n\n{body}",
+        "updated_at": updated_at,
+        "user": {"id": author_id, "login": "maintainer", "type": "User"},
+    }
+
+
+class _CommentingGitHub(_PublicationGitHub):
+    """A publication port that can also serve issue comments."""
+
+    def __init__(self, comments: list[dict[str, object]]) -> None:
+        super().__init__()
+        self._comments = comments
+
+    def list_comments(self, repository: str, target_number: int) -> list[dict[str, object]]:
+        del repository, target_number
+        return list(self._comments)
+
+
+@pytest.mark.parametrize("tamper", ["edited", "edited_then_restored", "deleted"])
+def test_publication_is_blocked_before_any_git_object_when_a_decision_moves(
+    tmp_path: Path, tamper: str
+) -> None:
+    """End-to-end: the promise is "blocked before any Git object", so prove it.
+
+    `edited_then_restored` is the case a digest comparison alone would miss:
+    the body is put back, so `body_sha256` matches again, but GitHub's
+    `updated_at` stays newer and the comment demonstrably moved.
+    """
+
+    root = Path.cwd()
+    author_id = 4242
+    trigger = {**_trigger(root), "actor": {"id": author_id, "login": "maintainer", "type": "User"}}
+    issue = {
+        "number": 6,
+        "title": "Feature work",
+        "body": "Problem: bounded planning is needed. Outcome: create an OpenSpec draft.",
+        "labels": [],
+    }
+    bound_comments = [
+        _decision_part(
+            index, 2, f"## D{index} — decision body", comment_id=900 + index, author_id=author_id
+        )
+        for index in (1, 2)
+    ]
+    packet_dir = tmp_path / "packet"
+    info = build_planning_packet(
+        trigger=trigger,
+        issue=issue,
+        contract_root=root,
+        output_dir=packet_dir,
+        run_id="decision-publication",
+        comments=bound_comments,
+    )
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["decision_input"]["included_part_count"] == 2
+
+    if tamper == "edited":
+        observed = [
+            bound_comments[0],
+            _decision_part(
+                2,
+                2,
+                "## D2 — reconsidered",
+                comment_id=902,
+                author_id=author_id,
+                updated_at="2026-08-02T09:00:00Z",
+            ),
+        ]
+    elif tamper == "edited_then_restored":
+        # Byte-identical body, later timestamp.
+        observed = [
+            bound_comments[0],
+            _decision_part(
+                2,
+                2,
+                "## D2 — decision body",
+                comment_id=902,
+                author_id=author_id,
+                updated_at="2026-08-02T09:00:00Z",
+            ),
+        ]
+    else:
+        observed = [bound_comments[0]]
+
+    github = _CommentingGitHub(observed)
+    result = _result()
+    packet_document = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    result["evidence_citations"][0]["source_id"] = packet_document["sources"][0]["source_id"]
+    publication_root = tmp_path / "publication"
+    shutil.copytree(root / ".ai", publication_root / ".ai")
+
+    with publication_progress() as progress, pytest.raises(ControlPlaneError) as raised:
+        publish_plan(
+            github,
+            repository="TruPryce/property-tax-data-platform",
+            default_branch="main",
+            target_sha=str(trigger["target"]["head_sha"]),
+            issue_number=6,
+            run_id="decision-publication",
+            result=result,
+            publication_root=publication_root,
+            planning_packet_path=Path(info["packet_path"]),
+            context_manifest_path=Path(info["manifest_path"]),
+            progress=progress,
+        )
+    if tamper == "deleted":
+        assert raised.value.code == "incomplete_decision_input"
+    else:
+        assert raised.value.code == "incomplete_decision_input"
+        assert raised.value.details["reason"] == "part_edited_after_trigger"
+        if tamper == "edited_then_restored":
+            # The digest is unchanged; only the timestamp betrays the edit.
+            assert raised.value.details["body_digest_changed"] is False
+            assert raised.value.details["updated_at_changed"] is True
+
+    # No Git object of any kind was created.
+    assert github.created_refs == []
+    assert github.commits == {}
+    assert github.tree_bases == []
+    assert github.pull_requests == []
+    # And progress never entered a Git mutation stage.
+    for stage in (
+        "create_blobs",
+        "load_parent_commit",
+        "create_tree",
+        "create_commit",
+        "create_ref",
+        "create_pull_request",
+    ):
+        assert stage not in progress.completed
