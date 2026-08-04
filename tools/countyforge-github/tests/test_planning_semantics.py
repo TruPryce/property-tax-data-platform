@@ -1525,3 +1525,76 @@ def test_no_ceiling_leaves_the_returned_packet_over_the_limit(ceiling: int) -> N
         if item["reason_code"] == "packet_ceiling"
     ]
     assert len(fitted["sources"]) + len(shed) == len(packet["sources"])
+
+
+def test_ordinary_comments_are_shed_before_trusted_repository_material() -> None:
+    """`comment` was absent from the sheddable list, so it took the fallback rank
+    and shed *last*: an unmarked 4 KB discussion comment could survive while the
+    capability specification the issue is about was deleted."""
+
+    from countyforge_github.planning import (
+        _SHEDDABLE_CATEGORIES,
+        ContextLimits,
+        _fit_packet_to_ceiling,
+    )
+
+    assert "comment" in _SHEDDABLE_CATEGORIES
+    order = list(_SHEDDABLE_CATEGORIES)
+    assert order.index("comment") < order.index("openspec")
+    assert order.index("comment") < order.index("source_contract")
+
+    packet: dict[str, Any] = {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18",
+            },
+            {
+                "source_id": "part1",
+                "category": "comment",
+                "content": "d" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18/comment/1",
+            },
+            {
+                "source_id": "chatter",
+                "category": "comment",
+                "content": "z" * 4_000,
+                "bytes": 4_000,
+                "path": "github://issue/18/comment/2",
+            },
+            {
+                "source_id": "spec",
+                "category": "openspec",
+                "content": "s" * 2_000,
+                "bytes": 2_000,
+                "path": "openspec/specs/collin-cad-source-contract/spec.md",
+            },
+            {
+                "source_id": "contract",
+                "category": "source_contract",
+                "content": "c" * 2_000,
+                "bytes": 2_000,
+                "path": "docs/sources/collin.md",
+            },
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+    fitted = _fit_packet_to_ceiling(
+        packet, ContextLimits(max_total_bytes=11_000), frozenset({"part1"})
+    )
+    kept = {str(source["source_id"]) for source in fitted["sources"]}
+    # The chatter went; the capability specification and source contract stayed.
+    assert "chatter" not in kept
+    assert {"spec", "contract"} <= kept
+    # And the decision part was never a candidate, because it is mandatory.
+    assert "part1" in kept
+    shed = [
+        item["path"]
+        for item in fitted["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert shed == ["github://issue/18/comment/2"]

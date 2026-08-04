@@ -454,6 +454,14 @@ def _select_files(
 #: issue and the maintainer's decision parts are absent by design: a plan built
 #: on half a decision is the failure this contract exists to prevent.
 _SHEDDABLE_CATEGORIES = (
+    # Ordinary issue discussion first: it is untrusted, ad hoc, and the least
+    # valuable thing in the packet.  Omitting it from this list gave it the
+    # fallback rank and shed it *last*, so an unmarked 4 KB comment could
+    # survive while the capability specification the issue is about was
+    # deleted -- defeating the relevance ordering added alongside it.  The
+    # maintainer's decision parts are protected separately and never appear
+    # here, so shedding a comment can only ever drop ordinary discussion.
+    "comment",
     "adr",
     "architecture",
     "validation",
