@@ -453,21 +453,31 @@ def _select_files(
 #: Sources the packet may drop to fit its ceiling, least valuable first.  The
 #: issue and the maintainer's decision parts are absent by design: a plan built
 #: on half a decision is the failure this contract exists to prevent.
-_SHEDDABLE_CATEGORIES = (
-    # Ordinary issue discussion first: it is untrusted, ad hoc, and the least
-    # valuable thing in the packet.  Omitting it from this list gave it the
-    # fallback rank and shed it *last*, so an unmarked 4 KB comment could
-    # survive while the capability specification the issue is about was
-    # deleted -- defeating the relevance ordering added alongside it.  The
-    # maintainer's decision parts are protected separately and never appear
-    # here, so shedding a comment can only ever drop ordinary discussion.
-    "comment",
+#: Repository-file categories.  `selected_files` counts these and only these,
+#: so the number stays comparable with the declared `max_files` selection limit.
+_REPOSITORY_FILE_CATEGORIES = (
     "adr",
     "architecture",
     "validation",
     "agent_guidance",
     "openspec",
     "source_contract",
+)
+
+#: Shedding priority, least valuable first.  This is a *different* question from
+#: what counts as a repository file: folding the two together made retained
+#: issue comments count toward `selected_files`, reporting six selected files
+#: against a declared limit of two.
+#:
+#: Ordinary issue discussion sheds first: it is untrusted, ad hoc, and the least
+#: valuable thing in the packet, and trusted committed material should outlive
+#: it.  Omitting `comment` here previously gave it the fallback rank and shed it
+#: *last*, so an unmarked comment could survive while the capability
+#: specification the issue is about was deleted.  The maintainer's decision
+#: parts are protected separately and never enter this ordering.
+_SHEDDABLE_CATEGORIES = (
+    "comment",
+    *_REPOSITORY_FILE_CATEGORIES,
     "context_candidate",
 )
 
@@ -483,7 +493,7 @@ def _with_exclusions(
 
     selection = dict(packet.get("selection") or {})
     selection["selected_files"] = sum(
-        1 for source in kept if str(source.get("category")) in _SHEDDABLE_CATEGORIES
+        1 for source in kept if str(source.get("category")) in _REPOSITORY_FILE_CATEGORIES
     )
     excluded = list(selection.get("excluded_candidates") or [])
     excluded.extend(

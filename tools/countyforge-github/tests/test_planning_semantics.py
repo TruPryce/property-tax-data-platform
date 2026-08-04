@@ -1598,3 +1598,69 @@ def test_ordinary_comments_are_shed_before_trusted_repository_material() -> None
         if item["reason_code"] == "packet_ceiling"
     ]
     assert shed == ["github://issue/18/comment/2"]
+
+
+def test_retained_comments_do_not_count_toward_selected_files() -> None:
+    """`selected_files` counts repository files, and comments are not files.
+
+    Adding `comment` to the shedding-priority tuple silently changed what
+    `selected_files` meant, because one tuple was answering two questions. A
+    packet holding six comments and one specification reported six selected
+    files against a declared `max_files` of two.
+    """
+
+    from countyforge_github.planning import (
+        _REPOSITORY_FILE_CATEGORIES,
+        _SHEDDABLE_CATEGORIES,
+        ContextLimits,
+        _fit_packet_to_ceiling,
+    )
+
+    # The two answer different questions and must not be the same tuple.
+    assert "comment" in _SHEDDABLE_CATEGORIES
+    assert "comment" not in _REPOSITORY_FILE_CATEGORIES
+    assert "issue" not in _REPOSITORY_FILE_CATEGORIES
+    assert set(_REPOSITORY_FILE_CATEGORIES) < set(_SHEDDABLE_CATEGORIES)
+
+    packet: dict[str, Any] = {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18",
+            },
+            *[
+                {
+                    "source_id": f"c{index}",
+                    "category": "comment",
+                    "content": "z" * 1_000,
+                    "bytes": 1_000,
+                    "path": f"github://issue/18/comment/{index}",
+                }
+                for index in range(6)
+            ],
+            {
+                "source_id": "spec",
+                "category": "openspec",
+                "content": "s" * 2_000,
+                "bytes": 2_000,
+                "path": "openspec/specs/collin-cad-source-contract/spec.md",
+            },
+        ],
+        "selection": {"max_files": 2, "selected_files": 1, "excluded_candidates": []},
+    }
+    fitted = _fit_packet_to_ceiling(
+        packet, ContextLimits(max_total_bytes=10_500), frozenset({"c0"})
+    )
+    retained_comments = [source for source in fitted["sources"] if source["category"] == "comment"]
+    repository_files = [
+        source
+        for source in fitted["sources"]
+        if str(source["category"]) in _REPOSITORY_FILE_CATEGORIES
+    ]
+    assert retained_comments, "the case is only meaningful with comments retained"
+    assert fitted["selection"]["selected_files"] == len(repository_files)
+    # And it never exceeds the limit repository selection was held to.
+    assert fitted["selection"]["selected_files"] <= fitted["selection"]["max_files"]
