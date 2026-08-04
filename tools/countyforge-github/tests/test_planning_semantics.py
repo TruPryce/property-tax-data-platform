@@ -1171,3 +1171,496 @@ def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
     with pytest.raises(ControlPlaneError) as raised:
         validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert raised.value.details["reason"] == "task_path_outside_declared_scope"
+
+
+# --------------------------------------------------------------------------
+# Run 30836072011 — the plan lane spent its whole 1,800-second budget having
+# emitted only `thread.started` and `turn.started`.
+# --------------------------------------------------------------------------
+
+
+def test_the_plan_lane_reasoning_effort_is_high_and_the_clock_is_unchanged() -> None:
+    """Reduce the request, not the deadline: a longer clock hides the cause."""
+
+    policy = json.loads(
+        Path(".ai/policies/countyforge-github-execution.v1.json").read_text(encoding="utf-8")
+    )
+    assert policy["commands"]["plan"]["reasoning_effort"] == "high"
+    profile = json.loads(Path(".ai/profiles/plan.read-only.v1.json").read_text(encoding="utf-8"))
+    assert profile["default_reasoning_effort"] == "high"
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 1800
+    assert profile["budgets"]["defaults"]["attempts"] == 1
+
+
+def test_the_planning_packet_aims_at_the_operational_target(tmp_path: Path) -> None:
+    """Run 30836072011 sent 262,974 bytes; the ceiling stays the fail-safe."""
+
+    import subprocess
+
+    from countyforge_github.planning import ContextLimits, build_planning_packet
+
+    limits = ContextLimits()
+    assert limits.operational_target_bytes < limits.max_total_bytes
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="operational-target",
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    # The target bounds selected *content*; the serialized packet adds JSON
+    # structure on top, so the two are asserted separately rather than conflated.
+    content_bytes = sum(
+        len(str(source.get("content", "")).encode("utf-8")) for source in packet["sources"]
+    )
+    assert content_bytes <= limits.operational_target_bytes
+    size = Path(info["packet_path"]).stat().st_size
+    assert size <= limits.max_total_bytes
+    # Materially smaller than the run that timed out, not merely under a ceiling.
+    assert size < 262_974
+
+
+def test_repository_context_is_ordered_by_relevance_to_the_issue(tmp_path: Path) -> None:
+    """Alphabetical order let an unrelated ADR crowd out the capability spec."""
+
+    from countyforge_github.planning import ContextLimits, _select_files
+
+    root = Path.cwd()
+    selected, _ = _select_files(root, ContextLimits(), ("collin",))
+    paths = [str(item["path"]) for item in selected]
+    collin = [index for index, path in enumerate(paths) if "collin" in path.casefold()]
+    if collin:
+        unrelated = [
+            index
+            for index, path in enumerate(paths)
+            if "collin" not in path.casefold() and path.startswith("docs/decisions/")
+        ]
+        if unrelated:
+            assert min(collin) < min(unrelated)
+
+
+def test_a_timeout_with_no_observed_output_is_reported_distinctly(tmp_path: Path) -> None:
+    """`thread.started` + `turn.started` is an accepted turn, not progress.
+
+    Reporting a stalled provider and a too-large request alike is what made run
+    30836072011 read as a budget question.
+    """
+
+    from countyforge_github.results import (
+        TIMED_OUT_AFTER_PROGRESS,
+        TIMED_OUT_NO_PROGRESS,
+        classify_implementation_lane,
+    )
+
+    document = {
+        "ok": False,
+        "mode": "implement",
+        "disposition": "timed_out",
+        "summary": {"disposition": "timed_out", "exit_code": 5},
+    }
+    result_path = tmp_path / "runner.json"
+    result_path.write_text(json.dumps(document), encoding="utf-8")
+    exit_path = tmp_path / "exit"
+    exit_path.write_text("5\n", encoding="utf-8")
+
+    def classify(observed: bool | None) -> str:
+        return str(
+            classify_implementation_lane(
+                selected_provider="sakana",
+                lane_results={"openai": "skipped", "sakana": "failure"},
+                result_path=result_path,
+                exit_code_path=exit_path,
+                model_output_observed=observed,
+            )["disposition"]
+        )
+
+    assert classify(False) == TIMED_OUT_NO_PROGRESS
+    assert classify(True) == TIMED_OUT_AFTER_PROGRESS
+    # Unknown must not assert a progress claim the evidence cannot support.
+    assert classify(None) == TIMED_OUT_AFTER_PROGRESS
+
+
+def test_turn_lifecycle_events_alone_do_not_count_as_model_output() -> None:
+    """The exact stream run 30836072011 produced."""
+
+    from countyforge_runner.model_events import summarize_model_events
+
+    stream = Path("/tmp/countyforge-turn-only.ndjson")
+    stream.write_text(
+        json.dumps({"type": "thread.started", "thread_id": "019fc8a2"})
+        + "\n"
+        + json.dumps({"type": "turn.started"})
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = summarize_model_events(stream)
+    assert summary["event_count"] == 2
+    assert summary["last_event_type"] == "turn.started"
+    assert summary["output_event_observed"] is False
+    assert summary["provider_error_observed"] is False
+    stream.unlink()
+
+
+def test_the_packet_ceiling_is_measured_on_the_serialized_packet(tmp_path: Path) -> None:
+    """Bounding selected content left JSON framing unaccounted for.
+
+    A maximum decision package plus ordinary comments serialized to 245,614
+    bytes against a 240,000-byte ceiling. The ceiling is now measured on what is
+    actually written, optional context is shed to fit, and the maintainer's
+    decision parts are never shortened to make room.
+    """
+
+    import subprocess
+
+    from countyforge_github.decision_input import MAX_TOTAL_DECISION_BYTES
+    from countyforge_github.planning import ContextLimits, build_planning_packet
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    per_part = MAX_TOTAL_DECISION_BYTES // 7
+    comments = [
+        {
+            "id": 2000 + index,
+            "body": (
+                f"<!-- countyforge-plan-input:v1 issue=18 input=big part={index}/7 -->\n\n"
+                + "x" * per_part
+            ),
+            "updated_at": "2026-08-01T00:00:00Z",
+            "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        }
+        for index in range(1, 8)
+    ]
+    comments += [
+        {
+            "id": 3000 + index,
+            "body": "z" * 4_000,
+            "updated_at": "2026-08-01T00:00:00Z",
+            "user": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        }
+        for index in range(1, 10)
+    ]
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard it." + "y" * 19_500,
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="serialized-ceiling",
+        comments=comments,
+    )
+    size = Path(info["packet_path"]).stat().st_size
+    assert size <= ContextLimits().max_total_bytes
+
+    package = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))["decision_input"]
+    assert package["included_part_count"] == 7
+    assert package["truncated"] is False
+
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    shed = [
+        item
+        for item in packet["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert shed, "the ceiling should have shed optional context, not passed by luck"
+    # Every decision part still reached the packet whole.
+    decision_sources = [
+        source
+        for source in packet["sources"]
+        if source["category"] == "comment" and not source["truncated"]
+    ]
+    assert len(decision_sources) >= 7
+
+
+def test_mandatory_content_over_the_ceiling_refuses_rather_than_truncating() -> None:
+    """A plan built on half a decision is the failure this contract prevents."""
+
+    from countyforge_github.planning import ContextLimits, _fit_packet_to_ceiling
+
+    limits = ContextLimits()
+    packet = {
+        "sources": [
+            {"source_id": "issue", "category": "issue", "content": "i" * 200_000, "bytes": 200_000},
+            {
+                "source_id": "part1",
+                "category": "comment",
+                "content": "d" * 200_000,
+                "bytes": 200_000,
+            },
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+    with pytest.raises(ControlPlaneError) as raised:
+        _fit_packet_to_ceiling(packet, limits, frozenset({"part1"}))
+    assert raised.value.code == "planning_packet_ceiling_exceeded"
+    assert raised.value.details["max_total_bytes"] == limits.max_total_bytes
+
+
+def test_the_observed_output_fact_reaches_classification_from_the_workflow() -> None:
+    """The parameter had no production caller, so the disposition was unreachable."""
+
+    import yaml
+    from countyforge_github.cli import main as cli_main
+
+    del cli_main
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    prep = workflow["jobs"]["implementation-publication-prep"]["steps"]
+    run = next(
+        str(step["run"])
+        for step in prep
+        if "classify-implementation-lane" in str(step.get("run", ""))
+    )
+    assert "countyforge-implementation-model-events.summary.json" in run
+    assert "--model-output-observed" in run
+    # Only when the stream exists: absent evidence must stay unknown.
+    assert ".model_events_present == true" in run
+    assert ".output_event_observed" in run
+
+    cli_source = Path("tools/countyforge-github/src/countyforge_github/cli.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"--model-output-observed"' in cli_source
+    assert "model_output_observed=(" in cli_source
+
+
+def _ceiling_packet(context_count: int, *, issue_bytes: int = 3_000) -> dict[str, Any]:
+    """Long context paths make each exclusion record expensive to record."""
+
+    long_path = "docs/engineering/" + ("deeply-nested-directory-name/" * 6) + "document.md"
+    return {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * issue_bytes,
+                "bytes": issue_bytes,
+                "path": "github://issue/18",
+            },
+            *[
+                {
+                    "source_id": f"ctx{index}",
+                    "category": "adr",
+                    "content": "c" * 120,
+                    "bytes": 120,
+                    "path": f"{long_path}?{index}",
+                }
+                for index in range(context_count)
+            ],
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+
+
+def test_the_returned_packet_is_measured_with_its_own_exclusion_evidence() -> None:
+    """Shedding a source frees its content and then costs a `packet_ceiling`
+    record. Measuring only the surviving sources declared a packet fitting and
+    then returned it over the ceiling -- here by 4,164 bytes."""
+
+    from countyforge_github.planning import (
+        ContextLimits,
+        _fit_packet_to_ceiling,
+        _serialized_size,
+    )
+
+    packet = _ceiling_packet(24)
+    limits = ContextLimits(max_total_bytes=6_000)
+    assert _serialized_size(packet) > limits.max_total_bytes
+    with pytest.raises(ControlPlaneError) as raised:
+        _fit_packet_to_ceiling(packet, limits, frozenset())
+    # Refused rather than returned oversized: the records cost more than the
+    # content they freed, so no split of these sources fits.
+    assert raised.value.code == "planning_packet_ceiling_exceeded"
+    assert raised.value.details["shed_source_count"] == 24
+    assert raised.value.details["serialized_bytes"] > limits.max_total_bytes
+
+
+@pytest.mark.parametrize("ceiling", list(range(9_400, 12_800, 400)))
+def test_no_ceiling_leaves_the_returned_packet_over_the_limit(ceiling: int) -> None:
+    """Sweep the boundary rather than testing one value with comfortable headroom.
+
+    Every ceiling either yields a packet within it -- exclusion evidence
+    included -- or refuses. Neither may return an oversized document.
+    """
+
+    from countyforge_github.planning import (
+        ContextLimits,
+        _fit_packet_to_ceiling,
+        _serialized_size,
+    )
+
+    packet = _ceiling_packet(24)
+    limits = ContextLimits(max_total_bytes=ceiling)
+    try:
+        fitted = _fit_packet_to_ceiling(packet, limits, frozenset())
+    except ControlPlaneError as error:
+        assert error.code == "planning_packet_ceiling_exceeded"
+        return
+    assert _serialized_size(fitted) <= ceiling
+    # The evidence of what was dropped is present and counted in the measurement.
+    shed = [
+        item
+        for item in fitted["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert len(fitted["sources"]) + len(shed) == len(packet["sources"])
+
+
+def test_ordinary_comments_are_shed_before_trusted_repository_material() -> None:
+    """`comment` was absent from the sheddable list, so it took the fallback rank
+    and shed *last*: an unmarked 4 KB discussion comment could survive while the
+    capability specification the issue is about was deleted."""
+
+    from countyforge_github.planning import (
+        _SHEDDABLE_CATEGORIES,
+        ContextLimits,
+        _fit_packet_to_ceiling,
+    )
+
+    assert "comment" in _SHEDDABLE_CATEGORIES
+    order = list(_SHEDDABLE_CATEGORIES)
+    assert order.index("comment") < order.index("openspec")
+    assert order.index("comment") < order.index("source_contract")
+
+    packet: dict[str, Any] = {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18",
+            },
+            {
+                "source_id": "part1",
+                "category": "comment",
+                "content": "d" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18/comment/1",
+            },
+            {
+                "source_id": "chatter",
+                "category": "comment",
+                "content": "z" * 4_000,
+                "bytes": 4_000,
+                "path": "github://issue/18/comment/2",
+            },
+            {
+                "source_id": "spec",
+                "category": "openspec",
+                "content": "s" * 2_000,
+                "bytes": 2_000,
+                "path": "openspec/specs/collin-cad-source-contract/spec.md",
+            },
+            {
+                "source_id": "contract",
+                "category": "source_contract",
+                "content": "c" * 2_000,
+                "bytes": 2_000,
+                "path": "docs/sources/collin.md",
+            },
+        ],
+        "selection": {"excluded_candidates": []},
+    }
+    fitted = _fit_packet_to_ceiling(
+        packet, ContextLimits(max_total_bytes=11_000), frozenset({"part1"})
+    )
+    kept = {str(source["source_id"]) for source in fitted["sources"]}
+    # The chatter went; the capability specification and source contract stayed.
+    assert "chatter" not in kept
+    assert {"spec", "contract"} <= kept
+    # And the decision part was never a candidate, because it is mandatory.
+    assert "part1" in kept
+    shed = [
+        item["path"]
+        for item in fitted["selection"]["excluded_candidates"]
+        if item["reason_code"] == "packet_ceiling"
+    ]
+    assert shed == ["github://issue/18/comment/2"]
+
+
+def test_retained_comments_do_not_count_toward_selected_files() -> None:
+    """`selected_files` counts repository files, and comments are not files.
+
+    Adding `comment` to the shedding-priority tuple silently changed what
+    `selected_files` meant, because one tuple was answering two questions. A
+    packet holding six comments and one specification reported six selected
+    files against a declared `max_files` of two.
+    """
+
+    from countyforge_github.planning import (
+        _REPOSITORY_FILE_CATEGORIES,
+        _SHEDDABLE_CATEGORIES,
+        ContextLimits,
+        _fit_packet_to_ceiling,
+    )
+
+    # The two answer different questions and must not be the same tuple.
+    assert "comment" in _SHEDDABLE_CATEGORIES
+    assert "comment" not in _REPOSITORY_FILE_CATEGORIES
+    assert "issue" not in _REPOSITORY_FILE_CATEGORIES
+    assert set(_REPOSITORY_FILE_CATEGORIES) < set(_SHEDDABLE_CATEGORIES)
+
+    packet: dict[str, Any] = {
+        "sources": [
+            {
+                "source_id": "issue",
+                "category": "issue",
+                "content": "i" * 2_000,
+                "bytes": 2_000,
+                "path": "github://issue/18",
+            },
+            *[
+                {
+                    "source_id": f"c{index}",
+                    "category": "comment",
+                    "content": "z" * 1_000,
+                    "bytes": 1_000,
+                    "path": f"github://issue/18/comment/{index}",
+                }
+                for index in range(6)
+            ],
+            {
+                "source_id": "spec",
+                "category": "openspec",
+                "content": "s" * 2_000,
+                "bytes": 2_000,
+                "path": "openspec/specs/collin-cad-source-contract/spec.md",
+            },
+        ],
+        "selection": {"max_files": 2, "selected_files": 1, "excluded_candidates": []},
+    }
+    fitted = _fit_packet_to_ceiling(
+        packet, ContextLimits(max_total_bytes=10_500), frozenset({"c0"})
+    )
+    retained_comments = [source for source in fitted["sources"] if source["category"] == "comment"]
+    repository_files = [
+        source
+        for source in fitted["sources"]
+        if str(source["category"]) in _REPOSITORY_FILE_CATEGORIES
+    ]
+    assert retained_comments, "the case is only meaningful with comments retained"
+    assert fitted["selection"]["selected_files"] == len(repository_files)
+    # And it never exceeds the limit repository selection was held to.
+    assert fitted["selection"]["selected_files"] <= fitted["selection"]["max_files"]

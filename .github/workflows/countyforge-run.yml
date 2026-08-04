@@ -1765,6 +1765,15 @@ jobs:
           if [ -n "${adapter_disposition:-}" ]; then
             lane_arguments+=(--adapter-disposition "$adapter_disposition")
           fi
+          # The sanitized evidence already carries a bounded event summary; a
+          # timeout that emitted nothing beyond `turn.started` is a different
+          # problem from one that stopped mid-generation, and only this file
+          # knows which happened.
+          events_summary="$(find "$RUNNER_TEMP" -name countyforge-implementation-model-events.summary.json -type f -print -quit 2>/dev/null || true)"
+          if [ -n "$events_summary" ] && jq -e '.model_events_present == true' "$events_summary" >/dev/null 2>&1; then
+            observed="$(jq -r 'if .output_event_observed then "true" else "false" end' "$events_summary")"
+            lane_arguments+=(--model-output-observed "$observed")
+          fi
           if [ -n "$result_file" ]; then lane_arguments+=(--result "$result_file"); fi
           if [ -n "$exit_file" ]; then lane_arguments+=(--exit-code "$exit_file"); fi
           if [ -n "$implementation_result" ]; then lane_arguments+=(--implementation-result "$implementation_result"); fi

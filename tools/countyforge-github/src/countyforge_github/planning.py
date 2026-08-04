@@ -191,7 +191,16 @@ def _render_task(task: JsonObject) -> str:
 class ContextLimits:
     max_files: int = 48
     max_file_bytes: int = 20_000
+    #: Hard fail-safe.  Retained; nothing may exceed it.
     max_total_bytes: int = 240_000
+    #: What repository context selection actually aims at.  Run 30836072011 sent
+    #: a 262,974-byte packet to `fugu-ultra` at `xhigh`, and the provider
+    #: accepted the turn and emitted nothing but `thread.started` and
+    #: `turn.started` before the 1,800-second deadline killed it.  A planner does
+    #: not need a quarter of a megabyte of repository prose to turn four explicit
+    #: decisions into a structured delta, so selection stops here and the ceiling
+    #: stays a fail-safe rather than a target.
+    operational_target_bytes: int = 160_000
     max_issue_bytes: int = 20_000
 
 
@@ -349,7 +358,31 @@ def _bounded_text(path: Path, limits: ContextLimits) -> tuple[str, bool, int, st
     return content, truncated, len(raw), digest
 
 
-def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], list[JsonObject]]:
+_CATEGORY_RANK = {
+    "openspec": 0,
+    "source_contract": 1,
+    "agent_guidance": 2,
+    "architecture": 3,
+    "adr": 4,
+    "validation": 5,
+}
+
+
+def _context_priority(category: str, relative: str, relevance: Sequence[str]) -> tuple[int, int]:
+    """Lower sorts first: what this issue is about, before general background.
+
+    `relevance` is derived from the issue itself, so the ordering is a pure
+    function of trusted inputs rather than of the filesystem's alphabet.
+    """
+
+    lowered = relative.casefold()
+    matched = 0 if any(term and term in lowered for term in relevance) else 1
+    return (matched, _CATEGORY_RANK.get(category, 6))
+
+
+def _select_files(
+    root: Path, limits: ContextLimits, relevance: Sequence[str] = ()
+) -> tuple[list[JsonObject], list[JsonObject]]:
     """Select only stable, trusted documentation/contracts from the contract root."""
 
     candidates: list[tuple[str, str, Path]] = []
@@ -376,7 +409,11 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
     selected: list[JsonObject] = []
     excluded: list[JsonObject] = []
     total = 0
-    for category, relative, candidate in sorted(candidates, key=lambda item: item[1]):
+    # Alphabetical order filled the packet with whatever sorted first, so an
+    # unrelated ADR could crowd out the capability the issue is actually about.
+    for category, relative, candidate in sorted(
+        candidates, key=lambda item: (_context_priority(item[0], item[1], relevance), item[1])
+    ):
         if len(selected) >= limits.max_files:
             excluded.append({"path": relative, "reason_code": "file_limit"})
             continue
@@ -392,7 +429,8 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
             excluded.append({"path": relative, "reason_code": "outside_root"})
             continue
         content, truncated, raw_bytes, digest = _bounded_text(resolved, limits)
-        if total + len(content.encode("utf-8")) > limits.max_total_bytes:
+        budget = min(limits.operational_target_bytes, limits.max_total_bytes)
+        if total + len(content.encode("utf-8")) > budget:
             excluded.append({"path": relative, "reason_code": "byte_limit"})
             continue
         total += len(content.encode("utf-8"))
@@ -410,6 +448,124 @@ def _select_files(root: Path, limits: ContextLimits) -> tuple[list[JsonObject], 
             }
         )
     return selected, excluded
+
+
+#: Sources the packet may drop to fit its ceiling, least valuable first.  The
+#: issue and the maintainer's decision parts are absent by design: a plan built
+#: on half a decision is the failure this contract exists to prevent.
+#: Repository-file categories.  `selected_files` counts these and only these,
+#: so the number stays comparable with the declared `max_files` selection limit.
+_REPOSITORY_FILE_CATEGORIES = (
+    "adr",
+    "architecture",
+    "validation",
+    "agent_guidance",
+    "openspec",
+    "source_contract",
+)
+
+#: Shedding priority, least valuable first.  This is a *different* question from
+#: what counts as a repository file: folding the two together made retained
+#: issue comments count toward `selected_files`, reporting six selected files
+#: against a declared limit of two.
+#:
+#: Ordinary issue discussion sheds first: it is untrusted, ad hoc, and the least
+#: valuable thing in the packet, and trusted committed material should outlive
+#: it.  Omitting `comment` here previously gave it the fallback rank and shed it
+#: *last*, so an unmarked comment could survive while the capability
+#: specification the issue is about was deleted.  The maintainer's decision
+#: parts are protected separately and never enter this ordering.
+_SHEDDABLE_CATEGORIES = (
+    "comment",
+    *_REPOSITORY_FILE_CATEGORIES,
+    "context_candidate",
+)
+
+
+def _serialized_size(packet: JsonObject) -> int:
+    return len(canonical_bytes(packet)) + 1
+
+
+def _with_exclusions(
+    packet: JsonObject, kept: list[JsonObject], shed: list[JsonObject]
+) -> JsonObject:
+    """The exact document that would be returned for this kept/shed split."""
+
+    selection = dict(packet.get("selection") or {})
+    selection["selected_files"] = sum(
+        1 for source in kept if str(source.get("category")) in _REPOSITORY_FILE_CATEGORIES
+    )
+    excluded = list(selection.get("excluded_candidates") or [])
+    excluded.extend(
+        {"path": str(source.get("path", "")), "reason_code": "packet_ceiling"} for source in shed
+    )
+    selection["excluded_candidates"] = excluded
+    return {**packet, "sources": kept, "selection": selection}
+
+
+def _fit_packet_to_ceiling(
+    packet: JsonObject, limits: ContextLimits, mandatory_source_ids: frozenset[str]
+) -> JsonObject:
+    """Drop optional context until the serialized packet fits, or refuse.
+
+    Every measurement is taken on the document that would actually be returned,
+    exclusion evidence included.  Measuring only the surviving sources meant each
+    shed source removed its content and then added a `packet_ceiling` record, and
+    with long paths the records cost more than the content they freed: a packet
+    could be declared fitting at 239,950 bytes and returned above the ceiling.
+
+    Returns the packet unchanged when it already fits.  Raises when what remains
+    still does not fit, because the alternative -- shortening a decision or
+    dropping the evidence of what was dropped -- trades a bounded refusal for a
+    silent misrepresentation.
+    """
+
+    if _serialized_size(packet) <= limits.max_total_bytes:
+        return packet
+    sources = list(packet.get("sources") or [])
+    # Mandatory is the issue plus the maintainer's decision parts, named
+    # explicitly.  An ordinary issue comment shares the `comment` category with a
+    # decision part but is ordinary evidence, and shedding it is preferable to
+    # refusing a legitimate maximum-size decision package.
+    mandatory = [
+        source
+        for source in sources
+        if str(source.get("category")) == "issue"
+        or str(source.get("source_id")) in mandatory_source_ids
+    ]
+    optional = [source for source in sources if source not in mandatory]
+    # Least valuable first, and largest first within that, so the fewest sources
+    # are lost.
+    order = sorted(
+        optional,
+        key=lambda source: (
+            _SHEDDABLE_CATEGORIES.index(str(source.get("category")))
+            if str(source.get("category")) in _SHEDDABLE_CATEGORIES
+            else len(_SHEDDABLE_CATEGORIES) + 1,
+            -int(source.get("bytes", 0) or 0),
+        ),
+    )
+    kept = list(sources)
+    shed: list[JsonObject] = []
+    trimmed = _with_exclusions(packet, kept, shed)
+    for candidate in order:
+        if _serialized_size(trimmed) <= limits.max_total_bytes:
+            break
+        kept = [source for source in kept if source is not candidate]
+        shed.append(candidate)
+        trimmed = _with_exclusions(packet, kept, shed)
+    if _serialized_size(trimmed) > limits.max_total_bytes:
+        raise ControlPlaneError(
+            "planning_packet_ceiling_exceeded",
+            "The bounded planning packet cannot be reduced within its ceiling.",
+            {
+                "serialized_bytes": _serialized_size(trimmed),
+                "max_total_bytes": limits.max_total_bytes,
+                "mandatory_source_count": len(mandatory),
+                "shed_source_count": len(shed),
+            },
+        )
+    return trimmed
 
 
 def build_planning_packet(
@@ -520,9 +676,24 @@ def build_planning_packet(
         comment_limits.append(limit)
     comment_contents = [f"COMMENT (untrusted):\n{text}" for text in bounded_comments]
     comment_content_bytes = sum(len(content.encode()) for content in comment_contents)
-    context_budget = max(limits.max_total_bytes - issue_content_bytes - comment_content_bytes, 1)
+    # The decision package and the issue come first; repository context fills
+    # what remains of the operational target, not of the hard ceiling.
+    context_budget = max(
+        min(limits.operational_target_bytes, limits.max_total_bytes)
+        - issue_content_bytes
+        - comment_content_bytes,
+        1,
+    )
     selection_limits = replace(limits, max_total_bytes=context_budget)
-    selected, excluded = _select_files(contract_root.resolve(strict=True), selection_limits)
+    # Relevance comes from the issue a maintainer filed, never from model output.
+    relevance = tuple(
+        term
+        for term in re.findall(r"[a-z][a-z0-9-]{3,}", str(issue.get("title", "")).casefold())
+        if term not in {"feature", "issue", "add", "the", "and", "for", "with", "foundation"}
+    )[:6]
+    selected, excluded = _select_files(
+        contract_root.resolve(strict=True), selection_limits, relevance
+    )
     issue_source: JsonObject = {
         "source_id": _source_id("issue", f"issue-{issue.get('number', 0)}"),
         "category": "issue",
@@ -592,6 +763,18 @@ def build_planning_packet(
             "count": title_redactions + body_redactions + comment_redactions,
         },
     }
+    # The ceiling has to be measured on what is actually sent.  Bounding selected
+    # *content* left JSON framing, source metadata, digests, and provenance
+    # unaccounted for: a maximum decision package plus ordinary comments
+    # serialized to 245,614 bytes against a 240,000-byte ceiling, and run
+    # 30836072011 shipped 262,974.  Optional repository context and ordinary
+    # comments are shed until it fits; mandatory content -- the issue and the
+    # maintainer's decision parts -- is never truncated to make room.
+    mandatory_source_ids = frozenset(
+        _source_id("comment", f"github://issue/{issue.get('number', 0)}/comment/{part.comment_id}")
+        for part in decision_input.parts
+    )
+    packet = _fit_packet_to_ceiling(packet, limits, mandatory_source_ids)
     packet_schema = load_json_object(
         contract_root / ".ai/schemas/countyforge-planning-packet.schema.json",
         kind="planning packet schema",

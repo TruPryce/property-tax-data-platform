@@ -15,7 +15,7 @@
       "profile_version": 1,
       "provider": "sakana",
       "model_ref": "sakana.fugu-ultra",
-      "reasoning_effort": "xhigh"
+      "reasoning_effort": "high"
     },
     "implement": {
       "profile_id": "implement.workspace-write.v1",

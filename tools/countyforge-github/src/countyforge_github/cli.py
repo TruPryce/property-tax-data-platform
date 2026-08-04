@@ -271,6 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
     _file(lane, "implementation_result", required=False)
     lane.add_argument("--implementation-result-present", choices=["true", "false"])
     lane.add_argument("--adapter-disposition")
+    # From the uploaded model-event summary: whether the provider emitted
+    # anything beyond accepting the turn. Absent means unknown, which keeps
+    # the stable timeout disposition rather than asserting no progress.
+    lane.add_argument("--model-output-observed", choices=("true", "false"))
     lane.add_argument("--freeze-outcome")
     lane.add_argument("--frozen-bundle-present", choices=["true", "false"])
 
@@ -884,6 +888,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                         else args.implementation_result_present == "true"
                     ),
                     adapter_disposition=args.adapter_disposition,
+                    model_output_observed=(
+                        None
+                        if args.model_output_observed is None
+                        else args.model_output_observed == "true"
+                    ),
                     freeze_outcome=args.freeze_outcome,
                     frozen_bundle_present=(
                         None
