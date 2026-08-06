@@ -227,9 +227,15 @@ def folded_outcome_detail(result: JsonObject) -> JsonObject | None:
         for scenario_index, scenario in enumerate(scenarios):
             if not isinstance(scenario, dict):
                 continue
-            # Only when the outcome is genuinely missing: a populated `then`
-            # beside a `when` that happens to contain the word is correct.
-            if scenario.get("then"):
+            # Exactly the observed shape: `then` present, a list, and empty.
+            # A falsy check also caught a missing key, `null`, `""`, and `{}` --
+            # which are `required` and `type` failures, not `minItems`. Claiming
+            # `minItems` for those would substitute fabricated evidence for the
+            # validator that actually failed, and this runs *before* schema
+            # validation, so nothing downstream would correct it. They fall
+            # through to the schema, which names them accurately.
+            then = scenario.get("then")
+            if not (isinstance(then, list) and not then):
                 continue
             when = scenario.get("when")
             if not isinstance(when, str) or not _FOLDED_OUTCOME.search(when):

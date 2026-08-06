@@ -1746,18 +1746,79 @@ def test_a_populated_then_beside_a_when_containing_the_word_is_not_flagged() -> 
     validate_planning_result(document, contract_root=CONTRACT_ROOT)
 
 
+_FOLDED_WHEN = "When the adapter decodes the literal, then it returns the reviewed exact value."
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "validator"),
+    [
+        ("missing", ..., "required"),
+        ("null", None, "type"),
+        ("empty string", "", "type"),
+        ("empty object", {}, "type"),
+        ("zero", 0, "type"),
+    ],
+)
+def test_a_falsy_then_that_is_not_an_empty_list_keeps_its_real_validator(
+    label: str, value: Any, validator: str
+) -> None:
+    """A falsy check caught `required` and `type` failures and relabelled them
+    `minItems`. This diagnostic runs *before* schema validation, so nothing
+    downstream would have corrected the substituted evidence."""
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = _FOLDED_WHEN
+    if value is ...:
+        scenario.pop("then", None)
+    else:
+        scenario["then"] = value
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    # The specific diagnosis declines these outright.
+    assert folded_outcome_detail(document) is None, label
+
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["validator"] == validator, label
+    assert details.get("reason") is None, label
+    assert details["path"].endswith("then") or details["path"].endswith("scenarios[0]")
+
+
+def test_only_a_present_empty_list_earns_the_folded_diagnosis() -> None:
+    """The one shape actually observed, and only that shape."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = _FOLDED_WHEN
+    scenario["then"] = []
+    detail = folded_outcome_detail(document)
+    assert detail is not None
+    assert detail["reason"] == "scenario_outcome_folded_into_when"
+    assert detail["validator"] == "minItems"
+
+
 def test_the_folded_detector_tolerates_a_malformed_pre_schema_document() -> None:
     """It runs before schema validation, so it sees unvalidated shapes."""
 
     from countyforge_github.planning_semantics import folded_outcome_detail
 
+    # Each scenario carries a folded `when` where it can, so the check under
+    # test is the `then` branch rather than an early return on a missing
+    # trigger -- which is how the previous version passed without exercising it.
     for document in (
         {},
         {"requirements": "not a list"},
         {"requirements": [None, 7, "text"]},
         {"requirements": [{"scenarios": "not a list"}]},
         {"requirements": [{"scenarios": [None, {"when": 42, "then": []}]}]},
-        {"requirements": [{"scenarios": [{"then": None}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN, "then": None}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN, "then": "text"}]}]},
     ):
         assert folded_outcome_detail(document) is None
 
