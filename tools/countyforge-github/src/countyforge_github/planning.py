@@ -38,7 +38,10 @@ from countyforge_github.decision_input import (
 )
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning_scope import resolve_planning_scope
-from countyforge_github.planning_semantics import validate_planning_semantics
+from countyforge_github.planning_semantics import (
+    folded_outcome_detail,
+    validate_planning_semantics,
+)
 from countyforge_github.redaction import redact_untrusted_text
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -915,6 +918,15 @@ def validate_planning_result(
         contract_root / ".ai/schemas/countyforge-plan-result.schema.json",
         kind="planning result schema",
     )
+    # Before the schema, because the schema rejects `then: []` on `minItems`
+    # and a more specific diagnosis placed after it could never run.
+    folded = folded_outcome_detail(result)
+    if folded is not None:
+        raise ControlPlaneError(
+            "invalid_plan_result",
+            "Planning output does not satisfy its strict contract.",
+            folded,
+        )
     try:
         validate_document(result, schema, kind="planning result")
     except KernelError as error:

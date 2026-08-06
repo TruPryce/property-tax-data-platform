@@ -184,12 +184,6 @@ def _validate_requirements(result: JsonObject) -> None:
                         if not value
                     ],
                 )
-            if not then and _FOLDED_OUTCOME.search(when):
-                _fail(
-                    "scenario_outcome_folded_into_when",
-                    requirement=identifier,
-                    scenario=str(scenario.get("name", "")),
-                )
             for text in (*given, when, *then, str(scenario.get("name", ""))):
                 phrase = _contains_placeholder(text)
                 if phrase is not None:
@@ -205,6 +199,54 @@ def _validate_requirements(result: JsonObject) -> None:
                     duplicate_of=previous,
                 )
             scenario_signatures[signature] = identifier
+
+
+def folded_outcome_detail(result: JsonObject) -> JsonObject | None:
+    """Name the mistake before the schema reports only its symptom.
+
+    Runs *before* schema validation, which is the only place it can run: a
+    scenario with `then: []` is rejected by `minItems` first, so a check placed
+    after it could never fire.  `then: should be non-empty` is true but does not
+    say why the array is empty; when the outcome is sitting inside `when`, that
+    is worth saying, because it is the whole correction.
+
+    Returns bounded evidence for the first such scenario, or `None`.  It never
+    rewrites the trigger: guessing where one ends would mutate model output on a
+    heuristic, and "then" appears legitimately inside prose.
+    """
+
+    requirements = result.get("requirements")
+    if not isinstance(requirements, list):
+        return None
+    for requirement_index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            continue
+        scenarios = requirement.get("scenarios")
+        if not isinstance(scenarios, list):
+            continue
+        for scenario_index, scenario in enumerate(scenarios):
+            if not isinstance(scenario, dict):
+                continue
+            # Only when the outcome is genuinely missing: a populated `then`
+            # beside a `when` that happens to contain the word is correct.
+            if scenario.get("then"):
+                continue
+            when = scenario.get("when")
+            if not isinstance(when, str) or not _FOLDED_OUTCOME.search(when):
+                continue
+            path = f"requirements[{requirement_index}].scenarios[{scenario_index}]"
+            return {
+                "path": f"{path}.then",
+                "pointer": f"/requirements/{requirement_index}/scenarios/{scenario_index}/then",
+                "validator": "minItems",
+                "reason": "scenario_outcome_folded_into_when",
+                "scenario": str(scenario.get("name", ""))[:200],
+                "detail": (
+                    f"{path}.then: should be non-empty; the expected outcome appears to be "
+                    f"written inside {path}.when, which must contain the trigger only"
+                ),
+            }
+    return None
 
 
 def normalize_write_path(candidate: str) -> str:

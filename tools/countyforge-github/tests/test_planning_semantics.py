@@ -1685,34 +1685,81 @@ def _folded_scenario_result() -> dict[str, Any]:
 def test_a_schema_failure_reports_the_exact_json_path() -> None:
     """Twelve identical failures were reported as one opaque sentence."""
 
+    # A different constraint on a different field, so the mapping is shown to
+    # generalise rather than to hardcode the one failure that prompted it.
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["given"] = []
     with pytest.raises(ControlPlaneError) as raised:
-        validate_planning_result(_folded_scenario_result(), contract_root=CONTRACT_ROOT)
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert raised.value.code == "invalid_plan_result"
     details = raised.value.details
-    assert details["path"] == "requirements[0].scenarios[0].then"
-    assert details["pointer"] == "/requirements/0/scenarios/0/then"
+    assert details["path"] == "requirements[0].scenarios[0].given"
+    assert details["pointer"] == "/requirements/0/scenarios/0/given"
     assert details["validator"] == "minItems"
-    assert details["detail"] == "requirements[0].scenarios[0].then: should be non-empty"
+    assert details["detail"] == "requirements[0].scenarios[0].given: should be non-empty"
 
 
-def test_an_outcome_folded_into_when_is_named_not_split() -> None:
-    """Splitting on the word "then" would mutate model output on a heuristic."""
+def test_an_outcome_folded_into_when_is_named_through_the_real_entry_point() -> None:
+    """The previous version asserted `scenario_incomplete` while the PR claimed
+    the folded pattern was named -- the check sat after a branch that always
+    raised first, and after schema validation that rejects `then: []` anyway.
 
-    from countyforge_github.planning_semantics import _FOLDED_OUTCOME
+    This drives `validate_planning_result`, the way every caller does.
+    """
 
-    document = _folded_scenario_result()
-    # Reach the semantic gate directly: the schema stops the empty array first.
-    document["requirements"][0]["scenarios"][0]["then"] = []
-    assert _FOLDED_OUTCOME.search(document["requirements"][0]["scenarios"][0]["when"])
-    reason = _refusal(document, required_cross_issues=[43])
-    assert reason == "scenario_incomplete"
     with pytest.raises(ControlPlaneError) as raised:
-        _validate(document, required_cross_issues=[43])
-    assert raised.value.details["missing"] == ["then"]
-    assert raised.value.details["scenario"]
+        validate_planning_result(_folded_scenario_result(), contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["reason"] == "scenario_outcome_folded_into_when"
+    assert details["path"] == "requirements[0].scenarios[0].then"
+    assert "written inside requirements[0].scenarios[0].when" in details["detail"]
+    assert details["scenario"]
 
-    # And the trigger is never rewritten to manufacture an outcome.
+    # The trigger is never rewritten to manufacture an outcome.
+    document = _folded_scenario_result()
     assert "then it returns" in document["requirements"][0]["scenarios"][0]["when"]
+
+
+def test_an_empty_then_without_a_folded_outcome_gets_the_plain_path_diagnostic() -> None:
+    """The specific diagnosis must not swallow the general one."""
+
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["then"] = []
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details.get("reason") is None
+    assert details["detail"] == "requirements[0].scenarios[0].then: should be non-empty"
+    assert details["validator"] == "minItems"
+
+
+def test_a_populated_then_beside_a_when_containing_the_word_is_not_flagged() -> None:
+    """`then` appears legitimately in prose; only a *missing* outcome matters."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["when"] = (
+        "the adapter decodes the literal, then halts"
+    )
+    assert folded_outcome_detail(document) is None
+    validate_planning_result(document, contract_root=CONTRACT_ROOT)
+
+
+def test_the_folded_detector_tolerates_a_malformed_pre_schema_document() -> None:
+    """It runs before schema validation, so it sees unvalidated shapes."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    for document in (
+        {},
+        {"requirements": "not a list"},
+        {"requirements": [None, 7, "text"]},
+        {"requirements": [{"scenarios": "not a list"}]},
+        {"requirements": [{"scenarios": [None, {"when": 42, "then": []}]}]},
+        {"requirements": [{"scenarios": [{"then": None}]}]},
+    ):
+        assert folded_outcome_detail(document) is None
 
 
 def test_the_prompt_shows_the_separated_scenario_shape() -> None:
