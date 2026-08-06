@@ -77,6 +77,10 @@ BROAD_WRITE_PATHS = frozenset(
 _NORMATIVE = re.compile(r"\b(?:SHALL NOT|MUST NOT|SHALL|MUST)\b")
 _DECISION_ID = re.compile(r"^D[0-9]{1,3}$")
 _TASK_ID = re.compile(r"^[0-9]{1,3}\.[0-9]{1,3}$")
+#: An outcome written inside the trigger.  Detected and reported, never
+#: split: guessing where the trigger ends would mutate model output on a
+#: heuristic, and "then" appears legitimately inside prose.
+_FOLDED_OUTCOME = re.compile(r",\s*then\b|\bthen\s+it\b", re.IGNORECASE)
 
 
 def _fail(reason: str, **details: object) -> NoReturn:
@@ -167,7 +171,19 @@ def _validate_requirements(result: JsonObject) -> None:
             then = [str(item) for item in scenario.get("then") or []]
             when = str(scenario.get("when", ""))
             if not given or not when or not then:
-                _fail("scenario_incomplete", requirement=identifier)
+                # Name which half is missing.  Sakana folded every outcome into
+                # `when` and left `then` empty across all 12 scenarios, and
+                # "scenario_incomplete" alone did not say which field to fix.
+                _fail(
+                    "scenario_incomplete",
+                    requirement=identifier,
+                    scenario=str(scenario.get("name", "")),
+                    missing=[
+                        field
+                        for field, value in (("given", given), ("when", when), ("then", then))
+                        if not value
+                    ],
+                )
             for text in (*given, when, *then, str(scenario.get("name", ""))):
                 phrase = _contains_placeholder(text)
                 if phrase is not None:
@@ -183,6 +199,60 @@ def _validate_requirements(result: JsonObject) -> None:
                     duplicate_of=previous,
                 )
             scenario_signatures[signature] = identifier
+
+
+def folded_outcome_detail(result: JsonObject) -> JsonObject | None:
+    """Name the mistake before the schema reports only its symptom.
+
+    Runs *before* schema validation, which is the only place it can run: a
+    scenario with `then: []` is rejected by `minItems` first, so a check placed
+    after it could never fire.  `then: should be non-empty` is true but does not
+    say why the array is empty; when the outcome is sitting inside `when`, that
+    is worth saying, because it is the whole correction.
+
+    Returns bounded evidence for the first such scenario, or `None`.  It never
+    rewrites the trigger: guessing where one ends would mutate model output on a
+    heuristic, and "then" appears legitimately inside prose.
+    """
+
+    requirements = result.get("requirements")
+    if not isinstance(requirements, list):
+        return None
+    for requirement_index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            continue
+        scenarios = requirement.get("scenarios")
+        if not isinstance(scenarios, list):
+            continue
+        for scenario_index, scenario in enumerate(scenarios):
+            if not isinstance(scenario, dict):
+                continue
+            # Exactly the observed shape: `then` present, a list, and empty.
+            # A falsy check also caught a missing key, `null`, `""`, and `{}` --
+            # which are `required` and `type` failures, not `minItems`. Claiming
+            # `minItems` for those would substitute fabricated evidence for the
+            # validator that actually failed, and this runs *before* schema
+            # validation, so nothing downstream would correct it. They fall
+            # through to the schema, which names them accurately.
+            then = scenario.get("then")
+            if not (isinstance(then, list) and not then):
+                continue
+            when = scenario.get("when")
+            if not isinstance(when, str) or not _FOLDED_OUTCOME.search(when):
+                continue
+            path = f"requirements[{requirement_index}].scenarios[{scenario_index}]"
+            return {
+                "path": f"{path}.then",
+                "pointer": f"/requirements/{requirement_index}/scenarios/{scenario_index}/then",
+                "validator": "minItems",
+                "reason": "scenario_outcome_folded_into_when",
+                "scenario": str(scenario.get("name", ""))[:200],
+                "detail": (
+                    f"{path}.then: should be non-empty; the expected outcome appears to be "
+                    f"written inside {path}.when, which must contain the trigger only"
+                ),
+            }
+    return None
 
 
 def normalize_write_path(candidate: str) -> str:

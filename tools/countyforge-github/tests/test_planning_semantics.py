@@ -1664,3 +1664,181 @@ def test_retained_comments_do_not_count_toward_selected_files() -> None:
     assert fitted["selection"]["selected_files"] == len(repository_files)
     # And it never exceeds the limit repository selection was held to.
     assert fitted["selection"]["selected_files"] <= fitted["selection"]["max_files"]
+
+
+# --------------------------------------------------------------------------
+# The Sakana run that completed in 8m41s and failed schema validation: every
+# scenario folded its outcome into `when` and left `then` empty.
+# --------------------------------------------------------------------------
+
+
+def _folded_scenario_result() -> dict[str, Any]:
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = (
+        "When the adapter decodes the literal, then it returns the reviewed exact negative Decimal."
+    )
+    scenario["then"] = []
+    return document
+
+
+def test_a_schema_failure_reports_the_exact_json_path() -> None:
+    """Twelve identical failures were reported as one opaque sentence."""
+
+    # A different constraint on a different field, so the mapping is shown to
+    # generalise rather than to hardcode the one failure that prompted it.
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["given"] = []
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert raised.value.code == "invalid_plan_result"
+    details = raised.value.details
+    assert details["path"] == "requirements[0].scenarios[0].given"
+    assert details["pointer"] == "/requirements/0/scenarios/0/given"
+    assert details["validator"] == "minItems"
+    assert details["detail"] == "requirements[0].scenarios[0].given: should be non-empty"
+
+
+def test_an_outcome_folded_into_when_is_named_through_the_real_entry_point() -> None:
+    """The previous version asserted `scenario_incomplete` while the PR claimed
+    the folded pattern was named -- the check sat after a branch that always
+    raised first, and after schema validation that rejects `then: []` anyway.
+
+    This drives `validate_planning_result`, the way every caller does.
+    """
+
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(_folded_scenario_result(), contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["reason"] == "scenario_outcome_folded_into_when"
+    assert details["path"] == "requirements[0].scenarios[0].then"
+    assert "written inside requirements[0].scenarios[0].when" in details["detail"]
+    assert details["scenario"]
+
+    # The trigger is never rewritten to manufacture an outcome.
+    document = _folded_scenario_result()
+    assert "then it returns" in document["requirements"][0]["scenarios"][0]["when"]
+
+
+def test_an_empty_then_without_a_folded_outcome_gets_the_plain_path_diagnostic() -> None:
+    """The specific diagnosis must not swallow the general one."""
+
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["then"] = []
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details.get("reason") is None
+    assert details["detail"] == "requirements[0].scenarios[0].then: should be non-empty"
+    assert details["validator"] == "minItems"
+
+
+def test_a_populated_then_beside_a_when_containing_the_word_is_not_flagged() -> None:
+    """`then` appears legitimately in prose; only a *missing* outcome matters."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["when"] = (
+        "the adapter decodes the literal, then halts"
+    )
+    assert folded_outcome_detail(document) is None
+    validate_planning_result(document, contract_root=CONTRACT_ROOT)
+
+
+_FOLDED_WHEN = "When the adapter decodes the literal, then it returns the reviewed exact value."
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "validator"),
+    [
+        ("missing", ..., "required"),
+        ("null", None, "type"),
+        ("empty string", "", "type"),
+        ("empty object", {}, "type"),
+        ("zero", 0, "type"),
+    ],
+)
+def test_a_falsy_then_that_is_not_an_empty_list_keeps_its_real_validator(
+    label: str, value: Any, validator: str
+) -> None:
+    """A falsy check caught `required` and `type` failures and relabelled them
+    `minItems`. This diagnostic runs *before* schema validation, so nothing
+    downstream would have corrected the substituted evidence."""
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = _FOLDED_WHEN
+    if value is ...:
+        scenario.pop("then", None)
+    else:
+        scenario["then"] = value
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    # The specific diagnosis declines these outright.
+    assert folded_outcome_detail(document) is None, label
+
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["validator"] == validator, label
+    assert details.get("reason") is None, label
+    assert details["path"].endswith("then") or details["path"].endswith("scenarios[0]")
+
+
+def test_only_a_present_empty_list_earns_the_folded_diagnosis() -> None:
+    """The one shape actually observed, and only that shape."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = _FOLDED_WHEN
+    scenario["then"] = []
+    detail = folded_outcome_detail(document)
+    assert detail is not None
+    assert detail["reason"] == "scenario_outcome_folded_into_when"
+    assert detail["validator"] == "minItems"
+
+
+def test_the_folded_detector_tolerates_a_malformed_pre_schema_document() -> None:
+    """It runs before schema validation, so it sees unvalidated shapes."""
+
+    from countyforge_github.planning_semantics import folded_outcome_detail
+
+    # Each scenario carries a folded `when` where it can, so the check under
+    # test is the `then` branch rather than an early return on a missing
+    # trigger -- which is how the previous version passed without exercising it.
+    for document in (
+        {},
+        {"requirements": "not a list"},
+        {"requirements": [None, 7, "text"]},
+        {"requirements": [{"scenarios": "not a list"}]},
+        {"requirements": [{"scenarios": [None, {"when": 42, "then": []}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN, "then": None}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN}]}]},
+        {"requirements": [{"scenarios": [{"when": _FOLDED_WHEN, "then": "text"}]}]},
+    ):
+        assert folded_outcome_detail(document) is None
+
+
+def test_the_prompt_shows_the_separated_scenario_shape() -> None:
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    assert "nothing splits it for you" in prompt
+    assert '"when": "the adapter decodes the literal",' in prompt
+    assert '"the reviewed exact negative Decimal is returned",' in prompt
+    # The instruction and the worked example must both be present: the example
+    # alone reads as decoration, and the rule alone was already there.
+    assert "is the trigger" in prompt
+    assert prompt.index("is the trigger") < prompt.index('"when": "the adapter decodes')
+
+
+def test_a_correctly_separated_scenario_still_passes() -> None:
+    """The guard must not reject prose that legitimately contains the word."""
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = "the adapter decodes the literal"
+    scenario["then"] = ["the reviewed exact negative Decimal is returned"]
+    validate_planning_result(document, contract_root=CONTRACT_ROOT)

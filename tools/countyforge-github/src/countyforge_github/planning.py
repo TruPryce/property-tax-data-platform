@@ -38,7 +38,10 @@ from countyforge_github.decision_input import (
 )
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning_scope import resolve_planning_scope
-from countyforge_github.planning_semantics import validate_planning_semantics
+from countyforge_github.planning_semantics import (
+    folded_outcome_detail,
+    validate_planning_semantics,
+)
 from countyforge_github.redaction import redact_untrusted_text
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -841,6 +844,44 @@ def build_planning_packet(
     }
 
 
+#: Plain-language hints for the validators a planning result actually trips.
+_VALIDATOR_HINTS = {
+    "minItems": "should be non-empty",
+    "minLength": "is too short",
+    "maxLength": "is too long",
+    "required": "is missing a required property",
+    "type": "has the wrong type",
+    "enum": "is not one of the permitted values",
+    "pattern": "does not match its required shape",
+    "additionalProperties": "contains a property the contract does not define",
+}
+
+
+def _json_path(pointer: str) -> str:
+    """Render an RFC 6901 pointer the way a person reads a document."""
+
+    rendered = ""
+    for token in [part for part in str(pointer).split("/") if part != ""]:
+        rendered += f"[{token}]" if token.isdigit() else (f".{token}" if rendered else token)
+    return rendered or "(document root)"
+
+
+def _schema_failure_details(error: KernelError) -> JsonObject:
+    """Bounded, actionable detail: where it failed and what was wrong there."""
+
+    details = error.details if isinstance(error.details, dict) else {}
+    pointer = str(details.get("path", ""))
+    validator = str(details.get("validator", ""))
+    path = _json_path(pointer)
+    hint = _VALIDATOR_HINTS.get(validator, f"failed the {validator} constraint")
+    return {
+        "path": path,
+        "pointer": pointer,
+        "validator": validator,
+        "detail": f"{path}: {hint}",
+    }
+
+
 def validate_planning_result(
     result: JsonObject,
     *,
@@ -877,11 +918,26 @@ def validate_planning_result(
         contract_root / ".ai/schemas/countyforge-plan-result.schema.json",
         kind="planning result schema",
     )
+    # Before the schema, because the schema rejects `then: []` on `minItems`
+    # and a more specific diagnosis placed after it could never run.
+    folded = folded_outcome_detail(result)
+    if folded is not None:
+        raise ControlPlaneError(
+            "invalid_plan_result",
+            "Planning output does not satisfy its strict contract.",
+            folded,
+        )
     try:
         validate_document(result, schema, kind="planning result")
-    except KernelError:
+    except KernelError as error:
+        # The validator already knows the exact pointer; discarding it left a
+        # 12-scenario failure reported as one opaque sentence.  A run that says
+        # `requirements[0].scenarios[0].then: [] should be non-empty` can be
+        # acted on without re-deriving the cause from the artifact.
         raise ControlPlaneError(
-            "invalid_plan_result", "Planning output does not satisfy its strict contract."
+            "invalid_plan_result",
+            "Planning output does not satisfy its strict contract.",
+            _schema_failure_details(error),
         ) from None
     try:
         validate_planning_payload(result)
