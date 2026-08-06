@@ -1664,3 +1664,73 @@ def test_retained_comments_do_not_count_toward_selected_files() -> None:
     assert fitted["selection"]["selected_files"] == len(repository_files)
     # And it never exceeds the limit repository selection was held to.
     assert fitted["selection"]["selected_files"] <= fitted["selection"]["max_files"]
+
+
+# --------------------------------------------------------------------------
+# The Sakana run that completed in 8m41s and failed schema validation: every
+# scenario folded its outcome into `when` and left `then` empty.
+# --------------------------------------------------------------------------
+
+
+def _folded_scenario_result() -> dict[str, Any]:
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = (
+        "When the adapter decodes the literal, then it returns the reviewed exact negative Decimal."
+    )
+    scenario["then"] = []
+    return document
+
+
+def test_a_schema_failure_reports_the_exact_json_path() -> None:
+    """Twelve identical failures were reported as one opaque sentence."""
+
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(_folded_scenario_result(), contract_root=CONTRACT_ROOT)
+    assert raised.value.code == "invalid_plan_result"
+    details = raised.value.details
+    assert details["path"] == "requirements[0].scenarios[0].then"
+    assert details["pointer"] == "/requirements/0/scenarios/0/then"
+    assert details["validator"] == "minItems"
+    assert details["detail"] == "requirements[0].scenarios[0].then: should be non-empty"
+
+
+def test_an_outcome_folded_into_when_is_named_not_split() -> None:
+    """Splitting on the word "then" would mutate model output on a heuristic."""
+
+    from countyforge_github.planning_semantics import _FOLDED_OUTCOME
+
+    document = _folded_scenario_result()
+    # Reach the semantic gate directly: the schema stops the empty array first.
+    document["requirements"][0]["scenarios"][0]["then"] = []
+    assert _FOLDED_OUTCOME.search(document["requirements"][0]["scenarios"][0]["when"])
+    reason = _refusal(document, required_cross_issues=[43])
+    assert reason == "scenario_incomplete"
+    with pytest.raises(ControlPlaneError) as raised:
+        _validate(document, required_cross_issues=[43])
+    assert raised.value.details["missing"] == ["then"]
+    assert raised.value.details["scenario"]
+
+    # And the trigger is never rewritten to manufacture an outcome.
+    assert "then it returns" in document["requirements"][0]["scenarios"][0]["when"]
+
+
+def test_the_prompt_shows_the_separated_scenario_shape() -> None:
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    assert "nothing splits it for you" in prompt
+    assert '"when": "the adapter decodes the literal",' in prompt
+    assert '"the reviewed exact negative Decimal is returned",' in prompt
+    # The instruction and the worked example must both be present: the example
+    # alone reads as decoration, and the rule alone was already there.
+    assert "is the trigger" in prompt
+    assert prompt.index("is the trigger") < prompt.index('"when": "the adapter decodes')
+
+
+def test_a_correctly_separated_scenario_still_passes() -> None:
+    """The guard must not reject prose that legitimately contains the word."""
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    scenario["when"] = "the adapter decodes the literal"
+    scenario["then"] = ["the reviewed exact negative Decimal is returned"]
+    validate_planning_result(document, contract_root=CONTRACT_ROOT)

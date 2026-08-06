@@ -53,6 +53,25 @@ Plan for this repository's actual boundaries and current six-county scope:
   one scenario with concrete `given`, `when`, and `then` content. Text such as "satisfy this
   criterion", "the implementation is evaluated", or "demonstrably satisfied" is rejected, and two
   requirements may not share the same scenario.
+- A scenario has three separate fields. `given` is the starting state, `when` is the trigger **and
+  nothing else**, and `then` is a non-empty array of expected outcomes. Do not write the outcome
+  inside `when`: a `when` reading "the adapter decodes the literal, then it returns the exact
+  value" with an empty `then` is rejected, and nothing splits it for you. Copy this shape:
+
+  ```json
+  {
+    "name": "Decode an independent signed multiword vector",
+    "given": [
+      "an independently authored signed multiword NUMERIC fixture",
+      "approved precision and scale metadata"
+    ],
+    "when": "the adapter decodes the literal",
+    "then": [
+      "the reviewed exact negative Decimal is returned",
+      "no float conversion occurs"
+    ]
+  }
+  ```
 - Give every `task_slices` entry its own `write_paths`: the narrowest repository-relative directory
   prefixes that task needs. Broad aliases such as `libs`, `services`, `dags`, `tools`, `docs`, or
   root documents are rejected, as are `.github/`, `.ai/`, and `openspec/specs/`. Every task path

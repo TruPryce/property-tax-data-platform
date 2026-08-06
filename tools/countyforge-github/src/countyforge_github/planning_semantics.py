@@ -77,6 +77,10 @@ BROAD_WRITE_PATHS = frozenset(
 _NORMATIVE = re.compile(r"\b(?:SHALL NOT|MUST NOT|SHALL|MUST)\b")
 _DECISION_ID = re.compile(r"^D[0-9]{1,3}$")
 _TASK_ID = re.compile(r"^[0-9]{1,3}\.[0-9]{1,3}$")
+#: An outcome written inside the trigger.  Detected and reported, never
+#: split: guessing where the trigger ends would mutate model output on a
+#: heuristic, and "then" appears legitimately inside prose.
+_FOLDED_OUTCOME = re.compile(r",\s*then\b|\bthen\s+it\b", re.IGNORECASE)
 
 
 def _fail(reason: str, **details: object) -> NoReturn:
@@ -167,7 +171,25 @@ def _validate_requirements(result: JsonObject) -> None:
             then = [str(item) for item in scenario.get("then") or []]
             when = str(scenario.get("when", ""))
             if not given or not when or not then:
-                _fail("scenario_incomplete", requirement=identifier)
+                # Name which half is missing.  Sakana folded every outcome into
+                # `when` and left `then` empty across all 12 scenarios, and
+                # "scenario_incomplete" alone did not say which field to fix.
+                _fail(
+                    "scenario_incomplete",
+                    requirement=identifier,
+                    scenario=str(scenario.get("name", "")),
+                    missing=[
+                        field
+                        for field, value in (("given", given), ("when", when), ("then", then))
+                        if not value
+                    ],
+                )
+            if not then and _FOLDED_OUTCOME.search(when):
+                _fail(
+                    "scenario_outcome_folded_into_when",
+                    requirement=identifier,
+                    scenario=str(scenario.get("name", "")),
+                )
             for text in (*given, when, *then, str(scenario.get("name", ""))):
                 phrase = _contains_placeholder(text)
                 if phrase is not None:
