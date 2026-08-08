@@ -102,6 +102,24 @@ def _remove_secret_bearing_files(run_dir: Path, secret_values: tuple[str, ...]) 
     return leaked
 
 
+#: The only keys carried out of a schema failure.  `validate_document` builds
+#: them from the validator, never from the document, so they cannot leak model
+#: output, source text, or secrets.
+_SAFE_VALIDATION_KEYS = ("kind", "path", "validator")
+
+
+def _safe_validation_detail(error: KernelError) -> JsonObject:
+    """Bounded structural facts about a schema failure, and nothing else."""
+
+    details = error.details if isinstance(error.details, dict) else {}
+    detail: JsonObject = {"error_code": str(error.code)[:64]}
+    for key in _SAFE_VALIDATION_KEYS:
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            detail[key] = value[:200]
+    return detail
+
+
 class Runner:
     """Dispatch only implemented immutable profiles."""
 
@@ -332,6 +350,7 @@ class Runner:
         return root / "plan" / resolved.run_id
 
     def _run_plan(self, resolved: ResolvedRun) -> tuple[JsonObject, int]:
+        validation_detail: JsonObject | None = None
         run_dir = self._plan_run_dir(resolved)
         if run_dir.is_dir() and any(run_dir.iterdir()):
             raise KernelError(
@@ -383,10 +402,16 @@ class Runner:
                         kind="planning result",
                     )
                     validate_planning_payload(result_document)
-                except KernelError:
+                except KernelError as error:
+                    # `validate_document` already produced bounded structural
+                    # facts -- kind, JSON pointer, validator -- and discarding
+                    # them left the whole run reporting only `validation_failed`.
+                    # Only those three are kept: no document values, no model
+                    # output, no exception text.
                     disposition = "validation_failed"
                     code = 5
                     result_document = None
+                    validation_detail = _safe_validation_detail(error)
         elif code == 0:
             disposition = "validation_failed"
             code = 5
@@ -442,6 +467,11 @@ class Runner:
         }
         if result_document is not None:
             result["plan"] = result_document
+        if validation_detail is not None:
+            # Bounded structural facts only, so the workflow can report
+            # `path=/task_slices/5/write_paths validator=minItems` instead of
+            # the bare disposition.
+            result["validation_detail"] = validation_detail
         if code != 0 and adapter_stderr:
             result["adapter_stderr_tail"] = _redacted_tail(adapter_stderr, environment)
         return result, code

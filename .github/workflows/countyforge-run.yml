@@ -2029,7 +2029,18 @@ jobs:
           if ! jq -e '.ok == true and .disposition == "completed"' "$result_file" >/dev/null; then
             disposition="$(jq -r '.disposition // "unknown"' "$result_file" 2>/dev/null || printf 'invalid_result')"
             error_code="$(jq -r '.summary.error_code // "unknown"' "$result_file" 2>/dev/null || printf 'invalid_result')"
-            echo "::error::Planning provider failed before materialization: disposition=$disposition error_code=$error_code" >&2
+            # The runner already carries the failing JSON pointer and validator
+            # for a schema rejection, bounded to structural facts. Without this
+            # the message stayed `disposition=validation_failed
+            # error_code=validation_failed`, which is what made run
+            # 31269239926 hard to diagnose. Absent detail keeps the old message.
+            detail=""
+            if jq -e '.validation_detail.path != null and .validation_detail.validator != null' "$result_file" >/dev/null 2>&1; then
+              detail_path="$(jq -r '.validation_detail.path' "$result_file")"
+              detail_validator="$(jq -r '.validation_detail.validator' "$result_file")"
+              detail=" path=$detail_path validator=$detail_validator"
+            fi
+            echo "::error::Planning provider failed before materialization: disposition=$disposition error_code=$error_code$detail" >&2
             exit 2
           fi
           plan_file="$(find "$RUNNER_TEMP/countyforge-result" -name countyforge-plan-result.json -type f -print -quit 2>/dev/null || true)"

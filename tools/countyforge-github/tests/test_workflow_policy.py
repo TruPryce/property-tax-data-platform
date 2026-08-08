@@ -2371,3 +2371,133 @@ def test_image_construction_and_runtime_verification_share_one_digest_computatio
     assert workflow_digest == document_sha256(profile)
     assert 'EXPECTED_PROFILE_SHA="${COUNTYFORGE_PROFILE_SHA256:?' in _IMPLEMENT_ADAPTER
     assert '"$IMAGE_PROFILE_SHA" != "$EXPECTED_PROFILE_SHA"' in _IMPLEMENT_ADAPTER
+
+
+# --------------------------------------------------------------------------
+# Run 31269239926 — the runner knew the failing field and the Actions message
+# said only `validation_failed`.
+# --------------------------------------------------------------------------
+
+
+def _materialization_step() -> str:
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps") or []:
+            run = str(step.get("run", ""))
+            if "Planning provider failed before materialization" in run:
+                return run
+    raise AssertionError("materialization guard step not found")
+
+
+def _run_materialization_guard(
+    tmp_path: Path, result: dict[str, Any]
+) -> subprocess.CompletedProcess[str]:
+    """Execute the real step body; asserting on its text would prove nothing."""
+
+    temp = tmp_path / "temp"
+    (temp / "countyforge-result").mkdir(parents=True)
+    (temp / "countyforge-result" / "countyforge-result.json").write_text(
+        json.dumps(result), encoding="utf-8"
+    )
+    return subprocess.run(
+        ["bash", "-c", _materialization_step()],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(temp),
+            "ISSUE_NUMBER": "18",
+            "COUNTYFORGE_RUN_ID": "gh-test-a1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_actions_message_names_the_failing_field(tmp_path: Path) -> None:
+    """`disposition=validation_failed error_code=validation_failed` was all a
+    maintainer saw, while the runner already knew the pointer and validator."""
+
+    completed = _run_materialization_guard(
+        tmp_path,
+        {
+            "ok": False,
+            "disposition": "validation_failed",
+            "summary": {"error_code": "validation_failed"},
+            "validation_detail": {
+                "error_code": "schema_validation_failed",
+                "kind": "planning result",
+                "path": "/task_slices/5/write_paths",
+                "validator": "minItems",
+            },
+        },
+    )
+    assert completed.returncode == 2
+    assert "disposition=validation_failed" in completed.stderr
+    assert "path=/task_slices/5/write_paths" in completed.stderr
+    assert "validator=minItems" in completed.stderr
+
+
+def test_the_message_keeps_its_generic_form_without_a_validation_detail(
+    tmp_path: Path,
+) -> None:
+    completed = _run_materialization_guard(
+        tmp_path,
+        {
+            "ok": False,
+            "disposition": "timed_out",
+            "summary": {"error_code": "timed_out"},
+        },
+    )
+    assert completed.returncode == 2
+    assert "disposition=timed_out error_code=timed_out" in completed.stderr
+    assert "path=" not in completed.stderr
+    assert "validator=" not in completed.stderr
+
+
+def test_a_partial_validation_detail_is_not_half_reported(tmp_path: Path) -> None:
+    """Both fields or neither: `path= validator=` would read as evidence."""
+
+    for detail in ({"path": "/task_slices/5/write_paths"}, {"validator": "minItems"}, {}):
+        completed = _run_materialization_guard(
+            tmp_path / f"case{len(detail)}{'p' if 'path' in detail else 'v'}",
+            {
+                "ok": False,
+                "disposition": "validation_failed",
+                "summary": {"error_code": "validation_failed"},
+                "validation_detail": detail,
+            },
+        )
+        assert completed.returncode == 2
+        assert "path=" not in completed.stderr
+        assert "validator=" not in completed.stderr
+
+
+def test_the_surfaced_message_carries_no_model_or_document_content(
+    tmp_path: Path,
+) -> None:
+    """Only the four sanitized keys exist on the runner side, and the message
+    quotes just two of them."""
+
+    marker = "SENTINEL-MODEL-TEXT"
+    completed = _run_materialization_guard(
+        tmp_path,
+        {
+            "ok": False,
+            "disposition": "validation_failed",
+            "summary": {"error_code": "validation_failed", "stderr_tail": marker},
+            "plan": {"problem_statement": marker},
+            "validation_detail": {
+                "error_code": "schema_validation_failed",
+                "kind": "planning result",
+                "path": "/requirements/0/id",
+                "validator": "pattern",
+            },
+        },
+    )
+    assert completed.returncode == 2
+    assert marker not in completed.stderr
+    assert marker not in completed.stdout
+    assert "validator=pattern" in completed.stderr
