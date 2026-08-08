@@ -72,6 +72,31 @@ Plan for this repository's actual boundaries and current six-county scope:
     ]
   }
   ```
+- The schema you are given omits length, pattern, and minimum-item limits that the trusted
+  validator still enforces, so they are stated here and all of them are rejected on violation:
+  - each `requirements[].id` is lower-case letters, digits, and hyphens only, 64 characters at
+    most: `numeric-decoding-exactness`, never `R1`;
+  - each `validation_checks` entry is a short command identifier of 64 characters at most, such as
+    `make check` or `repo.check` — never a sentence describing what the check proves. Put that
+    prose in the requirement's scenarios;
+  - `write_paths`, `validation_checks`, `given`, `then`, `scenarios`, `requirements`, and
+    `task_slices` must each contain at least one entry.
+- `task_slices` are mutating implementation work. Every task changes repository content and must
+  name at least one `write_paths` prefix. Never emit a task that exists only to run validation,
+  verification, review, lint, tests, OpenSpec checks, documentation checks, or repository-wide
+  gates. Repository-wide final checks belong in top-level `validation_commands`; checks specific to
+  one mutating task belong in that task's `validation_checks`. This is rejected:
+
+  ```json
+  {
+    "task_id": "6.1",
+    "title": "Run final validation",
+    "write_paths": []
+  }
+  ```
+
+  Omit that task and put its commands in `validation_commands`. Do not invent a write path to
+  satisfy the requirement, and do not attach the commands to an unrelated source or docs task.
 - Give every `task_slices` entry its own `write_paths`: the narrowest repository-relative directory
   prefixes that task needs. Broad aliases such as `libs`, `services`, `dags`, `tools`, `docs`, or
   root documents are rejected, as are `.github/`, `.ai/`, and `openspec/specs/`. Every task path

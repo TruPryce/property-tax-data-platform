@@ -1842,3 +1842,136 @@ def test_a_correctly_separated_scenario_still_passes() -> None:
     scenario["when"] = "the adapter decodes the literal"
     scenario["then"] = ["the reviewed exact negative Decimal is returned"]
     validate_planning_result(document, contract_root=CONTRACT_ROOT)
+
+
+# --------------------------------------------------------------------------
+# Run 31269239926 — Sakana completed in ~295s and the plan failed validation.
+# 23 schema errors, all of them constraints the provider-compatible generation
+# schema strips before the model ever sees it.
+# --------------------------------------------------------------------------
+
+RUN_31269239926 = Path("tools/countyforge-github/tests/fixtures/plan-result-run-31269239926.json")
+
+
+def _schema_errors(document: dict[str, Any]) -> list[Any]:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    return sorted(
+        Draft202012Validator(schema).iter_errors(document),
+        key=lambda item: (list(item.absolute_path), item.validator or ""),
+    )
+
+
+def test_the_run_31269239926_plan_is_rejected_for_three_independent_reasons() -> None:
+    """The reported `write_paths: []` was real but was one of three blockers,
+    and not the first the validator reports."""
+
+    document = json.loads(RUN_31269239926.read_text(encoding="utf-8"))
+    failures = {
+        (
+            "/" + "/".join(str(part) for part in error.absolute_path),
+            error.validator,
+        )
+        for error in _schema_errors(document)
+    }
+    # The validation-only task.
+    assert ("/task_slices/5/write_paths", "minItems") in failures
+    # Requirement ids emitted as `R1`..`R9`.
+    assert ("/requirements/0/id", "pattern") in failures
+    # Validation checks written as prose sentences.
+    assert ("/task_slices/1/validation_checks/0", "maxLength") in failures
+    assert len(failures) > 20
+
+
+def test_a_validation_only_task_slice_remains_schema_invalid() -> None:
+    """Strictness is not weakened to accommodate the model."""
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    write_paths = schema["$defs"]["task_slice"]["properties"]["write_paths"]
+    assert write_paths["minItems"] == 1
+
+    document = _result()
+    document["task_slices"].append(
+        {
+            "task_id": "6.1",
+            "title": "Run deterministic Collin foundation validation",
+            "description": "Run strict OpenSpec validation and the repository gates.",
+            "write_paths": [],
+            "validation_checks": ["make check"],
+            "prerequisites": ["1.1"],
+            "risk": "low",
+            "source_ids": ["aa11aa11aa11aa11aa11aa11"],
+        }
+    )
+    assert any(
+        error.validator == "minItems" and "write_paths" in str(list(error.absolute_path))
+        for error in _schema_errors(document)
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert raised.value.code == "invalid_plan_result"
+    assert raised.value.details["path"] == "task_slices[4].write_paths"
+
+
+def test_the_prompt_forbids_validation_only_task_slices() -> None:
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    assert "mutating implementation work" in prompt
+    assert "only to run validation" in prompt
+    assert "belong in top-level `validation_commands`" in prompt
+    # The negative example, in the shape the model actually emitted.
+    assert '"task_id": "6.1"' in prompt
+    assert '"write_paths": []' in prompt
+    assert "Do not invent a write path" in prompt
+
+
+def test_the_prompt_states_every_constraint_the_generation_schema_strips() -> None:
+    """The root cause, as an invariant rather than three patched sentences.
+
+    The generation schema is projected onto the provider-compatible keyword
+    subset, which drops `pattern`, `minItems`, `maxLength`, and `minLength`.
+    Every one of run 31269239926's 23 errors violated a dropped constraint, so
+    the prompt is the only channel for them and must carry them.
+    """
+
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    generation = json.loads(
+        Path(".ai/schemas/countyforge-plan-generation.schema.json").read_text(encoding="utf-8")
+    )
+
+    def keywords(node: object) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found.add(key)
+                found |= keywords(value)
+        elif isinstance(node, list):
+            for item in node:
+                found |= keywords(item)
+        return found
+
+    stripped = {"pattern", "minItems", "maxLength", "minLength"} & keywords(generation)
+    assert not stripped, f"generation schema unexpectedly carries {sorted(stripped)}"
+
+    # So the prompt must say each of them in words.
+    assert "lower-case letters, digits, and hyphens" in prompt  # pattern
+    assert "64 characters at most" in prompt  # maxLength
+    assert "at least one entry" in prompt  # minItems
+    assert "never `R1`" in prompt
+    assert "never a sentence" in prompt
+
+
+def test_the_generated_requirement_id_and_check_shapes_are_named_in_the_prompt() -> None:
+    """Both other blockers, pinned to the exact values the model produced."""
+
+    document = json.loads(RUN_31269239926.read_text(encoding="utf-8"))
+    assert document["requirements"][0]["id"] == "R1"
+    assert len(document["task_slices"][1]["validation_checks"][0]) > 64
+
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    assert "`numeric-decoding-exactness`, never `R1`" in prompt
+    assert "short command identifier" in prompt

@@ -837,3 +837,85 @@ def test_the_executor_supplies_every_environment_variable_the_adapter_requires()
     # Names the workflow or the profile allowlist provides rather than the executor.
     external = {"RUNNER_TEMP", "GITHUB_TOKEN", "PROVIDER_SECRET_VALUE"}
     assert not (required - supplied - external), sorted(required - supplied - external)
+
+
+def test_plan_validation_failure_preserves_bounded_schema_details(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    """Run 31269239926 reported only `validation_failed`.
+
+    `validate_document` already builds the pointer and validator; discarding
+    them meant the workflow could not say which field was wrong.
+    """
+
+    document = _valid_plan_document()
+    # The exact defect: a validation-only task slice with no write paths.
+    document["task_slices"].append(
+        {
+            "task_id": "6.1",
+            "title": "Run deterministic Collin foundation validation",
+            "description": "Run strict OpenSpec validation and the repository gates.",
+            "write_paths": [],
+            "validation_checks": ["make check"],
+            "prerequisites": ["1.1"],
+            "risk": "low",
+            "source_ids": ["ab01ab01ab01ab01ab01ab01"],
+        }
+    )
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", document)
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+
+    assert exit_code == 5
+    assert result["disposition"] == "validation_failed"
+    assert "plan" not in result
+    detail = result["validation_detail"]
+    assert detail["error_code"] == "schema_validation_failed"
+    assert detail["path"] == "/task_slices/2/write_paths"
+    assert detail["validator"] == "minItems"
+    assert detail["kind"] == "planning result"
+
+
+def test_plan_validation_detail_carries_nothing_but_structural_facts(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    """No document values, model output, or arbitrary exception text."""
+
+    document = _valid_plan_document()
+    marker = "SENTINEL-MODEL-TEXT-THAT-MUST-NOT-ESCAPE"
+    document["requirements"][0]["id"] = marker  # violates the id pattern
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", document)
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+
+    assert exit_code == 5
+    detail = result["validation_detail"]
+    assert set(detail) <= {"error_code", "kind", "path", "validator"}
+    assert detail["validator"] == "pattern"
+    assert detail["path"] == "/requirements/0/id"
+    # The offending value never leaves the runner.
+    assert marker not in json.dumps(result)
+
+
+def test_a_successful_plan_carries_no_validation_detail(
+    tmp_path: Path,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    """Existing success behaviour is unchanged."""
+
+    adapter = _write_plan_adapter(tmp_path / "plan-adapter.sh", _valid_plan_document())
+    kernel = Kernel()
+    result, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request_factory("plan")))
+
+    assert exit_code == 0
+    assert result["disposition"] == "completed"
+    assert "validation_detail" not in result
+    assert isinstance(result["plan"], dict)
