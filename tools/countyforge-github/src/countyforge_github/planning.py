@@ -39,6 +39,7 @@ from countyforge_github.decision_input import (
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning_scope import resolve_planning_scope
 from countyforge_github.planning_semantics import (
+    declared_capabilities,
     folded_outcome_detail,
     validate_planning_semantics,
 )
@@ -760,6 +761,12 @@ def build_planning_packet(
             "selected_files": len(selected),
             "excluded_candidates": excluded,
         },
+        # The canonical capability inventory, from the same function the
+        # semantic gate enforces with.  Run 31281189305 declared `MODIFIED` for
+        # a capability that does not exist, because nothing in the packet said
+        # which do: `openspec/specs/` is empty, and zero selected spec sources
+        # is indistinguishable from "the packet omitted them".
+        "declared_capabilities": sorted(declared_capabilities(contract_root)),
         "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,

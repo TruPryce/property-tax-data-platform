@@ -100,7 +100,14 @@ def _contains_placeholder(text: str) -> str | None:
 
 
 def declared_capabilities(root: Path) -> frozenset[str]:
-    """Capability names already declared in the repository's OpenSpec tree."""
+    """The canonical capability inventory: promoted OpenSpec specs, nothing else.
+
+    `openspec/specs/<name>/spec.md` is the only source.  A capability proposed
+    inside `openspec/changes/**/specs/` is a draft awaiting human merge, not a
+    declared capability, and neither documentation, policy keys, nor selected
+    packet context may stand in for this.  Packet construction and the semantic
+    gate both call this, so the model is told exactly what the gate enforces.
+    """
 
     specs = root / "openspec" / "specs"
     if not specs.is_dir():
@@ -128,7 +135,15 @@ def _validate_capability(result: JsonObject, root: Path) -> str:
     existing = declared_capabilities(root)
     if change_type in {"MODIFIED", "REMOVED"} and name not in existing:
         # Modifying something that does not exist means the planner guessed.
-        _fail("affected_capability_not_declared", capability=name)
+        # Report the inventory: an empty list is the whole answer -- nothing is
+        # declared yet, so every capability must be ADDED.
+        _fail(
+            "affected_capability_not_declared",
+            capability=name,
+            change_type=change_type,
+            declared_capabilities=sorted(existing)[:64],
+            declared_capability_count=len(existing),
+        )
     if change_type == "ADDED" and name in existing:
         _fail("affected_capability_already_exists", capability=name)
     return name

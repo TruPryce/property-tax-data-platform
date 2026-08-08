@@ -132,6 +132,9 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                     "untrusted": True,
                 },
                 "sources": [],
+                # Required: an absent inventory and an empty one must not look
+                # alike, which is the defect run 31281189305 exposed.
+                "declared_capabilities": [],
                 "selection": {
                     "max_files": 1,
                     "max_bytes": 1,
