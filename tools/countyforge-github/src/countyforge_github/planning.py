@@ -384,6 +384,21 @@ def _context_priority(category: str, relative: str, relevance: Sequence[str]) ->
     return (matched, _CATEGORY_RANK.get(category, 6))
 
 
+def _crosses_nested_repository_boundary(root: Path, candidate: Path) -> bool:
+    """Return whether a candidate belongs to a child Git repository."""
+
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    for component in relative.parts[:-1]:
+        current /= component
+        if (current / ".git").exists():
+            return True
+    return False
+
+
 def _select_files(
     root: Path, limits: ContextLimits, relevance: Sequence[str] = ()
 ) -> tuple[list[JsonObject], list[JsonObject]]:
@@ -418,6 +433,9 @@ def _select_files(
     for category, relative, candidate in sorted(
         candidates, key=lambda item: (_context_priority(item[0], item[1], relevance), item[1])
     ):
+        if _crosses_nested_repository_boundary(root, candidate):
+            excluded.append({"path": relative, "reason_code": "nested_repository"})
+            continue
         if len(selected) >= limits.max_files:
             excluded.append({"path": relative, "reason_code": "file_limit"})
             continue

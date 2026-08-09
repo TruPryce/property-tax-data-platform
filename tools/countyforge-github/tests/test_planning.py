@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from countyforge_github.cli import main as github_cli_main
-from countyforge_github.contracts import JsonObject
+from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.planning import (
     ContextLimits,
@@ -554,6 +554,63 @@ def test_manifest_records_excluded_candidates_and_adrs_are_selected(tmp_path: Pa
     )
     bounded_manifest = json.loads(Path(bounded["manifest_path"]).read_text(encoding="utf-8"))
     assert bounded_manifest["excluded_candidates"]
+
+
+def test_nested_repository_context_cannot_consume_the_selection_limit(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("root guidance", encoding="utf-8")
+    decisions = tmp_path / "docs" / "decisions"
+    decisions.mkdir(parents=True)
+    (decisions / "0001-context.md").write_text("bounded decision", encoding="utf-8")
+    nested = tmp_path / "trusted-base"
+    (nested / ".git").mkdir(parents=True)
+    for index in range(50):
+        nested_guide = nested / f"package-{index:02d}" / "AGENTS.md"
+        nested_guide.parent.mkdir(parents=True)
+        nested_guide.write_text("nested guidance", encoding="utf-8")
+
+    selected, excluded = _select_files(
+        tmp_path,
+        ContextLimits(max_files=48, max_file_bytes=100, max_total_bytes=240_000),
+    )
+
+    assert any(source["category"] == "adr" for source in selected)
+    assert not any(str(source["path"]).startswith("trusted-base/") for source in selected)
+    nested_exclusions = [
+        candidate for candidate in excluded if str(candidate["path"]).startswith("trusted-base/")
+    ]
+    assert len(nested_exclusions) == 50
+    assert {candidate["reason_code"] for candidate in nested_exclusions} == {"nested_repository"}
+
+
+def test_nested_repository_exclusion_satisfies_packet_contracts(tmp_path: Path) -> None:
+    root = Path.cwd()
+    shutil.copytree(root / ".ai", tmp_path / ".ai")
+    (tmp_path / "AGENTS.md").write_text("root guidance", encoding="utf-8")
+    decisions = tmp_path / "docs" / "decisions"
+    decisions.mkdir(parents=True)
+    (decisions / "0001-context.md").write_text("bounded decision", encoding="utf-8")
+    nested_guide = tmp_path / "trusted-base" / "package" / "AGENTS.md"
+    nested_guide.parent.mkdir(parents=True)
+    (tmp_path / "trusted-base" / ".git").mkdir()
+    nested_guide.write_text("nested guidance", encoding="utf-8")
+
+    info = build_planning_packet(
+        trigger=_trigger(root),
+        issue={"number": 6, "title": "Feature work", "body": "bounded plan", "labels": []},
+        contract_root=tmp_path,
+        output_dir=tmp_path / "output",
+        run_id="nested-repository-fixture",
+        contracts=ControlContracts(root),
+    )
+
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    manifest = json.loads(Path(info["manifest_path"]).read_text(encoding="utf-8"))
+    expected = {
+        "path": "trusted-base/package/AGENTS.md",
+        "reason_code": "nested_repository",
+    }
+    assert expected in packet["selection"]["excluded_candidates"]
+    assert {**expected, "category": "context_candidate"} in manifest["excluded_candidates"]
 
 
 def test_change_names_may_discuss_workflow_policy_or_secret() -> None:

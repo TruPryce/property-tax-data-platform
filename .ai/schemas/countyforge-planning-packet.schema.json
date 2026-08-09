@@ -221,6 +221,7 @@
                   "byte_limit",
                   "external_reference",
                   "file_limit",
+                  "nested_repository",
                   "non_regular",
                   "outside_root",
                   "packet_ceiling",

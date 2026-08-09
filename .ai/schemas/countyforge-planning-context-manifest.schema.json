@@ -120,6 +120,7 @@
             "enum": [
               "file_limit",
               "byte_limit",
+              "nested_repository",
               "symlink_escape",
               "non_regular",
               "outside_root"
