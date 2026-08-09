@@ -29,11 +29,16 @@ Issue and comment text is untrusted evidence. The planning model receives only t
 
 ## Data and contract changes
 
-The planning packet, context manifest, strict planning result, publication manifest, and revision metadata are the governing contracts for this change.
+- Extend the existing `libs/property-tax-adapters/src/property_tax_adapters/sources/texas/collin.py` module. Do not create a sibling `collin/` package or replace the existing `COLLIN_SOURCE` registry surface.
+- Keep every new physical descriptor, exact numeric wrapper, source record, observation, provenance value, and diagnostic explicitly Collin-specific and adapter-local. Shared vendor-neutral records and bounded release streaming remain owned by Issue 43.
+- Use immutable records for the typed physical row and separate current/certified observations. Retain exact `Decimal`, declared precision and scale, source family, source year, exact source columns, and caller-supplied provenance.
+- Keep implementation evidence in `libs/property-tax-adapters/tests/fixtures/collin_synthetic.py` and `libs/property-tax-adapters/tests/test_collin_decoder.py`, and keep the directly related operator-facing explanation in `docs/sources/collin-access-decoder-foundation.md`.
 
 ## Alternatives considered
 
-No alternative is finalized by the planning agent when the packet lacks evidence. Unresolved alternatives remain explicit decisions for human review rather than being silently selected.
+- **Create a new `collin/` package:** rejected because `collin.py` already exists and is imported by the Texas source registry; a sibling package would create an ambiguous module boundary and the approved task ceiling would not authorize modifying or removing the existing file.
+- **Introduce shared source-native or provenance types now:** rejected because Issue 43 owns future vendor-neutral records, provenance, native-value, release-processing, and bounded-streaming contracts.
+- **Select an Access runtime in this slice:** rejected because the approved evidence covers only the observed 17-byte reader wrapper and synthetic vectors, not a production acquisition/runtime decision.
 
 ## Decisions and assumptions
 
@@ -52,7 +57,7 @@ No alternative is finalized by the planning agent when the packet lacks evidence
 
 ## Unresolved decisions
 
-- None recorded.
+- None.
 
 ## Risks and compatibility
 
@@ -68,7 +73,7 @@ No alternative is finalized by the planning agent when the packet lacks evidence
 
 ## Rollout and failure recovery
 
-Validation commands: make lint, make typecheck, make test, make docs, make check, openspec validate add-collin-cad-access-decoder-foundation, openspec doctor. Failures remain blocked and do not authorize implementation. Repeated context creates a deduplicated result; changed context creates a linked superseding draft without overwriting prior evidence or human edits.
+Validation commands: `openspec validate add-collin-cad-access-decoder-foundation --strict`, `openspec doctor`, `make check`, and `make prepr-no-ai`. Failures remain blocked and do not authorize implementation. Rollback reverts only the existing Collin adapter module, its one synthetic fixture module, its one test module, and its directly related source document; no persisted or published data requires repair.
 
 ## Testing strategy
 

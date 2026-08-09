@@ -11,12 +11,14 @@ Produce an accepted OpenSpec change defining a synthetic-only Collin adapter fou
 - Originating issue: #18
 - CountyForge planning run: `gh-1162c41aab31da12e3206bc9-a1`
 - Affected capability: collin-cad-source-contract (ADDED)
+- Permitted implementation files: `libs/property-tax-adapters/src/property_tax_adapters/sources/texas/collin.py`, `libs/property-tax-adapters/tests/test_collin_decoder.py`, `libs/property-tax-adapters/tests/fixtures/collin_synthetic.py`, and `docs/sources/collin-access-decoder-foundation.md`.
 
 ## Constraints
 
 - The adapter reads only the approved privacy-minimized projection and never reads owner, DBA, mailing, or situs values into typed records, fixtures, diagnostics, or extras. [source_id:be2861af666dfc3b02456915]
 - Diagnostics are limited to a stable code, field or table name, one-based row number, and schema fingerprint; complete rows, arbitrary values, identities, addresses, credentials, and host-local paths are prohibited. [source_id:8230e8434d4ed3576ea75416]
 - The implementation performs no network access, receives no production credential, and commits no county archive, Access database, source row, owner record, address, or production appraisal record. [source_id:515a41057d446a949cae5adc] [source_id:7676ed46a8bb877ba7fdaac0]
+- The implementation extends the existing `collin.py` registry module and does not create a competing sibling `collin/` package or alter the established `COLLIN_SOURCE` import surface.
 
 ## Non-goals
 
@@ -37,7 +39,7 @@ Produce an accepted OpenSpec change defining a synthetic-only Collin adapter fou
 
 ## Unresolved decisions
 
-- None recorded.
+- None.
 
 ## Cross-issue boundaries
 
