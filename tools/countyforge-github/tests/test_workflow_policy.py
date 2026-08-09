@@ -2501,3 +2501,131 @@ def test_the_surfaced_message_carries_no_model_or_document_content(
     assert marker not in completed.stderr
     assert marker not in completed.stdout
     assert "validator=pattern" in completed.stderr
+
+
+def _materialize_step() -> str:
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps") or []:
+            run = str(step.get("run", ""))
+            if "materialize-plan" in run and "Planning materialization failed" in run:
+                return run
+    raise AssertionError("materialization step not found")
+
+
+def _run_materialize_step(
+    tmp_path: Path, error_document: dict[str, Any] | None, exit_code: int
+) -> subprocess.CompletedProcess[str]:
+    """Execute the real step with a stubbed CLI, so the failure path runs."""
+
+    temp = tmp_path / "temp"
+    (temp / "countyforge-result").mkdir(parents=True)
+    (temp / "countyforge-result" / "countyforge-result.json").write_text(
+        json.dumps({"ok": True, "disposition": "completed"}), encoding="utf-8"
+    )
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "countyforge-plan-result.json").write_text("{}", encoding="utf-8")
+    (temp / "countyforge-result" / "countyforge-plan-result.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    payload = json.dumps(error_document) if error_document is not None else ""
+    (stub / "uv").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "sync" ]; then exit 0; fi\n'
+        f"cat <<'DOC'\n{payload}\nDOC\n"
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    (stub / "uv").chmod(0o755)
+    (tmp_path / "trusted").mkdir()
+
+    return subprocess.run(
+        ["bash", "-e", "-c", _materialize_step()],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(temp),
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "ISSUE_NUMBER": "18",
+            "COUNTYFORGE_RUN_ID": "gh-test-a1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_materialization_failure_reports_reason_status_and_count(tmp_path: Path) -> None:
+    """Run 31293882847 printed only `Process completed with exit code 2`."""
+
+    completed = _run_materialize_step(
+        tmp_path,
+        {
+            "ok": False,
+            "disposition": "invalid_plan_result",
+            "message": "A planned result cannot contain blocked reasons.",
+            "details": {
+                "reason": "planned_result_has_blocked_reasons",
+                "status": "planned",
+                "blocked_reason_count": 3,
+            },
+        },
+        exit_code=2,
+    )
+    assert completed.returncode == 2
+    assert "code=invalid_plan_result" in completed.stderr
+    assert "reason=planned_result_has_blocked_reasons" in completed.stderr
+    assert "status=planned" in completed.stderr
+    assert "blocked_reason_count=3" in completed.stderr
+
+
+def test_model_prose_never_reaches_the_materialization_message(tmp_path: Path) -> None:
+    marker = "SENTINEL-BLOCKED-REASON-PROSE"
+    completed = _run_materialize_step(
+        tmp_path,
+        {
+            "ok": False,
+            "disposition": "invalid_plan_result",
+            "message": marker,
+            "details": {
+                "reason": "planned_result_has_blocked_reasons",
+                "status": "planned",
+                "blocked_reason_count": 3,
+                "blocked_reasons": [marker],
+                "proposed_change_name": marker,
+            },
+        },
+        exit_code=2,
+    )
+    assert completed.returncode == 2
+    # Allowlisted keys only: the message, the prose, and the name stay out.
+    assert marker not in completed.stderr
+    assert marker not in completed.stdout
+    assert "reason=planned_result_has_blocked_reasons" in completed.stderr
+
+
+def test_a_failure_without_allowlisted_details_stays_generic(tmp_path: Path) -> None:
+    completed = _run_materialize_step(
+        tmp_path,
+        {"ok": False, "disposition": "planning_change_exists", "message": "x", "details": {}},
+        exit_code=2,
+    )
+    assert completed.returncode == 2
+    assert "code=planning_change_exists" in completed.stderr
+    assert "reason=" not in completed.stderr
+    assert "status=" not in completed.stderr
+
+
+def test_a_successful_materialization_prints_no_error_and_succeeds(tmp_path: Path) -> None:
+    completed = _run_materialize_step(
+        tmp_path, {"ok": True, "change_name": "add-thing"}, exit_code=0
+    )
+    assert completed.returncode == 0
+    assert "Planning materialization failed" not in completed.stderr

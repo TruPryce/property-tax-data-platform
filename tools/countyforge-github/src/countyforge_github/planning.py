@@ -980,8 +980,16 @@ def validate_planning_result(
             "unsafe_plan_payload", "Planning output contains executable-looking content."
         ) from None
     if not _CHANGE.fullmatch(str(result["proposed_change_name"])):
+        # Unreachable today, and deliberately kept: the result schema enforces
+        # this exact pattern and is validated first, so an invalid name is
+        # already reported as `proposed_change_name` / `pattern` with its
+        # pointer. A test pins that equivalence, so if the schema ever relaxes
+        # this guard still refuses. The reason exists for that case, not as a
+        # diagnostic anything can currently produce.
         raise ControlPlaneError(
-            "invalid_plan_result", "The proposed OpenSpec change name is invalid."
+            "invalid_plan_result",
+            "The proposed OpenSpec change name is invalid.",
+            {"reason": "invalid_change_name", "expected_pattern": _CHANGE.pattern},
         )
     for field in ("files_to_create", "files_to_modify", "proposed_files"):
         for raw_path in result[field]:
@@ -1012,8 +1020,19 @@ def validate_planning_result(
                     "prohibited_plan_path", "Planning output contains a prohibited path."
                 )
     if result["status"] == "planned" and result["blocked_reasons"]:
+        # Run 31293882847 emitted three: the human-merge gate, OpenSpec
+        # acceptance, and the issue-43 boundary.  All true, none a blocker of
+        # this plan -- they are standing conditions the contract represents
+        # elsewhere.  The count and status are reported; the strings are model
+        # prose and are not.
         raise ControlPlaneError(
-            "invalid_plan_result", "A planned result cannot contain blocked reasons."
+            "invalid_plan_result",
+            "A planned result cannot contain blocked reasons.",
+            {
+                "reason": "planned_result_has_blocked_reasons",
+                "status": str(result["status"]),
+                "blocked_reason_count": len(result["blocked_reasons"]),
+            },
         )
     serialized = json.dumps(result, sort_keys=True).casefold()
     if any(
