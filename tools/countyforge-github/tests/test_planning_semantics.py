@@ -2130,7 +2130,78 @@ def test_the_packet_inventory_is_the_semantic_gate_inventory(tmp_path: Path) -> 
 
 def test_the_prompt_names_the_packet_field_authoritative() -> None:
     prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
-    assert "`declared_capabilities` list is the authoritative inventory" in prompt
-    assert "every capability\n  must be `ADDED`" in prompt
-    assert "Do not infer that a capability exists from a proposal under" in prompt
-    assert "only\n  `declared_capabilities` counts" in prompt
+    # Wrapping-independent: the prompt is prose and will be reflowed.
+    flat = " ".join(prompt.split())
+    assert "`declared_capabilities` list is the authoritative inventory" in flat
+    assert "every capability must be `ADDED`" in flat
+    assert "Do not infer that a capability exists from a proposal under" in flat
+    assert "only `declared_capabilities` counts" in flat
+
+
+def test_a_directory_that_cannot_be_a_capability_name_is_not_inventoried(
+    tmp_path: Path,
+) -> None:
+    """Self-review: the inventory was unbounded into a bounded packet field.
+
+    `affected_capability.name` caps at 64 characters, so a longer directory
+    could never be declared against; carrying it would only have broken the
+    packet that must transport it.
+    """
+
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    for name in ("c" * 70, "Capital-Letters", "under_score", "valid-capability"):
+        directory = tmp_path / "openspec/specs" / name
+        directory.mkdir(parents=True)
+        (directory / "spec.md").write_text("## Requirements\\n", encoding="utf-8")
+
+    assert declared_capabilities(tmp_path) == frozenset({"valid-capability"})
+
+
+def test_an_inventory_too_large_to_carry_refuses_rather_than_truncating(
+    tmp_path: Path,
+) -> None:
+    """An inventory the prompt calls authoritative must be complete.
+
+    Truncating would let the model choose `ADDED` for a capability that already
+    exists; overflowing would fail packet construction with an opaque schema
+    error. Neither is acceptable, so this refuses by name.
+    """
+
+    from countyforge_github.planning import (
+        MAX_DECLARED_CAPABILITIES,
+        _bounded_capability_inventory,
+    )
+
+    def stage(count: int) -> Path:
+        root = tmp_path / f"root{count}"
+        for index in range(count):
+            directory = root / "openspec/specs" / f"capability-{index:03d}"
+            directory.mkdir(parents=True)
+            (directory / "spec.md").write_text("## Requirements\\n", encoding="utf-8")
+        return root
+
+    assert len(_bounded_capability_inventory(stage(MAX_DECLARED_CAPABILITIES))) == (
+        MAX_DECLARED_CAPABILITIES
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        _bounded_capability_inventory(stage(MAX_DECLARED_CAPABILITIES + 1))
+    assert raised.value.code == "declared_capability_inventory_too_large"
+    assert raised.value.details["declared_capability_count"] == MAX_DECLARED_CAPABILITIES + 1
+
+
+def test_the_producer_bound_matches_the_packet_schema_bound() -> None:
+    """Pin the two together; a bound enforced only at the consumer is the defect."""
+
+    from countyforge_github.planning import MAX_DECLARED_CAPABILITIES
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-planning-packet.schema.json").read_text(encoding="utf-8")
+    )
+    bound = schema["properties"]["declared_capabilities"]
+    assert bound["maxItems"] == MAX_DECLARED_CAPABILITIES
+
+    from countyforge_github.planning_semantics import CAPABILITY_NAME
+
+    assert CAPABILITY_NAME.pattern == "^[a-z0-9][a-z0-9-]{0,63}$"
+    assert bound["items"]["maxLength"] == 64

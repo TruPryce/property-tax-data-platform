@@ -572,6 +572,33 @@ def _fit_packet_to_ceiling(
     return trimmed
 
 
+#: Mirrors the packet schema's bound on `declared_capabilities`.
+MAX_DECLARED_CAPABILITIES = 128
+
+
+def _bounded_capability_inventory(contract_root: Path) -> list[str]:
+    """The inventory, or a refusal -- never a silent truncation.
+
+    The schema caps this list, and writing it unbounded meant the 129th promoted
+    capability would fail packet construction with an opaque schema error.
+    Truncating instead would be worse: an inventory the model is told is
+    authoritative must be complete, or it will choose `ADDED` for something that
+    already exists.
+    """
+
+    inventory = sorted(declared_capabilities(contract_root))
+    if len(inventory) > MAX_DECLARED_CAPABILITIES:
+        raise ControlPlaneError(
+            "declared_capability_inventory_too_large",
+            "The declared capability inventory exceeds the bounded packet contract.",
+            {
+                "declared_capability_count": len(inventory),
+                "max_declared_capabilities": MAX_DECLARED_CAPABILITIES,
+            },
+        )
+    return inventory
+
+
 def build_planning_packet(
     *,
     trigger: JsonObject,
@@ -766,7 +793,7 @@ def build_planning_packet(
         # a capability that does not exist, because nothing in the packet said
         # which do: `openspec/specs/` is empty, and zero selected spec sources
         # is indistinguishable from "the packet omitted them".
-        "declared_capabilities": sorted(declared_capabilities(contract_root)),
+        "declared_capabilities": _bounded_capability_inventory(contract_root),
         "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,

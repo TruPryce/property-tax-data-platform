@@ -77,6 +77,8 @@ BROAD_WRITE_PATHS = frozenset(
 _NORMATIVE = re.compile(r"\b(?:SHALL NOT|MUST NOT|SHALL|MUST)\b")
 _DECISION_ID = re.compile(r"^D[0-9]{1,3}$")
 _TASK_ID = re.compile(r"^[0-9]{1,3}\.[0-9]{1,3}$")
+#: Mirrors `affected_capability.name` in the plan schema.
+CAPABILITY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 #: An outcome written inside the trigger.  Detected and reported, never
 #: split: guessing where the trigger ends would mutate model output on a
 #: heuristic, and "then" appears legitimately inside prose.
@@ -115,7 +117,13 @@ def declared_capabilities(root: Path) -> frozenset[str]:
     return frozenset(
         child.name
         for child in sorted(specs.iterdir())
-        if child.is_dir() and (child / "spec.md").is_file()
+        if child.is_dir()
+        and (child / "spec.md").is_file()
+        # A directory whose name cannot be a capability name is not a
+        # capability: `affected_capabilities[].name` is bound by this same
+        # pattern, so such a name could never be declared against, and carrying
+        # it would only risk breaking the packet that must transport it.
+        and CAPABILITY_NAME.fullmatch(child.name) is not None
     )
 
 
