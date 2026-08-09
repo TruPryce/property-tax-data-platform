@@ -2205,3 +2205,138 @@ def test_the_producer_bound_matches_the_packet_schema_bound() -> None:
 
     assert CAPABILITY_NAME.pattern == "^[a-z0-9][a-z0-9-]{0,63}$"
     assert bound["items"]["maxLength"] == 64
+
+
+# --------------------------------------------------------------------------
+# Run 31293882847 — zero schema errors, capability correctly ADDED, refused
+# because a `planned` result carried three standing conditions as blockers.
+# --------------------------------------------------------------------------
+
+RUN_31293882847 = Path("tools/countyforge-github/tests/fixtures/plan-result-run-31293882847.json")
+
+#: The exact strings the model emitted. All true, none a blocker of this plan.
+PRODUCTION_BLOCKED_REASONS = [
+    "The generated OpenSpec change remains a draft until an authorized maintainer merges it; "
+    "decisions D1 through D4 are resolved only for drafting and each requires human merge "
+    "acceptance.",
+    "Non-bootstrap implementation must not begin before the issue-linked OpenSpec change is "
+    "accepted.",
+    "Implementation must remain outside the production and shared abstraction boundaries owned "
+    "by Issue 43.",
+]
+
+
+def test_the_run_31293882847_artifact_fails_only_the_blocked_reasons_invariant() -> None:
+    """Everything earlier in the pipeline held: schema clean, capability ADDED."""
+
+    from jsonschema import Draft202012Validator
+
+    document = json.loads(RUN_31293882847.read_text(encoding="utf-8"))
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    assert list(Draft202012Validator(schema).iter_errors(document)) == []
+    assert document["affected_capabilities"][0]["change_type"] == "ADDED"
+    assert document["status"] == "planned"
+    assert len(document["blocked_reasons"]) == 3
+
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert raised.value.code == "invalid_plan_result"
+    assert details["reason"] == "planned_result_has_blocked_reasons"
+    assert details["status"] == "planned"
+    assert details["blocked_reason_count"] == 3
+    # The prose itself is never in the refusal.
+    for reason in document["blocked_reasons"]:
+        assert reason not in json.dumps(details)
+
+
+def test_clearing_blocked_reasons_alone_passes_and_materializes(tmp_path: Path) -> None:
+    """The one-field correction, proven before implementing."""
+
+    import shutil
+
+    from countyforge_github.planning import materialize_plan
+
+    document = json.loads(RUN_31293882847.read_text(encoding="utf-8"))
+    document["blocked_reasons"] = []
+    scope = validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert scope["resolved_from"] == "issue:18"
+
+    shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
+    manifest = materialize_plan(
+        document, publication_root=tmp_path, issue_number=18, run_id="run-31293882847"
+    )
+    assert len(manifest["files"]) == 5
+    change = tmp_path / "openspec/changes" / document["proposed_change_name"]
+    assert (change / "specs/collin-cad-source-contract/spec.md").is_file()
+
+
+def test_a_blocked_result_may_carry_genuine_blocked_reasons() -> None:
+    """The invariant is about `planned`, not about blockers existing."""
+
+    document = _result()
+    decisions = document["planning_decisions"]
+    decisions[0]["status"] = "blocked"
+    document["status"] = "blocked"
+    document["blocked_reasons"] = ["D1 is not accepted yet."]
+    scope = validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    assert scope["resolved_from"] == "issue:18"
+
+
+def test_a_planned_result_with_empty_blocked_reasons_is_valid() -> None:
+    document = _result()
+    assert document["status"] == "planned"
+    assert document["blocked_reasons"] == []
+    validate_planning_result(document, contract_root=CONTRACT_ROOT)
+
+
+@pytest.mark.parametrize(
+    ("name", "validator"),
+    [
+        ("Not A Valid Name", "pattern"),
+        ("-leading-hyphen", "pattern"),
+        ("a" * 200, "maxLength"),
+    ],
+)
+def test_an_invalid_change_name_is_reported_by_the_schema_path(name: str, validator: str) -> None:
+    """The in-code guard for this is unreachable, so the schema reports it.
+
+    `_CHANGE` and the schema pattern are identical and the schema is validated
+    first, so no input reaches the guard. The real diagnostic is the pointer
+    path, and it does not surface the offending name.
+    """
+
+    from countyforge_github.planning import _CHANGE
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    assert schema["properties"]["proposed_change_name"]["pattern"] == _CHANGE.pattern
+
+    document = _result()
+    document["proposed_change_name"] = name
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(document, contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["path"] == "proposed_change_name"
+    assert details["validator"] == validator
+    # Unvalidated model output stays out of the diagnostic.
+    assert name not in json.dumps(details)
+
+
+def test_the_prompt_separates_blockers_from_standing_conditions() -> None:
+    prompt = " ".join(
+        Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
+    assert "A `planned` result must emit `blocked_reasons: []`." in prompt
+    assert "only for a result whose `status` is `blocked`" in prompt
+    # Each standing condition is named with the field that actually represents it.
+    assert "human maintainer merge is `implementation_eligibility: false`" in prompt
+    assert "`planning_decisions[].requires_human_merge`" in prompt
+    assert "lifecycle gate, not a blocker" in prompt
+    assert "`cross_issue_dependencies` entry" in prompt
+    # And all three production strings appear as negative examples.
+    for reason in PRODUCTION_BLOCKED_REASONS:
+        assert " ".join(reason.split()) in prompt

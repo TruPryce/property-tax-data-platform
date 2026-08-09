@@ -2050,10 +2050,30 @@ jobs:
           fi
           cd trusted
           uv sync --frozen --package countyforge-github
+          # `bash -e` used to kill the step the moment this exited nonzero, so the
+          # bounded error document the CLI had already written was never read and
+          # Actions printed only `Process completed with exit code 2`. Capture the
+          # status, report allowlisted structural facts, then fail exactly as before.
+          set +e
           uv run --package countyforge-github countyforge-github materialize-plan \
             --result "$plan_file" --publication-root "$GITHUB_WORKSPACE/trusted" \
             --issue-number "$ISSUE_NUMBER" --run-id "$COUNTYFORGE_RUN_ID" \
             > "$RUNNER_TEMP/countyforge-materialization.json"
+          materialize_status=$?
+          set -e
+          if [ "$materialize_status" -ne 0 ]; then
+            summary="code=$(jq -r '.disposition // "unknown"' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || printf 'unknown')"
+            # Allowlisted keys only. `blocked_reasons` and the change name are
+            # model prose and are never surfaced; the count and status are enough.
+            for key in reason status blocked_reason_count path validator expected_pattern; do
+              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || true)"
+              if [ -n "$value" ]; then
+                summary="$summary $key=$value"
+              fi
+            done
+            echo "::error::Planning materialization failed: $summary" >&2
+            exit "$materialize_status"
+          fi
 
       - name: Run trusted planning validation gates
         run: |
