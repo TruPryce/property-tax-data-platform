@@ -6,12 +6,13 @@
   "additionalProperties": false,
   "required": [
     "contract_version",
-    "packet_id",
-    "run_id",
-    "repository",
+    "declared_capabilities",
     "issue",
-    "sources",
-    "selection"
+    "packet_id",
+    "repository",
+    "run_id",
+    "selection",
+    "sources"
   ],
   "properties": {
     "contract_version": {
@@ -230,6 +231,15 @@
             }
           }
         }
+      }
+    },
+    "declared_capabilities": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
       }
     }
   }

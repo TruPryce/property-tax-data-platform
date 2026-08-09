@@ -1975,3 +1975,233 @@ def test_the_generated_requirement_id_and_check_shapes_are_named_in_the_prompt()
     prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
     assert "`numeric-decoding-exactness`, never `R1`" in prompt
     assert "short command identifier" in prompt
+
+
+# --------------------------------------------------------------------------
+# Run 31281189305 — zero schema errors, refused by the semantic gate for
+# declaring MODIFIED against a capability inventory that is empty.
+# --------------------------------------------------------------------------
+
+RUN_31281189305 = Path("tools/countyforge-github/tests/fixtures/plan-result-run-31281189305.json")
+
+
+def _run_31281189305(change_type: str) -> dict[str, Any]:
+    document = json.loads(RUN_31281189305.read_text(encoding="utf-8"))
+    document["affected_capabilities"][0]["change_type"] = change_type
+    return document
+
+
+def test_the_run_31281189305_plan_has_no_schema_errors() -> None:
+    """The prompt work in #50 held: this failure is purely semantic."""
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    document = json.loads(RUN_31281189305.read_text(encoding="utf-8"))
+    assert list(Draft202012Validator(schema).iter_errors(document)) == []
+    assert document["affected_capabilities"][0]["change_type"] == "MODIFIED"
+
+
+def test_modified_against_an_empty_inventory_is_refused_and_names_it(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ControlPlaneError) as raised:
+        validate_planning_result(_run_31281189305("MODIFIED"), contract_root=CONTRACT_ROOT)
+    details = raised.value.details
+    assert details["reason"] == "affected_capability_not_declared"
+    assert details["capability"] == "collin-cad-source-contract"
+    assert details["change_type"] == "MODIFIED"
+    # The inventory travels with the refusal; empty is the whole answer.
+    assert details["declared_capabilities"] == []
+    assert details["declared_capability_count"] == 0
+
+
+def test_the_single_added_correction_passes_the_whole_semantic_validator() -> None:
+    """Probed before implementing: `MODIFIED` -> `ADDED` is the only blocker.
+
+    Asserting the full pass, not just the capability check, is what makes the
+    next paid run predictable instead of revealing one constraint at a time.
+    """
+
+    scope = validate_planning_result(_run_31281189305("ADDED"), contract_root=CONTRACT_ROOT)
+    assert scope["resolved_from"] == "issue:18"
+    assert scope["required_cross_issues"] == [43]
+
+
+def test_the_corrected_plan_materializes_a_draft_change(tmp_path: Path) -> None:
+    """One correction reaches a materialized change, not merely a passing gate."""
+
+    import shutil
+
+    from countyforge_github.planning import materialize_plan
+
+    shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
+    document = _run_31281189305("ADDED")
+    manifest = materialize_plan(
+        document, publication_root=tmp_path, issue_number=18, run_id="run-31281189305"
+    )
+    assert manifest["implementation_eligibility"] is False
+    change = tmp_path / "openspec/changes" / document["proposed_change_name"]
+    assert (change / "specs/collin-cad-source-contract/spec.md").is_file()
+    assert (
+        (change / "specs/collin-cad-source-contract/spec.md")
+        .read_text(encoding="utf-8")
+        .startswith("## ADDED Requirements")
+    )
+
+
+# --- The inventory itself -------------------------------------------------
+
+
+def test_only_promoted_openspec_specs_count_as_declared(tmp_path: Path) -> None:
+    """A capability proposed in a change is a draft awaiting human merge."""
+
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    root = tmp_path
+    promoted = root / "openspec/specs/promoted-capability"
+    promoted.mkdir(parents=True)
+    (promoted / "spec.md").write_text("## Requirements\n", encoding="utf-8")
+
+    # Proposed only inside a change: not declared.
+    proposed = root / "openspec/changes/add-thing/specs/proposed-capability"
+    proposed.mkdir(parents=True)
+    (proposed / "spec.md").write_text("## ADDED Requirements\n", encoding="utf-8")
+
+    # A directory with no spec.md is not a capability either.
+    (root / "openspec/specs/empty-directory").mkdir(parents=True)
+
+    assert declared_capabilities(root) == frozenset({"promoted-capability"})
+
+
+def test_the_inventory_is_deterministic_and_bounded(tmp_path: Path) -> None:
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    for index in range(12):
+        directory = tmp_path / "openspec/specs" / f"capability-{11 - index:02d}"
+        directory.mkdir(parents=True)
+        (directory / "spec.md").write_text("## Requirements\n", encoding="utf-8")
+
+    first = sorted(declared_capabilities(tmp_path))
+    second = sorted(declared_capabilities(tmp_path))
+    assert first == second == [f"capability-{index:02d}" for index in range(12)]
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-planning-packet.schema.json").read_text(encoding="utf-8")
+    )
+    bound = schema["properties"]["declared_capabilities"]
+    assert bound["maxItems"] == 128
+    assert bound["items"]["maxLength"] == 64
+
+
+def test_the_packet_inventory_is_the_semantic_gate_inventory(tmp_path: Path) -> None:
+    """One canonical definition, asserted against the real repository."""
+
+    import subprocess
+
+    from countyforge_github.planning import build_planning_packet
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    root = Path.cwd()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    info = build_planning_packet(
+        trigger={
+            "repository": {"id": 987654, "full_name": "TruPryce/property-tax-data-platform"},
+            "target": {"type": "issue", "number": 18, "head_sha": sha, "base_sha": sha},
+            "actor": {"id": AUTHOR_ID, "login": "maintainer", "type": "User"},
+        },
+        issue={
+            "number": 18,
+            "title": "feature: add Collin CAD Access decoder foundation",
+            "body": "Problem: the Collin source is missing. Outcome: onboard the county source.",
+            "labels": [],
+        },
+        contract_root=root,
+        output_dir=tmp_path,
+        run_id="declared-capabilities",
+    )
+    packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    assert packet["declared_capabilities"] == sorted(declared_capabilities(root))
+    # Today that is empty, which is exactly why run 31281189305 guessed.
+    assert packet["declared_capabilities"] == []
+
+
+def test_the_prompt_names_the_packet_field_authoritative() -> None:
+    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    # Wrapping-independent: the prompt is prose and will be reflowed.
+    flat = " ".join(prompt.split())
+    assert "`declared_capabilities` list is the authoritative inventory" in flat
+    assert "every capability must be `ADDED`" in flat
+    assert "Do not infer that a capability exists from a proposal under" in flat
+    assert "only `declared_capabilities` counts" in flat
+
+
+def test_a_directory_that_cannot_be_a_capability_name_is_not_inventoried(
+    tmp_path: Path,
+) -> None:
+    """Self-review: the inventory was unbounded into a bounded packet field.
+
+    `affected_capability.name` caps at 64 characters, so a longer directory
+    could never be declared against; carrying it would only have broken the
+    packet that must transport it.
+    """
+
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    for name in ("c" * 70, "Capital-Letters", "under_score", "valid-capability"):
+        directory = tmp_path / "openspec/specs" / name
+        directory.mkdir(parents=True)
+        (directory / "spec.md").write_text("## Requirements\\n", encoding="utf-8")
+
+    assert declared_capabilities(tmp_path) == frozenset({"valid-capability"})
+
+
+def test_an_inventory_too_large_to_carry_refuses_rather_than_truncating(
+    tmp_path: Path,
+) -> None:
+    """An inventory the prompt calls authoritative must be complete.
+
+    Truncating would let the model choose `ADDED` for a capability that already
+    exists; overflowing would fail packet construction with an opaque schema
+    error. Neither is acceptable, so this refuses by name.
+    """
+
+    from countyforge_github.planning import (
+        MAX_DECLARED_CAPABILITIES,
+        _bounded_capability_inventory,
+    )
+
+    def stage(count: int) -> Path:
+        root = tmp_path / f"root{count}"
+        for index in range(count):
+            directory = root / "openspec/specs" / f"capability-{index:03d}"
+            directory.mkdir(parents=True)
+            (directory / "spec.md").write_text("## Requirements\\n", encoding="utf-8")
+        return root
+
+    assert len(_bounded_capability_inventory(stage(MAX_DECLARED_CAPABILITIES))) == (
+        MAX_DECLARED_CAPABILITIES
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        _bounded_capability_inventory(stage(MAX_DECLARED_CAPABILITIES + 1))
+    assert raised.value.code == "declared_capability_inventory_too_large"
+    assert raised.value.details["declared_capability_count"] == MAX_DECLARED_CAPABILITIES + 1
+
+
+def test_the_producer_bound_matches_the_packet_schema_bound() -> None:
+    """Pin the two together; a bound enforced only at the consumer is the defect."""
+
+    from countyforge_github.planning import MAX_DECLARED_CAPABILITIES
+
+    schema = json.loads(
+        Path(".ai/schemas/countyforge-planning-packet.schema.json").read_text(encoding="utf-8")
+    )
+    bound = schema["properties"]["declared_capabilities"]
+    assert bound["maxItems"] == MAX_DECLARED_CAPABILITIES
+
+    from countyforge_github.planning_semantics import CAPABILITY_NAME
+
+    assert CAPABILITY_NAME.pattern == "^[a-z0-9][a-z0-9-]{0,63}$"
+    assert bound["items"]["maxLength"] == 64

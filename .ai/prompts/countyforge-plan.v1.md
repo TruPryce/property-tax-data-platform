@@ -46,8 +46,13 @@ Plan for this repository's actual boundaries and current six-county scope:
   one `specs/<capability>/spec.md`.
 - Name exactly one `affected_capabilities` entry: the domain capability this change alters, with
   `change_type` `ADDED`, `MODIFIED`, or `REMOVED`. It is the capability the issue is about, never
-  `issue-to-openspec-planning`, which is the planner's own capability. `MODIFIED` and `REMOVED`
-  require a capability that already exists under `openspec/specs/`.
+  `issue-to-openspec-planning`, which is the planner's own capability. The packet's
+  `declared_capabilities` list is the authoritative inventory of capabilities that already exist:
+  use `MODIFIED` or `REMOVED` only for a name that appears in it, and `ADDED` for anything else.
+  **An empty `declared_capabilities` list means no capability is declared yet, so every capability
+  must be `ADDED`.** Do not infer that a capability exists from a proposal under
+  `openspec/changes/`, from documentation, or from any other packet source; only
+  `declared_capabilities` counts.
 - Write each `requirements` entry as an obligation plus a way to observe it. `normative_rule` must
   contain SHALL, MUST, SHALL NOT, or MUST NOT and must state the specific behaviour. Give at least
   one scenario with concrete `given`, `when`, and `then` content. Text such as "satisfy this

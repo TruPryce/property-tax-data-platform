@@ -77,6 +77,8 @@ BROAD_WRITE_PATHS = frozenset(
 _NORMATIVE = re.compile(r"\b(?:SHALL NOT|MUST NOT|SHALL|MUST)\b")
 _DECISION_ID = re.compile(r"^D[0-9]{1,3}$")
 _TASK_ID = re.compile(r"^[0-9]{1,3}\.[0-9]{1,3}$")
+#: Mirrors `affected_capability.name` in the plan schema.
+CAPABILITY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 #: An outcome written inside the trigger.  Detected and reported, never
 #: split: guessing where the trigger ends would mutate model output on a
 #: heuristic, and "then" appears legitimately inside prose.
@@ -100,7 +102,14 @@ def _contains_placeholder(text: str) -> str | None:
 
 
 def declared_capabilities(root: Path) -> frozenset[str]:
-    """Capability names already declared in the repository's OpenSpec tree."""
+    """The canonical capability inventory: promoted OpenSpec specs, nothing else.
+
+    `openspec/specs/<name>/spec.md` is the only source.  A capability proposed
+    inside `openspec/changes/**/specs/` is a draft awaiting human merge, not a
+    declared capability, and neither documentation, policy keys, nor selected
+    packet context may stand in for this.  Packet construction and the semantic
+    gate both call this, so the model is told exactly what the gate enforces.
+    """
 
     specs = root / "openspec" / "specs"
     if not specs.is_dir():
@@ -108,7 +117,13 @@ def declared_capabilities(root: Path) -> frozenset[str]:
     return frozenset(
         child.name
         for child in sorted(specs.iterdir())
-        if child.is_dir() and (child / "spec.md").is_file()
+        if child.is_dir()
+        and (child / "spec.md").is_file()
+        # A directory whose name cannot be a capability name is not a
+        # capability: `affected_capabilities[].name` is bound by this same
+        # pattern, so such a name could never be declared against, and carrying
+        # it would only risk breaking the packet that must transport it.
+        and CAPABILITY_NAME.fullmatch(child.name) is not None
     )
 
 
@@ -128,7 +143,15 @@ def _validate_capability(result: JsonObject, root: Path) -> str:
     existing = declared_capabilities(root)
     if change_type in {"MODIFIED", "REMOVED"} and name not in existing:
         # Modifying something that does not exist means the planner guessed.
-        _fail("affected_capability_not_declared", capability=name)
+        # Report the inventory: an empty list is the whole answer -- nothing is
+        # declared yet, so every capability must be ADDED.
+        _fail(
+            "affected_capability_not_declared",
+            capability=name,
+            change_type=change_type,
+            declared_capabilities=sorted(existing)[:64],
+            declared_capability_count=len(existing),
+        )
     if change_type == "ADDED" and name in existing:
         _fail("affected_capability_already_exists", capability=name)
     return name
