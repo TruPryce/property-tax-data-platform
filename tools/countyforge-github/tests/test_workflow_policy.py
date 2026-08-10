@@ -2205,7 +2205,15 @@ def test_the_identity_fix_introduces_no_fallback_widening_or_longer_deadline() -
         body = "\n".join(
             line for line in _build_step(provider).splitlines() if not line.strip().startswith("#")
         )
-        assert "||" not in body
+        # Assert the property, not a proxy for it. Banning `||` outright also
+        # banned `jq ... || printf` in an unrelated diagnostic, and shell error
+        # fallback is not provider fallback.
+        for absent in ("fallback_provider", "retry_reasoning_effort", "--fallback"):
+            assert absent not in body
+        other = "sakana" if provider == "openai" else "openai"
+        assert f"CODEX_PROVIDER={other}" not in body
+        # Exactly one image build, never a second attempt at another provider.
+        assert body.count("10-build-countyforge-implement-image.sh") == 1
 
 
 #: Stands in for `docker image inspect`. The adapter calls it two ways:
@@ -2629,3 +2637,78 @@ def test_a_successful_materialization_prints_no_error_and_succeeds(tmp_path: Pat
     )
     assert completed.returncode == 0
     assert "Planning materialization failed" not in completed.stderr
+
+
+def _request_step() -> str:
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps") or []:
+            run = str(step.get("run", ""))
+            if "Run request construction failed" in run and "build-run-request" in run:
+                return run
+    raise AssertionError("run-request step not found")
+
+
+def test_every_build_run_request_site_captures_its_exit() -> None:
+    """Seven invocations; a guard on six of them would still hide a failure."""
+
+    text = Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    assert text.count("build-run-request \\") == text.count("Run request construction failed")
+    assert text.count("Run request construction failed") == 7
+
+
+def test_a_failed_run_request_reports_the_failing_field(tmp_path: Path) -> None:
+    """Run 31336691458 printed only `Process completed with exit code 2`."""
+
+    step = _request_step()
+    marker = "run request construction"
+    start = step.index("set +e")
+    end = step.index("fi\n", step.index("Run request construction failed")) + 3
+    guard = step[start:end]
+
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    document = {
+        "ok": False,
+        "disposition": "schema_validation_failed",
+        "message": "SENTINEL-MESSAGE",
+        "details": {
+            "kind": "implementation packet",
+            "path": "/tasks/0/prerequisites/0",
+            "validator": "pattern",
+            "offending_value": "SENTINEL-VALUE",
+        },
+    }
+    (stub / "uv").write_text(
+        f"#!/usr/bin/env bash\ncat <<'DOC'\n{json.dumps(document)}\nDOC\nexit 2\n",
+        encoding="utf-8",
+    )
+    (stub / "uv").chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", "-e", "-c", guard],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(temp),
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "COUNTYFORGE_RUN_ID": "gh-test-a1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    del marker
+    assert completed.returncode == 2
+    assert "code=schema_validation_failed" in completed.stderr
+    assert "path=/tasks/0/prerequisites/0" in completed.stderr
+    assert "validator=pattern" in completed.stderr
+    assert "kind=implementation packet" in completed.stderr
+    # Non-allowlisted keys and the CLI message stay out.
+    assert "SENTINEL-VALUE" not in completed.stderr
+    assert "SENTINEL-MESSAGE" not in completed.stderr

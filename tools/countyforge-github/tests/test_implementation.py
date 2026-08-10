@@ -490,6 +490,7 @@ def test_trusted_context_cli_rejects_schema_invalid_task_plan(
                         "allowed_paths": ["docs"],
                         "required_checks": ["repo.check"],
                         "prerequisites": [],
+                        "decision_prerequisites": [],
                         "risk": "normal",
                         "status": "incomplete",
                     }
@@ -1239,3 +1240,139 @@ def test_the_change_metadata_reader_binds_the_generated_file(tmp_path: Path) -> 
         )
         == 6
     )
+
+
+# --------------------------------------------------------------------------
+# Run 31336691458 — the implementation packet failed schema validation 18
+# times before Sakana was invoked, on prerequisites the planning contract
+# admits and the implementation contract does not.
+# --------------------------------------------------------------------------
+
+
+def _marker(
+    task_id: str,
+    prerequisites: str,
+    *,
+    risk: str = "normal",
+    paths: str = "libs/property-tax-adapters/",
+) -> str:
+    """One task marker, in the exact merged-tasks.md format."""
+
+    return (
+        f"<!-- countyforge-task: {task_id} paths={paths} checks=repo.check "
+        f"risk={risk} prerequisites={prerequisites} -->\n"
+        f"- [ ] {task_id} Task {task_id}\n"
+    )
+
+
+#: The prerequisite shape run 31336691458 actually carried.
+_RUN_31336691458_MARKERS = (
+    "## Tasks\n\n"
+    + _marker("1.1", "D1,D2,D3,D4")
+    + _marker("2.1", "1.1,D1,D2,D4")
+    + _marker("6.1", "1.1,2.1")
+)
+
+
+def test_decision_prerequisites_are_separated_not_carried_into_ordering() -> None:
+    """`D1` is not an execution dependency; the schema rightly refuses it."""
+
+    from countyforge_github.implementation import _tasks_from_text
+
+    tasks = {task["task_id"]: task for task in _tasks_from_text(_RUN_31336691458_MARKERS)}
+    assert tasks["1.1"]["prerequisites"] == []
+    assert tasks["1.1"]["decision_prerequisites"] == ["D1", "D2", "D3", "D4"]
+    assert tasks["2.1"]["prerequisites"] == ["1.1"]
+    assert tasks["2.1"]["decision_prerequisites"] == ["D1", "D2", "D4"]
+    assert tasks["6.1"]["prerequisites"] == ["1.1", "2.1"]
+    assert tasks["6.1"]["decision_prerequisites"] == []
+
+
+def test_decision_provenance_survives_rather_than_being_dropped() -> None:
+    """Separated, not discarded: which decision a task rests on is evidence."""
+
+    from countyforge_github.implementation import _tasks_from_text
+
+    tasks = _tasks_from_text(_RUN_31336691458_MARKERS)
+    carried = {item for task in tasks for item in task["decision_prerequisites"]}
+    assert carried == {"D1", "D2", "D3", "D4"}
+
+
+def test_the_split_task_satisfies_both_implementation_schemas() -> None:
+    from countyforge_github.implementation import _tasks_from_text
+    from jsonschema import Draft202012Validator
+
+    tasks = _tasks_from_text(_RUN_31336691458_MARKERS)
+    for name in (
+        "countyforge-implementation-packet.schema.json",
+        "countyforge-implementation-task-plan.schema.json",
+    ):
+        schema = json.loads(Path(".ai/schemas").joinpath(name).read_text(encoding="utf-8"))
+        item_schema = schema["properties"]["tasks"]["items"]
+        validator = Draft202012Validator(item_schema)
+        for task in tasks:
+            errors = [error.validator for error in validator.iter_errors(task)]
+            assert errors == [], f"{name}: {task['task_id']} -> {errors}"
+
+
+# --- The second contract mismatch: risk vocabulary ------------------------
+
+
+def test_every_planning_risk_value_parses_and_keeps_its_declared_scope() -> None:
+    """A `risk=low` marker failed the whole regex, so the task lost its declared
+    `allowed_paths` and fell back to `libs, services, dags, docs, openspec` --
+    the overbroad scope PR #47 removed on the planning side."""
+
+    from countyforge_github.implementation import _PLANNING_RISK, _tasks_from_text
+
+    plan_schema = json.loads(
+        Path(".ai/schemas/countyforge-plan-result.schema.json").read_text(encoding="utf-8")
+    )
+    planning_values = plan_schema["$defs"]["task_slice"]["properties"]["risk"]["enum"]
+    # Every value the planner may author must be parseable here.
+    assert set(planning_values) <= set(_PLANNING_RISK)
+
+    packet_schema = json.loads(
+        Path(".ai/schemas/countyforge-implementation-packet.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    packet_values = packet_schema["properties"]["tasks"]["items"]["properties"]["risk"]["enum"]
+    # And every mapping target must be one the packet accepts.
+    assert set(_PLANNING_RISK.values()) <= set(packet_values)
+
+    lines = ["## Tasks", ""]
+    for index, value in enumerate(planning_values, start=1):
+        lines.append(
+            _marker(
+                f"1.{index}",
+                "-",
+                risk=value,
+                paths="libs/property-tax-adapters/,docs/sources/",
+            ).rstrip("\n")
+        )
+    tasks = _tasks_from_text("\n".join(lines) + "\n")
+
+    assert len(tasks) == len(planning_values)
+    for task in tasks:
+        assert task["metadata_complete"] is True, task
+        # The declared narrow scope survives; the broad default is not used.
+        assert task["allowed_paths"] == ["libs/property-tax-adapters/", "docs/sources/"]
+        assert "services" not in task["allowed_paths"]
+        assert task["risk"] in packet_values
+
+
+def test_an_unknown_risk_leaves_the_task_incomplete_rather_than_guessing() -> None:
+    """Failing closed is right; silently assuming a severity is not."""
+
+    from countyforge_github.implementation import _tasks_from_text
+
+    text = (
+        "## Tasks\n\n"
+        "<!-- countyforge-task: 1.1 paths=libs/property-tax-adapters/ checks=repo.check "
+        "risk=catastrophic prerequisites=- -->\n"
+        "- [ ] 1.1 A task with a risk nobody authored\n"
+    )
+    task = _tasks_from_text(text)[0]
+    assert task["metadata_complete"] is False
+    assert task["risk"] == "normal"

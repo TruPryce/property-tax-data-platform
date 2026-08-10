@@ -211,6 +211,7 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                         "required_checks": ["repo.check"],
                         "risk": "normal",
                         "prerequisites": [],
+                        "decision_prerequisites": [],
                         "accepted_status": "incomplete",
                         "metadata_complete": True,
                     }
@@ -261,6 +262,7 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                         "allowed_paths": ["tools"],
                         "required_checks": ["repo.check"],
                         "prerequisites": [],
+                        "decision_prerequisites": [],
                         "risk": "normal",
                         "status": "incomplete",
                         "accepted_status": "incomplete",
