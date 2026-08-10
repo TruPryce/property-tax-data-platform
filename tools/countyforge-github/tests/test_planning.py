@@ -27,6 +27,10 @@ from countyforge_github.planning import (
 )
 from countyforge_github.redaction import redact_untrusted_text
 from countyforge_github.results import normalize_publication_result
+from countyforge_test_support import controlled_contract_root
+
+#: Capability inventory is controlled here; see `controlled_contract_root`.
+CONTRACT_ROOT = controlled_contract_root()
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -624,7 +628,7 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     result["declared_write_scope"] = ["openspec/changes/harden-github-workflow-policy/"]
     for task in result["task_slices"]:
         task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/"]
-    validate_planning_result(result, contract_root=Path.cwd())
+    validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
 def test_materializer_refuses_an_unusable_affected_capability(tmp_path: Path) -> None:
@@ -670,17 +674,17 @@ def test_result_prohibits_production_paths() -> None:
     result = _result()
     result["proposed_files"] = ["openspec/changes/add-safe-planning/../src/app.py"]
     with pytest.raises(ControlPlaneError, match="prohibited path"):
-        validate_planning_result(result, contract_root=Path.cwd())
+        validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
 def test_result_rejects_credentials_and_forged_citations() -> None:
     result = _result()
     result["security_privacy_considerations"] = ["OPENAI_API_KEY=not-a-real-key"]
     with pytest.raises(ControlPlaneError, match="credential"):
-        validate_planning_result(result, contract_root=Path.cwd())
+        validate_planning_result(result, contract_root=CONTRACT_ROOT)
     result = _result()
     with pytest.raises(ControlPlaneError, match="unknown packet source"):
-        validate_planning_result(result, contract_root=Path.cwd(), source_ids={"known-source"})
+        validate_planning_result(result, contract_root=CONTRACT_ROOT, source_ids={"known-source"})
 
 
 @pytest.mark.parametrize(
@@ -702,7 +706,7 @@ def test_result_rejects_shell_payloads(payload: str) -> None:
     result = _result()
     result["validation_commands"] = [payload]
     with pytest.raises(ControlPlaneError, match="executable-looking"):
-        validate_planning_result(result, contract_root=Path.cwd())
+        validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
 def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
@@ -731,7 +735,7 @@ def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
         }
     ]
     result["validation_commands"] = ["make check"]
-    validate_planning_result(result, contract_root=Path.cwd())
+    validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
 def test_branch_identity_is_bounded() -> None:

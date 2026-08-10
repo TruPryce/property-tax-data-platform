@@ -311,12 +311,13 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "task_id",
-          "description",
-          "status",
           "allowed_paths",
+          "decision_prerequisites",
+          "description",
           "required_checks",
-          "risk"
+          "risk",
+          "status",
+          "task_id"
         ],
         "properties": {
           "task_id": {

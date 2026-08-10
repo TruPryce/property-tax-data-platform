@@ -533,3 +533,35 @@ def test_explain_contains_complete_resolution(
 @pytest.fixture
 def kernel() -> Kernel:
     return Kernel()
+
+
+def test_decision_prerequisites_are_compared_across_the_two_documents() -> None:
+    """PR #61 added the field to both schemas but not to the agreement check.
+
+    The packet and the task plan are both handed to the model byte for byte, so
+    a stale plan disagreeing here would show it decision provenance the packet
+    contradicts, without `implementation_provenance_mismatch` firing.
+    """
+
+    source = Path("tools/countyforge-runner/src/countyforge_runner/resolver.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("def task_projection")
+    end = source.index("\n    def ", start + 1)
+    projection = source[start:end]
+    assert '"decision_prerequisites"' in projection
+    # Defaulted, because documents predating the field are still in flight.
+    assert 'task.get("decision_prerequisites", [])' in projection
+
+
+def test_both_implementation_schemas_require_decision_prerequisites() -> None:
+    """Asymmetry was expedience, not a decision: the packet had it optional."""
+
+    for name in (
+        "countyforge-implementation-packet.schema.json",
+        "countyforge-implementation-task-plan.schema.json",
+    ):
+        schema = json.loads(Path(".ai/schemas").joinpath(name).read_text(encoding="utf-8"))
+        task = schema["properties"]["tasks"]["items"]
+        assert "decision_prerequisites" in task["properties"], name
+        assert "decision_prerequisites" in task["required"], name
