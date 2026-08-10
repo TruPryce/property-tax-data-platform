@@ -35,9 +35,28 @@ _OPENSPEC_ISSUE = re.compile(r"^issue:[ \t]*([0-9]{1,9})[ \t]*$", re.MULTILINE)
 _TASK = re.compile(r"^- \[([ xX])\] ([0-9]+\.[0-9]+)\s+(.+?)\s*$")
 _TASK_META = re.compile(
     r"^\s*<!--\s*countyforge-task:\s*([0-9]+\.[0-9]+)\s+"
-    r"paths=([^\s]+)\s+checks=([^\s]+)\s+risk=(normal|higher_risk)"
+    r"paths=([^\s]+)\s+checks=([^\s]+)\s+risk=([A-Za-z_]+)"
     r"(?:\s+prerequisites=([^\s]+))?\s*-->\s*$"
 )
+
+#: The planning contract authors `low | normal | high`; the implementation
+#: packet speaks `normal | higher_risk`.  The marker parser previously accepted
+#: only the second vocabulary, so a `risk=low` task failed the whole marker
+#: regex, lost its declared `allowed_paths` and prerequisites, and fell back to
+#: the broad default -- `libs, services, dags, docs, openspec` -- which is the
+#: overbroad scope PR #47 removed on the planning side.  It fails closed on
+#: `metadata_complete`, but reports missing metadata for a task whose metadata
+#: is present and merely spoken in the other vocabulary.
+#:
+#: Both vocabularies are accepted and mapped onto the implementation one, and a
+#: test pins every planning value so the two cannot drift again.
+_PLANNING_RISK = {
+    "low": "normal",
+    "normal": "normal",
+    "high": "higher_risk",
+    "higher_risk": "higher_risk",
+}
+
 _FORBIDDEN = (
     ".github/workflows/",
     "codeowners",
@@ -242,6 +261,35 @@ def _change_hash(files: Iterable[Path], root: Path) -> str:
     return hashlib.sha256(canonical_bytes({"files": entries})).hexdigest()
 
 
+#: An accepted planning decision, carried through the merged task marker.
+_DECISION_PREREQUISITE = re.compile(r"^D[0-9]{1,3}$")
+#: Execution ordering: an earlier implementation task.
+_TASK_PREREQUISITE = re.compile(r"^[0-9]+\.[0-9]+$")
+
+
+def _split_prerequisites(raw: str | None) -> JsonObject:
+    """Separate execution ordering from accepted-decision provenance.
+
+    A merged task marker carries both -- `prerequisites=1.1,D3` -- because the
+    planning contract admits decision IDs.  The implementation engine has no
+    runtime semantics for a decision: by the time a plan is merged the decision
+    has crossed the human-merge boundary, so as *ordering* it is satisfied by
+    construction.  Run 31336691458 carried them into the packet anyway and
+    failed schema validation 18 times before the model was ever invoked.
+
+    They are separated rather than discarded.  That task 1.1 rests on D1 is
+    provenance worth keeping even when it constrains no scheduling, and this
+    control plane has been bitten repeatedly by dropping evidence quietly.
+    Anything matching neither shape stays in `prerequisites`, where the schema
+    refuses it rather than letting an unrecognised token vanish here.
+    """
+
+    items = [] if not raw or raw == "-" else [item for item in raw.split(",") if item]
+    decisions = [item for item in items if _DECISION_PREREQUISITE.fullmatch(item)]
+    ordering = [item for item in items if not _DECISION_PREREQUISITE.fullmatch(item)]
+    return {"prerequisites": ordering, "decision_prerequisites": decisions}
+
+
 def _tasks_from_text(text: str, *, allowed_paths: Iterable[str] | None = None) -> list[JsonObject]:
     task_paths = list(allowed_paths or ("libs", "services", "dags", "docs", "openspec"))
     metadata: dict[str, JsonObject] = {}
@@ -250,13 +298,15 @@ def _tasks_from_text(text: str, *, allowed_paths: Iterable[str] | None = None) -
         if match is None:
             continue
         task_id, paths, checks, risk, prerequisites = match.groups()
+        if risk not in _PLANNING_RISK:
+            # Leave it unparsed so the task reports incomplete metadata, rather
+            # than guessing a severity the plan did not author.
+            continue
         metadata[task_id] = {
             "allowed_paths": [item for item in paths.split(",") if item],
             "required_checks": [item for item in checks.split(",") if item],
-            "risk": risk,
-            "prerequisites": []
-            if not prerequisites or prerequisites == "-"
-            else prerequisites.split(","),
+            "risk": _PLANNING_RISK[risk],
+            **_split_prerequisites(prerequisites),
         }
     tasks: list[JsonObject] = []
     for line in text.splitlines():
@@ -279,6 +329,7 @@ def _tasks_from_text(text: str, *, allowed_paths: Iterable[str] | None = None) -
                 "required_checks": details["required_checks"] if details else ["repo.check"],
                 "risk": details["risk"] if details else "normal",
                 "prerequisites": details["prerequisites"] if details else [],
+                "decision_prerequisites": (details["decision_prerequisites"] if details else []),
             }
         )
     return tasks

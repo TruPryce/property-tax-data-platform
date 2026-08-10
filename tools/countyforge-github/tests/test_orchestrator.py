@@ -825,6 +825,7 @@ def test_implementation_retry_preserves_change_identity(
                 "required_checks": ["repo.check"],
                 "risk": "normal",
                 "prerequisites": [],
+                "decision_prerequisites": [],
             }
         ],
     )
