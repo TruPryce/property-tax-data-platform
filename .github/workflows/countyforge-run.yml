@@ -528,7 +528,7 @@ jobs:
     if: inputs.command == 'plan' && needs.claim.outputs.provider == 'sakana'
     needs: [claim, prepare, plan-packet, mark-running]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
@@ -632,7 +632,7 @@ jobs:
     if: inputs.command == 'plan' && needs.claim.outputs.provider == 'openai'
     needs: [claim, prepare, plan-packet, mark-running]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read

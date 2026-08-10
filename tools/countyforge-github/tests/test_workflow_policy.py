@@ -558,6 +558,21 @@ def test_provider_jobs_receive_exactly_one_provider_secret() -> None:
         assert "SAKANA_API_KEY" not in text
 
 
+def test_planning_provider_jobs_outlive_the_runner_wall_clock_budget() -> None:
+    profile = json.loads(
+        (Path(__file__).parents[3] / ".ai/profiles/plan.read-only.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    runner_wall_clock_seconds = profile["budgets"]["defaults"]["wall_clock_seconds"]
+    jobs = _jobs("countyforge-run.yml")
+
+    for name in ("plan-sakana", "plan-openai"):
+        job_timeout_minutes = int(jobs[name]["timeout-minutes"])
+        assert job_timeout_minutes == 60
+        assert job_timeout_minutes * 60 > runner_wall_clock_seconds
+
+
 def test_planning_image_and_request_build_have_no_provider_secret() -> None:
     jobs = _jobs("countyforge-run.yml")
     for name, credential in (
