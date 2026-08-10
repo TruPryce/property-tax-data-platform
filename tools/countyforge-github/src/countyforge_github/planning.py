@@ -200,7 +200,8 @@ class ContextLimits:
     #: What repository context selection actually aims at.  Run 30836072011 sent
     #: a 262,974-byte packet to `fugu-ultra` at `xhigh`, and the provider
     #: accepted the turn and emitted nothing but `thread.started` and
-    #: `turn.started` before the 1,800-second deadline killed it.  A planner does
+    #: `turn.started` before the then-current 1,800-second deadline killed it.
+    #: A planner does
     #: not need a quarter of a megabyte of repository prose to turn four explicit
     #: decisions into a structured delta, so selection stops here and the ceiling
     #: stays a fail-safe rather than a target.

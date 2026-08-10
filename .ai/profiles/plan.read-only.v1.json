@@ -59,7 +59,7 @@
   },
   "budgets": {
     "defaults": {
-      "wall_clock_seconds": 1800,
+      "wall_clock_seconds": 2700,
       "attempts": 1,
       "max_output_bytes": 524288,
       "max_input_bytes": 5000000,

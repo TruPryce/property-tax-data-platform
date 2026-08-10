@@ -328,6 +328,15 @@ def test_plan_resolves_distinct_generation_and_result_schemas(
     assert document["generation_schema_sha256"] != document["output_schema_sha256"]
 
 
+def test_plan_resolves_exactly_2700_seconds_without_an_override(
+    kernel: Kernel, request_factory: Callable[[str], JsonObject]
+) -> None:
+    resolved = kernel.resolve(request_factory("plan"))
+    assert resolved.effective_budgets["wall_clock_seconds"] == 2700
+    assert resolved.profile["budgets"]["ceilings"]["wall_clock_seconds"] == 3600
+    assert resolved.effective_budgets["attempts"] == 1
+
+
 def test_mode_cannot_change_after_profile_selection(
     kernel: Kernel, request_factory: Callable[[str], JsonObject]
 ) -> None:
