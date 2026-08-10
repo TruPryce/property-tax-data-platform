@@ -483,10 +483,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -577,10 +583,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -675,10 +687,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -781,10 +799,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -887,10 +911,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -1069,10 +1099,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -1346,10 +1382,16 @@ jobs:
           set -e
           if [ "$request_status" -ne 0 ]; then
             request_file="$RUNNER_TEMP/countyforge-request.json"
-            summary="code=$(jq -r '.disposition // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
+            # Two envelopes reach this file. `ControlPlaneError` is flat:
+            # {disposition, message, details}. `KernelError` nests:
+            # {disposition, error: {code, message, details}} -- and schema
+            # validation, the case these guards exist for, raises the nested
+            # one. Reading only `.details` printed the code and nothing else
+            # for exactly that failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$request_file" 2>/dev/null || printf 'unknown')"
             # Allowlisted structural keys only; never model or document content.
             for key in kind path validator reason; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$request_file" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$request_file" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi
@@ -2202,11 +2244,14 @@ jobs:
           materialize_status=$?
           set -e
           if [ "$materialize_status" -ne 0 ]; then
-            summary="code=$(jq -r '.disposition // "unknown"' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || printf 'unknown')"
+            # Both envelopes, as at the run-request guards: a `KernelError`
+            # nests its payload under `error`, and reading only the flat
+            # shape would print the code alone for a schema failure.
+            summary="code=$(jq -r '.disposition // .error.code // "unknown"' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || printf 'unknown')"
             # Allowlisted keys only. `blocked_reasons` and the change name are
             # model prose and are never surfaced; the count and status are enough.
             for key in reason status blocked_reason_count path validator expected_pattern; do
-              value="$(jq -r --arg k "$key" '.details[$k] // empty' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || true)"
+              value="$(jq -r --arg k "$key" '(.details[$k] // .error.details[$k]) // empty' "$RUNNER_TEMP/countyforge-materialization.json" 2>/dev/null || true)"
               if [ -n "$value" ]; then
                 summary="$summary $key=$value"
               fi

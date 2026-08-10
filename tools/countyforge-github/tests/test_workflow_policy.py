@@ -2712,3 +2712,122 @@ def test_a_failed_run_request_reports_the_failing_field(tmp_path: Path) -> None:
     # Non-allowlisted keys and the CLI message stay out.
     assert "SENTINEL-VALUE" not in completed.stderr
     assert "SENTINEL-MESSAGE" not in completed.stderr
+
+
+# --------------------------------------------------------------------------
+# PR #61 review — the guards read only the flat error envelope, so the schema
+# failure they exist to explain printed its code and nothing else.
+# --------------------------------------------------------------------------
+
+
+def _guard_body(needle: str) -> str:
+    workflow = yaml.safe_load(
+        Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps") or []:
+            run = str(step.get("run", ""))
+            if needle in run:
+                start = run.index("set +e")
+                end = run.index("fi\n", run.index(needle)) + 3
+                return run[start:end]
+    raise AssertionError(f"guard not found: {needle}")
+
+
+def _run_guard(tmp_path: Path, guard: str, document: dict[str, Any]) -> str:
+    temp = tmp_path / "temp"
+    temp.mkdir(exist_ok=True)
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "uv").write_text(
+        f"#!/usr/bin/env bash\ncat <<'DOC'\n{json.dumps(document)}\nDOC\nexit 2\n",
+        encoding="utf-8",
+    )
+    (stub / "uv").chmod(0o755)
+    completed = subprocess.run(
+        ["bash", "-e", "-c", guard],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(temp),
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "COUNTYFORGE_RUN_ID": "gh-test-a1",
+            "ISSUE_NUMBER": "18",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stderr
+    return completed.stderr
+
+
+def test_a_nested_kernel_error_envelope_still_names_the_failing_field(
+    tmp_path: Path,
+) -> None:
+    """The document is built by the real error class, not hand-written.
+
+    The previous test stubbed a flat `ControlPlaneError` shape, so it passed
+    while the nested `KernelError` shape -- which is what a schema validation
+    failure actually produces -- printed only its code.
+    """
+
+    from countyforge_runner.errors import KernelError
+
+    document = KernelError(
+        "schema_validation_failed",
+        "implementation packet does not satisfy its strict contract.",
+        {
+            "kind": "implementation packet",
+            "path": "/tasks/0/prerequisites/0",
+            "validator": "pattern",
+        },
+    ).as_document()
+    # The shape this test exists to cover.
+    assert "details" not in document
+    assert document["error"]["details"]["validator"] == "pattern"
+
+    stderr = _run_guard(tmp_path, _guard_body("Run request construction failed"), document)
+    assert "code=schema_validation_failed" in stderr
+    assert "kind=implementation packet" in stderr
+    assert "path=/tasks/0/prerequisites/0" in stderr
+    assert "validator=pattern" in stderr
+
+
+def test_a_flat_control_plane_envelope_still_works(tmp_path: Path) -> None:
+    from countyforge_github.errors import ControlPlaneError
+
+    document = ControlPlaneError(
+        "invalid_plan_result",
+        "A planned result cannot contain blocked reasons.",
+        {"reason": "planned_result_has_blocked_reasons", "status": "planned"},
+    ).as_document()
+    assert "details" in document
+
+    stderr = _run_guard(tmp_path, _guard_body("Run request construction failed"), document)
+    assert "code=invalid_plan_result" in stderr
+    assert "reason=planned_result_has_blocked_reasons" in stderr
+
+
+def test_the_materialization_guard_reads_both_envelopes_too(tmp_path: Path) -> None:
+    """Same flat-only assumption; fixed symmetrically rather than left to bite."""
+
+    from countyforge_runner.errors import KernelError
+
+    guard = _guard_body("Planning materialization failed")
+    document = KernelError(
+        "schema_validation_failed", "x", {"path": "/requirements/0/id", "validator": "pattern"}
+    ).as_document()
+    stderr = _run_guard(tmp_path, guard, document)
+    assert "path=/requirements/0/id" in stderr
+    assert "validator=pattern" in stderr
+
+
+def test_every_guard_reads_both_envelopes() -> None:
+    """Eight sites; one left on the flat-only expression would still go quiet."""
+
+    text = Path(".github/workflows/countyforge-run.yml").read_text(encoding="utf-8")
+    assert text.count(".details[$k] // empty") == 0
+    assert text.count("(.details[$k] // .error.details[$k]) // empty") == 8
+    assert text.count('.disposition // .error.code // "unknown"') == 8

@@ -797,6 +797,12 @@ class Kernel:
                         "allowed_paths": list(task["allowed_paths"]),
                         "required_checks": list(task["required_checks"]),
                         "prerequisites": list(task.get("prerequisites", [])),
+                        # Decision provenance is compared too: the packet and
+                        # the task plan are both handed to the model byte for
+                        # byte, so a stale plan disagreeing here would show it
+                        # decisions the packet contradicts.  Defaulted because
+                        # the field post-dates documents already in flight.
+                        "decision_prerequisites": list(task.get("decision_prerequisites", [])),
                         "risk": str(task["risk"]),
                         "accepted_status": str(task.get("accepted_status", "incomplete")),
                         "metadata_complete": bool(task.get("metadata_complete", False)),

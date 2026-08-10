@@ -31,9 +31,12 @@ from countyforge_github.planning_semantics import (
     SEMANTIC_DISPOSITION,
     validate_planning_semantics,
 )
+from countyforge_test_support import controlled_contract_root
 
 FIXTURE = Path("tools/countyforge-github/tests/fixtures/planning-result-collin-issue-18.json")
-CONTRACT_ROOT = Path.cwd()
+
+
+CONTRACT_ROOT = controlled_contract_root()
 AUTHOR_ID = 4242
 
 
@@ -2123,9 +2126,10 @@ def test_the_packet_inventory_is_the_semantic_gate_inventory(tmp_path: Path) -> 
         run_id="declared-capabilities",
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
+    # The invariant is that the two agree, not that the repository happens to
+    # declare nothing: asserting emptiness made this fail on any tree where a
+    # spec had been promoted locally.
     assert packet["declared_capabilities"] == sorted(declared_capabilities(root))
-    # Today that is empty, which is exactly why run 31281189305 guessed.
-    assert packet["declared_capabilities"] == []
 
 
 def test_the_prompt_names_the_packet_field_authoritative() -> None:
@@ -2340,3 +2344,21 @@ def test_the_prompt_separates_blockers_from_standing_conditions() -> None:
     # And all three production strings appear as negative examples.
     for reason in PRODUCTION_BLOCKED_REASONS:
         assert " ".join(reason.split()) in prompt
+
+
+def test_the_capability_tests_do_not_read_the_working_tree() -> None:
+    """`Path.cwd()` made these flip on any tree with a promoted spec.
+
+    `collin-cad-source-contract` is now declared in the repository, so this is
+    the difference between passing and failing rather than a hypothetical.
+    """
+
+    from countyforge_github.planning_semantics import declared_capabilities
+
+    assert CONTRACT_ROOT != Path.cwd()
+    assert declared_capabilities(CONTRACT_ROOT) == frozenset()
+    # The real tree does declare one now; the tests are simply not coupled to it.
+    assert "collin-cad-source-contract" in declared_capabilities(Path.cwd())
+    # Schemas and policy still come from the real tree, so they stay authoritative.
+    assert (CONTRACT_ROOT / ".ai/schemas/countyforge-plan-result.schema.json").is_file()
+    assert (CONTRACT_ROOT / ".ai/policies/countyforge-planning-scope.v1.json").is_file()
