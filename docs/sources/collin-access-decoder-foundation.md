@@ -2,8 +2,8 @@
 
 The Collin foundation is an adapter-local, synthetic-only contract for the measured pure-Python
 reader representation described by the
-[Collin OpenSpec delta](../../openspec/changes/add-collin-cad-access-decoder-foundation/specs/collin-cad-source-contract/spec.md).
-That OpenSpec change is the normative source. This document explains the implemented boundary; it
+[Collin source-contract specification](../../openspec/specs/collin-cad-source-contract/spec.md).
+That specification is the normative source. This document explains the implemented boundary; it
 does not approve a production Access runtime or establish live-release compatibility.
 
 ## Adapter Boundary
@@ -100,6 +100,6 @@ This foundation intentionally creates no competing shared abstraction.
 
 - [Source onboarding](README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
-- [Collin OpenSpec delta](../../openspec/changes/add-collin-cad-access-decoder-foundation/specs/collin-cad-source-contract/spec.md)
+- [Collin source-contract specification](../../openspec/specs/collin-cad-source-contract/spec.md)
 - [Bounded release parsing issue](https://github.com/TruPryce/property-tax-data-platform/issues/43)
 - [Architecture](../architecture/README.md)
