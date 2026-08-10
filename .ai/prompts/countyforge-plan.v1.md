@@ -61,7 +61,9 @@ Plan for this repository's actual boundaries and current six-county scope:
 - A scenario has three separate fields. `given` is the starting state, `when` is the trigger **and
   nothing else**, and `then` is a non-empty array of expected outcomes. Do not write the outcome
   inside `when`: a `when` reading "the adapter decodes the literal, then it returns the exact
-  value" with an empty `then` is rejected, and nothing splits it for you. Copy this shape:
+  value" with an empty `then` is rejected, and nothing splits it for you. A `when` that
+  repeats a `then` verbatim is rejected for the same reason: the trigger must not state its
+  own result. Copy this shape:
 
   ```json
   {
@@ -81,9 +83,15 @@ Plan for this repository's actual boundaries and current six-county scope:
   validator still enforces, so they are stated here and all of them are rejected on violation:
   - each `requirements[].id` is lower-case letters, digits, and hyphens only, 64 characters at
     most: `numeric-decoding-exactness`, never `R1`;
-  - each `validation_checks` entry is a short command identifier of 64 characters at most, such as
-    `make check` or `repo.check` — never a sentence describing what the check proves. Put that
-    prose in the requirement's scenarios;
+  - each `validation_checks` entry is one identifier from this closed set, and nothing else:
+    `repo.check`, `repo.runner-contract`, `repo.prepr-no-ai`, `docs.links`, `artifacts.check`.
+    Never a shell command, never a sentence describing what the check proves, and never a value
+    containing a space — a space ends the field in the task marker and silently discards the rest
+    of that task's metadata. Put the prose in the requirement's scenarios. Note that a task's
+    `validation_checks` and the top-level `validation_commands` are different fields with similar
+    names: `validation_commands` holds shell commands such as `make check`, while
+    `validation_checks` holds only the identifiers listed above. A shell command in
+    `validation_checks` is rejected;
   - `write_paths`, `validation_checks`, `given`, `then`, `scenarios`, `requirements`, and
     `task_slices` must each contain at least one entry.
 - `task_slices` are mutating implementation work. Every task changes repository content and must

@@ -22,6 +22,7 @@ from typing import NoReturn
 
 from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
 
 SEMANTIC_DISPOSITION = "planning_semantic_validation_failed"
 
@@ -211,6 +212,16 @@ def _validate_requirements(result: JsonObject) -> None:
                 phrase = _contains_placeholder(text)
                 if phrase is not None:
                     _fail("scenario_placeholder_text", requirement=identifier, phrase=phrase)
+            # A trigger that states its own outcome describes nothing to
+            # observe.  Every scenario in the Tarrant plan set `when` and `then`
+            # to the same sentence, which passed because `then` was non-empty
+            # and the duplicate check only compared *across* requirements.
+            if when in then:
+                _fail(
+                    "scenario_trigger_repeats_outcome",
+                    requirement=identifier,
+                    scenario=str(scenario.get("name", "")),
+                )
             # Two requirements sharing a scenario verbatim describe one
             # observation, so at most one of them is actually observable.
             signature = (*sorted(given), when, *sorted(then))
@@ -329,6 +340,21 @@ def _validate_task_scope(result: JsonObject, declared_scope: Sequence[str]) -> N
         paths = task.get("write_paths")
         if not isinstance(paths, list) or not paths:
             _fail("task_without_write_paths", task=task_id)
+        checks = [str(item) for item in task.get("validation_checks") or []]
+        unsupported = sorted(
+            check for check in checks if check not in _IMPLEMENTATION_VALIDATION_CHECKS
+        )
+        if unsupported:
+            # A check the implementation lane cannot run is not a check.  The
+            # Tarrant plan emitted `make check`, which is not in the vocabulary
+            # and contains a space, so its whole task marker failed to parse and
+            # every task silently fell back to the broad default write scope.
+            _fail(
+                "task_validation_check_unsupported",
+                task=task_id,
+                unsupported=unsupported[:8],
+                supported=sorted(_IMPLEMENTATION_VALIDATION_CHECKS),
+            )
         for raw in paths:
             path = normalize_write_path(str(raw))
             bare = path.rstrip("/")
