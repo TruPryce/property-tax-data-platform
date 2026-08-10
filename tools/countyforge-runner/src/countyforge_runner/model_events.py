@@ -98,8 +98,8 @@ def summarize_model_events(path: Path | None) -> JsonObject:
             provider_error = provider_error or "error" in lowered
             # `thread.started` and `turn.started` mean the provider accepted the
             # turn, not that the model produced anything.  Run 30836072011 spent
-            # its entire 30-minute budget having emitted exactly those two, so
-            # they must not count as progress.
+            # its entire then-current 30-minute budget having emitted exactly
+            # those two, so they must not count as progress.
             output_observed = output_observed or any(
                 token in lowered for token in ("message", "output", "item", "delta")
             )

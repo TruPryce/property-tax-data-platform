@@ -749,6 +749,30 @@ def test_review_wall_clock_timeout_never_succeeds(
     assert document["summary"]["outcome"] == "failed"
 
 
+def test_plan_wall_clock_timeout_remains_timed_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[[str], JsonObject],
+) -> None:
+    monkeypatch.setenv("SAKANA_API_KEY", "sakana-plan-timeout-fixture-secret")
+    adapter = tmp_path / "plan-timeout-adapter.sh"
+    adapter.write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p "$OUT_DIR"\nsleep 5\n',
+        encoding="utf-8",
+    )
+    adapter.chmod(0o755)
+    request = request_factory("plan")
+    request["budget_overrides"]["wall_clock_seconds"] = 1
+    kernel = Kernel()
+    document, exit_code = Runner(
+        kernel, evidence_root=tmp_path / "evidence", plan_adapter=adapter
+    ).run(kernel.resolve(request))
+    assert exit_code != 0
+    assert document["disposition"] == "timed_out"
+    assert document["summary"]["outcome"] == "failed"
+    assert document["summary"]["error_code"] == "timed_out"
+
+
 def test_review_output_budget_never_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

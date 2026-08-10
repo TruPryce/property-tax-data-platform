@@ -1177,13 +1177,13 @@ def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
 
 
 # --------------------------------------------------------------------------
-# Run 30836072011 — the plan lane spent its whole 1,800-second budget having
-# emitted only `thread.started` and `turn.started`.
+# Run 31423619620 reached the then-current 1,800-second planning limit exactly.
+# The bounded reliability experiment raises only that default to 2,700 seconds.
 # --------------------------------------------------------------------------
 
 
-def test_the_plan_lane_reasoning_effort_is_high_and_the_clock_is_unchanged() -> None:
-    """Reduce the request, not the deadline: a longer clock hides the cause."""
+def test_the_plan_lane_keeps_high_reasoning_and_uses_the_2700_second_budget() -> None:
+    """Extend one planning attempt without changing its model or hard ceiling."""
 
     policy = json.loads(
         Path(".ai/policies/countyforge-github-execution.v1.json").read_text(encoding="utf-8")
@@ -1191,7 +1191,8 @@ def test_the_plan_lane_reasoning_effort_is_high_and_the_clock_is_unchanged() -> 
     assert policy["commands"]["plan"]["reasoning_effort"] == "high"
     profile = json.loads(Path(".ai/profiles/plan.read-only.v1.json").read_text(encoding="utf-8"))
     assert profile["default_reasoning_effort"] == "high"
-    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 1800
+    assert profile["budgets"]["defaults"]["wall_clock_seconds"] == 2700
+    assert profile["budgets"]["ceilings"]["wall_clock_seconds"] == 3600
     assert profile["budgets"]["defaults"]["attempts"] == 1
 
 
