@@ -37,6 +37,15 @@ from countyforge_github.decision_input import (
     decision_marker,
 )
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.freshness import resolve_default_branch
+from countyforge_github.implementation_readiness import (
+    assert_implementation_readable,
+    implementation_check_ids,
+)
+from countyforge_github.planning_context import (
+    assert_base_context_unmoved,
+    trusted_context_digest,
+)
 from countyforge_github.planning_scope import resolve_planning_scope
 from countyforge_github.planning_semantics import (
     declared_capabilities,
@@ -812,6 +821,20 @@ def build_planning_packet(
         # which do: `openspec/specs/` is empty, and zero selected spec sources
         # is indistinguishable from "the packet omitted them".
         "declared_capabilities": _bounded_capability_inventory(contract_root),
+        # The authoritative check vocabulary, from the implementation lane
+        # itself.  Told in prose, the planner emitted `make check`; given the
+        # inventory it has no reason to invent one.
+        "implementation_check_ids": implementation_check_ids(),
+        # What the trusted half of this plan's input was, at the moment the
+        # model read it.  Publication re-derives this and refuses a plan whose
+        # base moved in between.
+        "trusted_context_sha256": trusted_context_digest(
+            contract_root,
+            extra={
+                "capabilities": _bounded_capability_inventory(contract_root),
+                "checks": implementation_check_ids(),
+            },
+        ),
         "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,
@@ -1165,11 +1188,20 @@ def materialize_plan(
                 "prohibited_plan_path", "Trusted materializer selected an invalid path."
             )
         destination.write_text(content, encoding="utf-8")
+    # The rendered markdown is what the implementation lane will parse, so it is
+    # re-read here with that parser.  Validating the result document alone let
+    # PR #56 through: `checks=make check` is valid JSON and unreadable markup.
+    readiness = assert_implementation_readable(
+        tasks,
+        contract_root=publication_root,
+        declared_task_ids=[str(task["task_id"]) for task in result["task_slices"]],
+    )
     return {
         "change_name": change,
         "issue_number": issue_number,
         "run_id": run_id,
         "planning_scope": scope_provenance,
+        "implementation_readiness": readiness,
         "files": [f"openspec/changes/{change}/{key}" for key in files],
         "implementation_eligibility": False,
     }
@@ -1181,6 +1213,7 @@ def materialize_plan(
 _PUBLICATION_STAGES = (
     "validate_result",
     "validate_provenance",
+    "verify_trusted_context",
     "resolve_predecessor",
     "create_blobs",
     "load_parent_commit",
@@ -1485,6 +1518,22 @@ def publish_plan(
             issue_number=issue,
             manifest=manifest,
         )
+        # The untrusted half of the input has been re-checked; this is the
+        # trusted half.  Also before the first Git object is created.
+        progress.enter("verify_trusted_context")
+        live = resolve_default_branch(github, repository=repository, at=run_id)
+        head = live.get("default_branch_sha")
+        if isinstance(head, str):
+            context_freshness = assert_base_context_unmoved(
+                github,
+                repository=repository,
+                target_sha=target_sha,
+                default_branch_sha=head,
+            )
+        else:
+            # Recorded rather than silently skipped: a publication that could
+            # not verify its base says so in its own manifest.
+            context_freshness = {"compared": False, "reason": "default_branch_unavailable"}
         progress.enter("resolve_predecessor")
         change = str(result["proposed_change_name"])
         base_branch = planning_branch(issue, change)
@@ -1692,6 +1741,9 @@ def publish_plan(
                 ],
             },
             "implementation_eligibility": False,
+            "trusted_context_freshness": context_freshness,
+            "implementation_readiness": manifest.get("implementation_readiness")
+            or {"contract_version": 1, "implementation_readable": True, "task_count": 0},
         }
         validate_document(
             publication_manifest,

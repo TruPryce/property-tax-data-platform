@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,7 +68,10 @@ def _result() -> dict[str, object]:
         "cross_issue_dependencies": [
             {
                 "issue_number": 43,
-                "relationship": "blocked_by",
+                # A boundary this plan must not cross, not a blocker it waits
+                # on: this result is `planned` with no blocked reasons, and
+                # `blocked_by` now has to mean what it says.
+                "relationship": "related_to",
                 "boundary": ["shared vendor-neutral source records"],
             }
         ],
@@ -80,7 +84,7 @@ def _result() -> dict[str, object]:
                 "task_id": "1.1",
                 "title": "Add strict contracts",
                 "description": "Add the bounded strict contract for the adapter module.",
-                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
                 "validation_checks": ["repo.check"],
                 "prerequisites": ["D1"],
                 "risk": "normal",
@@ -90,7 +94,7 @@ def _result() -> dict[str, object]:
                 "task_id": "1.2",
                 "title": "Run deterministic validation",
                 "description": "Cover the bounded contract with deterministic tests.",
-                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
                 "validation_checks": ["repo.check"],
                 "prerequisites": ["1.1"],
                 "risk": "low",
@@ -627,7 +631,7 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     # exactly that directory, so the declared scope has to follow it.
     result["declared_write_scope"] = ["openspec/changes/harden-github-workflow-policy/"]
     for task in result["task_slices"]:
-        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/"]
+        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/proposal.md"]
     validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
@@ -727,7 +731,7 @@ def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
             "task_id": "1.1",
             "title": "Confine Dallas source vocabulary",
             "description": ("Confine Dallas source vocabulary to `property_tax_adapters`."),
-            "write_paths": ["openspec/changes/add-safe-planning/"],
+            "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
             "validation_checks": ["repo.check"],
             "prerequisites": [],
             "risk": "normal",
@@ -924,6 +928,7 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
 _STAGE_ORDER = (
     "validate_result",
     "validate_provenance",
+    "verify_trusted_context",
     "resolve_predecessor",
     "create_blobs",
     "load_parent_commit",
@@ -1628,7 +1633,12 @@ def test_the_collin_issue_18_path_produces_a_valid_draft_planning_pull_request(
     assert "paths=libs,services,dags" not in tasks
     for forbidden in ("services/", "dags/", "tools/", ".github/", ".ai/"):
         assert f"paths={forbidden}" not in tasks
-    assert "tests/" not in tasks
+    # The claim is that no task writes the repository-root `tests/` tree. A bare
+    # substring cannot say that: a package's own `libs/.../tests/` contains it.
+    # Check the parsed paths instead.
+    for marker in re.findall(r"paths=([^\s]+)", tasks):
+        for path in marker.split(","):
+            assert not path.startswith("tests/"), path
 
     proposal = (change_root / "proposal.md").read_text(encoding="utf-8")
     assert "#43" in proposal

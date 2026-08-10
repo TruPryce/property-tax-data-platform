@@ -62,8 +62,21 @@ Plan for this repository's actual boundaries and current six-county scope:
   nothing else**, and `then` is a non-empty array of expected outcomes. Do not write the outcome
   inside `when`: a `when` reading "the adapter decodes the literal, then it returns the exact
   value" with an empty `then` is rejected, and nothing splits it for you. A `when` that
-  repeats a `then` verbatim is rejected for the same reason: the trigger must not state its
-  own result. Copy this shape:
+  repeats a `then` is rejected for the same reason, whether it repeats the only outcome or one of
+  several: the trigger must not state its own result. Nothing rewrites, splits, or de-duplicates
+  what you write — a scenario in either shape is refused whole and the plan fails.
+
+  Write the three fields as three different kinds of statement:
+  - `given` — the state that already holds before anything happens. No action, no result.
+  - `when` — the single action or event under test, stated as the action alone. One clause.
+    It contains no "and then", no outcome, and no assertion about what results.
+  - `then` — what an implementer could **observe afterwards**, one outcome per entry: a returned
+    value, a raised error, a written record, a rejected input, a recorded field. Each entry must
+    be checkable by looking at something after the action. "The parser works correctly", "the
+    behaviour is verified", or "the requirement is met" are not observations and are rejected.
+
+  If the only outcome you can state is the action restated, the requirement is not yet specific
+  enough to plan; sharpen the `normative_rule` until an observable result exists. Copy this shape:
 
   ```json
   {
@@ -83,9 +96,12 @@ Plan for this repository's actual boundaries and current six-county scope:
   validator still enforces, so they are stated here and all of them are rejected on violation:
   - each `requirements[].id` is lower-case letters, digits, and hyphens only, 64 characters at
     most: `numeric-decoding-exactness`, never `R1`;
-  - each `validation_checks` entry is one identifier from this closed set, and nothing else:
-    `repo.check`, `repo.runner-contract`, `repo.prepr-no-ai`, `docs.links`, `artifacts.check`.
-    Never a shell command, never a sentence describing what the check proves, and never a value
+  - each `validation_checks` entry is one identifier copied from the packet's
+    `implementation_check_ids`, and nothing else. That list is the implementation lane's own
+    registry of the checks it can run, so it is authoritative over anything stated here or
+    inferred from the repository; an identifier absent from it does not exist. Each identifier
+    names a check; the command it runs belongs to the runner, and no shell text belongs in this
+    field. Never a shell command, never a sentence describing what the check proves, and never a value
     containing a space — a space ends the field in the task marker and silently discards the rest
     of that task's metadata. Put the prose in the requirement's scenarios. Note that a task's
     `validation_checks` and the top-level `validation_commands` are different fields with similar
@@ -110,11 +126,32 @@ Plan for this repository's actual boundaries and current six-county scope:
 
   Omit that task and put its commands in `validation_commands`. Do not invent a write path to
   satisfy the requirement, and do not attach the commands to an unrelated source or docs task.
-- Give every `task_slices` entry its own `write_paths`: the narrowest repository-relative directory
-  prefixes that task needs. Broad aliases such as `libs`, `services`, `dags`, `tools`, `docs`, or
-  root documents are rejected, as are `.github/`, `.ai/`, and `openspec/specs/`. Every task path
-  must sit inside `declared_write_scope`, which must itself sit inside the trusted policy ceiling
-  for this issue; a scope wider than that ceiling is refused whatever the plan declares.
+- Give every `task_slices` entry its own `write_paths`, and name **the exact files that task
+  intends to create or modify** — not the directory that contains them. A directory authorises
+  everything beneath it and says nothing about what the task will do; a file list is the plan.
+  Every entry must therefore end in a filename with an extension, and a path ending in `/` is
+  rejected. If you cannot yet name the files, the task is not planned:
+
+  ```json
+  { "write_paths": ["libs/property-tax-adapters/src/.../texas/"] }
+  ```
+
+  is rejected; write this instead:
+
+  ```json
+  {
+    "write_paths": [
+      "libs/property-tax-adapters/src/.../texas/tarrant_roll.py",
+      "libs/property-tax-adapters/tests/texas/test_tarrant_roll.py"
+    ]
+  }
+  ```
+
+  Broad aliases such as `libs`, `services`, `dags`, `tools`, `docs`, or root documents are
+  rejected, as are `.github/`, `.ai/`, and `openspec/specs/`. Every task path must sit inside
+  `declared_write_scope` — which is a directory ceiling and stays one — and that scope must sit
+  inside the trusted policy ceiling for this issue; a scope wider than that ceiling is refused
+  whatever the plan declares.
 - State `prerequisites` for every task: decision IDs such as `D1`, and earlier task IDs such as
   `1.1`. Every reference must exist, dependencies must precede dependents, the graph must be
   acyclic, and a dependency named in a task's own description must also appear in its
@@ -123,7 +160,20 @@ Plan for this repository's actual boundaries and current six-county scope:
   `requires_human_merge: true`. A decision may be `resolved_for_draft` for the purpose of drafting;
   it is accepted only when an authorized maintainer merges the generated change.
 - Declare `cross_issue_dependencies` for every issue whose boundary constrains this one, with the
-  areas it owns. A task whose scope or description reaches into a declared boundary is refused.
+  areas it owns, and choose the `relationship` that states the actual obligation, because the
+  control plane enforces it rather than reading your prose:
+  - `related_to` — context only. It imposes nothing and blocks nothing.
+  - `depends_on` — this plan builds on work that issue is doing, but can proceed.
+  - `requires_contract_from` — this plan cannot be correct until that issue defines an interface,
+    schema, or type this work must conform to.
+  - `blocked_by` — this plan cannot be implemented at all until that issue lands.
+  - `supersedes` — this plan replaces work that issue described.
+
+  `requires_contract_from` and `blocked_by` are obligations, not notes: a plan declaring either
+  must set `status` to `blocked` and name that issue as `#<number>` in `blocked_reasons`. Do not
+  use `related_to` for a dependency that actually blocks; that is the defect this vocabulary
+  exists to prevent. A task whose scope or description reaches into a declared boundary is
+  refused.
 - Order task slices by dependency and name the affected package or contract. Include only checks
   supported by the packet and repository, such as `make check`, `make runner-contract-tests`, or
   the narrower CountyForge check targets.

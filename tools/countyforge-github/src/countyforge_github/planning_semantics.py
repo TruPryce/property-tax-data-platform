@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
 from countyforge_github.contracts import JsonObject
@@ -216,7 +216,12 @@ def _validate_requirements(result: JsonObject) -> None:
             # observe.  Every scenario in the Tarrant plan set `when` and `then`
             # to the same sentence, which passed because `then` was non-empty
             # and the duplicate check only compared *across* requirements.
-            if when in then:
+            # Compared after normalising case, surrounding space, internal
+            # runs of whitespace, and a trailing period, so that "the adapter
+            # decodes the literal" and "The adapter decodes the literal."  are
+            # recognised as the same sentence.  This normalises only the
+            # comparison; the stored text is never rewritten.
+            if _comparable(when) in {_comparable(item) for item in then}:
                 _fail(
                     "scenario_trigger_repeats_outcome",
                     requirement=identifier,
@@ -365,6 +370,12 @@ def _validate_task_scope(result: JsonObject, declared_scope: Sequence[str]) -> N
                     _fail("task_path_forbidden", task=task_id, path=path)
             if scope and not any(_within(path, allowed) for allowed in scope):
                 _fail("task_path_outside_declared_scope", task=task_id, path=path)
+            # The plan's `declared_write_scope` is a ceiling and may be a
+            # directory.  A task is an execution instruction, so it names the
+            # files it intends to write.  Tarrant declared a directory per task,
+            # which authorises everything under it and describes nothing.
+            if path.endswith("/") or "." not in PurePosixPath(path).name:
+                _fail("task_path_not_a_file", task=task_id, path=path)
 
 
 def _within(path: str, allowed: str) -> bool:
@@ -452,6 +463,12 @@ def _reject_cycles(graph: dict[str, list[str]]) -> None:
 
     for node in sorted(graph):
         visit(node, ())
+
+
+def _comparable(text: str) -> str:
+    """Normalise a sentence for equality testing only, never for storage."""
+
+    return " ".join(str(text).split()).casefold().rstrip(".")
 
 
 def _validate_cross_issue_boundary(result: JsonObject, required_issues: Iterable[int] = ()) -> None:
@@ -544,6 +561,40 @@ def _validate_eligibility(result: JsonObject) -> None:
                 "unresolved_decision_delegated_to_implementation",
                 task=str(task.get("task_id", "")),
                 decisions=undeclared,
+            )
+    _validate_dependency_obligations(result, reasons)
+
+
+#: Relationships that state an obligation this plan cannot satisfy by itself.
+#: `related_to` and `depends_on` are context; these two are blockers, which is
+#: the entire reason the vocabulary was widened.  Tarrant used `related_to` for
+#: "#43 owns these types" and for "Tarrant cannot ship until #43 lands", and
+#: nothing downstream could tell the two apart.
+_BLOCKING_RELATIONSHIPS = frozenset({"blocked_by", "requires_contract_from"})
+
+
+def _validate_dependency_obligations(result: JsonObject, reasons: str) -> None:
+    """A blocking relationship is a blocker, not a note."""
+
+    for entry in result.get("cross_issue_dependencies") or []:
+        if not isinstance(entry, dict):
+            continue
+        relationship = str(entry.get("relationship", ""))
+        if relationship not in _BLOCKING_RELATIONSHIPS:
+            continue
+        issue = entry.get("issue_number")
+        if str(result.get("status")) != "blocked":
+            _fail(
+                "blocking_dependency_not_reflected_in_status",
+                issue=issue,
+                relationship=relationship,
+                status=str(result.get("status", "")),
+            )
+        if f"#{issue}" not in reasons:
+            _fail(
+                "blocking_dependency_absent_from_blocked_reasons",
+                issue=issue,
+                relationship=relationship,
             )
 
 

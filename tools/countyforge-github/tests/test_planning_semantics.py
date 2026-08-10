@@ -391,7 +391,11 @@ def test_14_the_collin_task_paths_pass() -> None:
         "docs/sources/",
     }
     for task in _result()["task_slices"]:
-        assert set(task["write_paths"]) <= allowed
+        for path in task["write_paths"]:
+            # Task paths name files now, so containment is by prefix rather
+            # than by set membership against the directory ceiling.
+            assert any(path.startswith(prefix) for prefix in allowed), path
+            assert not path.endswith("/"), path
     forbidden = {
         "services/",
         "dags/",
@@ -640,7 +644,7 @@ def test_the_materializer_binds_the_resolved_ceiling_into_its_manifest(tmp_path:
     document = _result()
     document["declared_write_scope"] = ["libs/property-tax-adapters/"]
     for task in document["task_slices"]:
-        task["write_paths"] = ["libs/property-tax-adapters/"]
+        task["write_paths"] = ["libs/property-tax-adapters/src/collin.py"]
     manifest = materialize_plan(
         document,
         publication_root=tmp_path,
@@ -1170,7 +1174,10 @@ def test_issue_18_does_not_authorize_the_root_test_tree() -> None:
 
 def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
     document = _result()
-    document["task_slices"][0]["write_paths"] = ["libs/property-tax-adapters/", "tests/"]
+    document["task_slices"][0]["write_paths"] = [
+        "libs/property-tax-adapters/src/collin.py",
+        "tests/test_root.py",
+    ]
     with pytest.raises(ControlPlaneError) as raised:
         validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert raised.value.details["reason"] == "task_path_outside_declared_scope"
@@ -1977,11 +1984,16 @@ def test_the_generated_requirement_id_and_check_shapes_are_named_in_the_prompt()
     assert document["requirements"][0]["id"] == "R1"
     assert len(document["task_slices"][1]["validation_checks"][0]) > 64
 
-    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    # Whitespace-normalized: the guidance wraps, so a raw read would miss any
+    # phrase that happens to straddle a line break.
+    prompt = " ".join(
+        Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
     assert "`numeric-decoding-exactness`, never `R1`" in prompt
-    # The wording moved from "a short command identifier" to a named closed
-    # set, because the example it gave -- `make check` -- was the defect.
-    assert "one identifier from this closed set" in prompt
+    # The wording moved from "a short command identifier" to a named closed set
+    # (because the example it gave -- `make check` -- was the defect), and then
+    # from a set written out in prose to the packet field that carries it.
+    assert "one identifier copied from the packet's `implementation_check_ids`" in prompt
 
 
 # --------------------------------------------------------------------------
@@ -2011,6 +2023,23 @@ def _with_supported_checks(document: dict[str, Any]) -> dict[str, Any]:
     for task in document["task_slices"]:
         assert any(check in _HISTORICAL_CHECK_DEFECT for check in task["validation_checks"])
         task["validation_checks"] = ["repo.check"]
+    return document
+
+
+def _with_file_paths(document: dict[str, Any]) -> dict[str, Any]:
+    """Apply the third correction: every recorded plan wrote directories.
+
+    Each task said "somewhere under this package" and named no artifact, so the
+    plan authorized a whole subtree while describing none of it. Narrowed here
+    to one representative file per declared directory, which is the shape the
+    contract now requires.
+    """
+
+    for index, task in enumerate(document["task_slices"]):
+        task["write_paths"] = [
+            f"{path}artifact_{index}.py" if path.endswith("/") else path
+            for path in task["write_paths"]
+        ]
     return document
 
 
@@ -2052,7 +2081,8 @@ def test_the_single_added_correction_passes_the_whole_semantic_validator() -> No
     # which the implementation lane cannot run. That defect was latent until
     # the capability failure ahead of it was fixed.
     scope = validate_planning_result(
-        _with_supported_checks(_run_31281189305("ADDED")), contract_root=CONTRACT_ROOT
+        _with_file_paths(_with_supported_checks(_run_31281189305("ADDED"))),
+        contract_root=CONTRACT_ROOT,
     )
     assert scope["resolved_from"] == "issue:18"
     assert scope["required_cross_issues"] == [43]
@@ -2066,7 +2096,7 @@ def test_the_corrected_plan_materializes_a_draft_change(tmp_path: Path) -> None:
     from countyforge_github.planning import materialize_plan
 
     shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
-    document = _with_supported_checks(_run_31281189305("ADDED"))
+    document = _with_file_paths(_with_supported_checks(_run_31281189305("ADDED")))
     manifest = materialize_plan(
         document, publication_root=tmp_path, issue_number=18, run_id="run-31281189305"
     )
@@ -2288,7 +2318,9 @@ def test_clearing_blocked_reasons_alone_passes_and_materializes(tmp_path: Path) 
 
     from countyforge_github.planning import materialize_plan
 
-    document = _with_supported_checks(json.loads(RUN_31293882847.read_text(encoding="utf-8")))
+    document = _with_file_paths(
+        _with_supported_checks(json.loads(RUN_31293882847.read_text(encoding="utf-8")))
+    )
     document["blocked_reasons"] = []
     scope = validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert scope["resolved_from"] == "issue:18"
@@ -2466,15 +2498,18 @@ def test_the_prompt_names_the_closed_check_vocabulary_and_the_trigger_rule() -> 
     """The prompt offered `make check` as an example, which is what the planner
     copied into every task."""
 
-    from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
-
     prompt = " ".join(
         Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
     )
-    for check in _IMPLEMENTATION_VALIDATION_CHECKS:
-        assert f"`{check}`" in prompt, check
+    # The identifiers themselves are no longer written into the prompt. Prose
+    # restating a registry is prose that drifts from it; the packet carries the
+    # registry, and the prompt points at the packet. That the packet really
+    # carries them is asserted in
+    # `test_the_packet_carries_the_implementation_check_registry`.
+    assert "copied from the packet's `implementation_check_ids`" in prompt
+    assert "it is authoritative over anything stated here" in prompt
     assert "never a value containing a space" in prompt
-    assert "repeats a `then` verbatim is rejected" in prompt
+    assert "repeats a `then` is rejected" in prompt
     # `make check` is still correct for the top-level `validation_commands`;
     # the defect was offering it as a *validation_checks* example. The prompt
     # now contrasts the two similarly named fields explicitly.

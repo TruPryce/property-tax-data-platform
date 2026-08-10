@@ -161,7 +161,9 @@
             "enum": [
               "blocked_by",
               "depends_on",
-              "related_to"
+              "related_to",
+              "requires_contract_from",
+              "supersedes"
             ],
             "type": "string"
           },
