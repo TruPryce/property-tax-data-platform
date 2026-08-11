@@ -135,6 +135,12 @@ def request_factory(tmp_path: Path) -> Iterator[Callable[[str], JsonObject]]:
                 # Required: an absent inventory and an empty one must not look
                 # alike, which is the defect run 31281189305 exposed.
                 "declared_capabilities": [],
+                # Required for the same reason: a plan that was never handed
+                # the check registry, or never bound to the contracts it was
+                # planned against, must not be indistinguishable from one that
+                # was.
+                "implementation_check_ids": ["repo.check"],
+                "trusted_context_sha256": "0" * 64,
                 "selection": {
                     "max_files": 1,
                     "max_bytes": 1,

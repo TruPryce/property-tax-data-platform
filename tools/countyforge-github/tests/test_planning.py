@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -26,11 +27,16 @@ from countyforge_github.planning import (
     validate_planning_result,
 )
 from countyforge_github.redaction import redact_untrusted_text
-from countyforge_github.results import normalize_publication_result
+from countyforge_github.results import PUBLICATION_STAGES, normalize_publication_result
 from countyforge_test_support import controlled_contract_root
 
 #: Capability inventory is controlled here; see `controlled_contract_root`.
 CONTRACT_ROOT = controlled_contract_root()
+
+
+#: The commit every publication case targets, so a double can answer
+#: "the default branch has not moved" without inventing a second identity.
+_HEAD_SHA = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path.cwd(), text=True).strip()
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -67,7 +73,10 @@ def _result() -> dict[str, object]:
         "cross_issue_dependencies": [
             {
                 "issue_number": 43,
-                "relationship": "blocked_by",
+                # A boundary this plan must not cross, not a blocker it waits
+                # on: this result is `planned` with no blocked reasons, and
+                # `blocked_by` now has to mean what it says.
+                "relationship": "related_to",
                 "boundary": ["shared vendor-neutral source records"],
             }
         ],
@@ -80,7 +89,7 @@ def _result() -> dict[str, object]:
                 "task_id": "1.1",
                 "title": "Add strict contracts",
                 "description": "Add the bounded strict contract for the adapter module.",
-                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
                 "validation_checks": ["repo.check"],
                 "prerequisites": ["D1"],
                 "risk": "normal",
@@ -90,7 +99,7 @@ def _result() -> dict[str, object]:
                 "task_id": "1.2",
                 "title": "Run deterministic validation",
                 "description": "Cover the bounded contract with deterministic tests.",
-                "write_paths": ["openspec/changes/add-safe-planning/"],
+                "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
                 "validation_checks": ["repo.check"],
                 "prerequisites": ["1.1"],
                 "risk": "low",
@@ -627,7 +636,7 @@ def test_change_names_may_discuss_workflow_policy_or_secret() -> None:
     # exactly that directory, so the declared scope has to follow it.
     result["declared_write_scope"] = ["openspec/changes/harden-github-workflow-policy/"]
     for task in result["task_slices"]:
-        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/"]
+        task["write_paths"] = ["openspec/changes/harden-github-workflow-policy/proposal.md"]
     validate_planning_result(result, contract_root=CONTRACT_ROOT)
 
 
@@ -727,7 +736,7 @@ def test_result_allows_source_contract_vocabulary_and_inline_code() -> None:
             "task_id": "1.1",
             "title": "Confine Dallas source vocabulary",
             "description": ("Confine Dallas source vocabulary to `property_tax_adapters`."),
-            "write_paths": ["openspec/changes/add-safe-planning/"],
+            "write_paths": ["openspec/changes/add-safe-planning/proposal.md"],
             "validation_checks": ["repo.check"],
             "prerequisites": [],
             "risk": "normal",
@@ -753,6 +762,13 @@ class _PublicationGitHub:
         self.commits: dict[str, dict[str, object]] = {}
         self.fail_at = fail_at
         self.status = status
+        #: What the default branch changed since the run's target, if anything.
+        self.compare_files: list[dict[str, object]] = []
+        #: Where the default branch head points. Every publication case targets
+        #: the repository HEAD, so the ordinary case is a base that has not
+        #: moved and a compare that never happens. Tests that need a moved base
+        #: assign this and `compare_files`.
+        self.default_branch_sha: str = _HEAD_SHA
 
     def _maybe_fail(self, operation: str) -> None:
         """Stand in for a sanitized GitHub REST failure at one mutation."""
@@ -817,9 +833,24 @@ class _PublicationGitHub:
     def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
         del repository
         self._maybe_fail("get_git_ref")
+        if ref == "refs/heads/main" and ref not in self.refs:
+            return {"ref": ref, "object": {"sha": self.default_branch_sha, "type": "commit"}}
         if ref not in self.refs:
             return None
         return {"ref": ref, "object": {"sha": self.refs[ref], "type": "commit"}}
+
+    # Publication verifies its trusted base before creating any Git object, so
+    # the double has to be able to answer that. The default branch sits on the
+    # run's own target by default: an unmoved base, which is the ordinary case.
+    def repository_profile(self, repository: str) -> dict[str, object]:
+        del repository
+        self._maybe_fail("repository_profile")
+        return {"default_branch": "main"}
+
+    def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, object]:
+        del repository, base_sha, head_sha
+        self._maybe_fail("compare_commits")
+        return {"files": list(self.compare_files), "files_complete": True, "total_commits": 1}
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository, ref, sha
@@ -921,18 +952,8 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
 
 
 # The closed publication stage vocabulary, in the order the publisher enters it.
-_STAGE_ORDER = (
-    "validate_result",
-    "validate_provenance",
-    "resolve_predecessor",
-    "create_blobs",
-    "load_parent_commit",
-    "create_tree",
-    "create_commit",
-    "create_ref",
-    "create_pull_request",
-    "complete",
-)
+# One definition, in `results.py`; the test below proves the publisher agrees.
+_STAGE_ORDER = PUBLICATION_STAGES
 
 
 def _publication_case(tmp_path: Path, name: str, run_id: str = "plan-stage") -> dict[str, object]:
@@ -1628,7 +1649,12 @@ def test_the_collin_issue_18_path_produces_a_valid_draft_planning_pull_request(
     assert "paths=libs,services,dags" not in tasks
     for forbidden in ("services/", "dags/", "tools/", ".github/", ".ai/"):
         assert f"paths={forbidden}" not in tasks
-    assert "tests/" not in tasks
+    # The claim is that no task writes the repository-root `tests/` tree. A bare
+    # substring cannot say that: a package's own `libs/.../tests/` contains it.
+    # Check the parsed paths instead.
+    for marker in re.findall(r"paths=([^\s]+)", tasks):
+        for path in marker.split(","):
+            assert not path.startswith("tests/"), path
 
     proposal = (change_root / "proposal.md").read_text(encoding="utf-8")
     assert "#43" in proposal

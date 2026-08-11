@@ -37,6 +37,16 @@ from countyforge_github.decision_input import (
     decision_marker,
 )
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.freshness import resolve_default_branch
+from countyforge_github.implementation_readiness import (
+    assert_implementation_readable,
+    implementation_check_ids,
+)
+from countyforge_github.planning_context import (
+    UNVERIFIABLE_DISPOSITION,
+    assert_base_context_unmoved,
+    trusted_context_digest,
+)
 from countyforge_github.planning_scope import resolve_planning_scope
 from countyforge_github.planning_semantics import (
     declared_capabilities,
@@ -44,6 +54,7 @@ from countyforge_github.planning_semantics import (
     validate_planning_semantics,
 )
 from countyforge_github.redaction import redact_untrusted_text
+from countyforge_github.results import PUBLICATION_STAGES
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SAFE_PATH = re.compile(
@@ -595,6 +606,29 @@ def _fit_packet_to_ceiling(
 MAX_DECLARED_CAPABILITIES = 128
 
 
+def planning_trusted_digest(contract_root: Path) -> str:
+    """The one derivation of a plan's trusted context, used on both sides.
+
+    The packet records this; the provider step re-derives it from its own
+    checkout before invoking the model.  Both call this function rather than
+    assembling the same `extra` separately, because two copies of a derivation
+    is how the vocabularies in PR #56 came to disagree in the first place.
+
+    The inventory is re-derived from the root, never read back out of the
+    packet: a capability archived between packet and provider changes no
+    contract file at all, and reading the packet's own copy would compare a
+    value with itself.
+    """
+
+    return trusted_context_digest(
+        contract_root,
+        extra={
+            "capabilities": _bounded_capability_inventory(contract_root),
+            "checks": implementation_check_ids(),
+        },
+    )
+
+
 def _bounded_capability_inventory(contract_root: Path) -> list[str]:
     """The inventory, or a refusal -- never a silent truncation.
 
@@ -813,6 +847,14 @@ def build_planning_packet(
         # which do: `openspec/specs/` is empty, and zero selected spec sources
         # is indistinguishable from "the packet omitted them".
         "declared_capabilities": _bounded_capability_inventory(contract_root),
+        # The authoritative check vocabulary, from the implementation lane
+        # itself.  Told in prose, the planner emitted `make check`; given the
+        # inventory it has no reason to invent one.
+        "implementation_check_ids": implementation_check_ids(),
+        # What the trusted half of this plan's input was, at the moment the
+        # model read it.  The provider step re-derives this from its own
+        # checkout and refuses a packet built against other contracts.
+        "trusted_context_sha256": planning_trusted_digest(contract_root),
         "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,
@@ -1166,11 +1208,20 @@ def materialize_plan(
                 "prohibited_plan_path", "Trusted materializer selected an invalid path."
             )
         destination.write_text(content, encoding="utf-8")
+    # The rendered markdown is what the implementation lane will parse, so it is
+    # re-read here with that parser.  Validating the result document alone let
+    # PR #56 through: `checks=make check` is valid JSON and unreadable markup.
+    readiness = assert_implementation_readable(
+        tasks,
+        contract_root=publication_root,
+        declared_task_ids=[str(task["task_id"]) for task in result["task_slices"]],
+    )
     return {
         "change_name": change,
         "issue_number": issue_number,
         "run_id": run_id,
         "planning_scope": scope_provenance,
+        "implementation_readiness": readiness,
         "files": [f"openspec/changes/{change}/{key}" for key in files],
         "implementation_eligibility": False,
     }
@@ -1179,18 +1230,11 @@ def materialize_plan(
 # Publication is a multi-step sequence against GitHub's Git data API.  Failing
 # before the ref exists is operationally different from failing after the branch
 # is visible, and a sanitized status code alone cannot tell the two apart.
-_PUBLICATION_STAGES = (
-    "validate_result",
-    "validate_provenance",
-    "resolve_predecessor",
-    "create_blobs",
-    "load_parent_commit",
-    "create_tree",
-    "create_commit",
-    "create_ref",
-    "create_pull_request",
-    "complete",
-)
+#
+# The sequence itself lives in `results.py`, which normalizes what the publisher
+# writes.  This module used to hold a second copy, and adding a stage here and
+# not there made a complete publication read as incomplete.
+_PUBLICATION_STAGES = PUBLICATION_STAGES
 
 
 class PublicationProgress:
@@ -1486,6 +1530,26 @@ def publish_plan(
             issue_number=issue,
             manifest=manifest,
         )
+        # The untrusted half of the input has been re-checked; this is the
+        # trusted half.  Also before the first Git object is created.
+        progress.enter("verify_trusted_context")
+        live = resolve_default_branch(github, repository=repository, at=run_id)
+        head = live.get("default_branch_sha")
+        if not isinstance(head, str):
+            # Fails closed.  Recording the skip in the manifest was still
+            # publishing a plan whose base nobody had checked, and an unverified
+            # base is exactly the condition this stage exists to refuse.
+            raise ControlPlaneError(
+                UNVERIFIABLE_DISPOSITION,
+                "The trusted planning context could not be verified before publication.",
+                {"stage": "publication", "reason": "default_branch_unavailable"},
+            )
+        context_freshness = assert_base_context_unmoved(
+            github,
+            repository=repository,
+            target_sha=target_sha,
+            default_branch_sha=head,
+        )
         progress.enter("resolve_predecessor")
         change = str(result["proposed_change_name"])
         base_branch = planning_branch(issue, change)
@@ -1524,12 +1588,25 @@ def publish_plan(
                     "planning_materialization_missing",
                     "Trusted planning files are missing before publication.",
                 )
+            # This is the branch production takes: the files were materialized
+            # in an earlier job and copied here as an artifact, so readiness
+            # runs against the bytes that are about to become blobs rather than
+            # against whatever the materializer wrote somewhere else.
             manifest = {
                 "change_name": change,
                 "issue_number": issue,
                 "run_id": run_id,
                 "files": files,
                 "implementation_eligibility": False,
+                "implementation_readiness": assert_implementation_readable(
+                    (publication_root / f"openspec/changes/{change}/tasks.md").read_text(
+                        encoding="utf-8"
+                    ),
+                    contract_root=publication_root,
+                    declared_task_ids=[
+                        str(task["task_id"]) for task in result.get("task_slices") or []
+                    ],
+                ),
             }
         else:
             manifest = materialize_plan(
@@ -1693,6 +1770,11 @@ def publish_plan(
                 ],
             },
             "implementation_eligibility": False,
+            "trusted_context_freshness": context_freshness,
+            # Never defaulted. Both branches above run the gate, so a manifest
+            # missing this field means the gate did not run, and asserting
+            # readability that was never checked is worse than not asserting it.
+            "implementation_readiness": manifest["implementation_readiness"],
         }
         validate_document(
             publication_manifest,

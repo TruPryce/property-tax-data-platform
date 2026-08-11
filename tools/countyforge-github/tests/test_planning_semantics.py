@@ -391,7 +391,11 @@ def test_14_the_collin_task_paths_pass() -> None:
         "docs/sources/",
     }
     for task in _result()["task_slices"]:
-        assert set(task["write_paths"]) <= allowed
+        for path in task["write_paths"]:
+            # Task paths name files now, so containment is by prefix rather
+            # than by set membership against the directory ceiling.
+            assert any(path.startswith(prefix) for prefix in allowed), path
+            assert not path.endswith("/"), path
     forbidden = {
         "services/",
         "dags/",
@@ -640,7 +644,7 @@ def test_the_materializer_binds_the_resolved_ceiling_into_its_manifest(tmp_path:
     document = _result()
     document["declared_write_scope"] = ["libs/property-tax-adapters/"]
     for task in document["task_slices"]:
-        task["write_paths"] = ["libs/property-tax-adapters/"]
+        task["write_paths"] = ["libs/property-tax-adapters/src/collin.py"]
     manifest = materialize_plan(
         document,
         publication_root=tmp_path,
@@ -1170,7 +1174,10 @@ def test_issue_18_does_not_authorize_the_root_test_tree() -> None:
 
 def test_a_task_reaching_the_root_test_tree_is_now_refused() -> None:
     document = _result()
-    document["task_slices"][0]["write_paths"] = ["libs/property-tax-adapters/", "tests/"]
+    document["task_slices"][0]["write_paths"] = [
+        "libs/property-tax-adapters/src/collin.py",
+        "tests/test_root.py",
+    ]
     with pytest.raises(ControlPlaneError) as raised:
         validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert raised.value.details["reason"] == "task_path_outside_declared_scope"
@@ -1942,7 +1949,9 @@ def test_the_prompt_states_every_constraint_the_generation_schema_strips() -> No
     the prompt is the only channel for them and must carry them.
     """
 
-    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    prompt = " ".join(
+        Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
     generation = json.loads(
         Path(".ai/schemas/countyforge-plan-generation.schema.json").read_text(encoding="utf-8")
     )
@@ -1976,9 +1985,16 @@ def test_the_generated_requirement_id_and_check_shapes_are_named_in_the_prompt()
     assert document["requirements"][0]["id"] == "R1"
     assert len(document["task_slices"][1]["validation_checks"][0]) > 64
 
-    prompt = Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8")
+    # Whitespace-normalized: the guidance wraps, so a raw read would miss any
+    # phrase that happens to straddle a line break.
+    prompt = " ".join(
+        Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
     assert "`numeric-decoding-exactness`, never `R1`" in prompt
-    assert "short command identifier" in prompt
+    # The wording moved from "a short command identifier" to a named closed set
+    # (because the example it gave -- `make check` -- was the defect), and then
+    # from a set written out in prose to the packet field that carries it.
+    assert "one identifier copied from the packet's `implementation_check_ids`" in prompt
 
 
 # --------------------------------------------------------------------------
@@ -1992,6 +2008,39 @@ RUN_31281189305 = Path("tools/countyforge-github/tests/fixtures/plan-result-run-
 def _run_31281189305(change_type: str) -> dict[str, Any]:
     document = json.loads(RUN_31281189305.read_text(encoding="utf-8"))
     document["affected_capabilities"][0]["change_type"] = change_type
+    return document
+
+
+#: Every plan the pipeline produced before this rule emitted shell commands in
+#: `validation_checks` -- `make test`, `make lint`, `make docs`. It stayed
+#: latent because each of those runs failed earlier, on capability resolution or
+#: on blocked reasons. Implementation would have refused all of them.
+_HISTORICAL_CHECK_DEFECT = ("make check", "make docs", "make lint", "make test", "make typecheck")
+
+
+def _with_supported_checks(document: dict[str, Any]) -> dict[str, Any]:
+    """Apply the check-vocabulary correction the artifact also needs."""
+
+    for task in document["task_slices"]:
+        assert any(check in _HISTORICAL_CHECK_DEFECT for check in task["validation_checks"])
+        task["validation_checks"] = ["repo.check"]
+    return document
+
+
+def _with_file_paths(document: dict[str, Any]) -> dict[str, Any]:
+    """Apply the third correction: every recorded plan wrote directories.
+
+    Each task said "somewhere under this package" and named no artifact, so the
+    plan authorized a whole subtree while describing none of it. Narrowed here
+    to one representative file per declared directory, which is the shape the
+    contract now requires.
+    """
+
+    for index, task in enumerate(document["task_slices"]):
+        task["write_paths"] = [
+            f"{path}artifact_{index}.py" if path.endswith("/") else path
+            for path in task["write_paths"]
+        ]
     return document
 
 
@@ -2029,7 +2078,13 @@ def test_the_single_added_correction_passes_the_whole_semantic_validator() -> No
     next paid run predictable instead of revealing one constraint at a time.
     """
 
-    scope = validate_planning_result(_run_31281189305("ADDED"), contract_root=CONTRACT_ROOT)
+    # Two corrections, not one: the artifact also emitted `make ...` checks,
+    # which the implementation lane cannot run. That defect was latent until
+    # the capability failure ahead of it was fixed.
+    scope = validate_planning_result(
+        _with_file_paths(_with_supported_checks(_run_31281189305("ADDED"))),
+        contract_root=CONTRACT_ROOT,
+    )
     assert scope["resolved_from"] == "issue:18"
     assert scope["required_cross_issues"] == [43]
 
@@ -2042,7 +2097,7 @@ def test_the_corrected_plan_materializes_a_draft_change(tmp_path: Path) -> None:
     from countyforge_github.planning import materialize_plan
 
     shutil.copytree(CONTRACT_ROOT / ".ai", tmp_path / ".ai")
-    document = _run_31281189305("ADDED")
+    document = _with_file_paths(_with_supported_checks(_run_31281189305("ADDED")))
     manifest = materialize_plan(
         document, publication_root=tmp_path, issue_number=18, run_id="run-31281189305"
     )
@@ -2264,7 +2319,9 @@ def test_clearing_blocked_reasons_alone_passes_and_materializes(tmp_path: Path) 
 
     from countyforge_github.planning import materialize_plan
 
-    document = json.loads(RUN_31293882847.read_text(encoding="utf-8"))
+    document = _with_file_paths(
+        _with_supported_checks(json.loads(RUN_31293882847.read_text(encoding="utf-8")))
+    )
     document["blocked_reasons"] = []
     scope = validate_planning_result(document, contract_root=CONTRACT_ROOT)
     assert scope["resolved_from"] == "issue:18"
@@ -2363,3 +2420,101 @@ def test_the_capability_tests_do_not_read_the_working_tree() -> None:
     # Schemas and policy still come from the real tree, so they stay authoritative.
     assert (CONTRACT_ROOT / ".ai/schemas/countyforge-plan-result.schema.json").is_file()
     assert (CONTRACT_ROOT / ".ai/policies/countyforge-planning-scope.v1.json").is_file()
+
+
+# --------------------------------------------------------------------------
+# PR #56 — the Tarrant plan passed planning and would have been refused by
+# implementation, because two contracts disagreed about what a plan may say.
+# --------------------------------------------------------------------------
+
+
+def test_a_validation_check_implementation_cannot_run_is_refused() -> None:
+    """`make check` is not a check identifier, and its space ends the task
+    marker field -- so the whole marker failed to parse and every task fell back
+    to the broad default write scope."""
+
+    from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
+
+    for unsupported in ("make check", "make docs", "pytest", "repo.checks"):
+        document = _result()
+        document["task_slices"][0]["validation_checks"] = [unsupported]
+        with pytest.raises(ControlPlaneError) as raised:
+            _validate(document, required_cross_issues=[43])
+        details = raised.value.details
+        assert details["reason"] == "task_validation_check_unsupported"
+        assert details["unsupported"] == [unsupported]
+        # The refusal names the vocabulary, so the correction is obvious.
+        assert set(details["supported"]) == set(_IMPLEMENTATION_VALIDATION_CHECKS)
+
+
+def test_every_supported_check_identifier_is_accepted() -> None:
+    from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
+
+    for supported in sorted(_IMPLEMENTATION_VALIDATION_CHECKS):
+        document = _result()
+        for task in document["task_slices"]:
+            task["validation_checks"] = [supported]
+        _validate(document, required_cross_issues=[43])
+
+
+def test_no_supported_check_identifier_contains_a_space() -> None:
+    """A space ends the marker field; the vocabulary must never contain one."""
+
+    from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
+
+    for check in _IMPLEMENTATION_VALIDATION_CHECKS:
+        assert " " not in check, check
+
+
+def test_a_trigger_that_repeats_its_own_outcome_is_refused() -> None:
+    """All seven Tarrant scenarios set `when` and `then` to one sentence.
+
+    It passed because `then` was non-empty and the duplicate check compared
+    only *across* requirements, never within a scenario.
+    """
+
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    repeated = "the adapter decodes the value and returns the exact reviewed Decimal"
+    scenario["when"] = repeated
+    scenario["then"] = [repeated]
+    with pytest.raises(ControlPlaneError) as raised:
+        _validate(document, required_cross_issues=[43])
+    assert raised.value.details["reason"] == "scenario_trigger_repeats_outcome"
+    assert raised.value.details["scenario"]
+
+
+def test_a_trigger_echoed_among_several_outcomes_is_still_refused() -> None:
+    document = _result()
+    scenario = document["requirements"][0]["scenarios"][0]
+    repeated = "the adapter decodes the value"
+    scenario["when"] = repeated
+    scenario["then"] = ["the exact reviewed Decimal is returned", repeated]
+    with pytest.raises(ControlPlaneError) as raised:
+        _validate(document, required_cross_issues=[43])
+    assert raised.value.details["reason"] == "scenario_trigger_repeats_outcome"
+
+
+def test_the_prompt_names_the_closed_check_vocabulary_and_the_trigger_rule() -> None:
+    """The prompt offered `make check` as an example, which is what the planner
+    copied into every task."""
+
+    prompt = " ".join(
+        Path(".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
+    # The identifiers themselves are no longer written into the prompt. Prose
+    # restating a registry is prose that drifts from it; the packet carries the
+    # registry, and the prompt points at the packet. That the packet really
+    # carries them is asserted in
+    # `test_the_packet_carries_the_implementation_check_registry`.
+    assert "copied from the packet's `implementation_check_ids`" in prompt
+    assert "it is authoritative over anything stated here" in prompt
+    assert "never a value containing a space" in prompt
+    assert "repeats a `then` is rejected" in prompt
+    # `make check` is still correct for the top-level `validation_commands`;
+    # the defect was offering it as a *validation_checks* example. The prompt
+    # now contrasts the two similarly named fields explicitly.
+    assert "are different fields with similar names" in prompt
+    assert "A shell command in `validation_checks` is rejected" in prompt
+    guidance = prompt[prompt.index("each `validation_checks` entry") :][:600]
+    assert "make check" not in guidance.split("validation_commands` holds")[0]

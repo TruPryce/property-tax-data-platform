@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from countyforge_github.results import (
+    PUBLICATION_STAGES,
     TIMEOUT_EXIT_CODE,
     classify_implementation_lane,
     normalize_publication_result,
@@ -179,18 +180,13 @@ def test_implementation_completed_without_payload_fails_closed(tmp_path: Path) -
 
 # The publisher can only enter consecutive stages, so `completed` is always the
 # exact vocabulary prefix ending at the current stage.
-_STAGES = (
-    "validate_result",
-    "validate_provenance",
-    "resolve_predecessor",
-    "create_blobs",
-    "load_parent_commit",
-    "create_tree",
-    "create_commit",
-    "create_ref",
-    "create_pull_request",
-    "complete",
-)
+#
+# Taken from the production vocabulary rather than restated. Restating it is
+# what broke: the publisher gained `verify_trusted_context` and this list did
+# not, so a complete publication normalized as incomplete. What the vocabulary
+# *contains* is pinned against real publisher behaviour in
+# `test_planning.py::test_the_stage_vocabulary_is_what_the_publisher_enters`.
+_STAGES = PUBLICATION_STAGES
 
 
 def _prefix(stage: str) -> list[str]:

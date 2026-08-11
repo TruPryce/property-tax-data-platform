@@ -18,6 +18,8 @@ from countyforge_runner.resolver import Kernel
 from countyforge_github.contracts import ControlContracts, JsonObject
 from countyforge_github.errors import ControlPlaneError
 from countyforge_github.identity import execution_run_id
+from countyforge_github.planning import planning_trusted_digest
+from countyforge_github.planning_context import assert_context_fresh
 
 
 def build_run_request(
@@ -90,6 +92,23 @@ def build_run_request(
                 "planning_context_required",
                 "Planning requires a frozen planning packet and context manifest.",
             )
+        # The last trusted step before the provider is invoked, and the only one
+        # that holds both the packet and the checkout it will be read against.
+        # A retry reuses the recorded planning context, so a packet built under
+        # one set of contracts can reach a job running under another; refusing
+        # here keeps that packet away from a paid model call.
+        packet = load_json_object(planning_packet_path, kind="planning packet")
+        expected = packet.get("trusted_context_sha256")
+        if not isinstance(expected, str):
+            raise ControlPlaneError(
+                "planning_context_required",
+                "The planning packet does not record the contracts it was built against.",
+            )
+        assert_context_fresh(
+            expected=expected,
+            observed=planning_trusted_digest(contract_root),
+            stage="provider_invocation",
+        )
         request_input = {
             "planning_packet_path": str(planning_packet_path),
             "planning_packet_sha256": file_sha256(planning_packet_path),

@@ -7,12 +7,14 @@
   "required": [
     "contract_version",
     "declared_capabilities",
+    "implementation_check_ids",
     "issue",
     "packet_id",
     "repository",
     "run_id",
     "selection",
-    "sources"
+    "sources",
+    "trusted_context_sha256"
   ],
   "properties": {
     "contract_version": {
@@ -242,6 +244,19 @@
         "minLength": 1,
         "maxLength": 64
       }
+    },
+    "implementation_check_ids": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "trusted_context_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   }
 }

@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
 from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
+from countyforge_github.implementation import (
+    _IMPLEMENTATION_VALIDATION_CHECKS,
+    body_references_issue,
+)
 
 SEMANTIC_DISPOSITION = "planning_semantic_validation_failed"
 
@@ -36,6 +40,18 @@ PLACEHOLDER_PHRASES = (
     "see the description",
     "to be determined",
     "tbd",
+    # The prompt tells the model these are rejected, and until now they were
+    # not: a `then` reading "the parser works correctly" passed unless it
+    # happened to duplicate its `when`. Guidance the validator does not enforce
+    # is guidance the next plan gets to ignore.
+    "works correctly",
+    "behaves correctly",
+    "behaviour is verified",
+    "behavior is verified",
+    "the requirement is met",
+    "requirements are met",
+    "functions as expected",
+    "works as expected",
 )
 
 #: Write scopes no planning change may authorise for itself.  These are the
@@ -211,6 +227,21 @@ def _validate_requirements(result: JsonObject) -> None:
                 phrase = _contains_placeholder(text)
                 if phrase is not None:
                     _fail("scenario_placeholder_text", requirement=identifier, phrase=phrase)
+            # A trigger that states its own outcome describes nothing to
+            # observe.  Every scenario in the Tarrant plan set `when` and `then`
+            # to the same sentence, which passed because `then` was non-empty
+            # and the duplicate check only compared *across* requirements.
+            # Compared after normalising case, surrounding space, internal
+            # runs of whitespace, and a trailing period, so that "the adapter
+            # decodes the literal" and "The adapter decodes the literal."  are
+            # recognised as the same sentence.  This normalises only the
+            # comparison; the stored text is never rewritten.
+            if _comparable(when) in {_comparable(item) for item in then}:
+                _fail(
+                    "scenario_trigger_repeats_outcome",
+                    requirement=identifier,
+                    scenario=str(scenario.get("name", "")),
+                )
             # Two requirements sharing a scenario verbatim describe one
             # observation, so at most one of them is actually observable.
             signature = (*sorted(given), when, *sorted(then))
@@ -329,6 +360,21 @@ def _validate_task_scope(result: JsonObject, declared_scope: Sequence[str]) -> N
         paths = task.get("write_paths")
         if not isinstance(paths, list) or not paths:
             _fail("task_without_write_paths", task=task_id)
+        checks = [str(item) for item in task.get("validation_checks") or []]
+        unsupported = sorted(
+            check for check in checks if check not in _IMPLEMENTATION_VALIDATION_CHECKS
+        )
+        if unsupported:
+            # A check the implementation lane cannot run is not a check.  The
+            # Tarrant plan emitted `make check`, which is not in the vocabulary
+            # and contains a space, so its whole task marker failed to parse and
+            # every task silently fell back to the broad default write scope.
+            _fail(
+                "task_validation_check_unsupported",
+                task=task_id,
+                unsupported=unsupported[:8],
+                supported=sorted(_IMPLEMENTATION_VALIDATION_CHECKS),
+            )
         for raw in paths:
             path = normalize_write_path(str(raw))
             bare = path.rstrip("/")
@@ -339,6 +385,12 @@ def _validate_task_scope(result: JsonObject, declared_scope: Sequence[str]) -> N
                     _fail("task_path_forbidden", task=task_id, path=path)
             if scope and not any(_within(path, allowed) for allowed in scope):
                 _fail("task_path_outside_declared_scope", task=task_id, path=path)
+            # The plan's `declared_write_scope` is a ceiling and may be a
+            # directory.  A task is an execution instruction, so it names the
+            # files it intends to write.  Tarrant declared a directory per task,
+            # which authorises everything under it and describes nothing.
+            if path.endswith("/") or "." not in PurePosixPath(path).name:
+                _fail("task_path_not_a_file", task=task_id, path=path)
 
 
 def _within(path: str, allowed: str) -> bool:
@@ -426,6 +478,12 @@ def _reject_cycles(graph: dict[str, list[str]]) -> None:
 
     for node in sorted(graph):
         visit(node, ())
+
+
+def _comparable(text: str) -> str:
+    """Normalise a sentence for equality testing only, never for storage."""
+
+    return " ".join(str(text).split()).casefold().rstrip(".")
 
 
 def _validate_cross_issue_boundary(result: JsonObject, required_issues: Iterable[int] = ()) -> None:
@@ -518,6 +576,43 @@ def _validate_eligibility(result: JsonObject) -> None:
                 "unresolved_decision_delegated_to_implementation",
                 task=str(task.get("task_id", "")),
                 decisions=undeclared,
+            )
+    _validate_dependency_obligations(result, reasons)
+
+
+#: Relationships that state an obligation this plan cannot satisfy by itself.
+#: `related_to` and `depends_on` are context; these two are blockers, which is
+#: the entire reason the vocabulary was widened.  Tarrant used `related_to` for
+#: "#43 owns these types" and for "Tarrant cannot ship until #43 lands", and
+#: nothing downstream could tell the two apart.
+_BLOCKING_RELATIONSHIPS = frozenset({"blocked_by", "requires_contract_from"})
+
+
+def _validate_dependency_obligations(result: JsonObject, reasons: str) -> None:
+    """A blocking relationship is a blocker, not a note."""
+
+    for entry in result.get("cross_issue_dependencies") or []:
+        if not isinstance(entry, dict):
+            continue
+        relationship = str(entry.get("relationship", ""))
+        if relationship not in _BLOCKING_RELATIONSHIPS:
+            continue
+        issue = entry.get("issue_number")
+        if str(result.get("status")) != "blocked":
+            _fail(
+                "blocking_dependency_not_reflected_in_status",
+                issue=issue,
+                relationship=relationship,
+                status=str(result.get("status", "")),
+            )
+        # Boundary-aware, and the same matcher the implementation path uses:
+        # `"#43" in reasons` was satisfied by a plan that named #430 and never
+        # mentioned its actual blocker.
+        if not isinstance(issue, int) or not body_references_issue(reasons, issue):
+            _fail(
+                "blocking_dependency_absent_from_blocked_reasons",
+                issue=issue,
+                relationship=relationship,
             )
 
 
