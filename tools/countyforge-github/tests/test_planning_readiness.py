@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -440,3 +441,266 @@ def test_the_publication_manifest_records_the_freshness_check() -> None:
     )
     assert "trusted_context_freshness" in schema["required"]
     assert "implementation_readiness" in schema["required"]
+
+
+# --------------------------------------------------------------------------
+# Review fixes: each of these was reported as present and was not
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def planning_inputs(
+    tmp_path: Path, repo_root: Path, trigger_factory: Any
+) -> Iterator[tuple[dict[str, Any], Path, Path]]:
+    """A planning packet where the trusted profile actually admits one.
+
+    Plan inputs are bounded to `.ai/contexts/<run>/`, and the workflow copies
+    the packet there before invoking the provider. Building it anywhere else
+    would exercise a path production never takes -- which is the failure mode
+    this whole PR is about.
+    """
+
+    import shutil
+
+    from countyforge_github.contracts import ControlContracts
+    from countyforge_github.identity import execution_run_id
+    from countyforge_github.planning import build_planning_packet
+
+    trigger = trigger_factory("plan")
+    # The kernel binds the packet to the run the trigger resolves to, so the
+    # packet has to be built under that same identity rather than a literal.
+    run_id = execution_run_id(trigger, ControlContracts(repo_root).execution_policy)
+    context_root = repo_root / ".ai" / "contexts" / tmp_path.name
+    info = build_planning_packet(
+        trigger=trigger,
+        issue={
+            "number": 6,
+            "title": "Feature work",
+            "body": "Problem: bounded planning is needed. Outcome: create an OpenSpec draft.",
+            "labels": [],
+        },
+        contract_root=repo_root,
+        output_dir=context_root,
+        run_id=run_id,
+    )
+    try:
+        yield trigger, Path(info["packet_path"]), Path(info["manifest_path"])
+    finally:
+        shutil.rmtree(context_root, ignore_errors=True)
+
+
+def test_the_pre_provider_check_runs_where_the_packet_is_actually_consumed(
+    repo_root: Path,
+    planning_inputs: tuple[dict[str, Any], Path, Path],
+) -> None:
+    """It was described, tested directly, and called by nothing.
+
+    `build_run_request` is the last trusted step before the provider, so the
+    check belongs there or nowhere. Driving the real entry point is the whole
+    point: asserting on `assert_context_fresh` in isolation is what let the
+    wiring go missing.
+    """
+
+    from countyforge_github.planning import planning_trusted_digest
+    from countyforge_github.requests import build_run_request
+
+    root = repo_root
+    trigger, packet_path, manifest_path = planning_inputs
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    # The packet this checkout would build today: the request builds.
+    assert packet["trusted_context_sha256"] == planning_trusted_digest(root)
+    request = build_run_request(
+        trigger,
+        contract_root=root,
+        target_root=root,
+        planning_packet_path=packet_path,
+        context_manifest_path=manifest_path,
+    )
+    assert request["input"]["planning_packet_path"] == str(packet_path)
+
+    # A packet recorded under other contracts, which is what a retry replays:
+    # the recorded planning context is reused while the tooling has moved on.
+    # The checkout is the real one -- only the packet's own binding differs.
+    replayed = packet_path.with_name("replayed-packet.json")
+    replayed.write_text(
+        json.dumps({**packet, "trusted_context_sha256": "1" * 64}), encoding="utf-8"
+    )
+    with pytest.raises(ControlPlaneError) as raised:
+        build_run_request(
+            trigger,
+            contract_root=root,
+            target_root=root,
+            planning_packet_path=replayed,
+            context_manifest_path=manifest_path,
+        )
+    assert raised.value.code == STALE_DISPOSITION
+    assert raised.value.details["stage"] == "provider_invocation"
+    assert raised.value.details["expected"] == "1" * 64
+    assert raised.value.details["observed"] == packet["trusted_context_sha256"]
+
+
+def test_the_pre_provider_digest_tracks_a_real_contract_edit(tmp_path: Path) -> None:
+    """And the digest it compares is not inert: editing any bound contract
+    moves it, so the comparison above can actually fail."""
+
+    import shutil
+
+    from countyforge_github.planning import planning_trusted_digest
+
+    root = Path.cwd()
+    mirror = tmp_path / "mirror"
+    shutil.copytree(root / ".ai", mirror / ".ai")
+    shutil.copytree(root / "openspec", mirror / "openspec")
+    baseline = planning_trusted_digest(mirror)
+    prompt = mirror / ".ai/prompts/countyforge-plan.v1.md"
+    prompt.write_text(prompt.read_text(encoding="utf-8") + "\nAn added rule.\n", encoding="utf-8")
+    assert planning_trusted_digest(mirror) != baseline
+
+
+def test_a_packet_without_the_digest_never_reaches_the_provider(
+    repo_root: Path, planning_inputs: tuple[dict[str, Any], Path, Path]
+) -> None:
+    """Absent evidence is not evidence of freshness."""
+
+    from countyforge_github.requests import build_run_request
+
+    trigger, source_path, manifest_path = planning_inputs
+    packet = json.loads(source_path.read_text(encoding="utf-8"))
+    packet.pop("trusted_context_sha256")
+    stripped = source_path.with_name("stripped-packet.json")
+    stripped.write_text(json.dumps(packet), encoding="utf-8")
+
+    with pytest.raises(ControlPlaneError) as raised:
+        build_run_request(
+            trigger,
+            contract_root=repo_root,
+            target_root=repo_root,
+            planning_packet_path=stripped,
+            context_manifest_path=manifest_path,
+        )
+    assert raised.value.code == "planning_context_required"
+
+
+def test_the_already_materialized_path_proves_readiness_rather_than_claiming_it(
+    tmp_path: Path,
+) -> None:
+    """Production publishes with `--already-materialized`.
+
+    That branch rebuilt the manifest by hand, so the readiness evidence in every
+    real publication came from a default rather than from a check -- an
+    attestation of readability that nothing had read. It now runs the gate on
+    the copied bytes that are about to become blobs.
+    """
+
+    import sys
+
+    sys.path.insert(0, "tools/countyforge-github/tests")
+    from countyforge_github.planning import materialize_plan, publication_progress, publish_plan
+    from test_planning import _publication_case, _PublicationGitHub
+
+    case = _publication_case(tmp_path, "already")
+    root = case["publication_root"]
+    assert isinstance(root, Path)
+    materialize_plan(
+        dict(case["result"]),  # type: ignore[arg-type]
+        publication_root=root,
+        issue_number=6,
+        run_id=str(case["run_id"]),
+    )
+    case["already_materialized"] = True
+    with publication_progress() as progress:
+        published = publish_plan(_PublicationGitHub(), progress=progress, **case)  # type: ignore[arg-type]
+    readiness = published["publication_manifest"]["implementation_readiness"]
+    assert readiness["implementation_readable"] is True
+    # The defect was `task_count: 0` on a plan that has tasks.
+    assert readiness["task_count"] == len(case["result"]["task_slices"])  # type: ignore[index]
+    assert readiness["task_ids"] == [
+        str(task["task_id"])
+        for task in case["result"]["task_slices"]  # type: ignore[index]
+    ]
+
+
+def test_the_already_materialized_path_refuses_tasks_it_cannot_read(tmp_path: Path) -> None:
+    """The copied artifact is what gets published, so that is what is checked."""
+
+    import sys
+
+    sys.path.insert(0, "tools/countyforge-github/tests")
+    from countyforge_github.planning import materialize_plan, publication_progress, publish_plan
+    from test_planning import _publication_case, _PublicationGitHub
+
+    case = _publication_case(tmp_path, "tampered")
+    root = case["publication_root"]
+    assert isinstance(root, Path)
+    manifest = materialize_plan(
+        dict(case["result"]),  # type: ignore[arg-type]
+        publication_root=root,
+        issue_number=6,
+        run_id=str(case["run_id"]),
+    )
+    change = str(manifest["change_name"])
+    tasks = root / f"openspec/changes/{change}/tasks.md"
+    tasks.write_text(
+        tasks.read_text(encoding="utf-8").replace("checks=repo.check", "checks=make check"),
+        encoding="utf-8",
+    )
+    case["already_materialized"] = True
+    github = _PublicationGitHub()
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress() as progress:
+            publish_plan(github, progress=progress, **case)  # type: ignore[arg-type]
+    assert raised.value.code == READINESS_DISPOSITION
+    # Before the first Git object, which is the promise the stage order makes.
+    assert github.created_refs == []
+
+
+def test_a_longer_issue_number_does_not_satisfy_a_blocking_dependency() -> None:
+    """`"#43" in reasons` was true for a plan that only ever named #430."""
+
+    document = _result()
+    document["cross_issue_dependencies"][0]["relationship"] = "blocked_by"
+    document["status"] = "blocked"
+    document["blocked_reasons"] = ["Waiting on the shared record contract in #430."]
+    assert _refusal(document) == "blocking_dependency_absent_from_blocked_reasons"
+
+    document["blocked_reasons"] = ["Waiting on the shared record contract in #43."]
+    assert validate_planning_semantics(document, contract_root=CONTRACT_ROOT)["task_count"] == 4
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "the parser works correctly",
+        "The parser works correctly",
+        "the behaviour is verified",
+        "the requirement is met",
+        "the decoder functions as expected",
+    ],
+)
+def test_an_unobservable_outcome_is_refused_as_the_prompt_says(outcome: str) -> None:
+    """The prompt called these rejected; the validator had no such phrase.
+
+    Guidance the validator does not enforce is guidance the next plan ignores,
+    which is the same failure mode as `make check` being offered as an example.
+    """
+
+    document = _result()
+    document["requirements"][0]["scenarios"][0]["then"] = [outcome]
+    assert _refusal(document) == "scenario_placeholder_text"
+
+
+def test_the_prompt_examples_are_exactly_the_phrases_the_validator_rejects() -> None:
+    """Pin the two together so they cannot drift apart again."""
+
+    from countyforge_github.planning_semantics import PLACEHOLDER_PHRASES
+
+    prompt = " ".join(
+        (CONTRACT_ROOT / ".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
+    quoted = prompt[
+        prompt.index("are not observations") - 400 : prompt.index("are not observations")
+    ]
+    for phrase in ("works correctly", "behaviour is verified", "the requirement is met"):
+        assert phrase in quoted.casefold(), phrase
+        assert phrase in PLACEHOLDER_PHRASES, phrase

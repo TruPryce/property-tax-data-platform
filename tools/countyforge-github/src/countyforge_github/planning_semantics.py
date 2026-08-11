@@ -22,7 +22,10 @@ from typing import NoReturn
 
 from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
-from countyforge_github.implementation import _IMPLEMENTATION_VALIDATION_CHECKS
+from countyforge_github.implementation import (
+    _IMPLEMENTATION_VALIDATION_CHECKS,
+    body_references_issue,
+)
 
 SEMANTIC_DISPOSITION = "planning_semantic_validation_failed"
 
@@ -37,6 +40,18 @@ PLACEHOLDER_PHRASES = (
     "see the description",
     "to be determined",
     "tbd",
+    # The prompt tells the model these are rejected, and until now they were
+    # not: a `then` reading "the parser works correctly" passed unless it
+    # happened to duplicate its `when`. Guidance the validator does not enforce
+    # is guidance the next plan gets to ignore.
+    "works correctly",
+    "behaves correctly",
+    "behaviour is verified",
+    "behavior is verified",
+    "the requirement is met",
+    "requirements are met",
+    "functions as expected",
+    "works as expected",
 )
 
 #: Write scopes no planning change may authorise for itself.  These are the
@@ -590,7 +605,10 @@ def _validate_dependency_obligations(result: JsonObject, reasons: str) -> None:
                 relationship=relationship,
                 status=str(result.get("status", "")),
             )
-        if f"#{issue}" not in reasons:
+        # Boundary-aware, and the same matcher the implementation path uses:
+        # `"#43" in reasons` was satisfied by a plan that named #430 and never
+        # mentioned its actual blocker.
+        if not isinstance(issue, int) or not body_references_issue(reasons, issue):
             _fail(
                 "blocking_dependency_absent_from_blocked_reasons",
                 issue=issue,

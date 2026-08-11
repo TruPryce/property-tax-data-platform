@@ -603,6 +603,29 @@ def _fit_packet_to_ceiling(
 MAX_DECLARED_CAPABILITIES = 128
 
 
+def planning_trusted_digest(contract_root: Path) -> str:
+    """The one derivation of a plan's trusted context, used on both sides.
+
+    The packet records this; the provider step re-derives it from its own
+    checkout before invoking the model.  Both call this function rather than
+    assembling the same `extra` separately, because two copies of a derivation
+    is how the vocabularies in PR #56 came to disagree in the first place.
+
+    The inventory is re-derived from the root, never read back out of the
+    packet: a capability archived between packet and provider changes no
+    contract file at all, and reading the packet's own copy would compare a
+    value with itself.
+    """
+
+    return trusted_context_digest(
+        contract_root,
+        extra={
+            "capabilities": _bounded_capability_inventory(contract_root),
+            "checks": implementation_check_ids(),
+        },
+    )
+
+
 def _bounded_capability_inventory(contract_root: Path) -> list[str]:
     """The inventory, or a refusal -- never a silent truncation.
 
@@ -826,15 +849,9 @@ def build_planning_packet(
         # inventory it has no reason to invent one.
         "implementation_check_ids": implementation_check_ids(),
         # What the trusted half of this plan's input was, at the moment the
-        # model read it.  Publication re-derives this and refuses a plan whose
-        # base moved in between.
-        "trusted_context_sha256": trusted_context_digest(
-            contract_root,
-            extra={
-                "capabilities": _bounded_capability_inventory(contract_root),
-                "checks": implementation_check_ids(),
-            },
-        ),
+        # model read it.  The provider step re-derives this from its own
+        # checkout and refuses a packet built against other contracts.
+        "trusted_context_sha256": planning_trusted_digest(contract_root),
         "planning_context_sha256": computed_context_sha256,
         "redactions": {
             "applied": title_redactions + body_redactions + comment_redactions > 0,
@@ -1572,12 +1589,25 @@ def publish_plan(
                     "planning_materialization_missing",
                     "Trusted planning files are missing before publication.",
                 )
+            # This is the branch production takes: the files were materialized
+            # in an earlier job and copied here as an artifact, so readiness
+            # runs against the bytes that are about to become blobs rather than
+            # against whatever the materializer wrote somewhere else.
             manifest = {
                 "change_name": change,
                 "issue_number": issue,
                 "run_id": run_id,
                 "files": files,
                 "implementation_eligibility": False,
+                "implementation_readiness": assert_implementation_readable(
+                    (publication_root / f"openspec/changes/{change}/tasks.md").read_text(
+                        encoding="utf-8"
+                    ),
+                    contract_root=publication_root,
+                    declared_task_ids=[
+                        str(task["task_id"]) for task in result.get("task_slices") or []
+                    ],
+                ),
             }
         else:
             manifest = materialize_plan(
@@ -1742,8 +1772,10 @@ def publish_plan(
             },
             "implementation_eligibility": False,
             "trusted_context_freshness": context_freshness,
-            "implementation_readiness": manifest.get("implementation_readiness")
-            or {"contract_version": 1, "implementation_readable": True, "task_count": 0},
+            # Never defaulted. Both branches above run the gate, so a manifest
+            # missing this field means the gate did not run, and asserting
+            # readability that was never checked is worse than not asserting it.
+            "implementation_readiness": manifest["implementation_readiness"],
         }
         validate_document(
             publication_manifest,
