@@ -704,3 +704,191 @@ def test_the_prompt_examples_are_exactly_the_phrases_the_validator_rejects() -> 
     for phrase in ("works correctly", "behaviour is verified", "the requirement is met"):
         assert phrase in quoted.casefold(), phrase
         assert phrase in PLACEHOLDER_PHRASES, phrase
+
+
+# --------------------------------------------------------------------------
+# Re-review 4905830243: four findings, all in the freshness feature
+# --------------------------------------------------------------------------
+
+
+def test_the_stage_vocabulary_is_what_the_publisher_enters(
+    tmp_path: Path, planning_inputs: tuple[dict[str, Any], Path, Path]
+) -> None:
+    """The vocabulary was declared twice and the copies drifted.
+
+    Collapsing them to one definition removes the drift but proves nothing on
+    its own -- a single wrong list is still wrong. So this drives a real
+    publication and asserts that what the publisher actually recorded is what
+    the normalizer accepts. A stage added to the publisher and to nothing else
+    fails here.
+    """
+
+    import sys
+
+    sys.path.insert(0, "tools/countyforge-github/tests")
+    from countyforge_github.planning import publication_progress, publish_plan
+    from countyforge_github.results import PUBLICATION_STAGES, normalize_publication_result
+    from test_planning import _publication_case, _PublicationGitHub
+
+    case = _publication_case(tmp_path, "vocabulary")
+    progress_path = tmp_path / "vocabulary-progress.json"
+    with publication_progress(progress_path) as progress:
+        published = publish_plan(_PublicationGitHub(), progress=progress, **case)  # type: ignore[arg-type]
+
+    recorded = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert recorded["stage"] == "complete"
+    assert recorded["completed"] == list(PUBLICATION_STAGES[:-1])
+    # `verify_trusted_context` is genuinely one of them, not merely consistent.
+    assert "verify_trusted_context" in recorded["completed"]
+
+    # And the normalizer agrees, which is what drift broke: a successful
+    # publication was reported as incomplete. Driven through the files the
+    # workflow actually hands it, not through a dict shaped like them.
+    result_path = tmp_path / "vocabulary-result.json"
+    result_path.write_text(json.dumps(published), encoding="utf-8")
+    normalized = normalize_publication_result(
+        result_path=result_path, progress_path=progress_path, exit_code=0
+    )
+    # `publication_result_incomplete` is what drift produced: a publication
+    # that did everything, reported as having not finished.
+    assert normalized["disposition"] == "planning_publication_completed"
+    assert normalized["ok"] is True
+    assert normalized["exit_code"] == 0
+    assert normalized["details"]["stage"] == "complete"
+    assert normalized["details"]["completed"] == list(PUBLICATION_STAGES[:-1])
+
+
+def test_publication_fails_closed_when_the_default_branch_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    """It recorded the skip and published anyway.
+
+    Recording that freshness could not be established, and then publishing as
+    though it had been, is the fail-open this stage exists to prevent.
+    """
+
+    import sys
+
+    sys.path.insert(0, "tools/countyforge-github/tests")
+    from countyforge_github.planning import publication_progress, publish_plan
+    from countyforge_github.planning_context import UNVERIFIABLE_DISPOSITION
+    from test_planning import _publication_case, _PublicationGitHub
+
+    case = _publication_case(tmp_path, "unresolvable")
+    github = _PublicationGitHub()
+
+    def _no_profile(repository: str) -> dict[str, Any]:
+        raise ControlPlaneError("github_api_error", "GitHub API request failed.", {"status": 503})
+
+    github.repository_profile = _no_profile  # type: ignore[method-assign]
+    with pytest.raises(ControlPlaneError) as raised:  # noqa: PT012 - the boundary is under test
+        with publication_progress() as progress:
+            publish_plan(github, progress=progress, **case)  # type: ignore[arg-type]
+    assert raised.value.code == UNVERIFIABLE_DISPOSITION
+    assert raised.value.details["reason"] == "default_branch_unavailable"
+    # Before the first Git object, which is what "fails closed" has to mean.
+    assert github.created_refs == []
+    assert github.pull_requests == []
+
+
+@pytest.mark.parametrize(
+    ("comparison", "reason"),
+    [
+        ({"total_commits": 1}, "compare_files_unavailable"),
+        ({"files": None, "total_commits": 1}, "compare_files_unavailable"),
+        (
+            {"files": [{"filename": "a.py"}], "files_complete": False, "total_commits": 1},
+            "compare_files_incomplete",
+        ),
+        (
+            {
+                "files": [{"filename": f"file-{index}.py"} for index in range(300)],
+                "total_commits": 4,
+            },
+            "compare_files_incomplete",
+        ),
+        (
+            {"files": [{"filename": "a.py"}], "total_commits": "many"},
+            "compare_metadata_malformed",
+        ),
+        ({"files": [], "total_commits": 3}, "compare_files_empty_for_commit_range"),
+    ],
+)
+def test_incomplete_compare_evidence_never_establishes_freshness(
+    comparison: dict[str, Any], reason: str
+) -> None:
+    """A capped file list is a sample, not a report that nothing else changed.
+
+    GitHub caps compare responses at 300 files. A changed `.ai/schemas/...`
+    sitting outside the returned page would otherwise read as proof that the
+    trusted context held. Implementation approval already refuses on exactly
+    this limitation; publication now does too.
+    """
+
+    from countyforge_github.planning_context import UNVERIFIABLE_DISPOSITION
+
+    class _Capped:
+        def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, Any]:
+            del repository, base_sha, head_sha
+            return comparison
+
+    with pytest.raises(ControlPlaneError) as raised:
+        assert_base_context_unmoved(
+            _Capped(), repository="o/r", target_sha="a" * 40, default_branch_sha="b" * 40
+        )
+    assert raised.value.code == UNVERIFIABLE_DISPOSITION
+    assert raised.value.details["reason"] == reason
+
+
+def test_complete_compare_evidence_still_publishes() -> None:
+    """The fail-closed posture must not swallow the ordinary case."""
+
+    class _Complete:
+        def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, Any]:
+            del repository, base_sha, head_sha
+            return {
+                "files": [{"filename": "libs/property-tax-adapters/src/collin.py"}],
+                "files_complete": True,
+                "total_commits": 2,
+            }
+
+    evidence = assert_base_context_unmoved(
+        _Complete(), repository="o/r", target_sha="a" * 40, default_branch_sha="b" * 40
+    )
+    assert evidence["compared"] is True
+    assert evidence["reason"] == "base_moved_without_touching_context"
+
+
+def test_no_surviving_prompt_guidance_offers_a_shell_command_as_a_task_check() -> None:
+    """The corrected guidance was contradicted seventy lines later.
+
+    A later bullet still said "include only checks supported by the packet and
+    repository, such as `make check`, `make runner-contract-tests`" -- which is
+    the #56 defect restated in the same file that forbids it. The model reads
+    the whole prompt, so a single surviving example is enough to reproduce it.
+    """
+
+    prompt = " ".join(
+        (CONTRACT_ROOT / ".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
+    occurrences = [index for index in range(len(prompt)) if prompt.startswith("`make ", index)]
+    # Exactly one, and it is the sentence naming what `validation_commands`
+    # holds -- the one place a shell command is the correct answer.
+    assert len(occurrences) == 1, [prompt[index : index + 40] for index in occurrences]
+    sentence = prompt[max(occurrences[0] - 200, 0) : occurrences[0] + 40]
+    assert "`validation_commands` holds shell commands such as `make check`" in sentence
+    # And no bullet anywhere offers a `make` target as a *task* check.
+    assert "`make runner-contract-tests`" not in prompt
+    assert "`make docs`" not in prompt
+
+
+def test_the_task_ordering_bullet_points_at_the_registry() -> None:
+    """And the bullet that carried the contradiction now names the registry."""
+
+    prompt = " ".join(
+        (CONTRACT_ROOT / ".ai/prompts/countyforge-plan.v1.md").read_text(encoding="utf-8").split()
+    )
+    bullet = prompt[prompt.index("Order task slices by dependency") :][:400]
+    assert "implementation_check_ids" in bullet
+    assert "no shell command" in bullet
+    assert "make " not in bullet

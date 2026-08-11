@@ -43,6 +43,7 @@ from countyforge_github.implementation_readiness import (
     implementation_check_ids,
 )
 from countyforge_github.planning_context import (
+    UNVERIFIABLE_DISPOSITION,
     assert_base_context_unmoved,
     trusted_context_digest,
 )
@@ -53,6 +54,7 @@ from countyforge_github.planning_semantics import (
     validate_planning_semantics,
 )
 from countyforge_github.redaction import redact_untrusted_text
+from countyforge_github.results import PUBLICATION_STAGES
 
 _CHANGE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SAFE_PATH = re.compile(
@@ -1227,19 +1229,11 @@ def materialize_plan(
 # Publication is a multi-step sequence against GitHub's Git data API.  Failing
 # before the ref exists is operationally different from failing after the branch
 # is visible, and a sanitized status code alone cannot tell the two apart.
-_PUBLICATION_STAGES = (
-    "validate_result",
-    "validate_provenance",
-    "verify_trusted_context",
-    "resolve_predecessor",
-    "create_blobs",
-    "load_parent_commit",
-    "create_tree",
-    "create_commit",
-    "create_ref",
-    "create_pull_request",
-    "complete",
-)
+#
+# The sequence itself lives in `results.py`, which normalizes what the publisher
+# writes.  This module used to hold a second copy, and adding a stage here and
+# not there made a complete publication read as incomplete.
+_PUBLICATION_STAGES = PUBLICATION_STAGES
 
 
 class PublicationProgress:
@@ -1540,17 +1534,21 @@ def publish_plan(
         progress.enter("verify_trusted_context")
         live = resolve_default_branch(github, repository=repository, at=run_id)
         head = live.get("default_branch_sha")
-        if isinstance(head, str):
-            context_freshness = assert_base_context_unmoved(
-                github,
-                repository=repository,
-                target_sha=target_sha,
-                default_branch_sha=head,
+        if not isinstance(head, str):
+            # Fails closed.  Recording the skip in the manifest was still
+            # publishing a plan whose base nobody had checked, and an unverified
+            # base is exactly the condition this stage exists to refuse.
+            raise ControlPlaneError(
+                UNVERIFIABLE_DISPOSITION,
+                "The trusted planning context could not be verified before publication.",
+                {"stage": "publication", "reason": "default_branch_unavailable"},
             )
-        else:
-            # Recorded rather than silently skipped: a publication that could
-            # not verify its base says so in its own manifest.
-            context_freshness = {"compared": False, "reason": "default_branch_unavailable"}
+        context_freshness = assert_base_context_unmoved(
+            github,
+            repository=repository,
+            target_sha=target_sha,
+            default_branch_sha=head,
+        )
         progress.enter("resolve_predecessor")
         change = str(result["proposed_change_name"])
         base_branch = planning_branch(issue, change)

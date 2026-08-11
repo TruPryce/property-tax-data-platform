@@ -174,9 +174,10 @@ Plan for this repository's actual boundaries and current six-county scope:
   use `related_to` for a dependency that actually blocks; that is the defect this vocabulary
   exists to prevent. A task whose scope or description reaches into a declared boundary is
   refused.
-- Order task slices by dependency and name the affected package or contract. Include only checks
-  supported by the packet and repository, such as `make check`, `make runner-contract-tests`, or
-  the narrower CountyForge check targets.
+- Order task slices by dependency and name the affected package or contract. A task's
+  `validation_checks` hold only identifiers from the packet's `implementation_check_ids`, as
+  stated above; this bullet adds no other source and no shell command. Repository-wide commands
+  belong in the top-level `validation_commands`.
 - State data migration, backfill, rollback, source-license, privacy, and compatibility concerns when
   the issue affects schemas, county sources, release semantics, publication, or runtime behavior.
 - Cite every material repository fact or issue claim with an exact packet `source_id`. Citations

@@ -13,9 +13,16 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # Mirrors the publisher's closed vocabulary; a progress document naming anything
 # else is untrusted evidence and is ignored rather than reported.
+#: The closed publication stage vocabulary, in the order the publisher enters
+#: it.  This is the only definition: `planning.py` imports it rather than
+#: keeping its own copy, because it did keep one, and adding
+#: `verify_trusted_context` to the publisher without adding it here made every
+#: successful publication normalize as incomplete.  Two lists describing one
+#: sequence is the same defect this module's callers exist to prevent.
 PUBLICATION_STAGES = (
     "validate_result",
     "validate_provenance",
+    "verify_trusted_context",
     "resolve_predecessor",
     "create_blobs",
     "load_parent_commit",

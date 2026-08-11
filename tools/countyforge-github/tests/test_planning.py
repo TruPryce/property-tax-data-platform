@@ -27,11 +27,16 @@ from countyforge_github.planning import (
     validate_planning_result,
 )
 from countyforge_github.redaction import redact_untrusted_text
-from countyforge_github.results import normalize_publication_result
+from countyforge_github.results import PUBLICATION_STAGES, normalize_publication_result
 from countyforge_test_support import controlled_contract_root
 
 #: Capability inventory is controlled here; see `controlled_contract_root`.
 CONTRACT_ROOT = controlled_contract_root()
+
+
+#: The commit every publication case targets, so a double can answer
+#: "the default branch has not moved" without inventing a second identity.
+_HEAD_SHA = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path.cwd(), text=True).strip()
 
 
 def _trigger(root: Path) -> dict[str, object]:
@@ -757,6 +762,13 @@ class _PublicationGitHub:
         self.commits: dict[str, dict[str, object]] = {}
         self.fail_at = fail_at
         self.status = status
+        #: What the default branch changed since the run's target, if anything.
+        self.compare_files: list[dict[str, object]] = []
+        #: Where the default branch head points. Every publication case targets
+        #: the repository HEAD, so the ordinary case is a base that has not
+        #: moved and a compare that never happens. Tests that need a moved base
+        #: assign this and `compare_files`.
+        self.default_branch_sha: str = _HEAD_SHA
 
     def _maybe_fail(self, operation: str) -> None:
         """Stand in for a sanitized GitHub REST failure at one mutation."""
@@ -821,9 +833,24 @@ class _PublicationGitHub:
     def get_git_ref(self, repository: str, ref: str) -> dict[str, object] | None:
         del repository
         self._maybe_fail("get_git_ref")
+        if ref == "refs/heads/main" and ref not in self.refs:
+            return {"ref": ref, "object": {"sha": self.default_branch_sha, "type": "commit"}}
         if ref not in self.refs:
             return None
         return {"ref": ref, "object": {"sha": self.refs[ref], "type": "commit"}}
+
+    # Publication verifies its trusted base before creating any Git object, so
+    # the double has to be able to answer that. The default branch sits on the
+    # run's own target by default: an unmoved base, which is the ordinary case.
+    def repository_profile(self, repository: str) -> dict[str, object]:
+        del repository
+        self._maybe_fail("repository_profile")
+        return {"default_branch": "main"}
+
+    def compare_commits(self, repository: str, base_sha: str, head_sha: str) -> dict[str, object]:
+        del repository, base_sha, head_sha
+        self._maybe_fail("compare_commits")
+        return {"files": list(self.compare_files), "files_complete": True, "total_commits": 1}
 
     def update_git_ref(self, repository: str, ref: str, sha: str) -> None:
         del repository, ref, sha
@@ -925,19 +952,8 @@ def test_publication_deduplicates_and_supersedes_without_overwriting(tmp_path: P
 
 
 # The closed publication stage vocabulary, in the order the publisher enters it.
-_STAGE_ORDER = (
-    "validate_result",
-    "validate_provenance",
-    "verify_trusted_context",
-    "resolve_predecessor",
-    "create_blobs",
-    "load_parent_commit",
-    "create_tree",
-    "create_commit",
-    "create_ref",
-    "create_pull_request",
-    "complete",
-)
+# One definition, in `results.py`; the test below proves the publisher agrees.
+_STAGE_ORDER = PUBLICATION_STAGES
 
 
 def _publication_case(tmp_path: Path, name: str, run_id: str = "plan-stage") -> dict[str, object]:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import NoReturn
 
 from countyforge_github.contracts import JsonObject
 from countyforge_github.errors import ControlPlaneError
@@ -100,7 +101,32 @@ def assert_context_fresh(*, expected: str, observed: str, stage: str) -> None:
 #: Changes under these prefixes change what a correct plan says.  `openspec/specs/`
 #: is included because the declared capability inventory is derived from it, and
 #: that inventory is what tells a plan whether a capability already exists.
-_STALENESS_PREFIXES: tuple[str, ...] = (".ai/prompts/", ".ai/schemas/", ".ai/policies/")
+_STALENESS_PREFIXES: tuple[str, ...] = (
+    ".ai/prompts/",
+    ".ai/schemas/",
+    ".ai/policies/",
+    "openspec/specs/",
+)
+
+#: GitHub caps a compare response at 300 files.  At the cap the list is a sample.
+_COMPARE_FILE_CAP = 300
+
+UNVERIFIABLE_DISPOSITION = "planning_context_unverifiable"
+
+
+def _unverifiable(reason: str, **details: object) -> NoReturn:
+    """Refuse when freshness cannot be established, rather than assuming it.
+
+    Not knowing whether the trusted context moved is not the same as knowing it
+    did not.  Everything in this module exists to make that distinction, so
+    treating an absent or capped answer as "unmoved" would defeat all of it.
+    """
+
+    raise ControlPlaneError(
+        UNVERIFIABLE_DISPOSITION,
+        "The trusted planning context could not be verified before publication.",
+        {"stage": "publication", "reason": reason, **details},
+    )
 
 
 def assert_base_context_unmoved(
@@ -115,6 +141,12 @@ def assert_base_context_unmoved(
     question the repository no longer asks.  Such a plan is re-planned against
     the current base rather than merged as though nothing moved.
 
+    Compare evidence must be *complete* to prove anything.  A capped or partial
+    response would let a changed `.ai/...` file sit outside the returned list
+    and read as proof that nothing changed, so incomplete evidence refuses.
+    This mirrors the posture implementation approval already takes on the same
+    GitHub limitation.
+
     Returns bounded evidence when the base is unmoved or moved harmlessly.
     """
 
@@ -123,18 +155,25 @@ def assert_base_context_unmoved(
     comparison = github.compare_commits(repository, target_sha, default_branch_sha)
     files = comparison.get("files")
     if not isinstance(files, list):
-        raise ControlPlaneError(
-            "github_api_invalid_response", "GitHub commit comparison is unavailable."
-        )
+        # The compare API omits file evidence when it cannot provide a complete
+        # response.  Commit metadata alone never establishes freshness.
+        _unverifiable("compare_files_unavailable")
+    if comparison.get("files_complete") is False or len(files) >= _COMPARE_FILE_CAP:
+        _unverifiable("compare_files_incomplete", file_count=len(files))
+    try:
+        total_commits = int(comparison.get("total_commits", 0))
+    except (TypeError, ValueError):
+        _unverifiable("compare_metadata_malformed")
+    if total_commits > 0 and not files:
+        # A non-empty commit range with no files is an incomplete answer, not a
+        # report that those commits touched nothing.
+        _unverifiable("compare_files_empty_for_commit_range", total_commits=total_commits)
     changed = sorted(
         {
             str(entry.get("filename", ""))
             for entry in files
             if isinstance(entry, dict)
-            and (
-                str(entry.get("filename", "")).startswith(_STALENESS_PREFIXES)
-                or str(entry.get("filename", "")).startswith("openspec/specs/")
-            )
+            and str(entry.get("filename", "")).startswith(_STALENESS_PREFIXES)
         }
     )
     if changed:
