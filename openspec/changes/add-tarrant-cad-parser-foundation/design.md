@@ -14,7 +14,16 @@
 
 ## Proposed architecture
 
-Produce a reviewable five-file OpenSpec change defining the synthetic Tarrant certified-core physical layout, lexical rules, native record, provenance, diagnostics, privacy, atomicity, and non-production boundaries, while deferring vendor-neutral shared-record conversion until the contracts owned by Issue #43 exist.
+All work lands inside the existing adapter boundary. `property_tax_adapters.sources.texas.tarrant` gains four layers, each depending only on the one beneath it:
+
+1. **Declared contracts** — parser contract version `1`, the physical descriptor (ISO-8859-1, `|`, `"` with doubled-quote escaping, LF and CRLF), the exact sixteen-name required header projection, and the closed twenty-one-code diagnostic vocabulary.
+2. **Physical layer** — strict decoding, BOM rejection, quote-aware field splitting, single-physical-line records, one-based row numbering, exact-name header binding, observed-width validation, metadata-only extras, and the SHA-256 layout fingerprint.
+3. **Lexical layer** — the approved division, year, account, identifier, text, monetary, and date grammars; empty-text-only nulls; release-wide account uniqueness; and release-level atomic rejection with bounded, deterministically truncated diagnostics.
+4. **Record layer** — the frozen `TarrantCertifiedSourceRecord` and `TarrantSourceProvenance`.
+
+A fifth layer, conversion into the shared vendor-neutral `AppraisalSourceRecord`, imports `property_tax_adapters.sources.contracts` and is therefore blocked on Issue #43. It is a separate task so that layers 1 through 4 ship without it, and no county-local substitute is written while it waits.
+
+Supporting files are `libs/property-tax-adapters/tests/fixtures/tarrant_synthetic.py` for independently authored synthetic members and literal expected results, `libs/property-tax-adapters/tests/test_tarrant_parser.py` for contract, failure, privacy, atomicity, and architecture coverage, and `docs/sources/tarrant-parser-foundation.md` for the bounded source documentation.
 
 ## Dependency direction
 

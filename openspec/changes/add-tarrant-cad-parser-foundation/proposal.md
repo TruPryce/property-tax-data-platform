@@ -4,7 +4,9 @@ The repository needs a deterministic, adapter-local foundation contract for pars
 
 ## Outcome
 
-Produce a reviewable five-file OpenSpec change defining the synthetic Tarrant certified-core physical layout, lexical rules, native record, provenance, diagnostics, privacy, atomicity, and non-production boundaries, while deferring vendor-neutral shared-record conversion until the contracts owned by Issue #43 exist.
+Implement the synthetic Tarrant certified-core parser in the existing Tarrant adapter module, with independently authored synthetic fixtures, a Tarrant test module, and bounded source documentation. The parser decodes one already-selected member, binds the sixteen required headers by exact name, validates the approved lexical grammars, produces the frozen `TarrantCertifiedSourceRecord` with bounded provenance, rejects a logical release atomically through a closed diagnostic vocabulary, and excludes sensitive and unknown-column values.
+
+Native parsing, fixtures, tests, and documentation are implementable now. Only conversion into the shared vendor-neutral records waits on the contracts owned by Issue #43.
 
 ## Scope
 
@@ -38,10 +40,10 @@ Produce a reviewable five-file OpenSpec change defining the synthetic Tarrant ce
 
 ## Unresolved decisions
 
-- Issue #43 has not yet supplied the accepted and implemented SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release-processing, and streaming contracts required for correct vendor-neutral Tarrant conversion.
+- Issue #43 has not yet supplied the accepted and implemented SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release-processing, and streaming contracts. This blocks task 6.1 only. Tasks 1.1 through 5.1 — the Tarrant-native physical contracts, fixtures, physical and header parsing, lexical validation, the frozen native record, the test module, and the source documentation — are runnable without it, and the change adds no county-local substitute while waiting.
 
 ## Cross-issue boundaries
 
-- #43 (requires_contract_from): out of scope here and owned there: SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release processing, streaming and atomic-stage contracts
+- #43 (requires_contract_from, blocking task 6.1 only): out of scope here and owned there: SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release processing, streaming and atomic-stage contracts. Tarrant-native parsing and county diagnostics are designed and implemented independently of that boundary.
 
 This draft requires human maintainer approval before implementation. No decision recorded here is accepted until an authorized maintainer merges this change.
