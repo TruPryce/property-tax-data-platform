@@ -18,13 +18,18 @@ All work lands inside the existing adapter boundary. `property_tax_adapters.sour
 
 1. **Declared contracts** — parser contract version `1`, the physical descriptor (ISO-8859-1, `|`, `"` with doubled-quote escaping, LF and CRLF), the exact sixteen-name required header projection, and the closed twenty-one-code diagnostic vocabulary.
 2. **Physical layer** — strict decoding, BOM rejection, quote-aware field splitting, single-physical-line records, one-based row numbering, exact-name header binding, observed-width validation, metadata-only extras, and the SHA-256 layout fingerprint.
-3. **Lexical layer** — the approved division, year, account, identifier, text, monetary, and date grammars; empty-text-only nulls; release-wide account uniqueness; and release-level atomic rejection with bounded, deterministically truncated diagnostics.
-Layers 1 through 3 return validated field values and diagnostics. They construct no record type and import nothing from `property_tax_adapters.sources.contracts`, which is what makes them implementable while Issue #43 is open.
+3. **Lexical layer** — the approved division, year, account, identifier, text, and monetary grammars; empty-text-only nulls; opaque date text; release-wide account uniqueness; and release-level atomic rejection with bounded, deterministically truncated diagnostics.
+
+Together those three layers expose one function, `validate_certified_member`, returning one bounded `TarrantValidationReport`: parser contract version, acceptance flag, layout fingerprint, observed headers, accepted row count, up to 100 `TarrantDiagnostic` entries, the preserved total, and the truncation flag. It carries no row payload, is not persisted, cached, or logged, and its lifetime ends with the caller that received it.
+
+Making the interim scope a **validator rather than a row producer** is the point: a row-shaped return would have required inventing a stand-in for `SourceNativeValue`, which Issue #43 owns and D3 forbids replacing. As a validator, layers 1 through 3 construct no record type and import nothing from `property_tax_adapters.sources.contracts`, which is what makes them implementable while Issue #43 is open.
 
 Two further layers are blocked on Issue #43 and are separate tasks for that reason:
 
 4. **Record layer** — the frozen `TarrantCertifiedSourceRecord` and `TarrantSourceProvenance`. The approved record holds exact shared `SourceNativeValue` entries, so it depends on that boundary as directly as conversion does. Grouping it with layers 1 through 3 would have made the plan self-contradictory.
 5. **Conversion layer** — one shared `AppraisalSourceRecord` per certified row.
+
+Row materialization arrives with layer 4 as a separate entry point that reuses layer 3 validation. `TarrantValidationReport` survives that change unchanged and never grows record-carrying fields.
 
 No county-local substitute for a shared contract is written while either layer waits.
 
@@ -54,7 +59,7 @@ No alternative is finalized by the planning agent when the packet lacks evidence
 - **D2** (resolved_for_draft, requires human merge): Use deterministic synthetic lexical contracts for division, appraisal year, account and optional identifiers, source text, monetary values, dates, null handling, ranges, and release-wide Account_Num uniqueness without arithmetic or canonical semantic inference.
 - **D3** (resolved_for_draft, requires human merge): Define a frozen adapter-local TarrantCertifiedSourceRecord, preserve approved fields as Tarrant-native facts, and require vendor-neutral conversion to consume the shared contracts owned by Issue #43 without introducing county-local substitutes or canonical appraisal and tax semantics.
 - **D4** (resolved_for_draft, requires human merge): Require caller-supplied release identity, bounded provenance, a closed redacted diagnostic vocabulary, release-level atomic rejection, deterministic diagnostic truncation, default-deny owner and address handling, discarded unknown-column values, and independently authored synthetic fixtures.
-- **D5** (proposed, requires human merge): The accepted date separators and component order are undecided. D2 fixes the components, calendar validity, and range but names no separator, so date validation is deferred rather than guessed. The plan does not select one.
+- Date grammar validation is deferred out of scope rather than carried as an open decision, because a decision that selects no pattern cannot be approved by merging. D2 names no separator, so dates are carried as opaque source-native text and `invalid_source_date` stays reserved. A follow-on change adds the grammar once a maintainer supplies the pattern. Every decision this change asks a maintainer to approve is D1 through D4.
 
 - The foundation receives one already-selected certified-core text member; archive acquisition, member selection, network access, persistence, orchestration, publication, and deployment remain outside its scope.
 - The approved 16-header projection and lexical rules form a deterministic synthetic contract and do not prove compatibility with a live Tarrant release.

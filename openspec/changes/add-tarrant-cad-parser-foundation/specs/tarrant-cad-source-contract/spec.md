@@ -121,9 +121,11 @@ Surrounding ASCII whitespace SHALL mean space, tab, CR, LF, vertical tab, and fo
 
 `Total_Value` and `Appraised_Value` SHALL be required nonblank values, and a blank SHALL be rejected with `blank_required_value`. `Land_Value`, `Improvement_Value`, and `Ag_Value` MAY be blank as source absence. Monetary grammar SHALL be `[0-9]+(?:\.[0-9]{1,4})?`. Monetary values SHALL parse with `decimal.Decimal`, SHALL retain their exact trimmed lexical text, and SHALL fall from zero through `10**28 - 1` inclusive. Leading signs, currency symbols, grouping separators, exponent notation, trailing decimal points, excessive scale, and otherwise malformed decimal text SHALL be rejected with `invalid_monetary_value`.
 
-`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. A nonblank date SHALL use a one- or two-digit month and day plus a four-digit year, SHALL be calendar-valid, SHALL fall within 1900 through 2100, and SHALL retain its original lexical text as source-native; a violation SHALL be rejected with `invalid_source_date`.
+`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. In this foundation they SHALL be carried as opaque source-native text: ASCII-trimmed, preserved exactly, and neither parsed nor interpreted as a calendar date. Date grammar validation is **out of scope for this change**, and `invalid_source_date` SHALL remain reserved in the closed vocabulary and SHALL NOT be emitted.
 
-The accepted separator set and component order are **not yet decided**. D2 fixes the components, the calendar validity, and the range, but states no separator, so an implementation cannot know whether `3/14/2025`, `03-14-2025`, `2025-03-14`, or another arrangement is accepted. Date validation MUST NOT be implemented until decision D5 supplies the exact lexical pattern; the implementation MUST NOT choose one, and MUST NOT accept every separator as a way of avoiding the choice. Every other rule in this requirement is implementable now.
+D2 fixes the date components, calendar validity, and the 1900–2100 range but names no separator, so `3/14/2025`, `03-14-2025`, and `2025-03-14` are equally consistent with the approved input. Rather than select one, this change carries the values without validating them. Nothing in this change interprets a date, and the monetary, identifier, division, year, account, and text rules are unaffected, so deferring costs no other behavior. A later change SHALL add the grammar once a maintainer supplies the exact lexical pattern, and SHALL then begin emitting `invalid_source_date`.
+
+The implementation MUST NOT select a separator, and MUST NOT accept every separator as a way of appearing to validate.
 
 The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improvement arithmetic, or division-distribution thresholds as row-validity rules. It MUST NOT pad, truncate, case-fold, numerically coerce, silently round, or infer any field from another, and a malformed nonblank value MUST NOT become null.
 
@@ -179,6 +181,37 @@ The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improve
 - **THEN** each release returns its accepted record
 - **THEN** no `duplicate_account_num` is recorded
 
+### Requirement: Expose the bounded interim validation result
+
+Until the Issue #43 contracts land, the adapter cannot return a row-shaped result without inventing a substitute for a contract that issue owns. The interim scope is therefore a **validator**, not a row producer, and its complete public surface SHALL be the following two frozen types and one function in `property_tax_adapters.sources.texas.tarrant`.
+
+The entry point SHALL be `validate_certified_member(data, *, release_identifier, source_member_name, expected_source_year)`, accepting `bytes` or `str` and returning one `TarrantValidationReport`. It SHALL be a pure function that performs no I/O, retains no state between calls, and holds no reference to its input after returning.
+
+`TarrantValidationReport` SHALL be a frozen dataclass with exactly these fields: `parser_contract_version: int`, `release_accepted: bool`, `layout_fingerprint: str | None`, `observed_headers: tuple[str, ...]`, `accepted_row_count: int`, `diagnostics: tuple[TarrantDiagnostic, ...]`, `total_diagnostic_count: int`, and `diagnostics_truncated: bool`. `layout_fingerprint` SHALL be `None` only when the header could not be read at all. `accepted_row_count` SHALL be `0` whenever `release_accepted` is `False`.
+
+`TarrantDiagnostic` SHALL be a frozen dataclass with exactly these fields: `code: str` from the closed vocabulary, `field_name: str | None`, `physical_row_number: int | None`, and `layout_fingerprint: str | None`. It SHALL carry no other attribute, so the redaction rules are enforced by the type rather than by convention.
+
+The report SHALL NOT carry parsed field values, rows, or any per-row payload. It MUST NOT be persisted, cached, logged, or returned across a process boundary, and its lifetime SHALL end with the caller that received it. It is not a substitute for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`, and it MUST NOT grow row-carrying fields to become one.
+
+When Issue #43 lands, row materialization SHALL be added as a separate entry point returning `TarrantCertifiedSourceRecord` values, reusing this validation rather than reimplementing it. `TarrantValidationReport` SHALL remain valid at that point and MUST NOT be removed or repurposed to carry records.
+
+#### Scenario: Validate an accepted release without constructing a record
+- **GIVEN** the shared Issue #43 contracts are absent from the repository
+- **GIVEN** a valid synthetic member of three data rows and complete caller-supplied release identity
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** one `TarrantValidationReport` is returned with `release_accepted` true
+- **THEN** `accepted_row_count` is 3
+- **THEN** `layout_fingerprint` and `observed_headers` are populated
+- **THEN** the report exposes no parsed field value and no row
+
+#### Scenario: Report a rejected release with a zero accepted count
+- **GIVEN** a synthetic release whose row 4 carries an invalid division code
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
+- **THEN** `diagnostics` contains one `TarrantDiagnostic` with code `invalid_division` and physical row number 4
+- **THEN** that diagnostic carries no attribute beyond code, field name, physical row number, and layout fingerprint
+
 ### Requirement: Construct the frozen adapter-local Tarrant source record
 
 The implementation SHALL define one frozen adapter-local `TarrantCertifiedSourceRecord` containing `division_code`, `appraisal_year`, `account_num`, optional `pidn`, optional `gis_link`, optional `property_class`, optional `state_use_code`, optional `exemption_code`, exact shared `SourceNativeValue` entries for the approved monetary and date fields, and a `TarrantSourceProvenance`.
@@ -203,7 +236,7 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 - **GIVEN** the shared Issue #43 contracts are absent from the repository
 - **GIVEN** a valid synthetic member and complete caller-supplied release identity
 - **WHEN** the parser decodes, binds headers, and validates the approved lexical grammars
-- **THEN** validated field values and diagnostics are produced
+- **THEN** one `TarrantValidationReport` is returned
 - **THEN** no `TarrantCertifiedSourceRecord` is constructed
 - **THEN** no county-local replacement for a shared contract is defined
 
@@ -260,6 +293,8 @@ Every native and shared record SHALL retain jurisdiction `tx-tarrant`, the relea
 ### Requirement: Emit only the closed diagnostic vocabulary with bounded metadata
 
 The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `malformed_delimited_record`, `multiline_record_unsupported`, `blank_header`, `duplicate_header`, `header_name_collision`, `missing_required_header`, `row_width_mismatch`, `unsupported_layout`, `extra_columns_present`, `blank_required_value`, `invalid_division`, `invalid_appraisal_year`, `appraisal_year_mismatch`, `invalid_account_num`, `invalid_source_identifier`, `invalid_source_text`, `invalid_monetary_value`, `invalid_source_date`, and `duplicate_account_num`.
+
+The vocabulary SHALL remain closed at these twenty-one codes as D4 fixed them. `invalid_source_date` SHALL be declared and reserved but SHALL NOT be emitted by this change, because date grammar validation is deferred; a later change adds the grammar and begins emitting it. Reserving the code rather than omitting it keeps the vocabulary stable across that change.
 
 A diagnostic SHALL contain only its stable code and, where applicable, an approved field or header name, the one-based physical row number, and the layout fingerprint. Unknown source header text SHALL NOT be echoed. A diagnostic MUST NOT contain a complete row, an arbitrary field value, an account value, release or member text, an owner name, an address, a protected identity, a credential, exception text, or a host-local path.
 
