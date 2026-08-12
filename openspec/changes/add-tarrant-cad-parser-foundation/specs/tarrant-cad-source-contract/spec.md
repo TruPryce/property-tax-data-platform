@@ -15,8 +15,8 @@ The parser contract version SHALL be `1`.
 - **GIVEN** a header at physical row 1 and one valid single-line data record at physical row 2
 - **GIVEN** caller-supplied release identifier, source member name, and expected source year
 - **WHEN** the parser reads the member
-- **THEN** one logical release result is returned
-- **THEN** the accepted record carries physical row number 2
+- **THEN** one `TarrantValidationReport` is returned with `release_accepted` true
+- **THEN** `accepted_row_count` is 1
 - **THEN** no network, archive, or filesystem-acquisition operation is performed
 
 #### Scenario: Preserve a quoted field containing a delimiter
@@ -31,13 +31,15 @@ The parser contract version SHALL be `1`.
 - **GIVEN** a synthetic member whose first three bytes are `EF BB BF`
 - **WHEN** the parser reads the member
 - **THEN** `unexpected_bom` is recorded
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 #### Scenario: Reject a record spanning two physical lines
 - **GIVEN** a synthetic member containing a quoted field with an embedded LF
 - **WHEN** the parser reads the member
 - **THEN** `multiline_record_unsupported` is recorded
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 ### Requirement: Bind fields only by the exact required header projection
 
@@ -58,21 +60,23 @@ Every data row SHALL contain exactly the observed header width; a row of any oth
 - **WHEN** the parser validates the header and reads the data rows
 - **THEN** every required field is bound by its exact name
 - **THEN** `extra_columns_present` is recorded and the release is not rejected
-- **THEN** the additional column value is absent from the returned records
+- **THEN** the additional column value is absent from the report
 - **THEN** the additional column value is absent from the retained diagnostics
 
 #### Scenario: Reject a header differing only by ASCII case
 - **GIVEN** a synthetic header containing both `Account_Num` and `ACCOUNT_NUM`
 - **WHEN** the parser validates the header
 - **THEN** `header_name_collision` is recorded
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 #### Scenario: Reject a data row narrower than the observed header
 - **GIVEN** a valid synthetic header of seventeen observed columns
 - **GIVEN** a data row containing sixteen fields
 - **WHEN** the parser validates that row
 - **THEN** `row_width_mismatch` is recorded with the one-based physical row number
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 ### Requirement: Compute the deterministic layout fingerprint as provenance
 
@@ -103,7 +107,7 @@ The original ordered header vector SHALL be retained separately in provenance ra
 - **GIVEN** identical parser contract version, encoding, and quote behavior
 - **WHEN** the adapter computes the layout fingerprint for each member
 - **THEN** both fingerprints are identical lowercase SHA-256 hexadecimal digests
-- **THEN** each provenance record retains its own original ordered header vector
+- **THEN** each report retains its own `observed_headers` in the original order
 
 #### Scenario: Validate layout independently of the fingerprint
 - **GIVEN** a synthetic member missing the `Ag_Value` header
@@ -121,45 +125,76 @@ Surrounding ASCII whitespace SHALL mean space, tab, CR, LF, vertical tab, and fo
 
 `Total_Value` and `Appraised_Value` SHALL be required nonblank values, and a blank SHALL be rejected with `blank_required_value`. `Land_Value`, `Improvement_Value`, and `Ag_Value` MAY be blank as source absence. Monetary grammar SHALL be `[0-9]+(?:\.[0-9]{1,4})?`. Monetary values SHALL parse with `decimal.Decimal`, SHALL retain their exact trimmed lexical text, and SHALL fall from zero through `10**28 - 1` inclusive. Leading signs, currency symbols, grouping separators, exponent notation, trailing decimal points, excessive scale, and otherwise malformed decimal text SHALL be rejected with `invalid_monetary_value`.
 
-`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. In this foundation they SHALL be carried as opaque source-native text: ASCII-trimmed, preserved exactly, and neither parsed nor interpreted as a calendar date. Date grammar validation is **out of scope for this change**, and `invalid_source_date` SHALL remain reserved in the closed vocabulary and SHALL NOT be emitted.
+`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. A nonblank date SHALL be ASCII-trimmed and SHALL match exactly `^(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/([0-9]{4})$` — a one- or two-digit month, a solidus, a one- or two-digit day, a solidus, and a four-digit year. D5 supplies this separator and component order; D2 fixes the components, calendar validity, and range.
 
-D2 fixes the date components, calendar validity, and the 1900–2100 range but names no separator, so `3/14/2025`, `03-14-2025`, and `2025-03-14` are equally consistent with the approved input. Rather than select one, this change carries the values without validating them. Nothing in this change interprets a date, and the monetary, identifier, division, year, account, and text rules are unaffected, so deferring costs no other behavior. A later change SHALL add the grammar once a maintainer supplies the exact lexical pattern, and SHALL then begin emitting `invalid_source_date`.
+A date matching that pattern SHALL additionally be calendar-valid, so `2/30/2025` and `4/31/2025` are rejected, and SHALL fall within 1900 through 2100 inclusive. The original trimmed lexical text SHALL be retained as source-native, so `3/14/2025` and `03/14/2025` are preserved as written and are not normalized to one another. Any other separator, component order, two-digit year, non-ASCII digit, or otherwise malformed date SHALL be rejected with `invalid_source_date`.
 
-The implementation MUST NOT select a separator, and MUST NOT accept every separator as a way of appearing to validate.
+The implementation MUST NOT accept a second separator, MUST NOT reorder components, and MUST NOT rewrite an accepted date into a canonical form.
 
 The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improvement arithmetic, or division-distribution thresholds as row-validity rules. It MUST NOT pad, truncate, case-fold, numerically coerce, silently round, or infer any field from another, and a malformed nonblank value MUST NOT become null.
 
-#### Scenario: Preserve an approved source row
+#### Scenario: Accept an approved source row
 - **GIVEN** a synthetic row with division `R`
 - **GIVEN** an `Appraisal_Year` equal to the caller-supplied expected source year
 - **GIVEN** an `Account_Num` containing leading zeroes and punctuation
 - **GIVEN** monetary and date literals inside the approved grammars
-- **WHEN** the parser converts that row
-- **THEN** `Account_Num` retains its leading zeroes and punctuation as text
-- **THEN** `division_code` is stored separately from account identity
-- **THEN** each monetary value carries an exact `Decimal` and its original lexical text
-- **THEN** no canonical appraisal or tax value is populated
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 1
+- **THEN** `diagnostics` is empty
+
+#### Scenario: Reject a date carrying an unapproved separator
+- **GIVEN** a synthetic row whose `Deed_Date` is `2025-03-14`
+- **GIVEN** every other field inside the approved grammars
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `invalid_source_date` is recorded with the field name and physical row number
+- **THEN** `release_accepted` is false
+- **THEN** the rejected date text is absent from the retained diagnostics
+
+#### Scenario: Accept one- and two-digit date components
+- **GIVEN** a synthetic row whose `Deed_Date` is `3/14/2025`
+- **GIVEN** a second synthetic row whose `Notice_Date` is `03/14/2025`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 2
+- **THEN** no `invalid_source_date` is recorded
+
+#### Scenario: Reject a calendar-invalid date matching the pattern
+- **GIVEN** a synthetic row whose `Appraisal_Date` is `2/30/2025`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `invalid_source_date` is recorded
+- **THEN** `release_accepted` is false
+
+#### Scenario: Distinguish accounts differing only by leading zeroes
+- **GIVEN** two otherwise valid synthetic rows whose `Account_Num` values are `00123` and `123`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 2
+- **THEN** no `duplicate_account_num` is recorded
 
 #### Scenario: Treat empty text as the only null
 - **GIVEN** a synthetic row whose `Land_Value` is empty after trimming
 - **GIVEN** a second synthetic row whose `Land_Value` is the literal text `NULL`
-- **WHEN** the parser converts both rows
-- **THEN** the first row records `Land_Value` as absent
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** no diagnostic is recorded for the first row
 - **THEN** `invalid_monetary_value` is recorded for the second row
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 #### Scenario: Reject a monetary value carrying a grouping separator
 - **GIVEN** a synthetic row whose `Total_Value` is `1,250.00`
-- **WHEN** the parser converts that row
+- **WHEN** the caller invokes `validate_certified_member`
 - **THEN** `invalid_monetary_value` is recorded with the field name and physical row number
+- **THEN** `release_accepted` is false
 - **THEN** the rejected lexical text is absent from the retained diagnostics
 
 #### Scenario: Accept an unequal appraised and total pair
 - **GIVEN** a synthetic row whose `Appraised_Value` exceeds its `Total_Value`
 - **GIVEN** both values inside the approved monetary grammar and range
-- **WHEN** the parser converts that row
-- **THEN** the row is accepted
-- **THEN** both values retain their exact `Decimal` and lexical text
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 1
+- **THEN** no monetary diagnostic is recorded
 
 ### Requirement: Enforce release-wide account uniqueness
 
@@ -171,14 +206,16 @@ The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improve
 - **GIVEN** no other blocking condition
 - **WHEN** the parser evaluates the complete logical release
 - **THEN** `duplicate_account_num` is recorded for the second occurrence
-- **THEN** zero native records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 - **THEN** the duplicated account text is absent from the retained diagnostics
 
 #### Scenario: Accept one account across two identified releases
 - **GIVEN** two synthetic releases with distinct caller-supplied release identifiers
 - **GIVEN** one row in each release sharing the same `Account_Num`
-- **WHEN** the parser evaluates each release separately
-- **THEN** each release returns its accepted record
+- **WHEN** the caller invokes `validate_certified_member` for each release
+- **THEN** each report has `release_accepted` true
+- **THEN** each report has `accepted_row_count` 1
 - **THEN** no `duplicate_account_num` is recorded
 
 ### Requirement: Expose the bounded interim validation result
@@ -240,6 +277,16 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 - **THEN** no `TarrantCertifiedSourceRecord` is constructed
 - **THEN** no county-local replacement for a shared contract is defined
 
+#### Scenario: Retain exact source values on a constructed record
+- **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
+- **GIVEN** a valid certified-core row whose `Account_Num` carries leading zeroes and punctuation
+- **GIVEN** monetary literals inside the approved grammar
+- **WHEN** the adapter constructs the native record
+- **THEN** `account_num` retains its leading zeroes and punctuation as text
+- **THEN** `division_code` is stored separately from account identity
+- **THEN** each monetary value carries an exact `Decimal` and its original lexical text
+- **THEN** the record provenance carries the release identifier, source member name, layout fingerprint, and one-based physical row number
+
 #### Scenario: Leave canonical semantics absent
 - **GIVEN** a valid certified-core row carrying `Total_Value`, `Appraised_Value`, and `Exemption_Code`
 - **WHEN** the adapter constructs the native record
@@ -271,30 +318,41 @@ One certified-core physical row SHALL produce one certified shared record. No cu
 
 ### Requirement: Require caller-supplied release identity and retain bounded provenance
 
-One logical release SHALL be one caller-identified certified artifact, selected member, and expected source year. The adapter SHALL require caller-supplied `release_identifier`, `source_member_name`, and `expected_source_year`, and MUST NOT infer any of them from row data or source filenames. Release and member identifiers SHALL be bounded logical identifiers and MUST NOT be absolute paths or host-local locations.
+One logical release SHALL be one caller-identified certified artifact, selected member, and expected source year. The adapter SHALL require caller-supplied `release_identifier`, `source_member_name`, and `expected_source_year`, and MUST NOT infer any of them from row data or source filenames.
 
-Every native and shared record SHALL retain jurisdiction `tx-tarrant`, the release identifier, the source member name, the expected source year, source family `certified-core`, source status `certified`, the original ordered observed headers, exact-name and ASCII case-fold collision metadata, the layout fingerprint, the one-based physical row number, the parser contract version, and the exact source field name with original lexical text for each source-native value.
+D4 requires those identifiers to be bounded logical identifiers rather than absolute paths or host-local locations but sets no exact bound, so this foundation binds them as follows. `release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters after no trimming, SHALL contain only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. That alphabet admits no `/`, `\\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are all unrepresentable rather than merely discouraged. `expected_source_year` SHALL be an `int` from 1900 through 2100 inclusive.
+
+A caller-supplied value violating any of these bounds SHALL raise `ValueError` before the member is read. This is a caller contract rather than source data, so it fails as a programming error and produces no diagnostic and no report; the closed diagnostic vocabulary describes the source, never the caller.
+
+When records exist — that is, after Issue #43 lands and the record layer is built — every native and shared record SHALL retain jurisdiction `tx-tarrant`, the release identifier, the source member name, the expected source year, source family `certified-core`, source status `certified`, the original ordered observed headers, exact-name and ASCII case-fold collision metadata, the layout fingerprint, the one-based physical row number, the parser contract version, and the exact source field name with original lexical text for each source-native value. Until then the report carries the layout fingerprint, the observed headers, and the parser contract version, and the remaining provenance lives in the caller's own inputs.
 
 #### Scenario: Require the caller to identify the release
 - **GIVEN** a valid synthetic member
 - **GIVEN** a caller that supplies no `expected_source_year`
-- **WHEN** the parser is invoked
-- **THEN** the parser fails closed before reading any data row
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** the call fails before any data row is read
 - **THEN** no year is inferred from row data or from the member name
 
-#### Scenario: Retain bounded provenance on an accepted record
+#### Scenario: Reject a release identifier shaped like a path
+- **GIVEN** a valid synthetic member
+- **GIVEN** a `source_member_name` of `/var/tmp/tarrant/2025.txt`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `ValueError` is raised before the member is read
+- **THEN** no `TarrantValidationReport` is produced
+- **THEN** no diagnostic is recorded
+
+#### Scenario: Retain bounded provenance in the report
 - **GIVEN** a valid synthetic member and complete caller-supplied release identity
-- **WHEN** the parser accepts a data row at physical row 5
-- **THEN** the record provenance carries jurisdiction `tx-tarrant`, the release identifier, and the source member name
-- **THEN** the provenance carries the original ordered observed headers and the layout fingerprint
-- **THEN** the provenance carries physical row number 5 and parser contract version 1
-- **THEN** the provenance carries no absolute path or host-local location
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** the report carries the layout fingerprint and the observed headers in their original order
+- **THEN** the report carries parser contract version 1
+- **THEN** the report carries no absolute path or host-local location
 
 ### Requirement: Emit only the closed diagnostic vocabulary with bounded metadata
 
 The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `malformed_delimited_record`, `multiline_record_unsupported`, `blank_header`, `duplicate_header`, `header_name_collision`, `missing_required_header`, `row_width_mismatch`, `unsupported_layout`, `extra_columns_present`, `blank_required_value`, `invalid_division`, `invalid_appraisal_year`, `appraisal_year_mismatch`, `invalid_account_num`, `invalid_source_identifier`, `invalid_source_text`, `invalid_monetary_value`, `invalid_source_date`, and `duplicate_account_num`.
 
-The vocabulary SHALL remain closed at these twenty-one codes as D4 fixed them. `invalid_source_date` SHALL be declared and reserved but SHALL NOT be emitted by this change, because date grammar validation is deferred; a later change adds the grammar and begins emitting it. Reserving the code rather than omitting it keeps the vocabulary stable across that change.
+The vocabulary SHALL remain closed at these twenty-one codes as D4 fixed them. Every code SHALL be reachable by this change, including `invalid_source_date`.
 
 A diagnostic SHALL contain only its stable code and, where applicable, an approved field or header name, the one-based physical row number, and the layout fingerprint. Unknown source header text SHALL NOT be echoed. A diagnostic MUST NOT contain a complete row, an arbitrary field value, an account value, release or member text, an owner name, an address, a protected identity, a credential, exception text, or a host-local path.
 
@@ -326,15 +384,16 @@ A future production reader SHALL follow Issue #43 by validating layout, opening 
 - **GIVEN** 49 otherwise valid rows
 - **WHEN** the parser evaluates the complete logical release
 - **THEN** `invalid_division` is recorded for physical row 37
-- **THEN** zero native records are returned
-- **THEN** zero shared records are returned
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 #### Scenario: Accept a release whose only diagnostic is nonfatal
 - **GIVEN** a synthetic release whose rows are all valid
 - **GIVEN** one additional metadata column
 - **WHEN** the parser evaluates the complete logical release
 - **THEN** `extra_columns_present` is the only recorded diagnostic
-- **THEN** every valid row is returned as a native record
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` equals the number of data rows
 
 ### Requirement: Exclude sensitive and unknown-column values
 
@@ -347,13 +406,13 @@ Unknown-column values SHALL also be discarded, because an unknown field may carr
 - **GIVEN** synthetic non-identifying placeholder text in those two columns
 - **WHEN** the parser accepts the release
 - **THEN** both header names appear in the original ordered header vector in provenance
-- **THEN** neither column value appears in any record, extra, or diagnostic
+- **THEN** neither column value appears in the report or its diagnostics
 
 #### Scenario: Discard an unknown column value
 - **GIVEN** a synthetic member carrying one column absent from the required projection and from the known sensitive list
 - **WHEN** the parser accepts the release
 - **THEN** `extra_columns_present` is recorded
-- **THEN** that column value is absent from every returned record
+- **THEN** that column value is absent from the report and its diagnostics
 
 ### Requirement: Use only privacy-safe synthetic fixtures
 
