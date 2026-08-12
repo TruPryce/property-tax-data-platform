@@ -4,9 +4,9 @@ The repository needs a deterministic, adapter-local foundation contract for pars
 
 ## Outcome
 
-Implement the synthetic Tarrant certified-core parser in the existing Tarrant adapter module, with independently authored synthetic fixtures, a Tarrant test module, and bounded source documentation. The parser decodes one already-selected member, binds the sixteen required headers by exact name, validates the approved lexical grammars, produces the frozen `TarrantCertifiedSourceRecord` with bounded provenance, rejects a logical release atomically through a closed diagnostic vocabulary, and excludes sensitive and unknown-column values.
+Implement the synthetic Tarrant certified-core parser in the existing Tarrant adapter module, with independently authored synthetic fixtures, a Tarrant test module, and bounded source documentation. The parser decodes one already-selected member, binds the sixteen required headers by exact name, computes the exact layout fingerprint, validates the approved lexical grammars, enforces release-wide account uniqueness, rejects a logical release atomically through a closed diagnostic vocabulary, and excludes sensitive and unknown-column values.
 
-Native parsing, fixtures, tests, and documentation are implementable now. Only conversion into the shared vendor-neutral records waits on the contracts owned by Issue #43.
+Parsing, validation, diagnostics, fixtures, tests, and documentation are implementable now and produce validated values rather than a record type. Both typed-record slices — the frozen `TarrantCertifiedSourceRecord` and the shared conversion — wait on Issue #43, because the approved native record holds shared `SourceNativeValue` entries and no county-local substitute may be written in the meantime.
 
 ## Scope
 
@@ -40,10 +40,11 @@ Native parsing, fixtures, tests, and documentation are implementable now. Only c
 
 ## Unresolved decisions
 
-- Issue #43 has not yet supplied the accepted and implemented SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release-processing, and streaming contracts. This blocks task 6.1 only. Tasks 1.1 through 5.1 — the Tarrant-native physical contracts, fixtures, physical and header parsing, lexical validation, the frozen native record, the test module, and the source documentation — are runnable without it, and the change adds no county-local substitute while waiting.
+- Issue #43 has not yet supplied the accepted and implemented SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release-processing, and streaming contracts. This blocks tasks 6.1 and 6.2 — the frozen Tarrant-native record and the shared conversion — because the approved record holds shared `SourceNativeValue` entries. Tasks 1.1 through 5.1 — contracts and fixtures, physical and header parsing with the layout fingerprint, lexical validation with uniqueness and atomic rejection, the test module, and the source documentation — are runnable without it, and the change adds no county-local substitute while waiting.
+- **D5 — accepted date separators and component order (not decided).** D2 fixes the date components, calendar validity, and the 1900–2100 range but states no separator, so `3/14/2025`, `03-14-2025`, and `2025-03-14` are equally consistent with the approved input. A maintainer must supply the exact lexical pattern. Date validation in task 3.1 is blocked on this; the implementation must not select a separator itself, and must not accept every separator to sidestep the choice. Every other lexical rule is unaffected.
 
 ## Cross-issue boundaries
 
-- #43 (requires_contract_from, blocking task 6.1 only): out of scope here and owned there: SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release processing, streaming and atomic-stage contracts. Tarrant-native parsing and county diagnostics are designed and implemented independently of that boundary.
+- #43 (requires_contract_from, blocking tasks 6.1 and 6.2): out of scope here and owned there: SourceNativeValue, SourceProvenance, AppraisalSourceRecord, bounded release processing, streaming and atomic-stage contracts. Tarrant-native physical parsing, lexical validation, and county diagnostics carry no dependency on that boundary and are implemented independently of it.
 
 This draft requires human maintainer approval before implementation. No decision recorded here is accepted until an authorized maintainer merges this change.

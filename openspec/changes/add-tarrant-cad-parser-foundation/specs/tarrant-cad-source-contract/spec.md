@@ -45,7 +45,9 @@ The adapter SHALL bind fields by untrimmed, case-sensitive, exact header name. A
 
 The required foundation headers SHALL be exactly these sixteen names: `RP`, `Appraisal_Year`, `Account_Num`, `PIDN`, `GIS_Link`, `Property_Class`, `State_Use_Code`, `Exemption_Code`, `Land_Value`, `Improvement_Value`, `Total_Value`, `Appraised_Value`, `Ag_Value`, `Deed_Date`, `Notice_Date`, `Appraisal_Date`.
 
-A blank header SHALL be rejected with `blank_header`. A header carrying surrounding whitespace SHALL be rejected. An exact duplicate header SHALL be rejected with `duplicate_header`. Two headers colliding under ASCII case folding SHALL be rejected with `header_name_collision`. A missing required header SHALL be rejected with `missing_required_header`.
+A blank header SHALL be rejected with `blank_header`. A header carrying surrounding ASCII whitespace SHALL be rejected with `unsupported_layout`. An exact duplicate header SHALL be rejected with `duplicate_header`. Two headers colliding under ASCII case folding SHALL be rejected with `header_name_collision`. A missing required header SHALL be rejected with `missing_required_header`.
+
+`unsupported_layout` SHALL be the code for every observed-layout rejection that the four preceding codes do not cover: a header carrying surrounding ASCII whitespace, a header containing an ASCII control character, an observed header of zero columns, and a member whose first physical row is absent. It MUST NOT be used for a condition that one of the other twenty codes names.
 
 Every data row SHALL contain exactly the observed header width; a row of any other width SHALL be rejected with `row_width_mismatch`. Additional headers beyond the required sixteen SHALL be accepted as metadata-only extras and SHALL record the nonfatal `extra_columns_present`. Their values SHALL be parsed only as far as row alignment requires and SHALL NOT be retained in records, diagnostics, or extras.
 
@@ -74,9 +76,27 @@ Every data row SHALL contain exactly the observed header width; a row of any oth
 
 ### Requirement: Compute the deterministic layout fingerprint as provenance
 
-The adapter SHALL compute a lowercase layout fingerprint as SHA-256 over compact canonical JSON containing the parser contract version, the encoding identifier, the delimiter and quote behavior identifier, the observed column count, and the sorted exact observed header names. The original ordered header vector SHALL be retained separately in provenance rather than inside the fingerprint document.
+The adapter SHALL compute a lowercase layout fingerprint as the SHA-256 hexadecimal digest of one canonical JSON document. D1 fixes the five members of that document; the exact keys, literals, and serialization below are this foundation's binding choice, so that two compliant implementations produce identical digests. They are a serialization contract, not a claim about any live release.
 
-The fingerprint SHALL be provenance only. It MUST NOT act as an allowlist, and required-layout validation SHALL remain independent of it.
+The document SHALL be a JSON object with exactly these five keys and no others:
+
+- `parser_contract_version` — the integer `1`;
+- `encoding` — the string `iso-8859-1`;
+- `dialect` — the string `pipe-delimited-double-quote-v1`, denoting delimiter `|`, quote `"`, doubled `""` as a literal quote, no escape character, and no multiline record;
+- `column_count` — the observed column count as an integer;
+- `headers_sorted` — the exact observed header names, unmodified, sorted by Unicode code point ascending.
+
+The document SHALL be serialized with keys sorted ascending by Unicode code point, with the separators `,` and `:` and no other whitespace, with non-ASCII characters emitted literally rather than escaped, and SHALL be encoded as UTF-8 before hashing. The digest SHALL be rendered as lowercase hexadecimal.
+
+The original ordered header vector SHALL be retained separately in provenance rather than inside the fingerprint document. The fingerprint SHALL be provenance only: it MUST NOT act as an allowlist, and required-layout validation SHALL remain independent of it.
+
+#### Scenario: Produce a byte-exact fingerprint for a known document
+- **GIVEN** an observed header of exactly the sixteen required names and no extras
+- **GIVEN** parser contract version 1, ISO-8859-1 encoding, and the `pipe-delimited-double-quote-v1` dialect
+- **WHEN** the adapter serializes the fingerprint document
+- **THEN** the serialized bytes are the UTF-8 encoding of a five-key JSON object with keys in the order `column_count`, `dialect`, `encoding`, `headers_sorted`, `parser_contract_version`
+- **THEN** the serialized bytes contain no space, tab, or newline outside a header name
+- **THEN** the digest is the lowercase hexadecimal SHA-256 of those bytes
 
 #### Scenario: Produce the same fingerprint for a reordered header
 - **GIVEN** two synthetic members whose headers contain identical names in different orders
@@ -102,6 +122,8 @@ Surrounding ASCII whitespace SHALL mean space, tab, CR, LF, vertical tab, and fo
 `Total_Value` and `Appraised_Value` SHALL be required nonblank values, and a blank SHALL be rejected with `blank_required_value`. `Land_Value`, `Improvement_Value`, and `Ag_Value` MAY be blank as source absence. Monetary grammar SHALL be `[0-9]+(?:\.[0-9]{1,4})?`. Monetary values SHALL parse with `decimal.Decimal`, SHALL retain their exact trimmed lexical text, and SHALL fall from zero through `10**28 - 1` inclusive. Leading signs, currency symbols, grouping separators, exponent notation, trailing decimal points, excessive scale, and otherwise malformed decimal text SHALL be rejected with `invalid_monetary_value`.
 
 `Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. A nonblank date SHALL use a one- or two-digit month and day plus a four-digit year, SHALL be calendar-valid, SHALL fall within 1900 through 2100, and SHALL retain its original lexical text as source-native; a violation SHALL be rejected with `invalid_source_date`.
+
+The accepted separator set and component order are **not yet decided**. D2 fixes the components, the calendar validity, and the range, but states no separator, so an implementation cannot know whether `3/14/2025`, `03-14-2025`, `2025-03-14`, or another arrangement is accepted. Date validation MUST NOT be implemented until decision D5 supplies the exact lexical pattern; the implementation MUST NOT choose one, and MUST NOT accept every separator as a way of avoiding the choice. Every other rule in this requirement is implementable now.
 
 The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improvement arithmetic, or division-distribution thresholds as row-validity rules. It MUST NOT pad, truncate, case-fold, numerically coerce, silently round, or infer any field from another, and a malformed nonblank value MUST NOT become null.
 
@@ -161,11 +183,14 @@ The adapter MUST NOT enforce `Appraised_Value <= Total_Value`, land-plus-improve
 
 The implementation SHALL define one frozen adapter-local `TarrantCertifiedSourceRecord` containing `division_code`, `appraisal_year`, `account_num`, optional `pidn`, optional `gis_link`, optional `property_class`, optional `state_use_code`, optional `exemption_code`, exact shared `SourceNativeValue` entries for the approved monetary and date fields, and a `TarrantSourceProvenance`.
 
-The adapter MUST NOT create Tarrant-local replacements for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`, and MUST NOT add Tarrant vocabulary to `property_tax_domain` or `property_tax_application`.
+Because the approved record holds shared `SourceNativeValue` entries, this requirement depends on the contracts owned by Issue #43 and SHALL NOT be implemented before they are accepted and implemented. The adapter MUST NOT create Tarrant-local replacements for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord` in order to build this record sooner. Physical parsing, header binding, lexical validation, uniqueness, atomic rejection, and the diagnostic vocabulary carry no such dependency and are implementable independently, returning validated values and diagnostics rather than a record type.
+
+The adapter MUST NOT add Tarrant vocabulary to `property_tax_domain` or `property_tax_application`. The existing `TARRANT_SOURCE` registry definition already imports both packages and SHALL be preserved unchanged, so the boundary is that neither package is modified and neither gains Tarrant parser vocabulary — not that the adapter module imports nothing from them.
 
 No Tarrant field SHALL populate or imply canonical market, appraised, assessed, or taxable value, tax amount, payment, balance, delinquency, penalty, interest, exemption entitlement, or replacement status.
 
 #### Scenario: Construct a Tarrant-native record
+- **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
 - **GIVEN** a valid certified-core row
 - **GIVEN** caller-supplied release identifier, source member name, and expected source year
 - **GIVEN** an `Appraisal_Year` matching that expected source year
@@ -173,6 +198,14 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 - **THEN** a frozen `TarrantCertifiedSourceRecord` is returned
 - **THEN** the record carries the approved native fields and a `TarrantSourceProvenance`
 - **THEN** no `property_tax_domain` or `property_tax_application` object is constructed
+
+#### Scenario: Parse and validate while the shared contracts are absent
+- **GIVEN** the shared Issue #43 contracts are absent from the repository
+- **GIVEN** a valid synthetic member and complete caller-supplied release identity
+- **WHEN** the parser decodes, binds headers, and validates the approved lexical grammars
+- **THEN** validated field values and diagnostics are produced
+- **THEN** no `TarrantCertifiedSourceRecord` is constructed
+- **THEN** no county-local replacement for a shared contract is defined
 
 #### Scenario: Leave canonical semantics absent
 - **GIVEN** a valid certified-core row carrying `Total_Value`, `Appraised_Value`, and `Exemption_Code`
@@ -311,5 +344,7 @@ The documentation SHALL state that live-release compatibility and production rea
 - **WHEN** a maintainer reviews the diff
 - **THEN** no acquisition, network, service, DAG, persistence, or deployment component is present
 - **THEN** the `property_tax_domain` and `property_tax_application` packages are unchanged
+- **THEN** the preserved `TARRANT_SOURCE` registry definition still imports both packages
+- **THEN** no Tarrant parser vocabulary is added to either package
 - **THEN** the dependency manifests are unchanged
 - **THEN** the Tarrant source documentation states that live compatibility and production readiness are unproved
