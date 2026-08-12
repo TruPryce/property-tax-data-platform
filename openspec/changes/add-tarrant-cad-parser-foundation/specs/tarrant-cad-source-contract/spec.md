@@ -19,13 +19,29 @@ The parser contract version SHALL be `1`.
 - **THEN** `accepted_row_count` is 1
 - **THEN** no network, archive, or filesystem-acquisition operation is performed
 
-#### Scenario: Preserve a quoted field containing a delimiter
-- **GIVEN** a synthetic data row whose `Property_Class` field is quoted and contains a literal `|`
-- **GIVEN** a doubled `""` inside that same quoted field
-- **WHEN** the parser reads the member
-- **THEN** the field value contains the literal `|`
-- **THEN** the doubled `""` is reduced to one `"` in the field value
-- **THEN** the row is bound to the observed header width
+#### Scenario: Accept a quoted field containing a delimiter
+- **GIVEN** a synthetic member whose observed header is exactly the sixteen required names
+- **GIVEN** a data row whose `Property_Class` field is quoted and contains one literal `|`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 1
+- **THEN** no `row_width_mismatch` is recorded
+
+#### Scenario: Accept a doubled quote inside a quoted field
+- **GIVEN** a synthetic member whose observed header is exactly the sixteen required names
+- **GIVEN** a data row whose `Property_Class` field is the quoted text `a""|b`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `release_accepted` is true
+- **THEN** `accepted_row_count` is 1
+- **THEN** no `malformed_delimited_record` is recorded
+- **THEN** no `row_width_mismatch` is recorded
+
+#### Scenario: Reject an unbalanced quote
+- **GIVEN** a synthetic data row whose `Property_Class` field opens a quote and never closes it
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `malformed_delimited_record` is recorded
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
 
 #### Scenario: Reject a UTF-8 byte-order mark
 - **GIVEN** a synthetic member whose first three bytes are `EF BB BF`
@@ -277,6 +293,14 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 - **THEN** no `TarrantCertifiedSourceRecord` is constructed
 - **THEN** no county-local replacement for a shared contract is defined
 
+#### Scenario: Retain a decoded quoted value on a constructed record
+- **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
+- **GIVEN** a valid certified-core row whose `Property_Class` field is the quoted text `a""|b`
+- **WHEN** the adapter constructs the native record
+- **THEN** `property_class` is the four-character text `a"|b`
+- **THEN** the literal `|` is preserved rather than treated as a delimiter
+- **THEN** the doubled `""` is reduced to one `"`
+
 #### Scenario: Retain exact source values on a constructed record
 - **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
 - **GIVEN** a valid certified-core row whose `Account_Num` carries leading zeroes and punctuation
@@ -320,7 +344,7 @@ One certified-core physical row SHALL produce one certified shared record. No cu
 
 One logical release SHALL be one caller-identified certified artifact, selected member, and expected source year. The adapter SHALL require caller-supplied `release_identifier`, `source_member_name`, and `expected_source_year`, and MUST NOT infer any of them from row data or source filenames.
 
-D4 requires those identifiers to be bounded logical identifiers rather than absolute paths or host-local locations but sets no exact bound, so this foundation binds them as follows. `release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters after no trimming, SHALL contain only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. That alphabet admits no `/`, `\\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are all unrepresentable rather than merely discouraged. `expected_source_year` SHALL be an `int` from 1900 through 2100 inclusive.
+D4 requires those identifiers to be bounded logical identifiers rather than absolute paths or host-local locations but sets no exact bound. Decision D6 supplies one, and merging this change is what accepts it: `release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters after no trimming, SHALL contain only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. That alphabet admits no `/`, `\\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are all unrepresentable rather than merely discouraged. `expected_source_year` SHALL be an `int` from 1900 through 2100 inclusive.
 
 A caller-supplied value violating any of these bounds SHALL raise `ValueError` before the member is read. This is a caller contract rather than source data, so it fails as a programming error and produces no diagnostic and no report; the closed diagnostic vocabulary describes the source, never the caller.
 
@@ -375,7 +399,7 @@ At most 100 diagnostics SHALL be retained, the total diagnostic count SHALL be p
 
 ### Requirement: Reject a logical release atomically
 
-The synthetic helper SHALL return zero native and zero shared records when any blocking diagnostic occurs. `extra_columns_present` SHALL be nonfatal; every other code in the closed vocabulary SHALL reject the logical release. There SHALL be no row-continues quarantine path.
+When any blocking diagnostic occurs the report SHALL carry `release_accepted` false and `accepted_row_count` zero, and once the record layer exists the same condition SHALL yield zero native and zero shared records. `extra_columns_present` SHALL be nonfatal; every other code in the closed vocabulary SHALL reject the logical release. There SHALL be no row-continues quarantine path, and no partially accepted release SHALL be observable in either form.
 
 A future production reader SHALL follow Issue #43 by validating layout, opening the caller-supplied atomic stage, staging records invisibly, finalizing release-wide checks, and committing once; failure at any point SHALL abort the stage and expose zero accepted records. Production duplicate detection SHALL belong to the stage's bounded external unique or index contract, and the production reader MUST NOT retain every account key in Python memory.
 
