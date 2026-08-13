@@ -29,7 +29,7 @@ The parser contract version SHALL be `1`.
 
 #### Scenario: Accept a doubled quote inside a quoted field
 - **GIVEN** a synthetic member whose observed header is exactly the sixteen required names
-- **GIVEN** a data row whose `Property_Class` field is written as the six characters `"a""|b"`, opening and closing with a quote
+- **GIVEN** a data row whose `Property_Class` field is written as the seven characters `"a""|b"`, opening and closing with a quote
 - **WHEN** the caller invokes `validate_certified_member`
 - **THEN** `release_accepted` is true
 - **THEN** `accepted_row_count` is 1
