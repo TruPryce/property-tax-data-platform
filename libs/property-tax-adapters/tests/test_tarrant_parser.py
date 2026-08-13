@@ -194,6 +194,55 @@ def test_a_crlf_inside_a_quoted_field_is_also_a_spanning_record() -> None:
     assert _codes(report) == ["multiline_record_unsupported"]
 
 
+def test_text_after_a_closing_quote_is_malformed() -> None:
+    """`"A"junk` was accepted with no diagnostic at all.
+
+    Once the quote closed, ordinary characters were appended to the field, so a
+    value the physical contract never described passed validation silently.
+    """
+
+    report = _validate(synthetic.TRAILING_TEXT_AFTER_QUOTE)
+    assert _codes(report) == ["malformed_delimited_record"]
+    assert report.release_accepted is False
+    assert report.diagnostics[0].physical_row_number == 2
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_recovery_preserves_physical_row_numbers(newline: str) -> None:
+    """Consuming only the CR of a CRLF opened a phantom record and shifted rows."""
+
+    report = _validate(synthetic.malformed_then_bad_row(newline))
+    reported = [(d.code.value, d.physical_row_number) for d in report.diagnostics]
+    assert reported == [("malformed_delimited_record", 2), ("invalid_division", 3)]
+    # Rows 2 and 3 are the only data rows; nothing may be reported beyond them.
+    assert max(row for _, row in reported) == 3
+
+
+def test_a_bare_cr_is_not_a_record_boundary() -> None:
+    """D1 accepts LF and CRLF. Treating a lone CR as a boundary would widen the
+    approved physical contract, and this member parsed cleanly before."""
+
+    report = _validate(synthetic.BARE_CR_MEMBER)
+    assert report.release_accepted is False
+    assert report.accepted_row_count == 0
+    assert "unsupported_layout" in _codes(report)
+
+
+def test_a_quoted_field_may_still_be_followed_by_a_delimiter_or_ending() -> None:
+    """The fix must not reject the legitimate shapes."""
+
+    for member in (synthetic.QUOTED_DELIMITER, synthetic.QUOTED_DOUBLED_QUOTE):
+        report = _validate(member)
+        assert report.release_accepted is True, member
+        assert report.accepted_row_count == 1
+
+    # A quoted final field, with and without a trailing terminator.
+    quoted_last = synthetic.row(Appraisal_Date='"12/1/2025"')
+    with_ending = synthetic.member(quoted_last)
+    assert _validate(with_ending).release_accepted is True
+    assert _validate(with_ending.rstrip(b"\n")).release_accepted is True
+
+
 def test_an_empty_member_is_an_unsupported_layout() -> None:
     report = _validate(synthetic.EMPTY_MEMBER)
     assert _codes(report) == ["unsupported_layout"]

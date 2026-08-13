@@ -346,6 +346,38 @@ def _decode(data: bytes | str) -> str | None:
     return data
 
 
+def _terminator_length(text: str, index: int) -> int:
+    """Length of the record terminator at `index`, or 0 if there is none.
+
+    D1 accepts LF and CRLF. A bare CR is deliberately not a terminator: treating
+    one as a record boundary would accept a physical layout the contract does
+    not, so it stays an ordinary character and is caught downstream as a control
+    character in a header or as invalid text in a field.
+    """
+
+    if text[index] == "\n":
+        return 1
+    if text[index] == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+        return 2
+    return 0
+
+
+def _skip_past_record(text: str, index: int) -> tuple[int, int]:
+    """Advance past the next terminator, consuming CRLF as one unit.
+
+    Consuming only the CR of a CRLF would leave the LF behind to open a phantom
+    blank record and shift every later physical row number.
+    """
+
+    length = len(text)
+    while index < length:
+        step = _terminator_length(text, index)
+        if step:
+            return index + step, 1
+        index += 1
+    return index, 0
+
+
 def _scan_records(
     text: str,
 ) -> list[tuple[int, list[str], TarrantDiagnosticCode | None]]:
@@ -355,13 +387,12 @@ def _scan_records(
     record that spans physical lines: by the time the field splitter runs, the
     newline is already gone and the record merely looks like two malformed ones.
     So the scan is quote-aware over the raw text, and a CR or LF encountered
-    inside a quoted field is reported as `multiline_record_unsupported` against
-    the row where that record began.
+    inside a quoted field is reported against the row where that record began.
 
     Returns one entry per record as `(physical_row_number, fields, error)`.
-    `fields` is empty when `error` is set.  LF and CRLF both terminate a record,
-    one trailing line ending is allowed, and blank records are preserved rather
-    than silently skipped so they reach row validation.
+    `fields` is empty when `error` is set. One trailing terminator is allowed,
+    and blank records are preserved rather than silently skipped so they reach
+    row validation.
     """
 
     records: list[tuple[int, list[str], TarrantDiagnosticCode | None]] = []
@@ -369,13 +400,14 @@ def _scan_records(
     current: list[str] = []
     in_quote = False
     quoted_field = False
+    field_closed = False
     start_row = 1
     row = 1
     index = 0
     length = len(text)
 
     def close_record(error: TarrantDiagnosticCode | None) -> None:
-        nonlocal fields, current, quoted_field
+        nonlocal fields, current, quoted_field, field_closed
         if error is None:
             fields.append("".join(current))
             records.append((start_row, fields, None))
@@ -384,6 +416,11 @@ def _scan_records(
         fields = []
         current = []
         quoted_field = False
+        field_closed = False
+
+    def fail_record() -> tuple[int, int]:
+        close_record(TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD)
+        return _skip_past_record(text, index)
 
     while index < length:
         char = text[index]
@@ -395,13 +432,13 @@ def _scan_records(
                     index += 2
                     continue
                 in_quote = False
+                field_closed = True
                 index += 1
                 continue
             if char in "\r\n":
-                # A newline inside a quoted field is either a record that spans
-                # physical lines, or a quote that never closes at all.  The
-                # difference is only visible by looking ahead for the close, and
-                # the two have different codes, so look before reporting.
+                # Either a record that spans physical lines or a quote that never
+                # closes at all. Only a lookahead separates them, and the two
+                # carry different codes, so look before reporting.
                 resume, consumed, closed = _discard_spanning_record(text, index)
                 close_record(
                     TarrantDiagnosticCode.MULTILINE_RECORD_UNSUPPORTED
@@ -417,14 +454,39 @@ def _scan_records(
             index += 1
             continue
 
+        step = _terminator_length(text, index)
+        if step:
+            close_record(None)
+            index += step
+            row += 1
+            start_row = row
+            # A single trailing terminator ends the member rather than opening
+            # an empty final record.
+            if index >= length:
+                return records
+            continue
+
+        if field_closed:
+            # A quoted field ended; only a delimiter or a terminator may follow.
+            # Anything else -- `"A"junk` -- is malformed rather than extra text
+            # silently appended to the value.
+            if char != _DELIMITER:
+                index, consumed = fail_record()
+                row += consumed
+                start_row = row
+                continue
+            fields.append("".join(current))
+            current = []
+            quoted_field = False
+            field_closed = False
+            index += 1
+            continue
+
         if char == _QUOTE:
             if current or quoted_field:
                 # A quote may only open a field, never appear mid-field.
-                close_record(TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD)
-                index = _skip_to_line_end(text, index)
-                if index < length:
-                    index += 1
-                row += 1
+                index, consumed = fail_record()
+                row += consumed
                 start_row = row
                 continue
             in_quote = True
@@ -439,19 +501,6 @@ def _scan_records(
             index += 1
             continue
 
-        if char in "\r\n":
-            close_record(None)
-            if char == "\r" and index + 1 < length and text[index + 1] == "\n":
-                index += 1
-            index += 1
-            row += 1
-            start_row = row
-            # A single trailing line ending is allowed rather than starting an
-            # empty final record.
-            if index >= length:
-                return records
-            continue
-
         current.append(char)
         index += 1
 
@@ -459,28 +508,20 @@ def _scan_records(
         # Opened and never closed, with no following line to close it on.
         close_record(TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD)
         return records
-    if fields or current or quoted_field:
+    if fields or current or quoted_field or field_closed:
         close_record(None)
     return records
-
-
-def _skip_to_line_end(text: str, index: int) -> int:
-    """Advance to the next CR or LF, or to the end of the text."""
-
-    while index < len(text) and text[index] not in "\r\n":
-        index += 1
-    return index
 
 
 def _discard_spanning_record(text: str, index: int) -> tuple[int, int, bool]:
     """Consume the remainder of a record whose quoted field met a line ending.
 
-    Starts on the CR or LF found inside the quoted field.  Consumes until the
-    quote closes, then to the end of that physical line, so the continuation is
-    not mistaken for a fresh record.
+    Starts on the CR or LF found inside the quoted field. Consumes until the
+    quote closes, then to the end of that record, so the continuation is not
+    mistaken for a fresh one.
 
     Returns the resuming index, how many physical rows were crossed, and whether
-    the quote ever closed.  It closing means the record spanned lines; it never
+    the quote ever closed. It closing means the record spanned lines; it never
     closing means the quote was simply unbalanced, and the two carry different
     diagnostic codes.
     """
@@ -488,26 +529,24 @@ def _discard_spanning_record(text: str, index: int) -> tuple[int, int, bool]:
     length = len(text)
     rows = 0
     while index < length:
-        char = text[index]
-        if char in "\r\n":
-            if char == "\r" and index + 1 < length and text[index + 1] == "\n":
-                index += 1
-            index += 1
+        step = _terminator_length(text, index)
+        if step:
+            index += step
             rows += 1
+            continue
+        char = text[index]
+        if char == "\r":
+            # A bare CR inside the quoted remainder is not a boundary.
+            index += 1
             continue
         if char == _QUOTE:
             if index + 1 < length and text[index + 1] == _QUOTE:
                 index += 2
                 continue
-            # The quote closes here; the rest of this physical line belongs to
-            # the same rejected record.
-            index = _skip_to_line_end(text, index + 1)
-            if index < length:
-                if text[index] == "\r" and index + 1 < length and text[index + 1] == "\n":
-                    index += 1
-                index += 1
-                rows += 1
-            return index, rows, True
+            # The quote closes here; the rest of this record is part of the same
+            # rejected record.
+            index, consumed = _skip_past_record(text, index + 1)
+            return index, rows + consumed, True
         index += 1
     return index, rows, False
 

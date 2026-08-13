@@ -136,6 +136,31 @@ MULTILINE_RECORD_CRLF = (
 SHARP_S = "\N{LATIN SMALL LETTER SHARP S}"
 NON_ASCII_DISTINCT_EXTRAS = (f"{HEADER}|SS|{SHARP_S}\n{VALID_ROW}|x|y\n").encode("iso-8859-1")
 
+#: A closing quote followed by ordinary characters. Appending them to the field
+#: would silently accept a value the physical contract never described.
+TRAILING_TEXT_AFTER_QUOTE = (
+    f"{HEADER}\n"
+    'R|2025|00123-A|PIDN-0001|GIS-0001|"A"junk|A|EX1|1000|2500.50|3500.50|'
+    "3500.50||3/14/2025|03/14/2025|12/1/2025\n"
+).encode("iso-8859-1")
+
+#: A malformed row at physical row 2 and a division defect at row 3, in both
+#: line endings. Consuming only the CR of a CRLF during recovery would leave the
+#: LF to open a phantom blank record and shift row 3 to row 4.
+_MALFORMED_ROW = 'R|2025|A1|P|G|"bad"x|A|E|1|2|3|4||3/1/2025|3/1/2025|3/1/2025'
+
+
+def malformed_then_bad_row(newline: str = "\n") -> bytes:
+    """Header, a malformed record, then a record with an invalid division."""
+
+    body = newline.join((HEADER, _MALFORMED_ROW, row(RP="X", Account_Num="ACC-3")))
+    return (body + newline).encode("iso-8859-1")
+
+
+#: D1 accepts LF and CRLF. A member separated only by bare CR is not a valid
+#: physical layout, and must not parse as though it were.
+BARE_CR_MEMBER = f"{HEADER}\r{VALID_ROW}\r".encode("iso-8859-1")
+
 EMPTY_MEMBER = b""
 
 
