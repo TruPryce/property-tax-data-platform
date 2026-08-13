@@ -164,10 +164,34 @@ def test_an_unbalanced_quote_is_refused() -> None:
     assert report.accepted_row_count == 0
 
 
-def test_a_record_spanning_two_physical_lines_is_refused() -> None:
+def test_a_record_spanning_two_physical_lines_reports_the_multiline_code() -> None:
+    """Asserting only rejection hid a real defect.
+
+    Splitting on newlines before parsing quotes made a spanning record look like
+    two malformed ones, so the release was refused for the wrong reason and the
+    row number pointed at the wrong place. The code itself is the assertion.
+    """
+
     report = _validate(synthetic.MULTILINE_RECORD)
+    assert _codes(report) == ["multiline_record_unsupported"]
     assert report.release_accepted is False
     assert report.accepted_row_count == 0
+    assert report.diagnostics[0].physical_row_number == 2
+
+
+def test_a_spanning_record_does_not_leak_a_second_diagnostic() -> None:
+    """Its continuation belongs to the same rejected record."""
+
+    report = _validate(synthetic.MULTILINE_RECORD_THEN_VALID)
+    assert _codes(report) == ["multiline_record_unsupported"]
+    assert report.total_diagnostic_count == 1
+    # The valid row after the spanning record still numbers correctly.
+    assert report.accepted_row_count == 0
+
+
+def test_a_crlf_inside_a_quoted_field_is_also_a_spanning_record() -> None:
+    report = _validate(synthetic.MULTILINE_RECORD_CRLF)
+    assert _codes(report) == ["multiline_record_unsupported"]
 
 
 def test_an_empty_member_is_an_unsupported_layout() -> None:
@@ -211,6 +235,22 @@ def test_a_defective_layout_is_refused_with_its_own_code(member: bytes, code: st
     assert code in _codes(report)
     assert report.release_accepted is False
     assert report.accepted_row_count == 0
+
+
+def test_header_collision_folds_ascii_only() -> None:
+    """`casefold()` maps 'SS' and 'ß' together; D1 says ASCII folding.
+
+    Two extra headers that differ only outside ASCII are distinct names, so the
+    release is accepted rather than reported as colliding.
+    """
+
+    report = _validate(synthetic.NON_ASCII_DISTINCT_EXTRAS)
+    assert "header_name_collision" not in _codes(report)
+    assert report.release_accepted is True
+
+    # An actual ASCII collision is still caught.
+    collision = _validate(synthetic.CASE_FOLD_COLLISION)
+    assert "header_name_collision" in _codes(collision)
 
 
 def test_a_row_width_mismatch_carries_its_physical_row_number() -> None:
@@ -383,6 +423,28 @@ def test_an_approved_date_is_accepted(value: str) -> None:
 def test_an_unapproved_date_is_refused(value: str) -> None:
     report = _validate(synthetic.member(synthetic.row(Deed_Date=value)))
     assert "invalid_source_date" in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("codepoint", "label"),
+    [(0x00, "nul"), (0x1F, "unit-separator"), (0x7F, "del"), (0x85, "nel"), (0x9F, "apc")],
+)
+def test_a_control_character_is_refused_in_source_text(codepoint: int, label: str) -> None:
+    """ISO-8859-1 can represent C1 controls, so excluding only C0 and DEL let
+    U+0080 through U+009F into supposedly non-control text."""
+
+    del label
+    value = f"A{chr(codepoint)}B"
+    report = _validate(synthetic.member(synthetic.row(Property_Class=value)))
+    assert "invalid_source_text" in _codes(report)
+
+
+@pytest.mark.parametrize("codepoint", [0x00, 0x1F, 0x7F, 0x85, 0x9F])
+def test_a_control_character_is_refused_in_a_header(codepoint: int) -> None:
+    header = f"{synthetic.HEADER}|Note{chr(codepoint)}"
+    member = synthetic.member(f"{synthetic.VALID_ROW}|x", header=header)
+    report = _validate(member)
+    assert "unsupported_layout" in _codes(report)
 
 
 def test_an_optional_identifier_and_text_bound_are_enforced() -> None:

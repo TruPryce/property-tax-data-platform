@@ -220,23 +220,13 @@ def validate_certified_member(
     if text.startswith(_TEXT_BOM):
         return _rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNEXPECTED_BOM))
 
-    lines = _physical_lines(text)
-    if not lines:
+    records = _scan_records(text)
+    if not records:
         return _rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNSUPPORTED_LAYOUT))
 
-    header_fields = _split_record(lines[0])
-    if header_fields is None:
-        return _rejected(
-            TarrantDiagnostic(
-                TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD, physical_row_number=1
-            )
-        )
-    if any("\n" in field or "\r" in field for field in header_fields):
-        return _rejected(
-            TarrantDiagnostic(
-                TarrantDiagnosticCode.MULTILINE_RECORD_UNSUPPORTED, physical_row_number=1
-            )
-        )
+    header_row, header_fields, header_error = records[0]
+    if header_error is not None:
+        return _rejected(TarrantDiagnostic(header_error, physical_row_number=header_row))
 
     observed = tuple(header_fields)
     fingerprint = layout_fingerprint(observed)
@@ -249,21 +239,11 @@ def validate_certified_member(
     accepted = 0
     seen_accounts: set[str] = set()
 
-    for offset, line in enumerate(lines[1:], start=2):
-        fields = _split_record(line)
-        if fields is None:
+    for offset, fields, error in records[1:]:
+        if error is not None:
             diagnostics.append(
                 TarrantDiagnostic(
-                    TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD,
-                    physical_row_number=offset,
-                    layout_fingerprint=fingerprint,
-                )
-            )
-            continue
-        if any("\n" in field or "\r" in field for field in fields):
-            diagnostics.append(
-                TarrantDiagnostic(
-                    TarrantDiagnosticCode.MULTILINE_RECORD_UNSUPPORTED,
+                    error,
                     physical_row_number=offset,
                     layout_fingerprint=fingerprint,
                 )
@@ -366,73 +346,170 @@ def _decode(data: bytes | str) -> str | None:
     return data
 
 
-def _physical_lines(text: str) -> list[str]:
-    """Split on LF and CRLF, allowing exactly one trailing line ending.
+def _scan_records(
+    text: str,
+) -> list[tuple[int, list[str], TarrantDiagnosticCode | None]]:
+    """Split the member into records, tracking quote state across line endings.
 
-    Blank and whitespace-only records are preserved rather than silently
-    skipped, so they reach row validation and fail there.
+    Splitting on newlines first and parsing quotes afterwards cannot detect a
+    record that spans physical lines: by the time the field splitter runs, the
+    newline is already gone and the record merely looks like two malformed ones.
+    So the scan is quote-aware over the raw text, and a CR or LF encountered
+    inside a quoted field is reported as `multiline_record_unsupported` against
+    the row where that record began.
+
+    Returns one entry per record as `(physical_row_number, fields, error)`.
+    `fields` is empty when `error` is set.  LF and CRLF both terminate a record,
+    one trailing line ending is allowed, and blank records are preserved rather
+    than silently skipped so they reach row validation.
     """
 
-    if not text:
-        return []
-    normalized = text.replace("\r\n", "\n")
-    if normalized.endswith("\n"):
-        normalized = normalized[:-1]
-    return normalized.split("\n")
-
-
-def _split_record(line: str) -> list[str] | None:
-    """Split one physical line, or return ``None`` when quoting is malformed.
-
-    Embedded pipes are accepted only inside a quoted field, and a doubled quote
-    inside one represents a literal quote.  There is no escape character.
-    """
-
+    records: list[tuple[int, list[str], TarrantDiagnosticCode | None]] = []
     fields: list[str] = []
     current: list[str] = []
+    in_quote = False
+    quoted_field = False
+    start_row = 1
+    row = 1
     index = 0
-    length = len(line)
+    length = len(text)
+
+    def close_record(error: TarrantDiagnosticCode | None) -> None:
+        nonlocal fields, current, quoted_field
+        if error is None:
+            fields.append("".join(current))
+            records.append((start_row, fields, None))
+        else:
+            records.append((start_row, [], error))
+        fields = []
+        current = []
+        quoted_field = False
+
     while index < length:
-        char = line[index]
-        if char != _QUOTE:
-            if char == _DELIMITER:
-                fields.append("".join(current))
-                current = []
-            else:
-                current.append(char)
-            index += 1
-            continue
-        if current:
-            # A quote may only open a field, never appear mid-field unquoted.
-            return None
-        index += 1
-        closed = False
-        while index < length:
-            char = line[index]
-            if char != _QUOTE:
-                current.append(char)
+        char = text[index]
+
+        if in_quote:
+            if char == _QUOTE:
+                if index + 1 < length and text[index + 1] == _QUOTE:
+                    current.append(_QUOTE)
+                    index += 2
+                    continue
+                in_quote = False
                 index += 1
                 continue
-            if index + 1 < length and line[index + 1] == _QUOTE:
-                current.append(_QUOTE)
-                index += 2
+            if char in "\r\n":
+                # A newline inside a quoted field is either a record that spans
+                # physical lines, or a quote that never closes at all.  The
+                # difference is only visible by looking ahead for the close, and
+                # the two have different codes, so look before reporting.
+                resume, consumed, closed = _discard_spanning_record(text, index)
+                close_record(
+                    TarrantDiagnosticCode.MULTILINE_RECORD_UNSUPPORTED
+                    if closed
+                    else TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD
+                )
+                in_quote = False
+                index = resume
+                row += consumed
+                start_row = row
                 continue
+            current.append(char)
             index += 1
-            closed = True
-            break
-        if not closed:
-            return None
-        if index < length:
-            if line[index] != _DELIMITER:
-                return None
+            continue
+
+        if char == _QUOTE:
+            if current or quoted_field:
+                # A quote may only open a field, never appear mid-field.
+                close_record(TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD)
+                index = _skip_to_line_end(text, index)
+                if index < length:
+                    index += 1
+                row += 1
+                start_row = row
+                continue
+            in_quote = True
+            quoted_field = True
             index += 1
+            continue
+
+        if char == _DELIMITER:
             fields.append("".join(current))
             current = []
+            quoted_field = False
+            index += 1
             continue
-        fields.append("".join(current))
-        return fields
-    fields.append("".join(current))
-    return fields
+
+        if char in "\r\n":
+            close_record(None)
+            if char == "\r" and index + 1 < length and text[index + 1] == "\n":
+                index += 1
+            index += 1
+            row += 1
+            start_row = row
+            # A single trailing line ending is allowed rather than starting an
+            # empty final record.
+            if index >= length:
+                return records
+            continue
+
+        current.append(char)
+        index += 1
+
+    if in_quote:
+        # Opened and never closed, with no following line to close it on.
+        close_record(TarrantDiagnosticCode.MALFORMED_DELIMITED_RECORD)
+        return records
+    if fields or current or quoted_field:
+        close_record(None)
+    return records
+
+
+def _skip_to_line_end(text: str, index: int) -> int:
+    """Advance to the next CR or LF, or to the end of the text."""
+
+    while index < len(text) and text[index] not in "\r\n":
+        index += 1
+    return index
+
+
+def _discard_spanning_record(text: str, index: int) -> tuple[int, int, bool]:
+    """Consume the remainder of a record whose quoted field met a line ending.
+
+    Starts on the CR or LF found inside the quoted field.  Consumes until the
+    quote closes, then to the end of that physical line, so the continuation is
+    not mistaken for a fresh record.
+
+    Returns the resuming index, how many physical rows were crossed, and whether
+    the quote ever closed.  It closing means the record spanned lines; it never
+    closing means the quote was simply unbalanced, and the two carry different
+    diagnostic codes.
+    """
+
+    length = len(text)
+    rows = 0
+    while index < length:
+        char = text[index]
+        if char in "\r\n":
+            if char == "\r" and index + 1 < length and text[index + 1] == "\n":
+                index += 1
+            index += 1
+            rows += 1
+            continue
+        if char == _QUOTE:
+            if index + 1 < length and text[index + 1] == _QUOTE:
+                index += 2
+                continue
+            # The quote closes here; the rest of this physical line belongs to
+            # the same rejected record.
+            index = _skip_to_line_end(text, index + 1)
+            if index < length:
+                if text[index] == "\r" and index + 1 < length and text[index + 1] == "\n":
+                    index += 1
+                index += 1
+                rows += 1
+            return index, rows, True
+        index += 1
+    return index, rows, False
 
 
 def _validate_header(observed: tuple[str, ...], fingerprint: str) -> list[TarrantDiagnostic]:
@@ -457,7 +534,7 @@ def _validate_header(observed: tuple[str, ...], fingerprint: str) -> list[Tarran
                 )
             )
         elif name != name.strip(_ASCII_WHITESPACE) or any(
-            character < " " or character == "\x7f" for character in name
+            _is_control(character) for character in name
         ):
             # Surrounding whitespace and control characters are layout defects
             # the four named header codes do not cover.
@@ -476,7 +553,9 @@ def _validate_header(observed: tuple[str, ...], fingerprint: str) -> list[Tarran
                 layout_fingerprint=fingerprint,
             )
         )
-    folded = [name.casefold() for name in observed]
+    # ASCII folding only.  `casefold()` maps 'SS' and 'ß' together, which would
+    # report a collision between two headers that differ under D1's ASCII rule.
+    folded = [_ascii_fold(name) for name in observed]
     if len(set(folded)) != len(folded) and len(set(observed)) == len(observed):
         diagnostics.append(
             TarrantDiagnostic(
@@ -589,12 +668,26 @@ def _validate_row(
     return diagnostics
 
 
+def _ascii_fold(value: str) -> str:
+    """Fold only ASCII letters, leaving every other code point untouched."""
+
+    return "".join(
+        chr(ord(character) + 32) if "A" <= character <= "Z" else character for character in value
+    )
+
+
+def _is_control(character: str) -> bool:
+    """C0, DEL, and the C1 range, all of which ISO-8859-1 can represent."""
+
+    return character < " " or "\x7f" <= character <= "\x9f"
+
+
 def _is_bounded_text(value: str, limit: int) -> bool:
     """Non-control text within the approved length."""
 
     if len(value) > limit:
         return False
-    return not any(character < " " or character == "\x7f" for character in value)
+    return not any(_is_control(character) for character in value)
 
 
 def _is_approved_monetary(value: str) -> bool:

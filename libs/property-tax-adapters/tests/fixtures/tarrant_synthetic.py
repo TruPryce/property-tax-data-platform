@@ -114,6 +114,28 @@ ROW_WIDTH_MISMATCH = (
     "3500.50||3/14/2025|03/14/2025\n"
 ).encode("iso-8859-1")
 
+#: A spanning record followed by an otherwise valid row: the continuation
+#: belongs to the rejected record, so only one diagnostic should result.
+MULTILINE_RECORD_THEN_VALID = (
+    f"{HEADER}\n"
+    'R|2025|00123-A|PIDN-0001|GIS-0001|"A\n1"|A|EX1|1000|2500.50|3500.50|'
+    "3500.50||3/14/2025|03/14/2025|12/1/2025\n"
+    f"{VALID_ROW}\n"
+).encode("iso-8859-1")
+
+#: The same defect with a CRLF inside the quoted field.
+MULTILINE_RECORD_CRLF = (
+    f"{HEADER}\r\n"
+    'R|2025|00123-A|PIDN-0001|GIS-0001|"A\r\n1"|A|EX1|1000|2500.50|3500.50|'
+    "3500.50||3/14/2025|03/14/2025|12/1/2025\r\n"
+).encode("iso-8859-1")
+
+#: U+00DF, representable in ISO-8859-1.  `"SS".casefold()` and
+#: `SHARP_S.casefold()` are both "ss", so Unicode folding reports a collision
+#: between two headers that D1's ASCII rule treats as distinct names.
+SHARP_S = "\N{LATIN SMALL LETTER SHARP S}"
+NON_ASCII_DISTINCT_EXTRAS = (f"{HEADER}|SS|{SHARP_S}\n{VALID_ROW}|x|y\n").encode("iso-8859-1")
+
 EMPTY_MEMBER = b""
 
 

@@ -37,8 +37,10 @@ no row, is not persisted, cached, or logged, and its lifetime ends with the call
 Contract version 1 decodes strictly as ISO-8859-1 and rejects UTF-8, UTF-16, and UTF-32 byte-order
 marks. The delimiter is `|`. The quote character is `"`, a doubled `""` inside a quoted field is one
 literal quote, and there is no escape character. Embedded pipes are accepted only inside a quoted
-field; an embedded CR or LF inside one is rejected, so every accepted record has exactly one
-physical source-row number. LF and CRLF boundaries are both accepted, one trailing line ending is
+field; an embedded CR or LF inside one is rejected as `multiline_record_unsupported`, so every
+accepted record has exactly one physical source-row number. A quote that opens and never closes
+anywhere in the member is `malformed_delimited_record` instead: records are scanned quote-aware over
+the raw text, so the two are distinguished rather than both looking malformed. LF and CRLF boundaries are both accepted, one trailing line ending is
 allowed, and blank or whitespace-only records are not silently skipped.
 
 The header is physical row 1 and data rows begin at row 2. Header names bind case-sensitively with
@@ -164,3 +166,11 @@ remain unproved and block any production claim:
 - source licensing and redistribution terms.
 
 Live-release compatibility and production readiness are **not** established by this foundation.
+
+## Related
+
+- [Source onboarding](README.md)
+- [Adapter overview](../../libs/property-tax-adapters/README.md)
+- [Tarrant OpenSpec delta](../../openspec/changes/add-tarrant-cad-parser-foundation/specs/tarrant-cad-source-contract/spec.md)
+- [Dallas parser foundation](dallas-parser-foundation.md)
+- [Architecture](../architecture/README.md)
