@@ -29,7 +29,7 @@ The parser contract version SHALL be `1`.
 
 #### Scenario: Accept a doubled quote inside a quoted field
 - **GIVEN** a synthetic member whose observed header is exactly the sixteen required names
-- **GIVEN** a data row whose `Property_Class` field is the quoted text `a""|b`
+- **GIVEN** a data row whose `Property_Class` field is written as the six characters `"a""|b"`, opening and closing with a quote
 - **WHEN** the caller invokes `validate_certified_member`
 - **THEN** `release_accepted` is true
 - **THEN** `accepted_row_count` is 1
@@ -141,7 +141,7 @@ Surrounding ASCII whitespace SHALL mean space, tab, CR, LF, vertical tab, and fo
 
 `Total_Value` and `Appraised_Value` SHALL be required nonblank values, and a blank SHALL be rejected with `blank_required_value`. `Land_Value`, `Improvement_Value`, and `Ag_Value` MAY be blank as source absence. Monetary grammar SHALL be `[0-9]+(?:\.[0-9]{1,4})?`. Monetary values SHALL parse with `decimal.Decimal`, SHALL retain their exact trimmed lexical text, and SHALL fall from zero through `10**28 - 1` inclusive. Leading signs, currency symbols, grouping separators, exponent notation, trailing decimal points, excessive scale, and otherwise malformed decimal text SHALL be rejected with `invalid_monetary_value`.
 
-`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. A nonblank date SHALL be ASCII-trimmed and SHALL match exactly `^(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/([0-9]{4})$` — a one- or two-digit month, a solidus, a one- or two-digit day, a solidus, and a four-digit year. D5 supplies this separator and component order; D2 fixes the components, calendar validity, and range.
+`Deed_Date`, `Notice_Date`, and `Appraisal_Date` MAY be blank. A nonblank date SHALL be ASCII-trimmed and SHALL match exactly `^(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/([0-9]{4})$` — a one- or two-digit month, a solidus, a one- or two-digit day, a solidus, and a four-digit year. D6 supplies this separator and component order; D2 fixes the components, calendar validity, and range.
 
 A date matching that pattern SHALL additionally be calendar-valid, so `2/30/2025` and `4/31/2025` are rejected, and SHALL fall within 1900 through 2100 inclusive. The original trimmed lexical text SHALL be retained as source-native, so `3/14/2025` and `03/14/2025` are preserved as written and are not normalized to one another. Any other separator, component order, two-digit year, non-ASCII digit, or otherwise malformed date SHALL be rejected with `invalid_source_date`.
 
@@ -295,7 +295,7 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 
 #### Scenario: Retain a decoded quoted value on a constructed record
 - **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
-- **GIVEN** a valid certified-core row whose `Property_Class` field is the quoted text `a""|b`
+- **GIVEN** a valid certified-core row whose `Property_Class` field is written as `"a""|b"`
 - **WHEN** the adapter constructs the native record
 - **THEN** `property_class` is the four-character text `a"|b`
 - **THEN** the literal `|` is preserved rather than treated as a delimiter
@@ -344,7 +344,7 @@ One certified-core physical row SHALL produce one certified shared record. No cu
 
 One logical release SHALL be one caller-identified certified artifact, selected member, and expected source year. The adapter SHALL require caller-supplied `release_identifier`, `source_member_name`, and `expected_source_year`, and MUST NOT infer any of them from row data or source filenames.
 
-D4 requires those identifiers to be bounded logical identifiers rather than absolute paths or host-local locations but sets no exact bound. Decision D6 supplies one, and merging this change is what accepts it: `release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters after no trimming, SHALL contain only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. That alphabet admits no `/`, `\\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are all unrepresentable rather than merely discouraged. `expected_source_year` SHALL be an `int` from 1900 through 2100 inclusive.
+D4 requires those identifiers to be bounded logical identifiers rather than absolute paths or host-local locations but sets no exact bound. Decision D7 supplies one, and merging this change is what accepts it: `release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters after no trimming, SHALL contain only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. That alphabet admits no `/`, `\\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are all unrepresentable rather than merely discouraged. `expected_source_year` SHALL be an `int` from 1900 through 2100 inclusive. `bool` SHALL NOT be accepted for it even though `bool` subclasses `int` in Python, and a non-`str` `release_identifier` or `source_member_name` SHALL be rejected rather than coerced.
 
 A caller-supplied value violating any of these bounds SHALL raise `ValueError` before the member is read. This is a caller contract rather than source data, so it fails as a programming error and produces no diagnostic and no report; the closed diagnostic vocabulary describes the source, never the caller.
 
@@ -356,6 +356,20 @@ When records exist — that is, after Issue #43 lands and the record layer is bu
 - **WHEN** the caller invokes `validate_certified_member`
 - **THEN** the call fails before any data row is read
 - **THEN** no year is inferred from row data or from the member name
+
+#### Scenario: Reject a caller argument of the wrong type
+- **GIVEN** a valid synthetic member
+- **GIVEN** a `release_identifier` of `b"tarrant-2025"` rather than a `str`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `ValueError` is raised before the member is read
+- **THEN** the value is not coerced to `str`
+
+#### Scenario: Reject a boolean expected source year
+- **GIVEN** a valid synthetic member
+- **GIVEN** an `expected_source_year` of `True`
+- **WHEN** the caller invokes `validate_certified_member`
+- **THEN** `ValueError` is raised before the member is read
+- **THEN** the value is not treated as the integer 1
 
 #### Scenario: Reject a release identifier shaped like a path
 - **GIVEN** a valid synthetic member
