@@ -893,7 +893,11 @@ def test_a_record_carries_the_source_field_and_lexical_text_per_value() -> None:
 
     total = record.source_native_values["Total_Value"]
     assert isinstance(total.value, Decimal)
-    assert Decimal(total.lexical_text.strip()) == total.value
+    # No `.strip()` here.  The earlier version called it on the stored text,
+    # which accommodated padding instead of checking the contract and let a
+    # raw-text defect pass.
+    assert Decimal(total.lexical_text) == total.value
+    assert total.lexical_text == total.lexical_text.strip()
 
 
 def test_a_record_populates_no_canonical_appraisal_or_tax_semantics() -> None:
@@ -979,3 +983,44 @@ def test_conversion_omits_a_blank_optional_identifier() -> None:
             else:
                 assert shared.source_native_identifiers[name] == native
         assert all(value.strip() for value in shared.source_native_identifiers.values())
+
+
+def test_a_padded_value_retains_its_trimmed_lexical_text() -> None:
+    """The contract requires the exact *trimmed* text, not the raw field.
+
+    Surrounding padding is layout, not source evidence.  Trimming removes it and
+    normalizes nothing else, so two date spellings stay distinct.
+    """
+
+    padded = (
+        f"{synthetic.HEADER}\n"
+        "R|2025|00123-A|PIDN-0001|GIS-0001|A1|A|EX1|1000|2500.50| 3500.50 |"
+        "3500.50||3/14/2025| 03/14/2025 |12/1/2025\n"
+    ).encode("iso-8859-1")
+
+    result = _materialize(padded)
+    assert result.report.release_accepted is True
+
+    values = result.records[0].source_native_values
+    assert values["Total_Value"].lexical_text == "3500.50"
+    assert values["Notice_Date"].lexical_text == "03/14/2025"
+    # Trimming is not normalization: the two spellings remain distinct.
+    assert values["Deed_Date"].lexical_text == "3/14/2025"
+    assert values["Deed_Date"].lexical_text != values["Notice_Date"].lexical_text
+
+
+def test_the_public_surface_declares_the_record_layer() -> None:
+    """A name absent from `__all__` is not part of the module's contract."""
+
+    from property_tax_adapters.sources.texas import tarrant
+
+    assert {
+        "TarrantCertifiedSourceRecord",
+        "TarrantSourceProvenance",
+        "TarrantMaterializationResult",
+        "TARRANT_SOURCE_VALUE_FIELDS",
+        "materialize_certified_member",
+        "convert_tarrant_record",
+    } <= set(tarrant.__all__)
+    for name in tarrant.__all__:
+        assert hasattr(tarrant, name), name

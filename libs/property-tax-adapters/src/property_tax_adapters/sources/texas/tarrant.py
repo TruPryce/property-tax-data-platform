@@ -517,7 +517,12 @@ def _materialize_row(
         values[name] = SourceNativeValue(
             source_field=name,
             value=parsed,
-            lexical_text=lexical,
+            # The trimmed text, not the raw field.  The contract requires
+            # monetary and date values to retain their exact *trimmed* lexical
+            # text, so surrounding padding is layout, not source evidence --
+            # while `3/14/2025` and `03/14/2025` stay distinct, because trimming
+            # removes padding and normalizes nothing.
+            lexical_text=stripped,
         )
 
     shared = SourceProvenance(
@@ -1117,9 +1122,15 @@ __all__ = [
     "TARRANT_SOURCE",
     "TARRANT_SOURCE_FAMILY",
     "TARRANT_SOURCE_STATUS",
+    "TARRANT_SOURCE_VALUE_FIELDS",
+    "TarrantCertifiedSourceRecord",
     "TarrantDiagnostic",
     "TarrantDiagnosticCode",
+    "TarrantMaterializationResult",
+    "TarrantSourceProvenance",
     "TarrantValidationReport",
+    "convert_tarrant_record",
     "layout_fingerprint",
+    "materialize_certified_member",
     "validate_certified_member",
 ]
