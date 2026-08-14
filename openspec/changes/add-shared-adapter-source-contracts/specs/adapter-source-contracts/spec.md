@@ -69,7 +69,26 @@ A blank or whitespace-only `source_field` SHALL be rejected at construction, bec
 
 ### Requirement: Carry the provenance issue #43 D7 approves and no more
 
-`SourceProvenance` SHALL carry `jurisdiction_code`, the caller-supplied `release_identifier` and `source_member_name`, a one-based `source_row_number`, `parser_contract_version`, and `layout_fingerprint`, together with D7's six optional fields: `table_name`, `source_family`, `source_year`, `source_status`, `observed_fields`, and `normalized_fields`. It SHALL carry no field beyond that list.
+`SourceProvenance` SHALL carry exactly these fields and no others, with these types:
+
+| field | type |
+| --- | --- |
+| `jurisdiction_code` | `str` |
+| `release_identifier` | `str` |
+| `source_member_name` | `str` |
+| `source_row_number` | `int` |
+| `parser_contract_version` | `int` |
+| `layout_fingerprint` | `str` |
+| `table_name` | `str \| None` |
+| `source_family` | `str \| None` |
+| `source_year` | `int \| None` |
+| `source_status` | `str \| None` |
+| `observed_fields` | `tuple[str, ...] \| None` |
+| `normalized_fields` | `tuple[str, ...] \| None` |
+
+On a field vector, `None` SHALL mean the county records no such vector and an empty tuple SHALL mean it recorded an empty one; the two SHALL NOT be conflated.
+
+A county whose native provenance carries a differently named fingerprint SHALL map it onto `layout_fingerprint` rather than adding a second fingerprint field.
 
 `source_row_number` SHALL be a positive integer, and a nonpositive value SHALL be rejected at construction.
 
@@ -101,7 +120,21 @@ A county that keeps its own provenance type SHALL hold a shared `SourceProvenanc
 
 ### Requirement: Identify an appraisal source record without forcing an unapproved key
 
-`AppraisalSourceRecord` SHALL carry `jurisdiction_code`, an optional approved `source_account_id`, `source_native_identifiers`, `appraisal_year`, `source_family`, an optional `source_status`, an optional `parcel_reference`, `source_native_values`, and the shared `provenance`.
+`AppraisalSourceRecord` SHALL carry exactly these fields, with these types:
+
+| field | type |
+| --- | --- |
+| `jurisdiction_code` | `str` |
+| `source_account_id` | `str \| None` |
+| `source_native_identifiers` | `Mapping[str, str]` |
+| `appraisal_year` | `int` |
+| `source_family` | `str \| None` |
+| `source_status` | `str \| None` |
+| `parcel_reference` | `str \| None` |
+| `source_native_values` | `Mapping[str, SourceNativeValue]` |
+| `provenance` | `SourceProvenance` |
+
+Both mappings SHALL be exposed as read-only views over defensive copies, so neither the caller's mapping nor the record's own mapping can be mutated after construction.
 
 `source_family` SHALL be optional. Issue #43 D7 approves it as required; this change proposes it optional because no approved Dallas value exists and D7's own rules assign Dallas only its account identifier and parcel reference. Merging this change is what accepts that supersession.
 
@@ -109,7 +142,7 @@ Where a county has an approved account identifier, `source_account_id` SHALL be 
 
 Where a county's accepted contract does not approve an account key, `source_account_id` SHALL be `None`, and the county's candidate identifiers SHALL be preserved in `source_native_identifiers` under their exact source names as distinct entries with no equivalence asserted between them. A record SHALL NOT promote an identifier its county contract prohibits promoting.
 
-An empty string SHALL be rejected in `source_account_id`, `source_family`, `source_status`, and `parcel_reference`, so absence is expressed as `None` and never as `""`.
+A blank or whitespace-only string SHALL be rejected in every nullable metadata field — `source_account_id`, `source_family`, `source_status`, and `parcel_reference` on the record, and `table_name`, `source_family`, and `source_status` on provenance — so absence is expressed as `None` and never as a string that merely looks empty. `lexical_text` is exempt, because an observed text is preserved exactly, whitespace included.
 
 `provenance` SHALL be required. A record SHALL NOT be constructible without it, because a source-native record whose origin is unknown is not evidence.
 
@@ -129,10 +162,11 @@ Each key of `source_native_values` SHALL equal the `source_field` of the value i
 - **THEN** both candidate identifiers appear in `source_native_identifiers` under their exact source names
 - **THEN** the two entries are distinct and neither is recorded as equivalent to the other
 
-#### Scenario: Reject an empty string where absence is meant
-- **GIVEN** a `source_account_id` of `""`
+#### Scenario: Reject a string that only looks empty
+- **GIVEN** a `source_account_id` of `""`, and separately one of `"   "`
 - **WHEN** the record is constructed
-- **THEN** `ValueError` is raised
+- **THEN** `ValueError` is raised in both cases
+- **THEN** a `lexical_text` of `"   "` on a value is still accepted, because an observed text is preserved exactly
 
 #### Scenario: Reject a record whose value map disagrees with itself
 - **GIVEN** a `source_native_values` entry keyed `Total_Value` whose value declares `source_field` of `Land_Value`

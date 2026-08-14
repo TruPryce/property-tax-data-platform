@@ -37,7 +37,12 @@ sources/texas/collin.py      imports contracts; Collin* value/provenance copies 
 sources/texas/{tarrant,denton,ellis}.py   unchanged by this change
 ```
 
-County-native input records and diagnostics stay in county modules, as D7 directs. Because the shared provenance carries D7's optional table, observed, and normalized fields, a county populates them directly rather than wrapping the shared type; where a county keeps its own provenance type it holds a shared `SourceProvenance` as a field rather than subclassing it, so one county's mechanism never becomes another's obligation.
+County-native input records and diagnostics stay in county modules, as D7 directs. Where a county keeps its own provenance type it holds a shared `SourceProvenance` as a field rather than subclassing it, so one county's mechanism never becomes another's obligation. Both migrations perform that composition explicitly rather than leaving it implied: `DallasSourceProvenance` and `CollinObservationProvenance` each gain a shared-provenance field, and the tasks say so.
+
+Two mappings the migrations must get right, because a wrong one is silent:
+
+- Collin's native fingerprint is called `schema_fingerprint`. It maps onto the shared `layout_fingerprint`; the shared provenance gains no second fingerprint field. Collin's observation lineage — `source_family`, `source_year`, `property_status`, `value_source_columns`, with their county enum types — stays on `CollinObservationProvenance`, and the shared optional strings never replace those enums.
+- Dallas keys `extras` by **normalized** header (`extra_headers` is built from `normalized_headers`), and `_normalize_header` strips surrounding ASCII whitespace and upper-cases. So `source_field` must be the normalized header, or the shared rule that a value-map key equals its value's `source_field` would fail. The ordered observed headers stay in provenance, where they already are.
 
 This is a boundary between two kinds of type, not a ban on county types. `DallasAppraisalSourceRecord`, `CollinAppraisalSourceRecord`, `CollinObservationProvenance`, and `CollinAppraisalObservation` all remain. What is prohibited is a second definition of a shared shape.
 
@@ -48,6 +53,8 @@ This is a boundary between two kinds of type, not a ban on county types. `Dallas
 ## Data and contract changes
 
 Three types are added. Five definitions are deleted: the unprefixed three from Dallas, and `CollinSourceNativeValue` and `CollinSourceProvenance` from Collin. No persisted schema exists yet, so no migration is required.
+
+One accepted capability changes. `dallas-cad-source-contract` guarantees `source_account_id: str` and a jurisdiction fixed to `tx-dallas`; the shared record permits `str | None`. Adopting the shared type without saying anything would quietly weaken that guarantee at the contract level even though Dallas's runtime behaviour is unchanged. This change therefore carries a MODIFIED delta restating the Dallas requirement against the shared types — always `tx-dallas`, always a non-null account and parcel reference, value keys equal to the normalized header, family and status `None`, empty extras still `""` — with regression tests in task 3.1.
 
 ## Alternatives considered
 
