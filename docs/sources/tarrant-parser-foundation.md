@@ -20,12 +20,20 @@ its scope.
 bytes or text plus a release identifier, source member name, and expected source year. It returns
 one `TarrantValidationReport`.
 
-The interim surface is a **validator, not a row producer**. The approved Tarrant-native record holds
-shared `SourceNativeValue` entries owned by
-[Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43), and that contract
-does not exist yet. Returning rows today would require a county-local substitute for a shared
-contract, which the accepted decisions forbid. Row materialization arrives with the record layer
-once Issue #43 lands, reusing this validation rather than reimplementing it.
+There are now two entry points over one traversal. `validate_certified_member` is the validator
+described above. `materialize_certified_member` returns that same report alongside typed
+`TarrantCertifiedSourceRecord` rows, and `convert_tarrant_record` converts one into the
+vendor-neutral `AppraisalSourceRecord` that
+[Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43) decision D7 owns —
+now implemented in
+[the shared adapter source contracts](shared-adapter-source-contracts.md). The validation is
+written once and reused, so the two entry points cannot disagree about what a valid Tarrant row is.
+
+Materialization is atomic with validation. A release rejected for any blocking reason yields zero
+records, never a partial set, including when other rows in the same member were valid.
+
+No county-local substitute for a shared contract exists, and that prohibition has not lifted — only
+the wait for the real thing has ended.
 
 `TarrantValidationReport` carries the parser contract version, an acceptance flag, the layout
 fingerprint, the observed headers, the accepted row count, up to 100 `TarrantDiagnostic` entries,

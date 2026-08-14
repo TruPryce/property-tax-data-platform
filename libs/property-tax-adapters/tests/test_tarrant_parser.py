@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -707,15 +708,28 @@ def _module_source() -> str:
     return Path(inspect.getfile(tarrant)).read_text(encoding="utf-8")
 
 
-def test_no_shared_issue_43_contract_is_imported_or_substituted() -> None:
-    """The record layer waits on Issue #43, and no county-local stand-in exists."""
+def test_the_shared_contracts_are_imported_and_never_substituted() -> None:
+    """Tasks 6.1 and 6.2 lift the wait; the prohibition on a stand-in does not lift.
+
+    Before the shared module existed this asserted the opposite -- that nothing
+    referenced those names -- because a county-local copy was the failure mode.
+    The copy is still the failure mode; only the source of the real thing has
+    changed.
+    """
+
+    import ast
 
     source = _module_source()
-    assert "sources.contracts" not in source
-    assert "AppraisalSourceRecord" not in source
-    assert "class SourceNativeValue" not in source
-    assert "class SourceProvenance" not in source
-    assert "TarrantCertifiedSourceRecord" not in source
+    assert "from property_tax_adapters.sources.contracts import" in source
+
+    defined = {node.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ClassDef)}
+    assert not defined & {
+        "SourceNativeValue",
+        "SourceProvenance",
+        "AppraisalSourceRecord",
+        "TarrantSourceNativeValue",
+        "TarrantAppraisalSourceRecord",
+    }
 
 
 def test_the_domain_and_application_packages_gain_no_tarrant_vocabulary() -> None:
@@ -777,9 +791,236 @@ def test_the_parser_adds_no_dependency_outside_the_standard_library() -> None:
         "hashlib",
         "json",
         "re",
+        "collections",
         "dataclasses",
         "datetime",
         "decimal",
         "enum",
+        "types",
         "typing",
     }, imported
+
+
+# --------------------------------------------------------------------------
+# Tasks 6.1 and 6.2: records, and conversion through the shared contracts
+# --------------------------------------------------------------------------
+
+
+def _materialize(data: bytes | str = synthetic.VALID_LF, **overrides: object):
+    """Mirrors `_validate`, so both entry points are exercised the same way."""
+
+    from property_tax_adapters.sources.texas.tarrant import materialize_certified_member
+
+    return materialize_certified_member(data, **{**IDENTITY, **overrides})  # type: ignore[arg-type]
+
+
+def test_materialization_reuses_validation_rather_than_repeating_it() -> None:
+    """The two entry points must never disagree about what a valid row is."""
+
+    validated = _validate(synthetic.VALID_LF)
+    result = _materialize(synthetic.VALID_LF)
+
+    assert result.report == validated
+    assert len(result.records) == validated.accepted_row_count
+
+
+def test_a_rejected_release_materializes_nothing() -> None:
+    """Atomic with validation: no partial set, ever."""
+
+    result = _materialize(synthetic.ROW_WIDTH_MISMATCH)
+
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_a_valid_row_beside_a_rejected_one_is_still_discarded() -> None:
+    """The case that actually exercises release-level atomicity.
+
+    A member whose only bad row is also its only row proves nothing: no record
+    was built, so discarding one is free.  Here a good row *is* built and must
+    still be thrown away, which is the whole claim.
+    """
+
+    mixed = (
+        f"{synthetic.HEADER}\n"
+        f"{synthetic.VALID_ROW}\n"
+        "R|2025|00124-A|PIDN-0002|GIS-0002|A1|A|EX1|1000|2500.50|3500.50\n"
+    ).encode("iso-8859-1")
+
+    result = _materialize(mixed)
+
+    assert result.report.release_accepted is False
+    assert result.report.accepted_row_count == 0
+    assert result.records == ()
+
+
+def test_a_stored_shared_provenance_may_not_disagree_with_its_county_fields() -> None:
+    """Holding a copy makes drift possible where deriving it did not."""
+
+    from dataclasses import replace
+
+    from property_tax_adapters.sources.texas.tarrant import TarrantSourceProvenance
+
+    provenance = _materialize().records[0].provenance
+    with pytest.raises(ValueError, match="disagrees with Tarrant provenance"):
+        TarrantSourceProvenance(
+            jurisdiction_code=provenance.jurisdiction_code,
+            release_identifier=provenance.release_identifier,
+            source_member_name=provenance.source_member_name,
+            expected_source_year=provenance.expected_source_year,
+            source_family=provenance.source_family,
+            source_status=provenance.source_status,
+            observed_headers=provenance.observed_headers,
+            duplicate_header_names=provenance.duplicate_header_names,
+            case_fold_collisions=provenance.case_fold_collisions,
+            layout_fingerprint=provenance.layout_fingerprint,
+            physical_row_number=provenance.physical_row_number,
+            parser_contract_version=provenance.parser_contract_version,
+            shared=replace(
+                provenance.shared,
+                source_row_number=provenance.physical_row_number + 1,
+            ),
+        )
+
+
+def test_a_record_carries_the_source_field_and_lexical_text_per_value() -> None:
+    record = _materialize().records[0]
+
+    for name, value in record.source_native_values.items():
+        assert value.source_field == name
+        assert value.lexical_text is not None
+        assert value.classification == "source-native"
+
+    total = record.source_native_values["Total_Value"]
+    assert isinstance(total.value, Decimal)
+    # No `.strip()` here.  The earlier version called it on the stored text,
+    # which accommodated padding instead of checking the contract and let a
+    # raw-text defect pass.
+    assert Decimal(total.lexical_text) == total.value
+    assert total.lexical_text == total.lexical_text.strip()
+
+
+def test_a_record_populates_no_canonical_appraisal_or_tax_semantics() -> None:
+    from dataclasses import fields as dataclass_fields
+
+    from property_tax_adapters.sources.texas.tarrant import TarrantCertifiedSourceRecord
+
+    declared = {field.name for field in dataclass_fields(TarrantCertifiedSourceRecord)}
+    assert not declared & {
+        "market_value",
+        "appraised_value",
+        "assessed_value",
+        "taxable_value",
+        "tax_amount",
+        "exemption_entitlement",
+        "replacement_cost",
+        "payment_status",
+        "delinquency",
+        "penalty",
+        "interest",
+    }
+
+
+def test_no_sensitive_value_reaches_a_record() -> None:
+    """A sensitive header may appear in layout provenance; its value may not."""
+
+    record = _materialize().records[0]
+
+    assert not set(record.source_native_values) & TARRANT_SENSITIVE_HEADERS
+    from property_tax_adapters.sources.texas.tarrant import TARRANT_SOURCE_VALUE_FIELDS
+
+    assert set(record.source_native_values) <= set(TARRANT_SOURCE_VALUE_FIELDS)
+
+
+def test_provenance_holds_the_shared_provenance_as_a_stored_field() -> None:
+    from dataclasses import fields as dataclass_fields
+
+    from property_tax_adapters.sources.contracts import SourceProvenance
+    from property_tax_adapters.sources.texas.tarrant import TarrantSourceProvenance
+
+    assert "shared" in {f.name for f in dataclass_fields(TarrantSourceProvenance)}
+
+    provenance = _materialize().records[0].provenance
+    assert isinstance(provenance.shared, SourceProvenance)
+    assert provenance.shared.jurisdiction_code == "tx-tarrant"
+    assert provenance.shared.source_family == "certified-core"
+    assert provenance.shared.source_status == "certified"
+    assert provenance.shared.observed_fields == provenance.observed_headers
+    assert provenance.duplicate_header_names == ()
+    assert provenance.case_fold_collisions == ()
+
+
+def test_one_native_row_converts_to_exactly_one_shared_record() -> None:
+    from property_tax_adapters.sources.texas.tarrant import convert_tarrant_record
+
+    result = _materialize()
+    converted = [convert_tarrant_record(record) for record in result.records]
+
+    assert len(converted) == len(result.records)
+    shared = converted[0]
+    native = result.records[0]
+    assert shared.jurisdiction_code == "tx-tarrant"
+    assert shared.source_account_id == native.account_num
+    assert shared.appraisal_year == native.appraisal_year
+    assert shared.source_family == "certified-core"
+    assert shared.source_status == "certified"
+    assert shared.parcel_reference is None
+    assert shared.source_native_identifiers["Account_Num"] == native.account_num
+    assert dict(shared.source_native_values) == dict(native.source_native_values)
+    assert shared.provenance is native.provenance.shared
+
+
+def test_conversion_omits_a_blank_optional_identifier() -> None:
+    """A blank PIDN or GIS_Link is absent, not an empty identifier."""
+
+    from property_tax_adapters.sources.texas.tarrant import convert_tarrant_record
+
+    for record in _materialize().records:
+        shared = convert_tarrant_record(record)
+        for name, native in (("PIDN", record.pidn), ("GIS_Link", record.gis_link)):
+            if native is None:
+                assert name not in shared.source_native_identifiers
+            else:
+                assert shared.source_native_identifiers[name] == native
+        assert all(value.strip() for value in shared.source_native_identifiers.values())
+
+
+def test_a_padded_value_retains_its_trimmed_lexical_text() -> None:
+    """The contract requires the exact *trimmed* text, not the raw field.
+
+    Surrounding padding is layout, not source evidence.  Trimming removes it and
+    normalizes nothing else, so two date spellings stay distinct.
+    """
+
+    padded = (
+        f"{synthetic.HEADER}\n"
+        "R|2025|00123-A|PIDN-0001|GIS-0001|A1|A|EX1|1000|2500.50| 3500.50 |"
+        "3500.50||3/14/2025| 03/14/2025 |12/1/2025\n"
+    ).encode("iso-8859-1")
+
+    result = _materialize(padded)
+    assert result.report.release_accepted is True
+
+    values = result.records[0].source_native_values
+    assert values["Total_Value"].lexical_text == "3500.50"
+    assert values["Notice_Date"].lexical_text == "03/14/2025"
+    # Trimming is not normalization: the two spellings remain distinct.
+    assert values["Deed_Date"].lexical_text == "3/14/2025"
+    assert values["Deed_Date"].lexical_text != values["Notice_Date"].lexical_text
+
+
+def test_the_public_surface_declares_the_record_layer() -> None:
+    """A name absent from `__all__` is not part of the module's contract."""
+
+    from property_tax_adapters.sources.texas import tarrant
+
+    assert {
+        "TarrantCertifiedSourceRecord",
+        "TarrantSourceProvenance",
+        "TarrantMaterializationResult",
+        "TARRANT_SOURCE_VALUE_FIELDS",
+        "materialize_certified_member",
+        "convert_tarrant_record",
+    } <= set(tarrant.__all__)
+    for name in tarrant.__all__:
+        assert hasattr(tarrant, name), name
