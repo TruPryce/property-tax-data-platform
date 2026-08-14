@@ -756,10 +756,22 @@ def test_declared_precision_and_scale_survive_on_the_shared_value() -> None:
 
 
 def test_an_absent_value_is_an_omitted_entry() -> None:
-    """Not a value that holds no value."""
+    """Not a value that holds no value.
+
+    The previous version guarded with `... or True`, which is unconditional, so
+    it asserted nothing about absence at all.  This names the columns that are
+    genuinely `None` in the fixture and requires each to be gone.
+    """
 
     observation = convert().observations[0]
-    assert any(value is None for value in observation.values.values()) or True
+    absent = {name for name, value in observation.values.items() if value is None}
+    present = {name for name, value in observation.values.items() if value is not None}
+    assert absent, "fixture no longer exercises absence"
+    assert present, "fixture no longer exercises presence"
+
     record = convert_collin_observation(observation)
+
+    assert absent & set(record.source_native_values) == set()
+    assert present <= set(record.source_native_values)
+    assert set(record.source_native_values) == present
     assert all(value is not None for value in record.source_native_values.values())
-    assert set(record.source_native_values) <= set(observation.values)

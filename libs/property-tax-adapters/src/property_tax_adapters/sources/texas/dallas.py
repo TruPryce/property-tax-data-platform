@@ -103,21 +103,38 @@ class DallasSourceProvenance:
     layout_fingerprint: str
     source_row_number: int
     parser_contract_version: int
+    #: A stored field, not a computed view.  The accepted contract requires this
+    #: type to *hold* a shared provenance, so it appears in `dataclasses.fields`
+    #: and travels with the record rather than being rebuilt on each access.
+    shared: SourceProvenance
 
-    @property
-    def shared(self) -> SourceProvenance:
-        """The vendor-neutral view of this provenance."""
-
-        return SourceProvenance(
-            jurisdiction_code=DALLAS_JURISDICTION_CODE,
-            release_identifier=self.release_identifier,
-            source_member_name=self.source_member_name,
-            source_row_number=self.source_row_number,
-            parser_contract_version=self.parser_contract_version,
-            layout_fingerprint=self.layout_fingerprint,
-            observed_fields=self.observed_headers,
-            normalized_fields=self.normalized_headers,
-        )
+    def __post_init__(self) -> None:
+        # A stored copy can drift from what it copies; a derived one could not.
+        # That is the cost of holding it, so the agreement is checked once here
+        # rather than trusted.
+        mismatched = [
+            name
+            for name, county, neutral in (
+                ("source_member_name", self.source_member_name, self.shared.source_member_name),
+                ("release_identifier", self.release_identifier, self.shared.release_identifier),
+                ("layout_fingerprint", self.layout_fingerprint, self.shared.layout_fingerprint),
+                ("source_row_number", self.source_row_number, self.shared.source_row_number),
+                (
+                    "parser_contract_version",
+                    self.parser_contract_version,
+                    self.shared.parser_contract_version,
+                ),
+                ("observed_headers", self.observed_headers, self.shared.observed_fields),
+                ("normalized_headers", self.normalized_headers, self.shared.normalized_fields),
+            )
+            if county != neutral
+        ]
+        if mismatched:
+            raise ValueError(
+                "shared provenance disagrees with Dallas provenance on: " + ", ".join(mismatched)
+            )
+        if self.shared.jurisdiction_code != DALLAS_JURISDICTION_CODE:
+            raise ValueError(f"shared provenance jurisdiction must be {DALLAS_JURISDICTION_CODE!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +416,16 @@ def _parse_source_record(
         layout_fingerprint=layout_fingerprint,
         source_row_number=source_row_number,
         parser_contract_version=DALLAS_PARSER_CONTRACT_VERSION,
+        shared=SourceProvenance(
+            jurisdiction_code=DALLAS_JURISDICTION_CODE,
+            release_identifier=release_identifier,
+            source_member_name=source_member_name,
+            source_row_number=source_row_number,
+            parser_contract_version=DALLAS_PARSER_CONTRACT_VERSION,
+            layout_fingerprint=layout_fingerprint,
+            observed_fields=observed_headers,
+            normalized_fields=normalized_headers,
+        ),
     )
     return DallasAppraisalSourceRecord(
         account_num=account_num,

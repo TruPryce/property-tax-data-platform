@@ -17,6 +17,7 @@ from fixtures.dallas_synthetic import (
     VALID_REORDERED,
     VALID_ROW,
 )
+from property_tax_adapters.sources.contracts import SourceProvenance
 from property_tax_adapters.sources.texas import dallas as dallas_module
 from property_tax_adapters.sources.texas.dallas import (
     DALLAS_PARSER_CONTRACT_VERSION,
@@ -26,6 +27,7 @@ from property_tax_adapters.sources.texas.dallas import (
     DallasParseError,
     DallasParseResult,
     DallasParserInputError,
+    DallasSourceProvenance,
     SourceNativeDecimal,
     SourceNativeValue,
     parse_dallas_appraisal_csv,
@@ -583,3 +585,49 @@ def test_an_empty_extra_column_stays_an_empty_text() -> None:
     value = parse(member).records[0].source_native_values["NOTE"]
     assert value.lexical_text == ""
     assert value.value == ""
+
+
+def test_dallas_provenance_stores_the_shared_provenance_as_a_field() -> None:
+    """The accepted delta requires it held, not derived.
+
+    A computed property satisfies attribute access and nothing else: it is
+    absent from `dataclasses.fields`, so it does not travel with the record and
+    no consumer inspecting the type can see it.
+    """
+
+    from dataclasses import fields as dataclass_fields
+
+    declared = {declared.name for declared in dataclass_fields(DallasSourceProvenance)}
+    assert "shared" in declared
+
+    provenance = parse().source_records[0].provenance
+    assert isinstance(provenance.shared, SourceProvenance)
+    assert provenance.shared.jurisdiction_code == "tx-dallas"
+    assert provenance.shared.observed_fields == provenance.observed_headers
+    assert provenance.shared.normalized_fields == provenance.normalized_headers
+
+
+def test_a_stored_shared_provenance_may_not_disagree_with_its_county_fields() -> None:
+    """Holding a copy makes drift possible; deriving it did not."""
+
+    provenance = parse().source_records[0].provenance
+    with pytest.raises(ValueError, match="disagrees with Dallas provenance"):
+        DallasSourceProvenance(
+            source_member_name=provenance.source_member_name,
+            release_identifier=provenance.release_identifier,
+            observed_headers=provenance.observed_headers,
+            normalized_headers=provenance.normalized_headers,
+            layout_fingerprint=provenance.layout_fingerprint,
+            source_row_number=provenance.source_row_number,
+            parser_contract_version=provenance.parser_contract_version,
+            shared=SourceProvenance(
+                jurisdiction_code="tx-dallas",
+                release_identifier=provenance.release_identifier,
+                source_member_name=provenance.source_member_name,
+                source_row_number=provenance.source_row_number + 1,
+                parser_contract_version=provenance.parser_contract_version,
+                layout_fingerprint=provenance.layout_fingerprint,
+                observed_fields=provenance.observed_headers,
+                normalized_fields=provenance.normalized_headers,
+            ),
+        )
