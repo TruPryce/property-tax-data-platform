@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from io import StringIO
@@ -16,6 +16,12 @@ from typing import Literal, Never
 
 from property_tax_application import AcquisitionMethod, CountySourceDefinition
 from property_tax_domain import CountySlug, county_by_slug
+
+from property_tax_adapters.sources.contracts import (
+    AppraisalSourceRecord,
+    SourceNativeValue,
+    SourceProvenance,
+)
 
 DALLAS_JURISDICTION_CODE: Literal["tx-dallas"] = "tx-dallas"
 DALLAS_PARSER_CONTRACT_VERSION = 1
@@ -81,17 +87,14 @@ class SourceNativeDecimal:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceNativeValue:
-    """Vendor-neutral adapter value that has no canonical tax semantics."""
-
-    lexical_text: str
-    value: str | Decimal
-    classification: Literal["source-native"] = SOURCE_NATIVE_CLASSIFICATION
-
-
-@dataclass(frozen=True, slots=True)
 class DallasSourceProvenance:
-    """Source identity and layout evidence attached to a Dallas-native row."""
+    """Source identity and layout evidence attached to a Dallas-native row.
+
+    County-native, and it stays that way.  The header vectors are a CSV concept
+    that a fixed-width county has no use for, so this composes the shared
+    provenance rather than subclassing it: Dallas may record more without every
+    county inheriting an obligation to record the same.
+    """
 
     source_member_name: str
     release_identifier: str
@@ -100,19 +103,38 @@ class DallasSourceProvenance:
     layout_fingerprint: str
     source_row_number: int
     parser_contract_version: int
+    #: A stored field, not a computed view.  The accepted contract requires this
+    #: type to *hold* a shared provenance, so it appears in `dataclasses.fields`
+    #: and travels with the record rather than being rebuilt on each access.
+    shared: SourceProvenance
 
-
-@dataclass(frozen=True, slots=True)
-class SourceProvenance:
-    """Vendor-neutral copy of source identity and layout evidence."""
-
-    source_member_name: str
-    release_identifier: str
-    observed_headers: tuple[str, ...]
-    normalized_headers: tuple[str, ...]
-    layout_fingerprint: str
-    source_row_number: int
-    parser_contract_version: int
+    def __post_init__(self) -> None:
+        # A stored copy can drift from what it copies; a derived one could not.
+        # That is the cost of holding it, so the agreement is checked once here
+        # rather than trusted.
+        mismatched = [
+            name
+            for name, county, neutral in (
+                ("source_member_name", self.source_member_name, self.shared.source_member_name),
+                ("release_identifier", self.release_identifier, self.shared.release_identifier),
+                ("layout_fingerprint", self.layout_fingerprint, self.shared.layout_fingerprint),
+                ("source_row_number", self.source_row_number, self.shared.source_row_number),
+                (
+                    "parser_contract_version",
+                    self.parser_contract_version,
+                    self.shared.parser_contract_version,
+                ),
+                ("observed_headers", self.observed_headers, self.shared.observed_fields),
+                ("normalized_headers", self.normalized_headers, self.shared.normalized_fields),
+            )
+            if county != neutral
+        ]
+        if mismatched:
+            raise ValueError(
+                "shared provenance disagrees with Dallas provenance on: " + ", ".join(mismatched)
+            )
+        if self.shared.jurisdiction_code != DALLAS_JURISDICTION_CODE:
+            raise ValueError(f"shared provenance jurisdiction must be {DALLAS_JURISDICTION_CODE!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,28 +150,6 @@ class DallasAppraisalSourceRecord:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "extras", _immutable_mapping(self.extras))
-
-
-@dataclass(frozen=True, slots=True)
-class AppraisalSourceRecord:
-    """Vendor-neutral adapter output without canonical value semantics."""
-
-    source_account_id: str
-    appraisal_year: int
-    parcel_reference: str | None
-    source_native_values: Mapping[str, SourceNativeValue]
-    provenance: SourceProvenance
-    jurisdiction_code: Literal["tx-dallas"] = field(
-        default=DALLAS_JURISDICTION_CODE,
-        init=False,
-    )
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "source_native_values",
-            _immutable_mapping(self.source_native_values),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,30 +308,31 @@ def convert_dallas_appraisal_record(
     """Convert a Dallas-native row to the vendor-neutral adapter record."""
 
     native_values = {
+        # `extras` is keyed by normalized header, and the shared contract
+        # requires a value's `source_field` to equal its mapping key, so the
+        # normalized header is the only choice that keeps the two in agreement.
+        # The ordered observed headers stay in provenance, where they were.
         "TOT_VAL": SourceNativeValue(
+            source_field="TOT_VAL",
             lexical_text=source_record.tot_val.lexical_text,
             value=source_record.tot_val.value,
         ),
         **{
-            header: SourceNativeValue(lexical_text=value, value=value)
+            header: SourceNativeValue(source_field=header, lexical_text=value, value=value)
             for header, value in sorted(source_record.extras.items())
         },
     }
-    provenance = source_record.provenance
     return AppraisalSourceRecord(
+        jurisdiction_code=DALLAS_JURISDICTION_CODE,
         source_account_id=source_record.account_num,
         appraisal_year=source_record.appraisal_year,
         parcel_reference=source_record.gis_parcel_id,
+        # Dallas classifies neither today.  The shared fields are optional so a
+        # county that has no family is representable without inventing one.
+        source_family=None,
+        source_status=None,
         source_native_values=native_values,
-        provenance=SourceProvenance(
-            source_member_name=provenance.source_member_name,
-            release_identifier=provenance.release_identifier,
-            observed_headers=provenance.observed_headers,
-            normalized_headers=provenance.normalized_headers,
-            layout_fingerprint=provenance.layout_fingerprint,
-            source_row_number=provenance.source_row_number,
-            parser_contract_version=provenance.parser_contract_version,
-        ),
+        provenance=source_record.provenance.shared,
     )
 
 
@@ -415,6 +416,16 @@ def _parse_source_record(
         layout_fingerprint=layout_fingerprint,
         source_row_number=source_row_number,
         parser_contract_version=DALLAS_PARSER_CONTRACT_VERSION,
+        shared=SourceProvenance(
+            jurisdiction_code=DALLAS_JURISDICTION_CODE,
+            release_identifier=release_identifier,
+            source_member_name=source_member_name,
+            source_row_number=source_row_number,
+            parser_contract_version=DALLAS_PARSER_CONTRACT_VERSION,
+            layout_fingerprint=layout_fingerprint,
+            observed_fields=observed_headers,
+            normalized_fields=normalized_headers,
+        ),
     )
     return DallasAppraisalSourceRecord(
         account_num=account_num,

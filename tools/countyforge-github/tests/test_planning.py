@@ -553,10 +553,20 @@ def test_manifest_records_excluded_candidates_and_adrs_are_selected(tmp_path: Pa
         contract_root=root,
         output_dir=tmp_path,
         run_id="manifest-fixture",
-        limits=ContextLimits(max_files=48, max_file_bytes=100, max_total_bytes=240_000),
+        # `adr` ranks below openspec, source_contract, agent_guidance, and
+        # architecture, so this limit has to clear all four before an ADR can
+        # appear at all.  Those four now fill 48 files exactly, which made the
+        # assertion below depend on the repository not gaining one more document
+        # of any higher-ranked kind.  64 leaves room for the ranking to be
+        # exercised rather than for the cap to decide the outcome.
+        limits=ContextLimits(max_files=64, max_file_bytes=100, max_total_bytes=240_000),
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
     assert any(source["category"] == "adr" for source in packet["sources"])
+    # The point is the ordering, not merely that an ADR is present: every
+    # higher-ranked category must still precede it.
+    categories = [source["category"] for source in packet["sources"]]
+    assert categories.index("adr") > categories.index("architecture")
     bounded = build_planning_packet(
         trigger=_trigger(root),
         issue={"number": 6, "title": "Feature work", "body": "bounded plan", "labels": []},

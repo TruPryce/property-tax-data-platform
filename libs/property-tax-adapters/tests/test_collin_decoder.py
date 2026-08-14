@@ -24,6 +24,8 @@ from fixtures.collin_synthetic import (
     YEAR_2026_BUFFER,
     ZERO_BUFFER,
 )
+from property_tax_adapters.sources.contracts import SourceNativeValue
+from property_tax_adapters.sources.texas import collin as collin_module
 from property_tax_adapters.sources.texas.collin import (
     CERTIFIED_VALUE_COLUMNS,
     COLLIN_PARSER_CONTRACT_VERSION,
@@ -41,7 +43,7 @@ from property_tax_adapters.sources.texas.collin import (
     CollinDiagnostic,
     CollinDiagnosticCode,
     CollinParserInputError,
-    CollinSourceNativeValue,
+    convert_collin_observation,
     convert_collin_row,
     decode_collin_numeric,
     fingerprint_collin_schema,
@@ -367,17 +369,17 @@ def test_source_values_retain_exact_columns_metadata_and_semantics() -> None:
 
     assert tuple(source_record.current_values) == CURRENT_VALUE_COLUMNS
     assert tuple(source_record.certified_values) == CERTIFIED_VALUE_COLUMNS
-    assert source_record.current_values["curr_market"] == CollinSourceNativeValue(
+    assert source_record.current_values["curr_market"] == SourceNativeValue(
         value=Decimal("123456789.01"),
         precision=28,
         scale=2,
-        source_column="curr_market",
+        source_field="curr_market",
     )
-    assert source_record.certified_values["cert_market"] == CollinSourceNativeValue(
+    assert source_record.certified_values["cert_market"] == SourceNativeValue(
         value=Decimal("0.42"),
         precision=28,
         scale=2,
-        source_column="cert_market",
+        source_field="cert_market",
     )
     assert (
         source_record.current_values["curr_market"].classification
@@ -388,12 +390,14 @@ def test_source_values_retain_exact_columns_metadata_and_semantics() -> None:
 def test_current_and_certified_provenance_remains_distinct() -> None:
     current, certified = convert().observations
 
-    assert current.provenance.source_member_name == SOURCE_MEMBER
-    assert current.provenance.release_identifier == RELEASE_IDENTIFIER
-    assert current.provenance.table_name == COLLIN_TABLE_NAME
-    assert current.provenance.source_row_number == 1
-    assert current.provenance.parser_contract_version == COLLIN_PARSER_CONTRACT_VERSION
+    assert current.provenance.shared.source_member_name == SOURCE_MEMBER
+    assert current.provenance.shared.release_identifier == RELEASE_IDENTIFIER
+    assert current.provenance.shared.table_name == COLLIN_TABLE_NAME
+    assert current.provenance.shared.source_row_number == 1
+    assert current.provenance.shared.parser_contract_version == COLLIN_PARSER_CONTRACT_VERSION
+    # Same digest, mapped onto the shared vocabulary rather than duplicated.
     assert current.provenance.schema_fingerprint == COMPATIBLE_SCHEMA_FINGERPRINT
+    assert current.provenance.shared.layout_fingerprint == COMPATIBLE_SCHEMA_FINGERPRINT
     assert current.provenance.source_family == "current"
     assert current.provenance.source_year == 2026
     assert current.provenance.property_status == "Preliminary"
@@ -634,7 +638,7 @@ def test_existing_collin_registry_surface_is_preserved() -> None:
 def test_collin_records_remain_adapter_local() -> None:
     assert CollinAppraisalSourceRecord.__module__.startswith("property_tax_adapters.")
     assert CollinAppraisalObservation.__module__.startswith("property_tax_adapters.")
-    assert CollinSourceNativeValue.__module__.startswith("property_tax_adapters.")
+    assert SourceNativeValue.__module__.startswith("property_tax_adapters.")
 
 
 def test_foundation_imports_no_access_network_or_runtime_dependency() -> None:
@@ -674,3 +678,100 @@ def test_fixture_module_contains_no_owner_or_address_fields() -> None:
         "mailing_address",
         "situs_address",
     } & set(fixture_source.casefold().split())
+
+
+# --------------------------------------------------------------------------
+# Shared-contract migration
+# --------------------------------------------------------------------------
+
+
+def test_collin_defines_no_copy_of_a_shared_contract() -> None:
+    """The duplication the shared module exists to remove."""
+
+    import ast
+    import pathlib
+
+    module = ast.parse(
+        pathlib.Path(collin_module.__file__).read_text(encoding="utf-8"),
+        type_comments=False,
+    )
+    defined = {node.name for node in ast.walk(module) if isinstance(node, ast.ClassDef)}
+    assert not defined & {
+        "SourceNativeValue",
+        "SourceProvenance",
+        "AppraisalSourceRecord",
+        "CollinSourceNativeValue",
+        "CollinSourceProvenance",
+    }
+    # County-native records and observation lineage stay, per issue #43 D7.
+    assert {
+        "CollinAppraisalSourceRecord",
+        "CollinAppraisalObservation",
+        "CollinObservationProvenance",
+    } <= defined
+
+
+def test_neither_candidate_identifier_is_promoted_to_an_account_key() -> None:
+    """Collin approves no account key, so the shared field stays None.
+
+    `prop_id` must not be declared a unique or canonical account key, and
+    `geo_id` must not be equated with it.
+    """
+
+    for observation in convert().observations:
+        record = convert_collin_observation(observation)
+        assert record.source_account_id is None
+        assert record.source_native_identifiers["prop_id"] == str(observation.prop_id)
+        assert record.source_native_identifiers["geo_id"] == observation.geo_id
+        assert (
+            record.source_native_identifiers["prop_id"]
+            != record.source_native_identifiers["geo_id"]
+        )
+
+
+def test_one_shared_record_per_family_without_collapse() -> None:
+    """Two observations of one account stay two records, sharing nothing."""
+
+    current, certified = convert().observations
+    first = convert_collin_observation(current)
+    second = convert_collin_observation(certified)
+
+    assert first.source_family == "current"
+    assert second.source_family == "certified"
+    assert first.appraisal_year != second.appraisal_year
+    assert first.source_native_identifiers == second.source_native_identifiers
+    assert not set(first.source_native_values) & set(second.source_native_values)
+
+
+def test_declared_precision_and_scale_survive_on_the_shared_value() -> None:
+    """Collin's accepted contract requires them preserved; D7 approves them shared."""
+
+    record = convert_collin_observation(convert().observations[0])
+    value = record.source_native_values["curr_market"]
+    assert value.precision > 0
+    assert value.scale >= 0
+    # The 17-byte wrapper is binary, so there is no original text.
+    assert value.lexical_text is None
+    assert value.source_field == "curr_market"
+
+
+def test_an_absent_value_is_an_omitted_entry() -> None:
+    """Not a value that holds no value.
+
+    The previous version guarded with `... or True`, which is unconditional, so
+    it asserted nothing about absence at all.  This names the columns that are
+    genuinely `None` in the fixture and requires each to be gone.
+    """
+
+    observation = convert().observations[0]
+    absent = {name for name, value in observation.values.items() if value is None}
+    present = {name for name, value in observation.values.items() if value is not None}
+    assert absent, "fixture no longer exercises absence"
+    assert present, "fixture no longer exercises presence"
+
+    record = convert_collin_observation(observation)
+
+    assert absent & set(record.source_native_values) == set()
+    assert present <= set(record.source_native_values)
+    assert set(record.source_native_values) == present
+    assert all(value is not None for value in record.source_native_values.values())
