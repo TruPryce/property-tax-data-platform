@@ -2,13 +2,11 @@
 
 Read on `main` at the time of drafting.
 
-Dallas already separates county-native from vendor-neutral. `dallas.py` defines `DallasSourceProvenance` and `DallasAppraisalSourceRecord` (county-native, carrying `extras: Mapping[str, str]`) **and** the unprefixed `SourceNativeValue`, `SourceProvenance`, and `AppraisalSourceRecord`, with `convert_dallas_appraisal_record` between them. Required decision 7's target is that unprefixed set; the conversion pattern it lives in is sound and this change keeps it.
+Dallas already separates county-native from vendor-neutral. `dallas.py` defines `DallasSourceProvenance` and `DallasAppraisalSourceRecord` (county-native, carrying `extras: Mapping[str, str]`) **and** the unprefixed `SourceNativeValue`, `SourceProvenance`, and `AppraisalSourceRecord`, with `convert_dallas_appraisal_record` between them. That conversion pattern is what D7 formalizes, and this change keeps it.
 
 Collin defines a parallel set — `CollinSourceNativeValue`, `CollinSourceProvenance`, `CollinObservationProvenance`, `CollinAppraisalSourceRecord`, `CollinAppraisalObservation` — that never converges with Dallas's.
 
-Tarrant (814 lines), Denton (684), and Ellis (777) define none of the three. Each accepted contract instead forbids a county-local substitute until this change lands. `sources/pacs.py` (255) is the precedent: shared, county-free, bound by two counties without a fork.
-
-Where the two implementations disagree:
+Tarrant (814 lines), Denton (684), and Ellis (777) define none of the three; each accepted contract forbids a county-local substitute until this lands. `sources/pacs.py` (255) is the precedent: shared, county-free, bound by two counties without a fork.
 
 | | Collin | Dallas |
 | --- | --- | --- |
@@ -17,20 +15,20 @@ Where the two implementations disagree:
 | record key | `prop_id: int`, `geo_id` | `source_account_id: str`, `parcel_reference` |
 | value grain | current and certified maps on one record | one values map per row |
 
-They agree on `source_member_name`, `release_identifier`, `source_row_number`, and `parser_contract_version`. That agreement is the shared core.
+D7's field list already anticipates this divergence: optional precision and scale cover Collin's Access NUMERIC decode, and optional table, observed fields, and normalized fields cover both counties' provenance. Adopting D7 as written therefore needs no composition workaround for those fields.
 
-Three facts from the source that shaped the design more than anything else:
+Three source facts that shaped the remaining detail:
 
-- `decode_collin_numeric` takes a 17-byte `bytes` wrapper. Collin has no lexical text, so a required `lexical_text` is unsatisfiable — hence D1's nullability.
-- Collin's contract forbids declaring `prop_id` an account key and forbids equating `geo_id` with it, so Collin has no approvable `source_account_id` — hence D3's nullability and D5.
-- `convert_dallas_appraisal_record` already funnels every unknown CSV column into the vendor-neutral values map, which Dallas's contract requires — hence D6's honest limit.
+- `decode_collin_numeric` takes a 17-byte `bytes` wrapper, so Collin has no lexical text — D7's "optional original lexical text" is what makes Collin representable.
+- Collin's contract forbids declaring `prop_id` an account key and forbids equating `geo_id` with it — D7's optional account ID is what makes Collin representable, and its rules say so explicitly.
+- Dallas emits `lexical_text=''` and `value=''` for an empty extra column today, verified by running the parser. Treating `''` as absence would break the case-for-case migration D7 requires.
 
 ## Proposed architecture
 
-One new module, `property_tax_adapters/sources/contracts.py`, holding three frozen slotted dataclasses and a `SOURCE_CONTRACT_VERSION` constant, importing the standard library only.
+One new module, `property_tax_adapters/sources/contracts.py`, holding three frozen slotted dataclasses, importing the standard library only.
 
 ```
-sources/contracts.py      <- new: SourceNativeValue, SourceProvenance, AppraisalSourceRecord
+sources/contracts.py      <- new: the three D7 contracts
 sources/pacs.py              existing: serialization mechanics
 sources/texas/dallas.py      imports contracts; unprefixed local copies deleted;
                              DallasSourceProvenance / DallasAppraisalSourceRecord stay
@@ -39,9 +37,9 @@ sources/texas/collin.py      imports contracts; Collin* value/provenance copies 
 sources/texas/{tarrant,denton,ellis}.py   unchanged by this change
 ```
 
-County-native types **compose** the shared ones rather than subclassing them. `DallasSourceProvenance` keeps its header vectors and gains a `shared: SourceProvenance` field; Collin's keeps `table_name` the same way. Subclassing would put one county's mechanism in every county's type, which is what the present divergence already costs.
+County-native input records and diagnostics stay in county modules, as D7 directs. Because the shared provenance carries D7's optional table, observed, and normalized fields, a county populates them directly rather than wrapping the shared type; where a county keeps its own provenance type it holds a shared `SourceProvenance` as a field rather than subclassing it, so one county's mechanism never becomes another's obligation.
 
-This is a boundary between two kinds of type, not a ban on county types. County-native records are required and stay: `DallasAppraisalSourceRecord`, `CollinAppraisalSourceRecord`, `CollinObservationProvenance`, and `CollinAppraisalObservation` all remain. What is prohibited is a second definition of a shared shape.
+This is a boundary between two kinds of type, not a ban on county types. `DallasAppraisalSourceRecord`, `CollinAppraisalSourceRecord`, `CollinObservationProvenance`, and `CollinAppraisalObservation` all remain. What is prohibited is a second definition of a shared shape.
 
 ## Dependency direction
 
@@ -53,18 +51,18 @@ Three types are added. Five definitions are deleted: the unprefixed three from D
 
 ## Alternatives considered
 
-- **A literal move of the Dallas types, as required decision 7 reads.** Cheapest and faithful, and unusable for four counties: no `source_field`, a required `lexical_text` Collin cannot supply, a required `source_account_id` Collin may not declare, a `Literal["tx-dallas"]` jurisdiction, and header vectors meaningless to a fixed-width county. The revision table in the proposal is the diff.
-- **A shared base class counties subclass.** Puts Dallas's headers and Collin's table name in one hierarchy, so every county carries fields it cannot populate.
-- **A shared allowlist of permitted source fields, to make the privacy claim enforceable.** Contradicts Dallas's accepted "Retain unknown extras" requirement. D6 states the limit instead of overriding an accepted contract.
-- **Amending Collin's contract to approve an account key.** Rejected: this change does not amend accepted contracts. D5 works within the prohibition.
-- **Planning #43 whole.** Leaves eight tasks blocked behind decisions they do not depend on, and repeats the 2,727-second timeout.
+- **Excluding precision and scale from the shared value**, on the grounds that they are Collin decode mechanics. Rejected: D7 approves them as optional shared fields, and excluding them would supersede approved input to no benefit while forcing Collin into a composition wrapper.
+- **Keeping provenance to the six fields every county shares**, moving the rest county-local. Rejected for the same reason: D7 approves six optional provenance fields, and narrowing them is a supersession with no county requiring it.
+- **Admitting `None` as a `SourceNativeValue.value`.** Rejected: D7 says exact `str | int | Decimal`, and a "value" containing no value is not justified by any accepted county contract. Absence is expressed by omitting the entry, or in county-local structures — which is what Collin's `Mapping[str, CollinSourceNativeValue | None]` already does.
+- **A shared allowlist of permitted source fields**, to make the privacy claim enforceable. Rejected: contradicts Dallas's accepted "Retain unknown extras" requirement. D6 states the limit instead.
+- **Amending Collin's contract to approve an account key.** Rejected: D7's optional account ID exists precisely so this is unnecessary.
 
 ## Decisions and assumptions
 
-D1 through D6 are stated in the proposal with their county evidence. Two assumptions:
+D1 through D6 are stated in the proposal, with the single supersession isolated in D3. Two assumptions:
 
-- No consumer outside `property_tax_adapters` imports the Dallas or Collin local types. Verified by search at drafting time — there are none — and re-checked by tasks 3.1 and 4.1 before deletion, which stop and report rather than rewrite if one has appeared.
-- Dallas supplies `source_account_id` from `account_num` and `parcel_reference` from `gis_parcel_id`, as it does today; only `source_family` and `source_status` become `None`.
+- No consumer outside `property_tax_adapters` imports the Dallas or Collin local types. Verified by search at drafting time — none exist — and re-checked by tasks 3.1 and 4.1 before deletion, which stop and report rather than rewrite if one has appeared.
+- Dallas supplies `source_account_id` from `account_num` and `parcel_reference` from `gis_parcel_id`, as D7's rules direct and as it does today.
 
 ## Unresolved decisions
 
@@ -72,9 +70,9 @@ D1 through D6 are stated in the proposal with their county evidence. Two assumpt
 
 ## Risks and compatibility
 
-The migration is the risk, not the new module. Both counties have full suites, and migration must preserve observable behaviour exactly — same rows accepted, same rejected, same codes in the same order, same counts. Each migration lands with its county's tests unmodified except where a type name moved, so a behaviour change surfaces as a failure rather than a rewritten expectation. The 52 Dallas contract cases that #43 protects are covered by that rule.
+The migration is the risk, not the new module. D7 requires existing Dallas and Collin behaviour and tests to remain case-for-case, so each migration lands with its county's tests unmodified except where a type name or attribute path moved. A behaviour change surfaces as a failure rather than a rewritten expectation, and the 52 Dallas contract cases D6 protects are covered by that rule.
 
-Widening `value` to include `int` and `None`, and making three fields nullable, is a loosening: a consumer that assumed non-null must now handle absence. There is no such consumer today, and the counties that specified concrete values still supply them.
+Making three record fields optional is a loosening: a consumer that assumed non-null must handle absence. There is no such consumer today, and the counties that specified concrete values still supply them.
 
 Not addressed: the 663 MiB. These are per-record containers.
 
@@ -84,4 +82,4 @@ Additive first — module and tests land before either migration, so a failed mi
 
 ## Testing strategy
 
-Contract tests prove immutability including private attributes, that a record cannot be constructed without provenance, that a value's map key must equal its `source_field`, that blank strings are rejected while `None` is accepted where declared, and that a caller's mapping cannot reach inside a constructed record. Architecture tests parse the AST and strip docstrings before asserting on imports and class names, because a docstring may legitimately name a county. Privacy tests assert what D6 actually claims — no named identity field, no untyped payload attribute — and deliberately do not assert the stronger property that Dallas's accepted extras behaviour makes false. Each county's migration is proved by its existing suite passing unchanged.
+Contract tests prove immutability including private attributes, that a record cannot be constructed without provenance, that each value-map key equals its `source_field`, that `lexical_text` accepts `''` for an observed empty text and `None` for a binary source, that `value` admits no `None`, and that a caller's mapping cannot reach inside a constructed record. Architecture tests parse the AST and strip docstrings before asserting on imports and class names, because a docstring may legitimately name a county. Privacy tests assert exactly what D6 claims and include a test documenting the property deliberately not claimed, so a later reader does not mistake the weaker guarantee for the stronger one. Each county's migration is proved by its existing suite passing unchanged.
