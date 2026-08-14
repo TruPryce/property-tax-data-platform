@@ -1,7 +1,11 @@
 # dallas-cad-source-contract Specification
 
 ## Purpose
-TBD - created by archiving change add-dallas-cad-parser-foundation. Update Purpose after archive.
+Define the synthetic, adapter-local Dallas CAD CSV physical contract, observed-header binding
+and layout identity, adapter-local Dallas and vendor-neutral source records, lexical forms and
+parent-row uniqueness, parser provenance and bounded diagnostics, and privacy and fixture
+boundaries that precede any production release-processing or orchestration integration.
+
 ## Requirements
 ### Requirement: Dallas CSV physical contract
 The Dallas parser SHALL accept UTF-8 input with at most one UTF-8 BOM at the start, SHALL parse
