@@ -243,10 +243,18 @@ def test_a_uniformly_short_member_is_refused() -> None:
     assert _codes(_validate(synthetic.TRUNCATED_REQUIRED)) == ["record_width_mismatch"]
 
 
-def test_a_trailing_region_warns_once_and_is_not_carried() -> None:
+def test_an_undocumented_trailing_region_fails_closed() -> None:
+    """Issue #20 requires unknown trailing bytes to be rejected.
+
+    Treating them as a warning accepted a member carrying undocumented content
+    with its unknown region merely noted. The region is still fingerprinted, so
+    the rejection carries evidence of what was found without carrying it.
+    """
+
     report = _validate(synthetic.WITH_TRAILING_REGION)
     assert _codes(report) == ["undocumented_trailing_region"]
-    assert report.release_accepted is True
+    assert report.release_accepted is False
+    assert report.accepted_row_count == 0
     assert report.trailing_region_bytes == len(synthetic.TRAILING_REGION_TEXT)
     assert synthetic.TRAILING_REGION_TEXT not in repr(report)
 
@@ -636,7 +644,7 @@ def test_the_trailing_digest_describes_source_bytes() -> None:
     import hashlib
 
     report = _validate(synthetic.WITH_LATIN1_TRAILING)
-    assert report.release_accepted is True
+    assert report.release_accepted is False  # trailing bytes fail closed
     expected = synthetic.LATIN1_TRAILING_TEXT.encode("iso-8859-1")
     assert len(expected) == 2
     assert report.trailing_region_bytes == 2
@@ -743,3 +751,17 @@ def test_every_declared_denton_code_is_reachable() -> None:
         "legal_child_orphaned",
     }
     assert {code.value for code in DentonDiagnosticCode} == emitted
+
+
+def test_a_fingerprinted_layout_cannot_be_relabelled() -> None:
+    """A settable version let a mutated layout report the old approved digest."""
+
+    from property_tax_adapters.sources.pacs import PacsField, PacsLayout
+
+    layout = PacsLayout("t", "v1", (PacsField("a", 1, 3),))
+    before = layout.fingerprint
+    for attribute, value in (("layout_version", "mutated-v2"), ("layout_id", "other")):
+        with pytest.raises(AttributeError):
+            setattr(layout, attribute, value)
+    assert layout.fingerprint == before
+    assert layout.layout_version == "v1"

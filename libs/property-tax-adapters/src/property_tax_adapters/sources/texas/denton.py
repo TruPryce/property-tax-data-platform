@@ -168,11 +168,14 @@ class DentonDiagnosticCode(StrEnum):
 
 
 #: Every other code rejects the logical release.
+#:
+#: `undocumented_trailing_region` is *not* here. Issue #20 requires unknown
+#: trailing regions to fail closed, and treating them as a warning contradicted
+#: that: a member carrying undocumented bytes would have been accepted with its
+#: unknown region merely noted. The region is still fingerprinted, so the
+#: rejection carries evidence of what was found.
 _NONFATAL_CODES: Final[frozenset[DentonDiagnosticCode]] = frozenset(
-    {
-        DentonDiagnosticCode.UNDOCUMENTED_TRAILING_REGION,
-        DentonDiagnosticCode.LEGAL_CHILD_ORPHANED,
-    }
+    {DentonDiagnosticCode.LEGAL_CHILD_ORPHANED}
 )
 
 

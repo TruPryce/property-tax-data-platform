@@ -32,6 +32,10 @@ order, must not overlap, must not repeat a name, and must have `end >= start`. T
 defects in trusted repository code rather than anything a source file did, so they raise `ValueError`
 at construction and produce no diagnostic.
 
+A layout is **immutable once constructed**. Its fingerprint is computed at construction, so a
+settable identifier or version would let a layout be relabelled afterwards and report an approved
+digest beside an unapproved label — precisely the drift the fingerprint exists to detect.
+
 ## Layout Fingerprint
 
 The fingerprint is the lowercase SHA-256 hexadecimal digest of one canonical JSON document with
@@ -138,8 +142,12 @@ one-based physical row number, and the layout fingerprint. Those four fields are
 there is nowhere to put a record, an arbitrary value, an account value, release or member text, an
 owner name, an address, a credential, exception text, or a host path.
 
-`undocumented_trailing_region` and `legal_child_orphaned` are non-fatal. Every other code rejects the
-logical release, which reports `release_accepted` false with `accepted_row_count` zero. At most 100
+`legal_child_orphaned` is the only non-fatal code. Every other code rejects the logical release,
+which reports `release_accepted` false with `accepted_row_count` zero. `undocumented_trailing_region`
+rejects: Issue #20 requires unknown trailing bytes to fail closed, and treating them as a warning
+would accept a member carrying undocumented content with its unknown region merely noted. The
+region's byte length and digest are still recorded, so the rejection carries evidence of what was
+found without carrying the content. At most 100
 diagnostics are retained, the total is preserved, and truncation is marked deterministically.
 
 ## Caller Identity

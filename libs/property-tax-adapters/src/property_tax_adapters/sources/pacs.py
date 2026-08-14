@@ -103,7 +103,7 @@ class PacsLayout:
     the fault and let a broken layout reach a release.
     """
 
-    __slots__ = ("_fields", "_fingerprint", "layout_id", "layout_version")
+    __slots__ = ("_fields", "_fingerprint", "_layout_id", "_layout_version")
 
     def __init__(self, layout_id: str, layout_version: str, fields: tuple[PacsField, ...]) -> None:
         if not layout_id:
@@ -128,10 +128,26 @@ class PacsLayout:
                     raise ValueError(f"{field.name}: overlaps {previous.name}")
             previous = field
 
-        self.layout_id = layout_id
-        self.layout_version = layout_version
+        self._layout_id = layout_id
+        self._layout_version = layout_version
         self._fields = fields
         self._fingerprint = _fingerprint(layout_id, layout_version, fields)
+
+    @property
+    def layout_id(self) -> str:
+        return self._layout_id
+
+    @property
+    def layout_version(self) -> str:
+        """Read-only.
+
+        The fingerprint is computed once at construction. A settable version
+        would let a layout be relabelled after fingerprinting, so a mutated
+        layout would validate and report the old approved digest beside the new
+        version -- exactly the drift the fingerprint exists to detect.
+        """
+
+        return self._layout_version
 
     @property
     def fields(self) -> tuple[PacsField, ...]:

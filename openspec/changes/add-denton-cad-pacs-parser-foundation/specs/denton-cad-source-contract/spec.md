@@ -26,9 +26,13 @@ The layout fingerprint SHALL be versioned separately from any export-header vers
 
 ### Requirement: Slice fixed-width records without emitting partial values
 
-The component SHALL slice a record using 1-indexed inclusive positions. A field whose `end` exceeds the observed record width MUST NOT be emitted as a valid truncated value: when the field is required the record SHALL be rejected with `truncated_required_field`, and when the field is optional it SHALL be reported absent.
+The component SHALL slice a record using 1-indexed inclusive positions. A field whose `end` exceeds the observed record width MUST NOT be emitted as a valid truncated value: when the field is required the component SHALL name it in `truncated_required`, and when the field is optional it SHALL name it in `absent_optional`. The component reports; it does not diagnose, because diagnostic vocabularies are county policy.
 
-A record wider than the layout's greatest declared `end` SHALL retain a structural fingerprint of the unknown trailing region — its byte length and a SHA-256 digest of that region — and SHALL emit no inferred field from it. The trailing region's content MUST NOT appear in a report or diagnostic.
+A county binding gates the observed width against the declared width before slicing, so a required field cannot end beyond the width a county accepts. `truncated_required` is therefore reachable only by a caller slicing directly, and no county diagnostic corresponds to it.
+
+A record wider than the layout's greatest declared `end` SHALL retain a structural fingerprint of the unknown trailing region — its byte length and a SHA-256 digest of that region's bytes in the member's own encoding — and SHALL emit no inferred field from it. The trailing region's content MUST NOT appear in a report or diagnostic.
+
+A layout SHALL be immutable once constructed. Its fingerprint is computed at construction, so a layout whose identifier or version could be reassigned afterwards would report an approved digest beside an unapproved label.
 
 Every sliced value SHALL retain its exact source text, and the component SHALL NOT trim, pad, case-fold, or coerce it. Trimming is a county rule applied by the binding, not a serialization mechanic.
 
@@ -36,8 +40,14 @@ Every sliced value SHALL retain its exact source text, and the component SHALL N
 - **GIVEN** a layout whose required field ends at position 40
 - **GIVEN** an observed record 30 characters wide
 - **WHEN** the component slices that record
-- **THEN** `truncated_required_field` is recorded with the field name and physical row number
+- **THEN** the field name appears in `truncated_required`
 - **THEN** no partial slice is emitted as a value
+
+#### Scenario: Refuse to relabel a fingerprinted layout
+- **GIVEN** a constructed layout and its fingerprint
+- **WHEN** a caller assigns a new layout version
+- **THEN** the assignment fails
+- **THEN** the fingerprint continues to describe the layout it was computed from
 
 #### Scenario: Fingerprint an undocumented trailing region
 - **GIVEN** a layout whose greatest declared end is position 60
@@ -46,6 +56,14 @@ Every sliced value SHALL retain its exact source text, and the component SHALL N
 - **THEN** the trailing region is recorded as a byte length and a digest
 - **THEN** no field is inferred from the trailing region
 - **THEN** the trailing content is absent from the report and its diagnostics
+
+#### Scenario: Reject a member carrying undocumented trailing bytes
+- **GIVEN** a synthetic member whose records are uniformly wider than the declared width
+- **WHEN** the caller invokes `validate_property_member`
+- **THEN** `undocumented_trailing_region` is recorded
+- **THEN** `release_accepted` is false
+- **THEN** `accepted_row_count` is 0
+- **THEN** the retained byte count describes the region without carrying its content
 
 ### Requirement: Decode a Denton PACS member without acquiring it
 
@@ -162,7 +180,7 @@ Every code in this vocabulary SHALL be reachable. `truncated_required_field` is 
 
 A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint. Those four fields SHALL be the whole type, so there is nowhere to put a complete record, an arbitrary value, an account value, release or member text, an owner name, an address, a credential, exception text, or a host-local path.
 
-`undocumented_trailing_region` and `legal_child_orphaned` SHALL be non-fatal. Every other code SHALL reject the logical release. At most 100 diagnostics SHALL be retained, the total count SHALL be preserved, and truncation SHALL be marked deterministically.
+`legal_child_orphaned` SHALL be non-fatal. Every other code, including `undocumented_trailing_region`, SHALL reject the logical release: the governing issue requires unknown trailing bytes to fail closed, and the region's structural fingerprint is retained so the rejection carries evidence of what was found. At most 100 diagnostics SHALL be retained, the total count SHALL be preserved, and truncation SHALL be marked deterministically.
 
 #### Scenario: Truncate a large diagnostic set deterministically
 - **GIVEN** a synthetic member producing 130 blocking diagnostics

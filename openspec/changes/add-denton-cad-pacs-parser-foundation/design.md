@@ -61,7 +61,7 @@ D1 through D4 come from this change rather than from an issue comment, so they a
 
 ## Unresolved decisions
 
-- Issue #43 has not supplied the shared adapter contracts, so typed record output is deferred. No task in this change depends on it.
+- Issue #43 has not supplied the shared adapter contracts. Tasks 6.1 through 6.3 depend on it and are recorded unchecked; tasks 1.1 through 5.1 do not, and are the runnable scope of this change.
 
 ## Risks and compatibility
 
