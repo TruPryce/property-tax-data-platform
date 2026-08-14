@@ -28,4 +28,5 @@ Add a county source-contract capability only after its spike establishes source 
 - [Dallas parser foundation](dallas-parser-foundation.md)
 - [Tarrant parser foundation](tarrant-parser-foundation.md)
 - [Denton PACS parser foundation](denton-pacs-parser-foundation.md)
+- [Ellis PACS parser binding](ellis-pacs-parser-binding.md)
 - [Architecture](../architecture/README.md)
