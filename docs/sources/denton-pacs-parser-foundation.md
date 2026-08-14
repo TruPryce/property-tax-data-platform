@@ -43,14 +43,24 @@ non-ASCII characters, and UTF-8 encoding.
 It is versioned **separately from any export-header version**, so a county may accept a known layout
 against an unknown export version and record both.
 
+Each county pins its expected fingerprints as **literals** rather than deriving them from its own
+layout. A derived constant would move with the mapping, so the comparison could never fail and the
+gate would be decorative; written down, an unreviewed mapping edit breaks it.
+
+A published layout that states a field length as well as its positions may declare that length, and
+the component cross-checks the two. Transcribing a published layout is where a digit gets dropped,
+and a length that disagrees with its positions is the defect this catches.
+
 ## Partial Values and Trailing Regions
 
 A field whose declared end exceeds the observed record width is never emitted as a truncated value.
-When the field is required the release is rejected with `truncated_required_field`; when it is
-optional the field is reported absent.
+The shared component reports a required field in that position as truncated and an optional one as
+absent. A county binding gates the observed width against the declared width first, so in practice a
+county never sees a truncated required field — see the note under Physical Layout.
 
 A record wider than the layout's greatest declared end retains a structural fingerprint of the
-unknown trailing region — its byte length and a SHA-256 digest — and no field is inferred from it.
+unknown trailing region — its byte length and a SHA-256 digest of the **source bytes**, in the
+member's own encoding rather than a UTF-8 re-encoding — and no field is inferred from it.
 The trailing content never appears in a report or diagnostic, because an undocumented region may
 carry identity or address data.
 
@@ -62,10 +72,17 @@ line ending is allowed, and a bare CR is **not** a boundary.
 
 A PACS member carries no header row, so physical row 1 is the first data record.
 
-Observed width is a **member-level** property. PACS records carry no delimiter, so a record of a
-different width is not a narrow record — it is evidence that the member is not the layout it claims
-to be, and the release is rejected with `record_width_mismatch` rather than parsed at a guessed
-width. An embedded control character is refused with `invalid_source_text` for the same reason: a
+Observed width is a **member-level** property, and it must both be uniform across records and reach
+the layout's declared width. PACS records carry no delimiter, so a record of a different width is not
+a narrow record — it is evidence that the member is not the layout it claims to be. Uniformity alone
+is not enough either: every required Denton field ends by position 75, so a member whose records were
+all 75 characters would otherwise pass against a layout declaring 305. Both cases are rejected with
+`record_width_mismatch` rather than parsed at a guessed width.
+
+Because the observed width must reach the declared width, a required field can never end beyond it,
+so `truncated_required_field` is deliberately absent from the county vocabulary — a code no input can
+produce should not be declared. Truncation remains a shared-component concept, reported by
+`slice_record` for callers that slice directly. An embedded control character is refused with `invalid_source_text` for the same reason: a
 bare CR would otherwise turn two records into one over-wide record with a trailing region.
 
 ## Lexical Rules
@@ -110,7 +127,7 @@ the release with `core_child_orphaned`. A legal child — `arb`, `lawsuit` — r
 ## Diagnostics and Atomicity
 
 The closed vocabulary is `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`,
-`truncated_required_field`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`,
+`unsupported_layout_fingerprint`, `undocumented_trailing_region`,
 `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`,
 `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`,
 `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and

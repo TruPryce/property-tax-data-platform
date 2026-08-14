@@ -107,6 +107,19 @@ DENTON_MONETARY_FIELDS: Final[tuple[str, ...]] = (
     "ten_percent_cap",
 )
 
+#: The approved Denton layout fingerprints, pinned as literals.
+#:
+#: Deriving these from the layout would make the gate tautological: editing a
+#: position would move the expected value with it and the comparison could never
+#: fail. Written out, an unreviewed mapping edit breaks the gate, which is the
+#: whole point of having one.
+DENTON_EXPECTED_PROPERTY_FINGERPRINT: Final = (
+    "ffa28810356375cf71441068c46467d946da47ac9ea900709c1fdd41a87904c2"  # pragma: allowlist secret
+)
+DENTON_EXPECTED_CHILD_FINGERPRINT: Final = (
+    "faa76621da3e8f86617d087c5ed2d5b15a8590a0f4883a3a15dc43bab555c13b"  # pragma: allowlist secret
+)
+
 DENTON_DIAGNOSTIC_RETENTION_LIMIT: Final = 100
 
 _ASCII_WHITESPACE: Final = " \t\r\n\v\f"
@@ -138,7 +151,6 @@ class DentonDiagnosticCode(StrEnum):
     INVALID_ENCODING = "invalid_encoding"
     UNEXPECTED_BOM = "unexpected_bom"
     RECORD_WIDTH_MISMATCH = "record_width_mismatch"
-    TRUNCATED_REQUIRED_FIELD = "truncated_required_field"
     UNSUPPORTED_LAYOUT_FINGERPRINT = "unsupported_layout_fingerprint"
     UNDOCUMENTED_TRAILING_REGION = "undocumented_trailing_region"
     BLANK_REQUIRED_KEY = "blank_required_key"
@@ -207,6 +219,7 @@ def validate_property_member(
     release_identifier: str,
     source_member_name: str,
     expected_tax_year: int,
+    expected_layout_fingerprint: str = DENTON_EXPECTED_PROPERTY_FINGERPRINT,
 ) -> DentonValidationReport:
     """Validate one already-selected Denton PACS property member.
 
@@ -219,55 +232,46 @@ def validate_property_member(
     _require_caller_identity(release_identifier, source_member_name, expected_tax_year)
     layout = DENTON_PROPERTY_LAYOUT
 
+    if expected_layout_fingerprint != layout.fingerprint:
+        return _report(
+            [_diagnostic(DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
+            layout=layout,
+            accepted=0,
+            owner_rows=0,
+            trailing=0,
+        )
+
     records, early = _records(data, layout)
     if early is not None:
         return _report([early], layout=layout, accepted=0, owner_rows=0, trailing=0)
 
-    observed_width, width_diagnostics = _observed_width(records, layout)
-    if width_diagnostics:
-        # A member whose records disagree is rejected rather than parsed at a
-        # guessed width, so nothing below runs on ambiguous input.
-        return _report(width_diagnostics, layout=layout, accepted=0, owner_rows=0, trailing=0)
+    preflight = _preflight(records, layout)
+    if preflight:
+        # A member that is not the declared layout is rejected rather than
+        # parsed at a guessed width, so nothing below runs on ambiguous input.
+        return _report(preflight, layout=layout, accepted=0, owner_rows=0, trailing=0)
 
     diagnostics: list[DentonDiagnostic] = []
     trailing_bytes = 0
 
-    # A fixed-width record is text with no delimiter, so an embedded control
-    # character is evidence of a structural problem rather than a value. A bare
-    # CR reaches here because it is not a record boundary, and accepting the
-    # over-wide record it produces would silently read two records as one.
-    control = [
-        _diagnostic(DentonDiagnosticCode.INVALID_SOURCE_TEXT, layout, None, row_number)
-        for row_number, record in records
-        if any(_is_control(character) for character in record)
-    ]
-    if control:
-        return _report(control, layout=layout, accepted=0, owner_rows=0, trailing=0)
-
     # Truncation and the trailing region are properties of the uniform observed
     # width, not of any one record, so they are determined once. Emitting them
     # per row would report the same layout defect once per record.
-    probe = layout.slice_record(records[0][1])
-    for name in probe.truncated_required:
-        diagnostics.append(
-            _diagnostic(DentonDiagnosticCode.TRUNCATED_REQUIRED_FIELD, layout, name, 1)
-        )
+    # Width is already gated against the declared width, so nothing can be
+    # truncated here; the component still reports truncation for callers that
+    # slice directly.
+    probe = layout.slice_record(records[0][1], encoding=DENTON_ENCODING)
     if probe.trailing is not None:
         trailing_bytes = probe.trailing.byte_length
         diagnostics.append(
             _diagnostic(DentonDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)
         )
-    if probe.truncated_required:
-        return _report(
-            diagnostics, layout=layout, accepted=0, owner_rows=0, trailing=trailing_bytes
-        )
-
     accepted = 0
     owner_rows: set[tuple[str, str]] = set()
     account_facts: dict[str, dict[str, str]] = {}
 
     for row_number, record in records:
-        values = layout.slice_record(record).values
+        values = layout.slice_record(record, encoding=DENTON_ENCODING).values
         row_diagnostics = _validate_property_values(values, layout, row_number, expected_tax_year)
         if row_diagnostics:
             diagnostics.extend(row_diagnostics)
@@ -322,6 +326,12 @@ def _observed_width(
     Width is a member-level property: PACS records carry no delimiter, so a
     record of a different width is not a narrow record but evidence that the
     member is not the layout it claims to be.
+
+    Uniformity alone is not enough. Comparing rows only with one another
+    accepted a member whose every record was 75 characters against a layout
+    declaring 305, because the required fields all happen to end by 75 and the
+    optional remainder simply looked absent. The observed width must reach the
+    declared width; anything beyond it is the trailing region.
     """
 
     observed = len(records[0][1])
@@ -330,6 +340,8 @@ def _observed_width(
         for row_number, record in records
         if len(record) != observed
     ]
+    if not mismatched and observed < layout.declared_width:
+        mismatched.append(_diagnostic(DentonDiagnosticCode.RECORD_WIDTH_MISMATCH, layout, None, 1))
     return observed, mismatched
 
 
@@ -340,6 +352,7 @@ def validate_child_member(
     source_member_name: str,
     child_table: str,
     accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str = DENTON_EXPECTED_CHILD_FINGERPRINT,
 ) -> DentonValidationReport:
     """Validate one Denton child member against the accepted account set.
 
@@ -352,6 +365,14 @@ def validate_child_member(
         raise ValueError("child_table is not an approved Denton child table")
 
     layout = DENTON_CHILD_LAYOUT
+    if expected_layout_fingerprint != layout.fingerprint:
+        return _report(
+            [_diagnostic(DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
+            layout=layout,
+            accepted=0,
+            owner_rows=0,
+            trailing=0,
+        )
     accounts = {str(value) for value in accepted_account_ids}
     orphan_code = (
         DentonDiagnosticCode.CORE_CHILD_ORPHANED
@@ -363,20 +384,14 @@ def validate_child_member(
     if early is not None:
         return _report([early], layout=layout, accepted=0, owner_rows=0, trailing=0)
 
+    preflight = _preflight(records, layout)
+    if preflight:
+        return _report(preflight, layout=layout, accepted=0, owner_rows=0, trailing=0)
+
     diagnostics: list[DentonDiagnostic] = []
     accepted = 0
     for row_number, record in records:
-        sliced = layout.slice_record(record)
-        if sliced.truncated_required:
-            diagnostics.append(
-                _diagnostic(
-                    DentonDiagnosticCode.TRUNCATED_REQUIRED_FIELD,
-                    layout,
-                    sliced.truncated_required[0],
-                    row_number,
-                )
-            )
-            continue
+        sliced = layout.slice_record(record, encoding=DENTON_ENCODING)
         prop_id = sliced.values["prop_id"].strip(_ASCII_WHITESPACE)
         if not prop_id:
             diagnostics.append(
@@ -396,6 +411,27 @@ def validate_child_member(
         owner_rows=0,
         trailing=0,
     )
+
+
+def _preflight(records: list[tuple[int, str]], layout: PacsLayout) -> list[DentonDiagnostic]:
+    """Checks every member must pass, whatever it contains.
+
+    Property and child members are both fixed-width text with no delimiter, so
+    a control character and a width disagreement mean the same thing in each.
+    Running these only for property members let a uniformly short child member
+    through, and let a control character inside a child corrupt `prop_id` into
+    a false `core_child_orphaned` rather than reporting the real defect.
+    """
+
+    control = [
+        _diagnostic(DentonDiagnosticCode.INVALID_SOURCE_TEXT, layout, None, row_number)
+        for row_number, record in records
+        if any(_is_control(character) for character in record)
+    ]
+    if control:
+        return control
+    _, mismatched = _observed_width(records, layout)
+    return mismatched
 
 
 def _records(
@@ -593,6 +629,8 @@ def _report(
 
 __all__ = [
     "DENTON_ACCOUNT_FACTS",
+    "DENTON_EXPECTED_CHILD_FINGERPRINT",
+    "DENTON_EXPECTED_PROPERTY_FINGERPRINT",
     "DENTON_CHILD_LAYOUT",
     "DENTON_CORE_CHILD_TABLES",
     "DENTON_DIAGNOSTIC_RETENTION_LIMIT",

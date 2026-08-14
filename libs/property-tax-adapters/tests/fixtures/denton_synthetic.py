@@ -153,10 +153,27 @@ ACCEPTED_ACCOUNT_IDS = ("000123",)
 CHILD_RESOLVED = member(child_row(prop_id="000123"))
 CHILD_ORPHANED = member(child_row(prop_id="999999"))
 
+#: Uniformly short: every record is 75 characters, which is exactly where the
+#: last required field ends. Comparing rows only with one another accepted this
+#: against a layout declaring 305.
+UNIFORMLY_SHORT = member(property_row()[:75], property_row(prop_id="000124")[:75])
+
+#: A child member that is uniformly short, and one carrying a control character.
+SHORT_CHILD = member(child_row()[:20], child_row(prop_id="000124")[:20])
+CONTROL_CHILD = member(child_row().replace("1", "\x01", 1))
+
+#: Non-ASCII trailing bytes: two ISO-8859-1 characters are two source bytes, and
+#: re-encoding them as UTF-8 would report four.
+LATIN1_TRAILING_TEXT = "\xe9\xe9"
+WITH_LATIN1_TRAILING = member(
+    property_row() + LATIN1_TRAILING_TEXT,
+    property_row(prop_id="000124") + LATIN1_TRAILING_TEXT,
+)
+
 EMPTY_MEMBER = b""
 
 #: Literal expectations authored from the contract, not from the parser.
 EXPECTED_PROPERTY_WIDTH = 305
 EXPECTED_CHILD_WIDTH = 31
-EXPECTED_DIAGNOSTIC_CODE_COUNT = 18
+EXPECTED_DIAGNOSTIC_CODE_COUNT = 17
 EXPECTED_SENSITIVE_FIELD_COUNT = 3

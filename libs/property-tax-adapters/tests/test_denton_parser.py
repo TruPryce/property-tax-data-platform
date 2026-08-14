@@ -229,11 +229,18 @@ def test_records_of_disagreeing_width_are_refused() -> None:
     assert report.accepted_row_count == 0
 
 
-def test_a_truncated_required_field_blocks_the_release() -> None:
-    report = _validate(synthetic.TRUNCATED_REQUIRED)
-    assert "truncated_required_field" in _codes(report)
+def test_a_uniformly_short_member_is_refused() -> None:
+    """Uniformity is not enough: every required Denton field ends by position 75,
+    so comparing rows only with one another accepted a 75-character member
+    against a layout declaring 305."""
+
+    report = _validate(synthetic.UNIFORMLY_SHORT)
+    assert _codes(report) == ["record_width_mismatch"]
     assert report.release_accepted is False
     assert report.accepted_row_count == 0
+
+    # And the short-by-any-amount case is refused the same way.
+    assert _codes(_validate(synthetic.TRUNCATED_REQUIRED)) == ["record_width_mismatch"]
 
 
 def test_a_trailing_region_warns_once_and_is_not_carried() -> None:
@@ -424,7 +431,6 @@ def test_the_diagnostic_vocabulary_is_closed() -> None:
         "invalid_encoding",
         "unexpected_bom",
         "record_width_mismatch",
-        "truncated_required_field",
         "unsupported_layout_fingerprint",
         "undocumented_trailing_region",
         "blank_required_key",
@@ -616,3 +622,124 @@ def test_the_foundation_adds_no_dependency_outside_the_standard_library() -> Non
             "enum",
             "typing",
         }, imported
+
+
+# --------------------------------------------------------------------------
+# Review findings
+# --------------------------------------------------------------------------
+
+
+def test_the_trailing_digest_describes_source_bytes() -> None:
+    """Re-encoding as UTF-8 reported four bytes for two ISO-8859-1 characters
+    and digested content that never appeared in the member."""
+
+    import hashlib
+
+    report = _validate(synthetic.WITH_LATIN1_TRAILING)
+    assert report.release_accepted is True
+    expected = synthetic.LATIN1_TRAILING_TEXT.encode("iso-8859-1")
+    assert len(expected) == 2
+    assert report.trailing_region_bytes == 2
+
+    sliced = DENTON_PROPERTY_LAYOUT.slice_record(
+        synthetic.property_row() + synthetic.LATIN1_TRAILING_TEXT, encoding="iso-8859-1"
+    )
+    assert sliced.trailing is not None
+    assert sliced.trailing.digest == hashlib.sha256(expected).hexdigest()
+
+
+def test_a_declared_length_that_disagrees_with_positions_raises() -> None:
+    """`length` was derived, so the promised disagreement could never occur."""
+
+    from property_tax_adapters.sources.pacs import PacsField
+
+    with pytest.raises(ValueError):
+        PacsField("a", 1, 12, declared_length=11)
+    assert PacsField("a", 1, 12, declared_length=12).length == 12
+
+
+def test_the_expected_fingerprint_is_pinned_rather_than_derived() -> None:
+    """A self-derived constant moves with the layout, so the gate cannot fail.
+
+    Reading the literal out of the module source proves it is written down
+    rather than computed from the layout it guards.
+    """
+
+    source = _denton_source()
+    assert f'"{DENTON_PROPERTY_LAYOUT.fingerprint}"' in source
+    assert f'"{DENTON_CHILD_LAYOUT.fingerprint}"' in source
+    assert "DENTON_EXPECTED_PROPERTY_FINGERPRINT: Final = DENTON_PROPERTY_LAYOUT" not in source
+
+
+def test_an_unexpected_layout_fingerprint_is_refused() -> None:
+    report = _validate(synthetic.VALID_LF, expected_layout_fingerprint="0" * 64)
+    assert _codes(report) == ["unsupported_layout_fingerprint"]
+    assert report.release_accepted is False
+
+
+def test_the_fingerprint_gate_runs_before_any_record_is_read() -> None:
+    report = _validate(synthetic.WIDTH_MISMATCH, expected_layout_fingerprint="0" * 64)
+    assert _codes(report) == ["unsupported_layout_fingerprint"]
+
+
+def _validate_child(data: bytes, **overrides: object):
+    return validate_child_member(
+        data,
+        **{
+            "release_identifier": synthetic.RELEASE_IDENTIFIER,
+            "source_member_name": synthetic.SOURCE_MEMBER_NAME,
+            "child_table": "land",
+            "accepted_account_ids": ("000123", "000124"),
+            **overrides,
+        },  # type: ignore[arg-type]
+    )
+
+
+def test_child_validation_applies_the_same_width_rule() -> None:
+    """A uniformly short child member was accepted outright."""
+
+    report = _validate_child(synthetic.SHORT_CHILD)
+    assert _codes(report) == ["record_width_mismatch"]
+    assert report.release_accepted is False
+
+
+def test_child_validation_applies_the_same_control_character_rule() -> None:
+    """A control character corrupted `prop_id` into a false orphan report."""
+
+    report = _validate_child(synthetic.CONTROL_CHILD)
+    assert _codes(report) == ["invalid_source_text"]
+    assert "core_child_orphaned" not in _codes(report)
+
+
+def test_child_validation_gates_on_its_own_fingerprint() -> None:
+    report = _validate_child(synthetic.CHILD_RESOLVED, expected_layout_fingerprint="0" * 64)
+    assert _codes(report) == ["unsupported_layout_fingerprint"]
+
+
+def test_every_declared_denton_code_is_reachable() -> None:
+    """Three codes in these PRs were declared and never emitted. Pin the rule.
+
+    `unsupported_layout_fingerprint` and `invalid_source_text` are covered by the
+    tests above; this asserts the vocabulary carries nothing that no test emits.
+    """
+
+    emitted = {
+        "invalid_encoding",
+        "unexpected_bom",
+        "record_width_mismatch",
+        "unsupported_layout_fingerprint",
+        "undocumented_trailing_region",
+        "blank_required_key",
+        "invalid_account_id",
+        "invalid_owner_sequence",
+        "invalid_monetary_value",
+        "invalid_ownership_percentage",
+        "invalid_tax_year",
+        "tax_year_mismatch",
+        "invalid_source_text",
+        "duplicate_owner_row",
+        "conflicting_account_facts",
+        "core_child_orphaned",
+        "legal_child_orphaned",
+    }
+    assert {code.value for code in DentonDiagnosticCode} == emitted

@@ -53,7 +53,7 @@ The Denton adapter MUST parse one already-selected, caller-supplied PACS member 
 
 LF and CRLF record boundaries SHALL both be accepted and one trailing line ending SHALL be allowed. A bare CR SHALL NOT be a record boundary. Physical row numbers SHALL be one-based in file order. A PACS member carries no header row, so row 1 SHALL be the first data record.
 
-Every record SHALL match the layout's expected observed width. A record of any other width SHALL be rejected with `record_width_mismatch`, and a member whose records disagree with one another SHALL be rejected rather than parsed at a guessed width.
+Every record SHALL match the layout's expected observed width, and that width SHALL be at least the layout's declared width. A record differing from the others SHALL be rejected with `record_width_mismatch`, and a member whose records agree with one another but fall short of the declared width SHALL be rejected the same way: uniformity is not evidence that the member is the declared layout. A member whose records disagree SHALL be rejected rather than parsed at a guessed width.
 
 #### Scenario: Parse a valid synthetic Denton member
 - **GIVEN** an independently authored ISO-8859-1 synthetic property member with no byte-order mark
@@ -156,7 +156,9 @@ A core appraisal child — land, improvement, or mobile home — that does not r
 
 ### Requirement: Emit only the closed Denton diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `truncated_required_field`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+
+Every code in this vocabulary SHALL be reachable. `truncated_required_field` is deliberately absent: once the observed width is required to reach the declared width, a required field can never end beyond it, so a county emitting that code would be declaring something no input can produce. Truncation remains a shared-component concept, reported by `slice_record` for callers that slice directly.
 
 A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint. Those four fields SHALL be the whole type, so there is nowhere to put a complete record, an arbitrary value, an account value, release or member text, an owner name, an address, a credential, exception text, or a host-local path.
 

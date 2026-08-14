@@ -39,6 +39,11 @@ class PacsField:
     start: int
     end: int
     required: bool = True
+    #: The width the published layout states, when it states one. Published PACS
+    #: layouts carry positions *and* a length, and transcribing them into code is
+    #: where a digit gets dropped. Supplying it here cross-checks the transcription;
+    #: a value that disagrees with the positions is the defect this catches.
+    declared_length: int | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -47,10 +52,15 @@ class PacsField:
             raise ValueError(f"{self.name}: positions are 1-indexed")
         if self.end < self.start:
             raise ValueError(f"{self.name}: end position precedes start position")
+        if self.declared_length is not None and self.declared_length != self.length:
+            raise ValueError(
+                f"{self.name}: declared length {self.declared_length} disagrees with "
+                f"positions {self.start}-{self.end} ({self.length})"
+            )
 
     @property
     def length(self) -> int:
-        """Declared width, inclusive of both endpoints."""
+        """Width implied by the positions, inclusive of both endpoints."""
 
         return self.end - self.start + 1
 
@@ -61,6 +71,7 @@ class TrailingRegion:
 
     The content is deliberately absent: an undocumented region may carry
     identity or address data, so it is measured and digested but never carried.
+    Both values describe the source bytes in the member's own encoding.
     """
 
     byte_length: int
@@ -138,13 +149,19 @@ class PacsLayout:
 
         return self._fields[-1].end
 
-    def slice_record(self, record: str) -> SlicedRecord:
+    def slice_record(self, record: str, *, encoding: str = "utf-8") -> SlicedRecord:
         """Slice one record at 1-indexed inclusive positions.
 
         A field whose declared end exceeds the observed width is never emitted
         as a truncated value: when required it is reported, and when optional it
         is absent. Values are returned exactly as they appear, because trimming
         is a county rule rather than a serialization mechanic.
+
+        `encoding` is the encoding the record was decoded from. The trailing
+        region's byte length and digest describe the *source* bytes, so a county
+        reading ISO-8859-1 must say so; re-encoding as UTF-8 would report two
+        bytes for one accented character and digest something that never
+        appeared in the file.
         """
 
         width = len(record)
@@ -164,7 +181,7 @@ class PacsLayout:
         trailing: TrailingRegion | None = None
         if width > self.declared_width:
             region = record[self.declared_width :]
-            encoded = region.encode("utf-8")
+            encoded = region.encode(encoding, errors="strict")
             trailing = TrailingRegion(
                 byte_length=len(encoded),
                 digest=hashlib.sha256(encoded).hexdigest(),
