@@ -127,9 +127,13 @@ Monetary fields SHALL match `[0-9]+(?:\.[0-9]{1,2})?` and fall from zero through
 
 ### Requirement: Emit only the closed Ellis diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `unrecognised_layout_package`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
 
-Every code in this vocabulary SHALL be reachable; `truncated_required_field` is deliberately absent for the reason the Denton contract gives.
+Every code in this vocabulary SHALL be reachable, and reachability SHALL be established by driving inputs through the public entry points rather than by comparing the vocabulary with itself. `truncated_required_field` is deliberately absent for the reason the Denton contract gives, and `unrecognised_layout_package` likewise: `classify_layout_package` returns a `LayoutPackageKind`, which is the reportable outcome, so a diagnostic code for it would promise a report that no entry point produces.
+
+The layout gate SHALL compare the declared layout against the pinned constant before comparing the caller-supplied value against it. Comparing the caller's value against the live layout digest would make the pinned constant decorative, because a drifted mapping moves that digest with it.
+
+A child member wider than its declared layout SHALL be rejected with `undocumented_trailing_region`, as a property member is.
 
 A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint, and those four fields SHALL be the whole type. `legal_child_orphaned` SHALL be the only non-fatal code. Every other code, including `undocumented_trailing_region`, SHALL reject the logical release, because the governing issue requires unknown trailing bytes to fail closed; the region's structural fingerprint is retained so the rejection carries evidence of what was found. At most 100 diagnostics SHALL be retained, the total SHALL be preserved, and truncation SHALL be marked deterministically.
 
