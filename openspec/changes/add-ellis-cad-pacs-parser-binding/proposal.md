@@ -45,7 +45,7 @@ The interim public surface is a validator rather than a row producer, matching D
 
 ## Unresolved decisions
 
-- Issue #43 has not supplied the accepted and implemented `SourceNativeValue`, `SourceProvenance`, `AppraisalSourceRecord`, bounded release-processing, and streaming contracts. Typed Ellis and vendor-neutral record output is therefore deferred to tasks 6.1 and 6.2, which are recorded unchecked rather than omitted: Issue #21 is not complete until they land. This change adds no county-local substitute while waiting, and tasks 1.1 through 5.1 are runnable without it.
+- Issue #43 has not supplied the accepted and implemented `SourceNativeValue`, `SourceProvenance`, `AppraisalSourceRecord`, bounded release-processing, and streaming contracts. Typed Ellis and vendor-neutral record output, and typed child records, are therefore deferred to tasks 6.1, 6.2, and 6.3, which are recorded unchecked rather than omitted: Issue #21 is not complete until all three land. This change adds no county-local substitute while waiting, and tasks 1.1 through 5.1 are runnable without it.
 
 ## Cross-issue boundaries
 

@@ -11,7 +11,7 @@
 ## 3. Ellis Records, Grain, and Diagnostics
 
 <!-- countyforge-task: 3.1 paths=libs/property-tax-adapters/src/property_tax_adapters/sources/texas/ellis.py,libs/property-tax-adapters/tests/fixtures/ellis_synthetic.py checks=repo.check risk=higher_risk prerequisites=D4,2.1 -->
-- [ ] 3.1 Implement the Ellis physical, lexical, and grain rules with independent fixtures — Implement strict ISO-8859-1 decoding with BOM rejection, LF and CRLF boundaries with one trailing ending allowed, a bare CR that is not a boundary, control characters refused as `invalid_source_text`, one-based physical row numbers with no header row, and a uniform observed width whose outliers are rejected with `record_width_mismatch`. Implement the D4 lexical grammars, empty-text-only nulls, `prop_id` compared as text, `(prop_id, owner_sequence)` owner-row grain with `duplicate_owner_row` rejection and no deduplication, summing, or arbitrary-row selection, `conflicting_account_facts` rejection, the closed eighteen-code vocabulary with exactly four permitted metadata fields, the 100-entry retention cap with preserved total and deterministic truncation, and release-level atomic rejection. Return the bounded `EllisValidationReport`; construct no record type and define no county-local replacement for a shared contract. Add `ellis_synthetic.py` with small, independently authored, identity-free members and package byte fixtures, each with literally authored expected results and no county bytes, production rows, archives, published layouts, owner values, or addresses.
+- [ ] 3.1 Implement the Ellis physical, lexical, and grain rules with independent fixtures — Implement strict ISO-8859-1 decoding with BOM rejection, LF and CRLF boundaries with one trailing ending allowed, a bare CR that is not a boundary, control characters refused as `invalid_source_text`, one-based physical row numbers with no header row, and a uniform observed width whose outliers are rejected with `record_width_mismatch`. Implement the D4 lexical grammars, empty-text-only nulls, `prop_id` compared as text, `(prop_id, owner_sequence)` owner-row grain with `duplicate_owner_row` rejection and no deduplication, summing, or arbitrary-row selection, `conflicting_account_facts` rejection, the closed nineteen-code vocabulary with exactly four permitted metadata fields, the 100-entry retention cap with preserved total and deterministic truncation, and release-level atomic rejection. Return the bounded `EllisValidationReport`; construct no record type and define no county-local replacement for a shared contract. Add `ellis_synthetic.py` with small, independently authored, identity-free members and package byte fixtures, each with literally authored expected results and no county bytes, production rows, archives, published layouts, owner values, or addresses.
 
 ## 4. Binding, Package, and Boundary Tests
 
@@ -25,8 +25,8 @@
 
 ## 6. Typed Records and Shared Conversion — Blocked on Issue #43
 
-Both slices below construct or consume contracts owned by Issue #43 and are
-runnable only after those contracts are accepted and implemented. Tasks 1.1
+The three slices below construct or consume contracts owned by Issue #43 and
+are runnable only after those contracts are accepted and implemented. Tasks 1.1
 through 5.1 do not depend on them. Issue #21 is not complete until these land.
 
 <!-- countyforge-task: 6.1 paths=libs/property-tax-adapters/src/property_tax_adapters/sources/texas/ellis.py,libs/property-tax-adapters/tests/test_ellis_parser.py checks=repo.check risk=higher_risk prerequisites=D4,3.1,4.1 -->
