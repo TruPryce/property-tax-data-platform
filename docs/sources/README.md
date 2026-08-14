@@ -27,4 +27,5 @@ Add a county source-contract capability only after its spike establishes source 
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
 - [Dallas parser foundation](dallas-parser-foundation.md)
 - [Tarrant parser foundation](tarrant-parser-foundation.md)
+- [Denton PACS parser foundation](denton-pacs-parser-foundation.md)
 - [Architecture](../architecture/README.md)
