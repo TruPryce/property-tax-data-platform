@@ -35,7 +35,7 @@ The interim public surface is a validator rather than a row producer, matching D
 
 ## Decisions
 
-- **D1** (proposed by this change, requires human merge): Ellis carries its own expected layout fingerprint and compares the declared mapping against it before parsing. Sharing a vendor with Denton is not evidence of compatibility, and the two fingerprints are independent values that are never assumed equal.
+- **D1** (proposed by this change, requires human merge): Ellis carries its own expected layout fingerprint, written as a literal rather than derived from the layout, and compares the declared mapping against it before parsing. A derived constant would move with the mapping and the comparison could never fail. Sharing a vendor with Denton is not evidence of compatibility, and the two fingerprints are independent values that are never assumed equal.
 - **D2** (proposed by this change, requires human merge): An OpenDocument Spreadsheet package is recognised by a ZIP local-file-header signature followed by a first member named `mimetype` whose stored value is `application/vnd.oasis.opendocument.spreadsheet`. Recognition is a bounded signature check on caller-supplied bytes; nothing is extracted, enumerated, or decompressed. An absent, truncated, or ambiguous signature fails closed.
 - **D3** (proposed by this change, requires human merge): The approved certified release label is `certified-all-property`. Any other caller-supplied label — a potential-exemption scenario, a mineral-only release, or an ambiguous value — is rejected with `unsupported_scenario_label` before any record is read.
 - **D4** (proposed by this change, requires human merge): Ellis reuses the Denton lexical bounds, because both are PACS exports and diverging without evidence would be inventing a difference rather than measuring one. The bounds remain declared per county so a measured divergence changes one county without touching the other.
@@ -44,7 +44,7 @@ The interim public surface is a validator rather than a row producer, matching D
 
 ## Unresolved decisions
 
-- Issue #43 has not supplied the accepted and implemented `SourceNativeValue`, `SourceProvenance`, `AppraisalSourceRecord`, bounded release-processing, and streaming contracts. Typed Ellis and vendor-neutral record output is therefore deferred, and this change adds no county-local substitute while waiting. Every task in this change is runnable without it.
+- Issue #43 has not supplied the accepted and implemented `SourceNativeValue`, `SourceProvenance`, `AppraisalSourceRecord`, bounded release-processing, and streaming contracts. Typed Ellis and vendor-neutral record output is therefore deferred to tasks 6.1 and 6.2, which are recorded unchecked rather than omitted: Issue #21 is not complete until they land. This change adds no county-local substitute while waiting, and tasks 1.1 through 5.1 are runnable without it.
 
 ## Cross-issue boundaries
 

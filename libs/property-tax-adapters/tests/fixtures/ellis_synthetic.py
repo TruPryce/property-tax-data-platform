@@ -130,19 +130,42 @@ _ODS_MEDIA_TYPE = b"application/vnd.oasis.opendocument.spreadsheet"
 #: A valid ODS signature. The file this stands for is named `.xlsx.ods`, which
 #: is exactly why classification must read content rather than the extension.
 MISLEADING_ODS_NAME = "ellis_appraisal_layout.xlsx.ods"
+#: A well-formed local file header: signature, version, flags, compression 0
+#: (stored), times, CRC, sizes, name length 8, extra length 0, then `mimetype`
+#: and its stored value.
 VALID_ODS_PACKAGE = (
-    _ZIP_LOCAL_HEADER + b"\x14\x00\x00\x00\x00\x00" + b"mimetype" + _ODS_MEDIA_TYPE + b"\x00" * 16
+    _ZIP_LOCAL_HEADER
+    + b"\x14\x00"  # version needed
+    + b"\x00\x00"  # flags
+    + b"\x00\x00"  # compression: stored
+    + b"\x00" * 4  # mod time and date
+    + b"\x00" * 4  # crc
+    + b"\x00" * 4  # compressed size
+    + b"\x00" * 4  # uncompressed size
+    + b"\x08\x00"  # file name length
+    + b"\x00\x00"  # extra field length
+    + b"mimetype"
+    + _ODS_MEDIA_TYPE
 )
 
 #: A ZIP whose first member is not `mimetype`: structurally a ZIP, not an ODS.
 ZIP_WITHOUT_MIMETYPE = (
-    _ZIP_LOCAL_HEADER + b"\x14\x00\x00\x00\x00\x00" + b"content.xml" + b"\x00" * 32
+    _ZIP_LOCAL_HEADER
+    + b"\x14\x00\x00\x00\x00\x00"
+    + b"\x00" * 12
+    + b"\x0b\x00"
+    + b"\x00\x00"
+    + b"content.xml"
+    + b"\x00" * 32
 )
 
 #: A ZIP whose `mimetype` member carries a different media type.
 ZIP_WITH_OTHER_MEDIA_TYPE = (
     _ZIP_LOCAL_HEADER
     + b"\x14\x00\x00\x00\x00\x00"
+    + b"\x00" * 12
+    + b"\x08\x00"
+    + b"\x00\x00"
     + b"mimetype"
     + b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
@@ -155,9 +178,50 @@ NOT_A_PACKAGE = b"This is plain text pretending to be a layout package."
 
 EMPTY_PACKAGE = b""
 
+#: A ZIP whose `mimetype` member is deflated rather than stored. ODS requires it
+#: uncompressed, which is what makes the media type readable without
+#: decompressing anything.
+DEFLATED_MIMETYPE = (
+    b"PK\x03\x04\x14\x00\x00\x00\x08\x00"
+    + b"\x00" * 16
+    + b"\x08\x00\x00\x00"
+    + b"mimetype"
+    + _ODS_MEDIA_TYPE
+)
+
+#: The marker appears after the signature but the header is not a `mimetype`
+#: entry. Searching for the bytes rather than parsing the header accepted this.
+MARKER_WITHOUT_HEADER = b"PK\x03\x04" + b"\x00" * 40 + b"mimetype" + _ODS_MEDIA_TYPE
+
+#: `mimetype` is not the first member: the name length says something else.
+WRONG_NAME_LENGTH = (
+    b"PK\x03\x04\x14\x00\x00\x00\x00\x00"
+    + b"\x00" * 16
+    + b"\x0b\x00\x00\x00"
+    + b"content.xml"
+    + _ODS_MEDIA_TYPE
+)
+
+#: Uniformly short Ellis member, and child fixtures.
+UNIFORMLY_SHORT = member(property_row()[:75], property_row(prop_id="000124")[:75])
+
+CHILD_WIDTHS = (("prop_id", 12), ("child_sequence", 4), ("child_value", 15))
+
+
+def child_row(prop_id: str = "000123", sequence: str = "1", value: str = "1000.00") -> str:
+    """One valid Ellis child record."""
+
+    fields = {"prop_id": prop_id, "child_sequence": sequence, "child_value": value}
+    return "".join(_pad(fields[name], width, name) for name, width in CHILD_WIDTHS)
+
+
+ACCEPTED_ACCOUNT_IDS = ("000123",)
+CHILD_RESOLVED = member(child_row(prop_id="000123"))
+CHILD_ORPHANED = member(child_row(prop_id="999999"))
+
 #: Literal expectations authored from the contract, not from the parser.
 EXPECTED_PROPERTY_WIDTH = 290
-EXPECTED_DIAGNOSTIC_CODE_COUNT = 18
+EXPECTED_DIAGNOSTIC_CODE_COUNT = 19
 EXPECTED_VALID_ROWS = 2
 UNSUPPORTED_LABELS = (
     "RC2 Potential",

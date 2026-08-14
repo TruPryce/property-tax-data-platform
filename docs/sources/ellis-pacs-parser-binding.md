@@ -20,7 +20,9 @@ component; a dependency between them would let a Denton layout change silently a
 ## Compatibility Is Ellis's Own Fingerprint
 
 Sharing a vendor with Denton is **not** evidence that the schemas agree. Ellis carries its own
-expected layout fingerprint and compares the declared mapping against it before parsing. A caller
+expected layout fingerprint — written as a **literal**, not derived from the layout, so an unreviewed
+mapping edit breaks the gate instead of moving both sides of it — and compares the declared mapping
+against it before parsing. A caller
 supplying another county's expected value is rejected with `unsupported_layout_fingerprint`.
 
 The Ellis and Denton fingerprints are independent values, asserted to differ, and neither is derived
@@ -42,9 +44,15 @@ gate and confirming only the gate's own code is reported.
 ## Layout Package Classification
 
 The published Ellis layout is named `.xlsx.ods`, so selecting a parser by extension picks the wrong
-one. `classify_layout_package` reads a bounded window of caller-supplied bytes and checks the
-OpenDocument signature: the ZIP local-file-header, then `mimetype` as the first member, then the
-media type `application/vnd.oasis.opendocument.spreadsheet`.
+one. `classify_layout_package` reads a bounded window of caller-supplied bytes and **parses** the
+ZIP local file header — signature, compression method, file-name length, extra-field length — then
+requires `mimetype` as the first member, stored uncompressed, carrying the media type
+`application/vnd.oasis.opendocument.spreadsheet`.
+
+Parsing the header rather than searching for the marker matters: an archive that merely contains
+those bytes somewhere after a ZIP signature is not an ODS package, and a deflated `mimetype` is not
+one either, because ODS stores it uncompressed precisely so the media type is readable without
+decompressing anything.
 
 It takes only bytes — there is no filename argument, so a name cannot mislead it. It extracts
 nothing, enumerates nothing, and decompresses nothing, and it adds no archive library, so a hostile
@@ -65,8 +73,22 @@ all rejected with `unsupported_scenario_label` before any record is read.
 Byte input decodes strictly as ISO-8859-1 with byte-order marks rejected. LF and CRLF boundaries are
 accepted with one trailing ending allowed; a bare CR is not a boundary, and an embedded control
 character is refused with `invalid_source_text` so two records cannot be read as one over-wide
-record. A PACS member has no header row, so physical row 1 is the first data record. Observed width is
-a member-level property, and outliers are rejected with `record_width_mismatch`.
+record. A PACS member has no header row, so physical row 1 is the first data record. Observed width
+must be uniform across records **and** reach the layout's declared width; a uniformly short member is
+not the declared layout however consistent it is, and both cases are rejected with
+`record_width_mismatch`.
+
+`truncated_required_field` is deliberately absent from the vocabulary for the reason the Denton
+document gives: with width gated against the declared width, a required field can never end beyond
+it.
+
+## Child Records
+
+Child members are validated against a caller-supplied set of accepted `prop_id` values, behind the
+same label, fingerprint, control-character, and width gates. A core appraisal child — `land`,
+`improvement`, `mobile_home` — that does not resolve blocks the release with `core_child_orphaned`;
+a legal child — `arb`, `lawsuit` — records the non-fatal `legal_child_orphaned`. A child member from
+a scenario roll is no more parseable than a property member from one.
 
 | Field | Rule |
 | --- | --- |
@@ -93,11 +115,11 @@ or assessed value are rejected with `conflicting_account_facts`.
 ## Diagnostics and Atomicity
 
 The closed vocabulary is `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`,
-`truncated_required_field`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`,
-`unsupported_scenario_label`, `unrecognised_layout_package`, `blank_required_key`,
-`invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`,
-`invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`,
-`duplicate_owner_row`, and `conflicting_account_facts`.
+`unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`,
+`unrecognised_layout_package`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`,
+`invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`,
+`invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and
+`legal_child_orphaned`. Every code in it is reachable.
 
 A diagnostic carries only its stable code and, where applicable, an approved field name, the
 one-based physical row number, and the layout fingerprint — the whole type, so there is nowhere to

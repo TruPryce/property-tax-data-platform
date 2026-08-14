@@ -21,7 +21,7 @@ current state.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -51,10 +51,10 @@ ELLIS_PROPERTY_LAYOUT = PacsLayout(
     layout_id="ellis.property",
     layout_version="v1",
     fields=(
-        PacsField("prop_id", 1, 12),
-        PacsField("owner_sequence", 13, 16),
-        PacsField("tax_year", 17, 20),
-        PacsField("ownership_percentage", 21, 30),
+        PacsField("prop_id", 1, 12, declared_length=12),
+        PacsField("owner_sequence", 13, 16, declared_length=4),
+        PacsField("tax_year", 17, 20, declared_length=4),
+        PacsField("ownership_percentage", 21, 30, declared_length=10),
         PacsField("market_value", 31, 45),
         PacsField("appraised_value", 46, 60),
         PacsField("assessed_value", 61, 75),
@@ -67,18 +67,50 @@ ELLIS_PROPERTY_LAYOUT = PacsLayout(
     ),
 )
 
-#: D1: the expected Ellis fingerprint. Compatibility is established against this
-#: value, never against Denton's and never from the vendor or a filename.
-ELLIS_EXPECTED_LAYOUT_FINGERPRINT: Final = ELLIS_PROPERTY_LAYOUT.fingerprint
+#: D1: the expected Ellis fingerprints, pinned as literals.
+#:
+#: Deriving these from the layout would make the gate tautological: editing a
+#: position would move the expected value with it and the comparison could never
+#: fail. Written out, an unreviewed mapping edit breaks the gate, which is the
+#: whole point of having one. Compatibility is established against these values,
+#: never against Denton's and never from the vendor or a filename.
+ELLIS_EXPECTED_LAYOUT_FINGERPRINT: Final = (
+    "f7e275e9c22b021029b2b34b0daebd066b2c87933bc76ac8fd941de31280f101"  # pragma: allowlist secret
+)
+ELLIS_EXPECTED_CHILD_FINGERPRINT: Final = (
+    "8f4e69d0cf3d55836f98d98dac7ad9800caa08b9143b4789f6cb873c505d17e2"  # pragma: allowlist secret
+)
+
+#: The synthetic Ellis child layout, mirroring the Denton child grain.
+ELLIS_CHILD_LAYOUT = PacsLayout(
+    layout_id="ellis.child",
+    layout_version="v1",
+    fields=(
+        PacsField("prop_id", 1, 12, declared_length=12),
+        PacsField("child_sequence", 13, 16, declared_length=4),
+        PacsField("child_value", 17, 31, required=False, declared_length=15),
+    ),
+)
+
+#: Core appraisal orphans block the release; legal orphans warn.
+ELLIS_CORE_CHILD_TABLES: Final[frozenset[str]] = frozenset({"land", "improvement", "mobile_home"})
+ELLIS_LEGAL_CHILD_TABLES: Final[frozenset[str]] = frozenset({"arb", "lawsuit"})
 
 #: D3: the only release label this foundation parses as certified current state.
 ELLIS_CERTIFIED_LABEL: Final = "certified-all-property"
+#: What a report says when the label was refused. Echoing the caller's text back
+#: would put arbitrary input into a default-deny output.
+ELLIS_REJECTED_LABEL: Final = "unsupported"
 
 #: D2: an OpenDocument Spreadsheet package begins with the ZIP local-file-header
 #: signature and stores `mimetype` as its first member.
 _ZIP_LOCAL_HEADER: Final = b"PK\x03\x04"
 _ODS_MEDIA_TYPE: Final = b"application/vnd.oasis.opendocument.spreadsheet"
 _MIMETYPE_MEMBER: Final = b"mimetype"
+#: A ZIP local file header is 30 bytes before the member name begins.
+_LOCAL_HEADER_LENGTH: Final = 30
+#: Compression method 0. ODS stores `mimetype` uncompressed by specification.
+_STORED: Final = 0
 #: The signature check reads no further than this, so a hostile package cannot
 #: turn recognition into extraction.
 _SIGNATURE_WINDOW: Final = 128
@@ -142,10 +174,11 @@ class EllisDiagnosticCode(StrEnum):
     INVALID_ENCODING = "invalid_encoding"
     UNEXPECTED_BOM = "unexpected_bom"
     RECORD_WIDTH_MISMATCH = "record_width_mismatch"
-    TRUNCATED_REQUIRED_FIELD = "truncated_required_field"
     UNSUPPORTED_LAYOUT_FINGERPRINT = "unsupported_layout_fingerprint"
     UNDOCUMENTED_TRAILING_REGION = "undocumented_trailing_region"
     UNSUPPORTED_SCENARIO_LABEL = "unsupported_scenario_label"
+    CORE_CHILD_ORPHANED = "core_child_orphaned"
+    LEGAL_CHILD_ORPHANED = "legal_child_orphaned"
     UNRECOGNISED_LAYOUT_PACKAGE = "unrecognised_layout_package"
     BLANK_REQUIRED_KEY = "blank_required_key"
     INVALID_ACCOUNT_ID = "invalid_account_id"
@@ -160,7 +193,10 @@ class EllisDiagnosticCode(StrEnum):
 
 
 _NONFATAL_CODES: Final[frozenset[EllisDiagnosticCode]] = frozenset(
-    {EllisDiagnosticCode.UNDOCUMENTED_TRAILING_REGION}
+    {
+        EllisDiagnosticCode.UNDOCUMENTED_TRAILING_REGION,
+        EllisDiagnosticCode.LEGAL_CHILD_ORPHANED,
+    }
 )
 
 
@@ -223,16 +259,31 @@ def classify_layout_package(package_bytes: bytes) -> LayoutPackageKind:
     if not isinstance(package_bytes, bytes):
         raise ValueError("package_bytes must be bytes")
     window = package_bytes[:_SIGNATURE_WINDOW]
-    if not window.startswith(_ZIP_LOCAL_HEADER):
+    if len(window) < _LOCAL_HEADER_LENGTH or not window.startswith(_ZIP_LOCAL_HEADER):
         return LayoutPackageKind.UNRECOGNISED
-    # `mimetype` must be the first member, and its value is stored uncompressed
-    # immediately after the member name.
-    marker = _ZIP_LOCAL_HEADER + window[len(_ZIP_LOCAL_HEADER) :]
-    position = marker.find(_MIMETYPE_MEMBER)
-    if position < 0:
+
+    # Parse the local file header rather than searching for the marker. Finding
+    # `mimetype` and the media type *somewhere* after a ZIP signature accepts
+    # any archive that happens to contain those bytes, including one where the
+    # member is deflated or is not the first entry.
+    compression = int.from_bytes(window[8:10], "little")
+    name_length = int.from_bytes(window[26:28], "little")
+    extra_length = int.from_bytes(window[28:30], "little")
+
+    # ODS requires `mimetype` first and stored uncompressed, which is what makes
+    # the media type readable without decompressing anything.
+    if compression != _STORED:
         return LayoutPackageKind.UNRECOGNISED
-    value_start = position + len(_MIMETYPE_MEMBER)
-    if not marker[value_start:].startswith(_ODS_MEDIA_TYPE):
+    if name_length != len(_MIMETYPE_MEMBER):
+        return LayoutPackageKind.UNRECOGNISED
+
+    name_start = _LOCAL_HEADER_LENGTH
+    name_end = name_start + name_length
+    if window[name_start:name_end] != _MIMETYPE_MEMBER:
+        return LayoutPackageKind.UNRECOGNISED
+
+    value_start = name_end + extra_length
+    if window[value_start : value_start + len(_ODS_MEDIA_TYPE)] != _ODS_MEDIA_TYPE:
         return LayoutPackageKind.UNRECOGNISED
     return LayoutPackageKind.OPENDOCUMENT_SPREADSHEET
 
@@ -260,7 +311,7 @@ def validate_property_member(
         return _report(
             [_diagnostic(EllisDiagnosticCode.UNSUPPORTED_SCENARIO_LABEL, layout, None, None)],
             layout=layout,
-            label=release_label,
+            label=ELLIS_REJECTED_LABEL,
             accepted=0,
             owner_rows=0,
             trailing=0,
@@ -305,6 +356,10 @@ def validate_property_member(
         for row_number, record in records
         if len(record) != observed
     ]
+    # Uniformity alone is not enough: a member whose every record falls short of
+    # the declared width is not the declared layout, however consistent it is.
+    if not mismatched and observed < layout.declared_width:
+        mismatched.append(_diagnostic(EllisDiagnosticCode.RECORD_WIDTH_MISMATCH, layout, None, 1))
     if mismatched:
         return _report(
             mismatched, layout=layout, label=release_label, accepted=0, owner_rows=0, trailing=0
@@ -315,32 +370,21 @@ def validate_property_member(
 
     # Truncation and the trailing region follow from the uniform observed width,
     # so they are determined once rather than reported per record.
-    probe = layout.slice_record(records[0][1])
-    for name in probe.truncated_required:
-        diagnostics.append(
-            _diagnostic(EllisDiagnosticCode.TRUNCATED_REQUIRED_FIELD, layout, name, 1)
-        )
+    # Width is already gated against the declared width, so nothing can be
+    # truncated here; the component still reports truncation for callers that
+    # slice directly.
+    probe = layout.slice_record(records[0][1], encoding=ELLIS_ENCODING)
     if probe.trailing is not None:
         trailing_bytes = probe.trailing.byte_length
         diagnostics.append(
             _diagnostic(EllisDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)
         )
-    if probe.truncated_required:
-        return _report(
-            diagnostics,
-            layout=layout,
-            label=release_label,
-            accepted=0,
-            owner_rows=0,
-            trailing=trailing_bytes,
-        )
-
     accepted = 0
     owner_rows: set[tuple[str, str]] = set()
     account_facts: dict[str, dict[str, str]] = {}
 
     for row_number, record in records:
-        values = layout.slice_record(record).values
+        values = layout.slice_record(record, encoding=ELLIS_ENCODING).values
         row_diagnostics = _validate_values(values, layout, row_number, expected_tax_year)
         if row_diagnostics:
             diagnostics.extend(row_diagnostics)
@@ -383,6 +427,103 @@ def validate_property_member(
         owner_rows=0 if blocking else len(owner_rows),
         trailing=trailing_bytes,
     )
+
+
+def validate_child_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    child_table: str,
+    accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str = ELLIS_EXPECTED_CHILD_FINGERPRINT,
+) -> EllisValidationReport:
+    """Validate one Ellis child member against the accepted account set.
+
+    Child facts and relationship provenance are part of the Ellis contract, and
+    the same label and fingerprint gates apply: a child member from a scenario
+    roll is no more parseable than a property member from one.
+    """
+
+    _require_caller_identity(release_identifier, source_member_name, _MIN_YEAR)
+    if child_table not in ELLIS_CORE_CHILD_TABLES | ELLIS_LEGAL_CHILD_TABLES:
+        raise ValueError("child_table is not an approved Ellis child table")
+
+    layout = ELLIS_CHILD_LAYOUT
+    if release_label != ELLIS_CERTIFIED_LABEL:
+        return _fail(EllisDiagnosticCode.UNSUPPORTED_SCENARIO_LABEL, layout, ELLIS_REJECTED_LABEL)
+    if expected_layout_fingerprint != layout.fingerprint:
+        return _fail(EllisDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, release_label)
+
+    text = _decode(data)
+    if text is None:
+        return _fail(EllisDiagnosticCode.INVALID_ENCODING, layout, release_label)
+    if text.startswith(_TEXT_BOM):
+        return _fail(EllisDiagnosticCode.UNEXPECTED_BOM, layout, release_label)
+    lines = _physical_lines(text)
+    if not lines:
+        return _fail(EllisDiagnosticCode.RECORD_WIDTH_MISMATCH, layout, release_label)
+
+    records = list(enumerate(lines, start=1))
+    preflight = _preflight(records, layout)
+    if preflight:
+        return _report(
+            preflight, layout=layout, label=release_label, accepted=0, owner_rows=0, trailing=0
+        )
+
+    accounts = {str(value) for value in accepted_account_ids}
+    orphan_code = (
+        EllisDiagnosticCode.CORE_CHILD_ORPHANED
+        if child_table in ELLIS_CORE_CHILD_TABLES
+        else EllisDiagnosticCode.LEGAL_CHILD_ORPHANED
+    )
+
+    diagnostics: list[EllisDiagnostic] = []
+    accepted = 0
+    for row_number, record in records:
+        sliced = layout.slice_record(record, encoding=ELLIS_ENCODING)
+        prop_id = sliced.values["prop_id"].strip(_ASCII_WHITESPACE)
+        if not prop_id:
+            diagnostics.append(
+                _diagnostic(EllisDiagnosticCode.BLANK_REQUIRED_KEY, layout, "prop_id", row_number)
+            )
+            continue
+        if prop_id not in accounts:
+            diagnostics.append(_diagnostic(orphan_code, layout, None, row_number))
+            continue
+        accepted += 1
+
+    blocking = any(entry.code not in _NONFATAL_CODES for entry in diagnostics)
+    return _report(
+        diagnostics,
+        layout=layout,
+        label=release_label,
+        accepted=0 if blocking else accepted,
+        owner_rows=0,
+        trailing=0,
+    )
+
+
+def _preflight(records: list[tuple[int, str]], layout: PacsLayout) -> list[EllisDiagnostic]:
+    """Checks every member must pass, whatever it contains."""
+
+    control = [
+        _diagnostic(EllisDiagnosticCode.INVALID_SOURCE_TEXT, layout, None, row_number)
+        for row_number, record in records
+        if any(_is_control(character) for character in record)
+    ]
+    if control:
+        return control
+    observed = len(records[0][1])
+    mismatched = [
+        _diagnostic(EllisDiagnosticCode.RECORD_WIDTH_MISMATCH, layout, None, row_number)
+        for row_number, record in records
+        if len(record) != observed
+    ]
+    if not mismatched and observed < layout.declared_width:
+        mismatched.append(_diagnostic(EllisDiagnosticCode.RECORD_WIDTH_MISMATCH, layout, None, 1))
+    return mismatched
 
 
 def _validate_values(
@@ -567,6 +708,11 @@ def _report(
 
 __all__ = [
     "ELLIS_ACCOUNT_FACTS",
+    "ELLIS_CHILD_LAYOUT",
+    "ELLIS_CORE_CHILD_TABLES",
+    "ELLIS_EXPECTED_CHILD_FINGERPRINT",
+    "ELLIS_LEGAL_CHILD_TABLES",
+    "ELLIS_REJECTED_LABEL",
     "ELLIS_CERTIFIED_LABEL",
     "ELLIS_DIAGNOSTIC_RETENTION_LIMIT",
     "ELLIS_ENCODING",
@@ -582,5 +728,6 @@ __all__ = [
     "EllisValidationReport",
     "LayoutPackageKind",
     "classify_layout_package",
+    "validate_child_member",
     "validate_property_member",
 ]

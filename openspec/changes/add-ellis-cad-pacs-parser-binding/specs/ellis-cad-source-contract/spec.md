@@ -90,7 +90,9 @@ A caller-supplied release label outside the approved certified set SHALL be reje
 
 ### Requirement: Validate Ellis records and preserve owner-row grain
 
-The Ellis adapter MUST parse one already-selected, caller-supplied member and MUST NOT discover, request, download, or open an archive. Byte input SHALL be decoded strictly as ISO-8859-1 with byte-order marks rejected, LF and CRLF boundaries accepted with one trailing ending allowed, a bare CR that is not a boundary, one-based physical row numbers with no header row, and a uniform observed width whose outliers are rejected with `record_width_mismatch`.
+The Ellis adapter MUST parse one already-selected, caller-supplied member and MUST NOT discover, request, download, or open an archive. Byte input SHALL be decoded strictly as ISO-8859-1 with byte-order marks rejected, LF and CRLF boundaries accepted with one trailing ending allowed, a bare CR that is not a boundary, one-based physical row numbers with no header row, and an observed width that SHALL be uniform across records and SHALL reach the layout's declared width, with any violation rejected as `record_width_mismatch`.
+
+The adapter SHALL also validate child members against a caller-supplied set of accepted `prop_id` values, applying the same label, fingerprint, control-character, and width gates, rejecting an unresolved core appraisal child with `core_child_orphaned` and recording the non-fatal `legal_child_orphaned` for an unresolved legal child.
 
 `prop_id` SHALL be the Ellis account identifier, trimmed, 1 through 32 visible ASCII characters, preserved as text and never parsed numerically. `owner_sequence` SHALL be one to four ASCII digits. `(prop_id, owner_sequence)` SHALL be the physical owner-row grain, preserved distinctly with no deduplication, no summing, and no arbitrary-row selection, and no account-level roll-up SHALL be derived.
 
@@ -123,7 +125,9 @@ Monetary fields SHALL match `[0-9]+(?:\.[0-9]{1,2})?` and fall from zero through
 
 ### Requirement: Emit only the closed Ellis diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `truncated_required_field`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `unrecognised_layout_package`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, and `conflicting_account_facts`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `unrecognised_layout_package`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+
+Every code in this vocabulary SHALL be reachable; `truncated_required_field` is deliberately absent for the reason the Denton contract gives.
 
 A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint, and those four fields SHALL be the whole type. `undocumented_trailing_region` SHALL be non-fatal; every other code SHALL reject the logical release. At most 100 diagnostics SHALL be retained, the total SHALL be preserved, and truncation SHALL be marked deterministically.
 

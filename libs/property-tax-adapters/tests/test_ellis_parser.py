@@ -249,10 +249,13 @@ def test_records_of_disagreeing_width_are_refused() -> None:
     assert report.diagnostics[0].physical_row_number == 2
 
 
-def test_a_truncated_required_field_blocks_the_release() -> None:
-    report = _validate(synthetic.TRUNCATED_REQUIRED)
-    assert "truncated_required_field" in _codes(report)
+def test_a_uniformly_short_member_is_refused() -> None:
+    """Uniformity is not enough; the observed width must reach the declared one."""
+
+    report = _validate(synthetic.UNIFORMLY_SHORT)
+    assert _codes(report) == ["record_width_mismatch"]
     assert report.release_accepted is False
+    assert _codes(_validate(synthetic.TRUNCATED_REQUIRED)) == ["record_width_mismatch"]
 
 
 def test_a_trailing_region_warns_once_and_is_not_carried() -> None:
@@ -327,10 +330,11 @@ def test_the_diagnostic_vocabulary_is_closed() -> None:
         "invalid_encoding",
         "unexpected_bom",
         "record_width_mismatch",
-        "truncated_required_field",
         "unsupported_layout_fingerprint",
         "undocumented_trailing_region",
         "unsupported_scenario_label",
+        "core_child_orphaned",
+        "legal_child_orphaned",
         "unrecognised_layout_package",
         "blank_required_key",
         "invalid_account_id",
@@ -494,3 +498,116 @@ def test_the_binding_adds_no_dependency_outside_the_standard_library() -> None:
         "enum",
         "typing",
     }, imported
+
+
+# --------------------------------------------------------------------------
+# Review findings
+# --------------------------------------------------------------------------
+
+
+def test_the_expected_fingerprint_is_pinned_rather_than_derived() -> None:
+    """`ELLIS_EXPECTED_LAYOUT_FINGERPRINT = ELLIS_PROPERTY_LAYOUT.fingerprint`
+    moved both sides of the gate together, so mapping drift was undetectable."""
+
+    source = _ellis_source()
+    assert f'"{ELLIS_PROPERTY_LAYOUT.fingerprint}"' in source
+    assert "ELLIS_EXPECTED_LAYOUT_FINGERPRINT: Final = ELLIS_PROPERTY_LAYOUT" not in source
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        synthetic.MARKER_WITHOUT_HEADER,
+        synthetic.DEFLATED_MIMETYPE,
+        synthetic.WRONG_NAME_LENGTH,
+    ],
+    ids=["marker-without-header", "deflated-mimetype", "wrong-name-length"],
+)
+def test_the_local_file_header_is_parsed_rather_than_searched(package: bytes) -> None:
+    """Finding the marker somewhere after a ZIP signature accepted any archive
+    that happened to contain those bytes."""
+
+    assert classify_layout_package(package) is LayoutPackageKind.UNRECOGNISED
+
+
+def test_a_rejected_label_is_not_echoed_back() -> None:
+    """Returning arbitrary caller text in a default-deny output."""
+
+    from property_tax_adapters.sources.texas.ellis import ELLIS_REJECTED_LABEL
+
+    report = _validate(synthetic.VALID_LF, release_label="ARBITRARY-CALLER-TEXT")
+    assert report.release_label == ELLIS_REJECTED_LABEL
+    assert "ARBITRARY-CALLER-TEXT" not in repr(report)
+
+
+def _validate_child(data: bytes, **overrides: object):
+    from property_tax_adapters.sources.texas.ellis import validate_child_member
+
+    return validate_child_member(
+        data,
+        **{
+            "release_identifier": synthetic.RELEASE_IDENTIFIER,
+            "source_member_name": synthetic.SOURCE_MEMBER_NAME,
+            "release_label": synthetic.CERTIFIED_LABEL,
+            "child_table": "land",
+            "accepted_account_ids": synthetic.ACCEPTED_ACCOUNT_IDS,
+            **overrides,
+        },  # type: ignore[arg-type]
+    )
+
+
+def test_ellis_has_a_child_binding() -> None:
+    """Issue #21 requires child facts and relationship provenance."""
+
+    report = _validate_child(synthetic.CHILD_RESOLVED)
+    assert report.release_accepted is True
+    assert report.accepted_row_count == 1
+
+
+def test_an_ellis_core_child_orphan_blocks() -> None:
+    report = _validate_child(synthetic.CHILD_ORPHANED)
+    assert _codes(report) == ["core_child_orphaned"]
+    assert report.release_accepted is False
+
+
+def test_an_ellis_legal_child_orphan_warns() -> None:
+    report = _validate_child(synthetic.CHILD_ORPHANED, child_table="arb")
+    assert _codes(report) == ["legal_child_orphaned"]
+    assert report.release_accepted is True
+
+
+def test_the_child_binding_applies_the_label_and_fingerprint_gates() -> None:
+    """A child member from a scenario roll is no more parseable than a property
+    member from one."""
+
+    labelled = _validate_child(synthetic.CHILD_RESOLVED, release_label="mineral-only")
+    assert _codes(labelled) == ["unsupported_scenario_label"]
+
+    fingerprinted = _validate_child(synthetic.CHILD_RESOLVED, expected_layout_fingerprint="0" * 64)
+    assert _codes(fingerprinted) == ["unsupported_layout_fingerprint"]
+
+
+def test_every_declared_ellis_code_is_reachable() -> None:
+    """No code is declared that no path can emit."""
+
+    assert {code.value for code in EllisDiagnosticCode} == {
+        "invalid_encoding",
+        "unexpected_bom",
+        "record_width_mismatch",
+        "unsupported_layout_fingerprint",
+        "undocumented_trailing_region",
+        "unsupported_scenario_label",
+        "unrecognised_layout_package",
+        "blank_required_key",
+        "invalid_account_id",
+        "invalid_owner_sequence",
+        "invalid_monetary_value",
+        "invalid_ownership_percentage",
+        "invalid_tax_year",
+        "tax_year_mismatch",
+        "invalid_source_text",
+        "duplicate_owner_row",
+        "conflicting_account_facts",
+        "core_child_orphaned",
+        "legal_child_orphaned",
+    }
