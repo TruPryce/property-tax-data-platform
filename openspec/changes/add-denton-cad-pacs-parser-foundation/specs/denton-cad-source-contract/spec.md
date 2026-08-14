@@ -158,6 +158,8 @@ The Denton adapter SHALL validate child records against a caller-supplied set of
 
 A core appraisal child — land, improvement, or mobile home — that does not resolve to an accepted account SHALL be rejected with `core_child_orphaned`. A legal child — ARB or lawsuit — that does not resolve SHALL record the non-fatal `legal_child_orphaned` and SHALL NOT reject the release.
 
+A child record's `child_sequence` SHALL be required and one to four ASCII digits. Its `child_value` MAY be blank as source absence, and a nonblank value SHALL match `[0-9]+(?:\.[0-9]{1,2})?`, parse with `decimal.Decimal`, and fall from zero through `10**26 - 1` inclusive. Empty text after trimming SHALL be the only null.
+
 #### Scenario: Block a core appraisal orphan
 - **GIVEN** an accepted property set containing one `prop_id`
 - **GIVEN** a synthetic land child record referencing a different `prop_id`

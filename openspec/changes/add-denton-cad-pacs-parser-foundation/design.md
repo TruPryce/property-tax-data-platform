@@ -51,7 +51,8 @@ The Denton capability specification in this change is the governing behavior con
 - **D1** (proposed by this change, requires human merge): 1-indexed inclusive positions with construction-time validation of order, non-overlap, and length, raising `ValueError`.
 - **D2** (proposed by this change, requires human merge): the exact five-key canonical fingerprint document and its serialization.
 - **D3** (proposed by this change, requires human merge): the Denton lexical bounds.
-- **D4** (proposed by this change, requires human merge): core appraisal orphans block, legal orphans warn, undocumented trailing regions warn.
+- **D4** (proposed by this change, requires human merge): core appraisal orphans block, legal orphans warn, and undocumented trailing regions **block**, because Issue #20 requires unknown trailing bytes to fail closed.
+- **D5** (proposed by this change, requires human merge): the child lexical bounds, decided here so task 6.3 is implementable rather than asking an implementer to choose them.
 
 D1 through D4 come from this change rather than from an issue comment, so they are listed explicitly and merging is what accepts them.
 
