@@ -1,67 +1,72 @@
 ## Why
 
-Five counties now have parsers, and they disagree about the three types that were supposed to be shared.
+Issue #43 required decision 7 directs: "Move vendor-neutral adapter types such as `AppraisalSourceRecord`, `SourceProvenance`, and `SourceNativeValue` to a county-neutral `property_tax_adapters` module before Collin or a DAG depends on them."
 
-Collin and Dallas each wrote their own. Dallas's `SourceNativeValue` carries `lexical_text` and a `str | Decimal` value; Collin's carries `precision`, `scale`, and `source_column` but no lexical text. Dallas's provenance carries observed and normalized headers; Collin's carries a table name and a schema fingerprint. Dallas's record is one row with a parcel reference; Collin's is one account with separate current and certified value maps.
+Those types exist today, in merged and accepted Dallas code, with concrete fields. A literal move would relocate that exact shape. This change proposes to **revise** the shape while moving it, and says so plainly below, because a straight move does not serve the four counties that came after Dallas.
 
-Tarrant, Denton, and Ellis have the same types **excised** rather than duplicated, on the grounds that Issue #43 owns them. That leaves eight tasks unchecked across three accepted changes — Tarrant 6.1–6.2, Denton 6.1–6.3, Ellis 6.1–6.3 — and none of those three issues can be called complete.
-
-So the cost of the missing contract is now measurable: eight blocked tasks, two divergent implementations, and three specifications that describe a type nothing provides.
+The cost of not having it is now measurable. Eight tasks are unchecked across three accepted changes — Tarrant 6.1–6.2, Denton 6.1–6.3, Ellis 6.1–6.3 — because each of those contracts forbids building a county-local substitute until this lands. Meanwhile Collin wrote its own parallel set, which disagrees with Dallas's on nearly every field.
 
 ## Outcome
 
-Add `property_tax_adapters.sources.contracts`: the vendor-neutral `SourceNativeValue`, `SourceProvenance`, and `AppraisalSourceRecord` that every county adapter can reuse without importing a county module, designed against five counties rather than one.
-
-Migrate Collin and Dallas onto it, deleting their local copies. Unblocking the three deferred counties is separate work in their own changes; this change makes it possible.
+Add `property_tax_adapters.sources.contracts` holding the vendor-neutral `SourceNativeValue`, `SourceProvenance`, and `AppraisalSourceRecord`, designed against five counties rather than one, and migrate Dallas and Collin onto it.
 
 ## Scope
 
-- Originating issue: #43, narrowed
+- Originating issue: #43, required decision 7 only
 - Affected capability: adapter-source-contracts (ADDED)
+
+## This is a revision of required decision 7, not only a move
+
+Required decision 7 names the types but states no field list of its own. The field list it points at is the merged Dallas definition. Here is exactly what this change proposes to alter, so the departure is reviewable rather than buried:
+
+| type | merged Dallas today | proposed |
+| --- | --- | --- |
+| `SourceNativeValue` | `lexical_text: str`, `value: str \| Decimal` | adds `source_field: str`; `lexical_text` becomes `str \| None`; `value` widens to `str \| int \| Decimal \| None` |
+| `SourceProvenance` | `observed_headers`, `normalized_headers`, plus five shared fields | header vectors move out to the already-existing `DallasSourceProvenance`; adds `jurisdiction_code` and `source_contract_version` |
+| `AppraisalSourceRecord` | `source_account_id: str`, `jurisdiction_code: Literal["tx-dallas"]` | `source_account_id` becomes `str \| None`; adds `source_family: str \| None`, `source_status: str \| None`, `source_native_identifiers`; `jurisdiction_code` stops being a Dallas literal |
+
+Every one of these is forced by a county other than Dallas, and each is justified under its decision below. None of it is accepted until a maintainer merges this change.
 
 ## Explicitly not in this change
 
-Issue #43 bundles four things. This change takes the first only:
+Issue #43 carries eight required decisions. This change takes **7** only. Decisions 1–6 and 8 — the bounded production input contract, validation ordering, the release-rejection boundary, bounded cross-row checks, `LocalExecutor` resource limits, the disposition of the Dallas `bytes | str -> tuple` helper, and the progress-event contract — remain open in #43, along with every acceptance criterion that depends on them.
 
-| | |
-| --- | --- |
-| shared vendor-neutral contracts | **this change** |
-| bounded release processing | separate |
-| streaming and memory bounds | separate |
-| the atomic stage contract | separate |
-
-The measured memory problem — 663 MiB retained on 200,000 Dallas rows against a 4 GiB scheduler — is real and remains open. It is a property of the *release-processing API*, not of the record types, and the three deferred counties are blocked on the types alone. Separating them lets eight tasks unblock without waiting for a streaming design, and keeps a change small enough to plan and review. It also fixes a practical problem: planning the whole of #43 exhausted the provider's wall clock at 2,727 seconds against a 2,700-second budget.
+The measured memory problem is real and stays open: 663 MiB retained on 200,000 Dallas rows against a 4 GiB scheduler with `PARALLELISM=4`. It is a property of the release-processing API, not of the record types, and making per-record containers lighter would not change a design that materializes every row. Splitting also fixes a practical problem: planning the whole of #43 spent 2,727 seconds against a 2,700-second budget, and overrides may only tighten, so the 3,600-second ceiling was unreachable.
 
 ## Constraints
 
-- The contracts carry no county vocabulary, no county field name, and no county policy, exactly as the shared PACS component does.
-- No canonical market, appraised, assessed, taxable, tax-amount, exemption-entitlement, or replacement semantics are introduced. These are source-native containers.
-- Owner names, mailing addresses, and situs addresses remain default-deny and MUST NOT be representable in a shared record.
+- The shared module carries no county vocabulary, no county field name, and no county policy, exactly as the shared PACS component does.
+- No canonical market, appraised, assessed, taxable, tax-amount, exemption-entitlement, or replacement semantics are introduced.
 - `property_tax_domain` and `property_tax_application` are unchanged and gain no adapter vocabulary.
 - No new dependency; the standard library only.
-- Migration preserves each county's observable behaviour. A migration that changes what a parser accepts or rejects is out of scope and would be a separate change.
+- Migration preserves each county's observable behaviour exactly. A migration that changes what a parser accepts or rejects is out of scope.
+- Dependency direction, layout fingerprinting, release-level atomicity, bounded diagnostics, provenance, and exact-decimal handling are not weakened.
 
 ## Non-goals
 
-- Bounded release processing, streaming, and the atomic stage.
+- Bounded release processing, streaming, the atomic stage, progress events, and the benchmark — all still #43.
 - Persistence, Bronze, Silver, Gold, DAGs, services, migrations, and orchestration.
-- Discovery, acquisition, and archive handling for any county.
 - Unblocking Tarrant, Denton, or Ellis, which happens in their own accepted changes once these contracts exist.
-- Collapsing Collin's dual current/certified observation model into the shared record.
+- Amending any accepted county contract.
 
 ## Decisions
 
-- **D1** (proposed by this change, requires human merge): `SourceNativeValue` carries `source_field: str`, `lexical_text: str`, `value: str | int | Decimal | None`, and `classification: Literal["source-native"]`. The exact source field name and the original lexical text travel with every value, because three accepted county specifications require them and a value without its source field cannot be traced back. Collin's `precision` and `scale` are **not** promoted: they describe how an Access NUMERIC was decoded, which is Collin's mechanism, and a shared type that carried them would be modelling one county's storage format for everyone. This does not weaken Collin's accepted requirement that the adapter "SHALL preserve each exact `Decimal`, declared precision, declared scale, exact source column" — precision and scale move to a Collin-local type composing the shared value, and the exact source column becomes the shared `source_field`, so both remain preserved.
-- **D2** (proposed by this change, requires human merge): `SourceProvenance` carries `jurisdiction_code`, `release_identifier`, `source_member_name`, `source_row_number`, `parser_contract_version`, and `layout_fingerprint`. That is the intersection the five counties already agree on. County-specific provenance — Dallas's header vectors, Collin's table name, Denton's and Ellis's layout version, Tarrant's collision metadata — stays in a county provenance type that **composes** the shared one rather than extending it, so a county may record more without every county carrying its fields.
-- **D3** (proposed by this change, requires human merge): `AppraisalSourceRecord` carries `jurisdiction_code`, `source_account_id: str`, `appraisal_year: int`, `source_family: str`, `source_status: str`, `parcel_reference: str | None`, `source_native_identifiers: Mapping[str, str]`, `source_native_values: Mapping[str, SourceNativeValue]`, and `provenance: SourceProvenance`. Account identifiers are `str` in the shared type even where a county stores an integer, because leading zeroes and punctuation are meaning in three of the five counties and a numeric type destroys them.
-- **D4** (proposed by this change, requires human merge): `jurisdiction_code` is `tx-` plus the county slug; `source_family` and `source_status` are free strings the county supplies rather than a shared enum, because the families observed so far — `certified-core`, `current`, `exemption` — are county products and a shared enum would have to change every time a county discovers one.
-- **D5** (proposed by this change, requires human merge): Collin keeps its dual current/certified observation model as a county concept layered over shared records. Its `CollinAppraisalObservation` is not migrated. One Collin account produces one shared record per observed family, which preserves the accepted Collin contract's requirement that the adapter "MUST NOT ... fill a missing current or certified value from the other family." A single shared record holding both families would make that leak easy and undetectable.
+- **D1** (proposed by this change, requires human merge): `SourceNativeValue` carries `source_field: str`, `lexical_text: str | None`, `value: str | int | Decimal | None`, and `classification: Literal["source-native"]`. `source_field` is added because three accepted county specifications require the exact source field to travel with the value, and Dallas's type cannot name where a value came from. `lexical_text` is **nullable** because Collin has no source text to supply: `decode_collin_numeric` reads a 17-byte binary wrapper, so there is no original lexical form to preserve exactly. It SHALL be present whenever the source is textual. Collin's `precision` and `scale` are not promoted; they describe an Access NUMERIC decode. This does not weaken Collin's accepted requirement to preserve "declared precision, declared scale, exact source column" — precision and scale stay in a Collin-local type composing the shared value, and the exact source column becomes `source_field`.
+- **D2** (proposed by this change, requires human merge): `SourceProvenance` carries `jurisdiction_code`, `release_identifier`, `source_member_name`, `source_row_number`, `parser_contract_version`, `layout_fingerprint`, and `source_contract_version`. That is the intersection all five counties already agree on, plus the contract version that identifies which shared contract produced a record. County-specific provenance composes the shared type rather than subclassing it. `DallasSourceProvenance` already exists on `main` and already holds the header vectors; this change makes it hold a shared `SourceProvenance` too.
+- **D3** (proposed by this change, requires human merge): `AppraisalSourceRecord` carries `jurisdiction_code`, `source_account_id: str | None`, `appraisal_year`, `source_family: str | None`, `source_status: str | None`, `parcel_reference: str | None`, `source_native_identifiers`, `source_native_values`, and a required `provenance`. When present, `source_account_id` is **text**, because Denton's accepted contract requires `000123` and `123` to compare as distinct and an integer type erases that silently. It is **nullable** because Collin's accepted contract forbids declaring either candidate an account key (see D5), and `source_family`/`source_status` are nullable because Dallas classifies neither today. A blank string is rejected; absence is expressed as `None`, never as `""`.
+- **D4** (proposed by this change, requires human merge): `jurisdiction_code` is a lowercase state prefix plus county slug and is no longer a Dallas literal. `source_family` and `source_status` are county-supplied strings rather than a shared enumeration, because the observed families are county products and an enum would need editing whenever a county finds a new one.
+- **D5** (proposed by this change, requires human merge): Collin sets `source_account_id` to `None`. Its accepted contract states that `prop_id` "MUST NOT be declared a unique or canonical account key" and that `geo_id` "MUST NOT be equated with `prop_id`", so neither may be promoted. Both are preserved in `source_native_identifiers` under their exact source names, as distinct entries with no equivalence asserted between them. `CollinAppraisalSourceRecord`, `CollinObservationProvenance`, and `CollinAppraisalObservation` remain county-local. Collin emits one shared record per current or certified observation, with no deduplication and no merging, which upholds its requirement that the adapter "MUST NOT ... fill a missing current or certified value from the other family."
+- **D6** (proposed by this change, requires human merge): the shared types guarantee that they define **no named identity field and no untyped payload attribute**. They do **not** guarantee that no identity value can reach a record, and this change does not claim otherwise. `source_native_values` is a mapping of county-chosen source fields, and Dallas's accepted contract requires retaining unknown extras — `convert_dallas_appraisal_record` already places every unknown CSV column into the vendor-neutral values map. A shared allowlist would therefore contradict an accepted county contract. Keeping identity out of records stays a county-contract obligation, enforced where the county knows its columns.
 
-**Provenance.** Issue #43 and the five accepted county contracts are the authoritative input. D1 through D5 are proposed by this change to close gaps that input leaves open — it requires vendor-neutral records "where every county adapter can reuse them" but states no field list, no identifier type, and no disposition for Collin's observation model — and no prior maintainer selection is claimed for any of them. Merging this change is what accepts them.
+**Provenance.** Issue #43 required decision 7 and the five accepted county contracts are the authoritative input. D1 through D6 are proposed by this change, each departing from the merged Dallas shape only where a named accepted contract makes that shape unusable. No prior maintainer selection is claimed for any of them, and merging this change is what accepts them.
 
 ## Unresolved decisions
 
-- None. The memory and streaming work that Issue #43 also describes is out of scope here rather than unresolved; it keeps its own issue.
+- None. Issue #43 decisions 1–6 and 8 are out of scope here rather than unresolved; they keep their issue.
+
+## Risks and open tension worth a maintainer's attention
+
+Dallas's accepted contract requires retaining unknown extras, and those extras flow into the vendor-neutral record today. That is accepted behaviour and this change preserves it, but it means a Dallas release that adds an owner-name column would carry it into a shared record. Closing that belongs in the Dallas contract, not here; D6 states the limit honestly rather than promising a guarantee the type system cannot keep.
 
 ## Cross-issue boundaries
 
