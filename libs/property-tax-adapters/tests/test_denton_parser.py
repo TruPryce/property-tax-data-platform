@@ -552,18 +552,27 @@ def _denton_source() -> str:
 
 
 def test_no_county_local_shared_contract_is_defined() -> None:
-    """Issue #43 owns these three; a fourth local copy is what this avoids."""
+    """Issue #43 owns these three; a local copy is still what this avoids.
+
+    Before the shared module existed this also asserted that nothing referenced
+    it, because waiting was the only correct behaviour.  Tasks 6.1 to 6.3 end
+    the wait; they do not license a copy, so the prohibition is now expressed as
+    a check on what this module *defines* rather than on what it imports.
+    """
+
+    import ast
 
     source = _denton_source()
-    for forbidden in (
-        "class SourceNativeValue",
-        "class SourceProvenance",
-        "class AppraisalSourceRecord",
-        "class DentonSourceNativeValue",
-        "class DentonAppraisalSourceRecord",
-    ):
-        assert forbidden not in source, forbidden
-    assert "sources.contracts" not in source
+    assert "from property_tax_adapters.sources.contracts import" in source
+
+    defined = {node.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ClassDef)}
+    assert not defined & {
+        "SourceNativeValue",
+        "SourceProvenance",
+        "AppraisalSourceRecord",
+        "DentonSourceNativeValue",
+        "DentonAppraisalSourceRecord",
+    }
 
 
 def test_the_domain_and_application_packages_gain_no_parser_vocabulary() -> None:
@@ -628,6 +637,7 @@ def test_the_foundation_adds_no_dependency_outside_the_standard_library() -> Non
             "dataclasses",
             "decimal",
             "enum",
+            "types",
             "typing",
         }, imported
 
@@ -852,3 +862,276 @@ def test_every_declared_denton_code_is_actually_emitted() -> None:
 
     declared = {code.value for code in DentonDiagnosticCode}
     assert declared - emitted == set(), f"declared but never emitted: {sorted(declared - emitted)}"
+
+
+# --------------------------------------------------------------------------
+# Tasks 6.1, 6.2, 6.3: records, conversion, and typed children
+# --------------------------------------------------------------------------
+
+
+def _materialize(data: bytes | str = None, **overrides: object):  # type: ignore[assignment]
+    from property_tax_adapters.sources.texas.denton import materialize_property_member
+
+    payload = synthetic.VALID_LF if data is None else data
+    return materialize_property_member(payload, **{**IDENTITY, **overrides})  # type: ignore[arg-type]
+
+
+def _materialize_child(data: bytes | str = None, **overrides: object):  # type: ignore[assignment]
+    from property_tax_adapters.sources.texas.denton import materialize_child_member
+
+    payload = synthetic.CHILD_RESOLVED if data is None else data
+    return materialize_child_member(
+        payload,
+        release_identifier=synthetic.RELEASE_IDENTIFIER,
+        source_member_name=synthetic.SOURCE_MEMBER_NAME,
+        accepted_account_ids=overrides.pop("accepted_account_ids", synthetic.ACCEPTED_ACCOUNT_IDS),
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+# -- 6.1 --------------------------------------------------------------------
+
+
+def test_materialization_reuses_validation_rather_than_repeating_it() -> None:
+    """Contract: Add a row-materialization entry point that reuses the existing validation."""
+
+    validated = _validate(synthetic.VALID_LF)
+    result = _materialize(synthetic.VALID_LF)
+
+    assert result.report == validated
+    assert len(result.records) == validated.accepted_row_count
+
+
+def test_the_report_stays_valid_and_record_free() -> None:
+    """Contract: Keep DentonValidationReport valid and record-free."""
+
+    from dataclasses import fields as dataclass_fields
+
+    from property_tax_adapters.sources.texas.denton import DentonValidationReport
+
+    declared = {field.name for field in dataclass_fields(DentonValidationReport)}
+    assert not declared & {"records", "rows", "values", "source_native_values"}
+    assert not hasattr(_materialize().report, "records")
+
+
+def test_a_record_carries_the_owner_grain_and_its_values() -> None:
+    """Contract: ...carrying prop_id, owner_sequence, the approved values as shared entries."""
+
+    record = _materialize().records[0]
+
+    assert record.prop_id == "000123"
+    assert record.owner_sequence
+    for name, value in record.source_native_values.items():
+        assert value.source_field == name
+        assert value.classification == "source-native"
+        assert value.lexical_text == value.lexical_text.strip()
+
+
+def test_ten_percent_cap_is_a_source_native_amount_and_nothing_more() -> None:
+    """Contract: ...ten_percent_cap as a source-native cap amount."""
+
+    from decimal import Decimal
+
+    row = synthetic.property_row(ten_percent_cap="000000000250.00")
+    record = _materialize(synthetic.member(row)).records[0]
+
+    cap = record.source_native_values["ten_percent_cap"]
+    assert cap.source_field == "ten_percent_cap"
+    assert cap.value == Decimal("250.00")
+    # A published amount, not a canonical capped value derived from anything.
+    assert not hasattr(record, "capped_value")
+
+
+def test_provenance_carries_the_fingerprint_version_and_field_positions() -> None:
+    """Contract: ...layout fingerprint and version, field positions, and the one-based row."""
+
+    from property_tax_adapters.sources.contracts import SourceProvenance
+    from property_tax_adapters.sources.texas.denton import DENTON_PROPERTY_LAYOUT
+
+    provenance = _materialize().records[0].provenance
+
+    assert provenance.jurisdiction_code == "tx-denton"
+    assert provenance.release_identifier == synthetic.RELEASE_IDENTIFIER
+    assert provenance.source_member_name == synthetic.SOURCE_MEMBER_NAME
+    assert provenance.tax_year == synthetic.EXPECTED_TAX_YEAR
+    assert provenance.layout_fingerprint == DENTON_PROPERTY_LAYOUT.fingerprint
+    assert provenance.layout_version == DENTON_PROPERTY_LAYOUT.layout_version
+    assert provenance.physical_row_number == 1
+    assert isinstance(provenance.shared, SourceProvenance)
+
+    assert provenance.field_positions["prop_id"] == (1, 12)
+    assert provenance.field_positions["ten_percent_cap"] == (121, 135)
+
+
+def test_no_sensitive_field_position_or_value_reaches_a_record() -> None:
+    """Contract: their values MUST NOT enter a report, a diagnostic, a
+    fixture, a log, or any output."""
+
+    record = _materialize().records[0]
+
+    assert not set(record.source_native_values) & DENTON_SENSITIVE_FIELDS
+    assert not set(record.provenance.field_positions) & DENTON_SENSITIVE_FIELDS
+
+
+def test_a_rejected_release_materializes_nothing() -> None:
+    """Release-level atomicity, with a valid row present to actually discard."""
+
+    mixed = synthetic.member(
+        synthetic.property_row(),
+        synthetic.property_row(prop_id="000124", tax_year="1899"),
+    )
+    result = _materialize(mixed)
+
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_a_stored_shared_provenance_may_not_disagree_with_its_county_fields() -> None:
+    from dataclasses import replace
+
+    from property_tax_adapters.sources.texas.denton import DentonSourceProvenance
+
+    provenance = _materialize().records[0].provenance
+    with pytest.raises(ValueError, match="disagrees with Denton provenance"):
+        DentonSourceProvenance(
+            jurisdiction_code=provenance.jurisdiction_code,
+            release_identifier=provenance.release_identifier,
+            source_member_name=provenance.source_member_name,
+            tax_year=provenance.tax_year,
+            layout_fingerprint=provenance.layout_fingerprint,
+            layout_version=provenance.layout_version,
+            field_positions=provenance.field_positions,
+            physical_row_number=provenance.physical_row_number,
+            parser_contract_version=provenance.parser_contract_version,
+            shared=replace(provenance.shared, source_row_number=99),
+        )
+
+
+# -- 6.2 --------------------------------------------------------------------
+
+
+def test_conversion_uses_prop_id_as_the_source_account_id() -> None:
+    """Contract: ...with jurisdiction tx-denton, prop_id as source account ID."""
+
+    from property_tax_adapters.sources.texas.denton import convert_denton_record
+
+    record = _materialize().records[0]
+    shared = convert_denton_record(record)
+
+    assert shared.jurisdiction_code == "tx-denton"
+    assert shared.source_account_id == record.prop_id
+    assert shared.appraisal_year == record.provenance.tax_year
+    assert shared.provenance is record.provenance.shared
+    for name, value in shared.source_native_values.items():
+        assert value.source_field == name
+
+
+def test_conversion_preserves_the_owner_grain_and_derives_no_roll_up() -> None:
+    """Contract: preserve (prop_id, owner_sequence) grain in the output,
+    derive no account roll-up."""
+
+    from property_tax_adapters.sources.texas.denton import convert_denton_record
+
+    allocation = synthetic.member(
+        synthetic.property_row(owner_sequence="1"),
+        synthetic.property_row(owner_sequence="2"),
+    )
+    records = _materialize(allocation).records
+    assert len(records) == 2
+
+    converted = [convert_denton_record(record) for record in records]
+    # One owner row in, one shared record out: no account-level merge.
+    assert len(converted) == 2
+    assert {shared.source_account_id for shared in converted} == {"000123"}
+    assert {shared.source_native_identifiers["owner_sequence"] for shared in converted} == {
+        "1",
+        "2",
+    }
+
+
+def test_conversion_populates_no_canonical_field() -> None:
+    """Contract: populate no canonical market, appraised, assessed, taxable,
+    tax-amount, exemption-entitlement, or capped-value field.
+
+    The Denton *field names* are market_value and the rest, and they travel as
+    source-native values keyed by the county's own name.  The prohibition is
+    about the record growing a canonical attribute, so that is what is checked.
+    """
+
+    from dataclasses import fields as dataclass_fields
+
+    from property_tax_adapters.sources.contracts import AppraisalSourceRecord
+    from property_tax_adapters.sources.texas.denton import convert_denton_record
+
+    shared = convert_denton_record(_materialize().records[0])
+    declared = {field.name for field in dataclass_fields(AppraisalSourceRecord)}
+    assert not declared & {
+        "market_value",
+        "appraised_value",
+        "assessed_value",
+        "taxable_value",
+        "tax_amount",
+        "exemption_entitlement",
+        "capped_value",
+    }
+    assert "market_value" in shared.source_native_values
+
+
+# -- 6.3 --------------------------------------------------------------------
+
+
+def test_a_child_record_carries_its_measured_grain() -> None:
+    """Contract: ...carrying prop_id, child_sequence, the child value as a shared entry."""
+
+    from decimal import Decimal
+
+    from property_tax_adapters.sources.texas.denton import DENTON_CHILD_LAYOUT
+
+    record = _materialize_child().records[0]
+
+    assert record.prop_id == "000123"
+    assert record.child_sequence == "1"
+    assert record.child_value is not None
+    assert record.child_value.source_field == "child_value"
+    assert record.child_value.value == Decimal("1000.00")
+    assert record.provenance.child_table == "land"
+    assert record.provenance.layout_fingerprint == DENTON_CHILD_LAYOUT.fingerprint
+    assert record.provenance.layout_version == DENTON_CHILD_LAYOUT.layout_version
+    assert record.provenance.physical_row_number == 1
+
+
+def test_an_empty_child_value_is_the_only_null() -> None:
+    """Contract: ...with empty text after trimming as the only null."""
+
+    blank = synthetic.member(synthetic.child_row(prop_id="000123", value=""))
+    record = _materialize_child(blank).records[0]
+
+    assert record.child_value is None
+    assert record.child_sequence == "1"
+
+
+def test_children_are_not_rolled_up_to_the_parent_account() -> None:
+    """Contract: Preserve each child at its measured source grain, derive no roll-up."""
+
+    two = synthetic.member(
+        synthetic.child_row(prop_id="000123", sequence="1", value="1000.00"),
+        synthetic.child_row(prop_id="000123", sequence="2", value="2500.00"),
+    )
+    records = _materialize_child(two).records
+
+    assert len(records) == 2
+    assert {record.child_sequence for record in records} == {"1", "2"}
+    # No summed total exists anywhere in the output.
+    assert not any(hasattr(record, "total") for record in records)
+
+
+def test_a_core_orphan_blocks_materialization_and_a_legal_orphan_does_not() -> None:
+    """Contract: ...keep the core-blocking and legal-warning classification intact."""
+
+    core = _materialize_child(synthetic.CHILD_ORPHANED)
+    assert core.report.release_accepted is False
+    assert core.records == ()
+
+    legal = _materialize_child(synthetic.CHILD_ORPHANED, child_table="arb")
+    assert legal.report.release_accepted is True
+    assert len(legal.records) == 1

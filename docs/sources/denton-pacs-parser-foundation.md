@@ -161,15 +161,30 @@ unrepresentable rather than merely discouraged. `expected_tax_year` is an `int` 
 A violation raises `ValueError` before the member is read and produces no report and no diagnostic:
 caller identity is a programming contract, not source data.
 
-## Interim Output
+## Output
 
-The public surface is a **validator, not a row producer**. Issue #20's acceptance criteria name a
-typed Denton record and an approved vendor-neutral record, and both require the
-`SourceNativeValue`, `SourceProvenance`, and `AppraisalSourceRecord` contracts owned by
-[Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43), which do not exist
-yet. Returning rows today would require a county-local substitute for a shared contract — the fourth
-such copy in this repository after Collin and Dallas — so typed record output is deferred rather than
-duplicated.
+There are two entry points over one traversal, for property members and for child members alike.
+`validate_property_member` and `validate_child_member` are the validators described above.
+`materialize_property_member` and `materialize_child_member` return that same report alongside
+typed `DentonSourceRecord` and `DentonChildRecord` rows, and `convert_denton_record` converts a
+property record into the vendor-neutral `AppraisalSourceRecord` that
+[Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43) decision D7 owns —
+now implemented in
+[the shared adapter source contracts](shared-adapter-source-contracts.md). The validation is
+written once and reused, so a validator and its materializing sibling cannot disagree about what a
+valid Denton row is.
+
+Materialization is atomic with validation: a rejected release yields zero records, never a partial
+set, including when other rows in the same member were valid.
+
+Records keep the grain the source published. A property record is one `(prop_id, owner_sequence)`
+owner row and conversion preserves that grain, so an owner allocation stays two records rather than
+becoming one account figure. A child record stays at its measured grain, and nothing sums children
+into the parent account. `ten_percent_cap` travels as a source-native amount and no canonical capped
+value is derived from it.
+
+No county-local substitute for a shared contract exists, and that prohibition has not lifted — only
+the wait for the real thing has ended.
 
 `DentonValidationReport` carries the parser contract version, an acceptance flag, the layout
 fingerprint and version, the accepted row and owner-row counts, the trailing-region byte count, up to
