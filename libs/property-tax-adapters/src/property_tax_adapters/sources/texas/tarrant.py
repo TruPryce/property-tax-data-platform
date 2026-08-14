@@ -4,14 +4,17 @@ This is the synthetic foundation accepted in OpenSpec change
 ``add-tarrant-cad-parser-foundation``.  It parses one already-selected
 certified-core text member and makes no claim of live-release compatibility.
 
-The public surface is deliberately a **validator**, not a row producer.  The
-approved Tarrant-native record holds shared ``SourceNativeValue`` entries owned
-by Issue #43, and that contract does not exist yet; returning rows today would
-mean inventing a county-local stand-in, which decision D5 forbids.  So
-:func:`validate_certified_member` returns a bounded
-:class:`TarrantValidationReport` of counts, diagnostics, fingerprint, and
-observed headers, and carries no field values at all.  Row materialization
-arrives with the record layer once Issue #43 lands, reusing this validation.
+Two entry points share one traversal.  :func:`validate_certified_member`
+returns a bounded :class:`TarrantValidationReport` of counts, diagnostics,
+fingerprint, and observed headers, carrying no field value at all.
+:func:`materialize_certified_member` returns that same report alongside typed
+records, and :func:`convert_tarrant_record` converts one into the vendor-neutral
+contract Issue #43 owns.  The validation is written once and reused rather than
+reimplemented per entry point, so the two can never disagree about what a valid
+Tarrant row is.
+
+Materialization is atomic with validation: a rejected release yields zero
+records, never a partial set.
 """
 
 from __future__ import annotations
@@ -19,14 +22,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final, Literal
 
 from property_tax_application import AcquisitionMethod, CountySourceDefinition
 from property_tax_domain import CountySlug, county_by_slug
+
+from property_tax_adapters.sources.contracts import (
+    AppraisalSourceRecord,
+    SourceNativeValue,
+    SourceProvenance,
+)
 
 TARRANT_JURISDICTION_CODE: Literal["tx-tarrant"] = "tx-tarrant"
 TARRANT_PARSER_CONTRACT_VERSION: Final = 1
@@ -196,6 +207,120 @@ class TarrantValidationReport:
     diagnostics_truncated: bool
 
 
+#: The exact Tarrant field names whose values travel as source-native values.
+#: Owner, address, and legal-description headers are absent by construction: a
+#: name may appear in layout provenance, a value never enters a record.
+TARRANT_SOURCE_VALUE_FIELDS: Final[tuple[str, ...]] = (
+    "RP",
+    "Property_Class",
+    "State_Use_Code",
+    "Exemption_Code",
+    "Land_Value",
+    "Improvement_Value",
+    "Total_Value",
+    "Appraised_Value",
+    "Ag_Value",
+    "Deed_Date",
+    "Notice_Date",
+    "Appraisal_Date",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TarrantSourceProvenance:
+    """County-native provenance for one materialized Tarrant row.
+
+    Holds the shared provenance as a stored field rather than deriving it, so it
+    appears in ``dataclasses.fields`` and travels with the record.  The county
+    fields it duplicates are checked for agreement at construction, because a
+    stored copy can drift where a derived one could not.
+
+    ``duplicate_header_names`` and ``case_fold_collisions`` are the binding
+    metadata D1 requires.  Both are empty on any release that produced a record,
+    since either condition rejects the release outright; recording them is what
+    makes "bound by exact name, unambiguously" an observable fact rather than an
+    assumption.
+    """
+
+    jurisdiction_code: Literal["tx-tarrant"]
+    release_identifier: str
+    source_member_name: str
+    expected_source_year: int
+    source_family: str
+    source_status: str
+    observed_headers: tuple[str, ...]
+    duplicate_header_names: tuple[str, ...]
+    case_fold_collisions: tuple[str, ...]
+    layout_fingerprint: str
+    physical_row_number: int
+    parser_contract_version: int
+    shared: SourceProvenance
+
+    def __post_init__(self) -> None:
+        mismatched = [
+            name
+            for name, county, neutral in (
+                ("release_identifier", self.release_identifier, self.shared.release_identifier),
+                ("source_member_name", self.source_member_name, self.shared.source_member_name),
+                ("layout_fingerprint", self.layout_fingerprint, self.shared.layout_fingerprint),
+                ("physical_row_number", self.physical_row_number, self.shared.source_row_number),
+                (
+                    "parser_contract_version",
+                    self.parser_contract_version,
+                    self.shared.parser_contract_version,
+                ),
+                ("observed_headers", self.observed_headers, self.shared.observed_fields),
+                ("source_family", self.source_family, self.shared.source_family),
+                ("source_status", self.source_status, self.shared.source_status),
+                ("expected_source_year", self.expected_source_year, self.shared.source_year),
+                ("jurisdiction_code", self.jurisdiction_code, self.shared.jurisdiction_code),
+            )
+            if county != neutral
+        ]
+        if mismatched:
+            raise ValueError(
+                "shared provenance disagrees with Tarrant provenance on: " + ", ".join(mismatched)
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TarrantCertifiedSourceRecord:
+    """One validated certified-core row, carrying no canonical semantics.
+
+    Every monetary and date value is a shared ``SourceNativeValue`` holding both
+    the exact source field and the original lexical text, so a value can always
+    be traced back to the column and characters it came from.  Nothing here is a
+    market, appraised, assessed, taxable, or exemption-entitlement amount; those
+    meanings belong to a canonical layer this foundation does not have.
+    """
+
+    division_code: str
+    appraisal_year: int
+    account_num: str
+    pidn: str | None
+    gis_link: str | None
+    property_class: str | None
+    state_use_code: str | None
+    exemption_code: str | None
+    source_native_values: Mapping[str, SourceNativeValue]
+    provenance: TarrantSourceProvenance
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "source_native_values",
+            MappingProxyType(dict(self.source_native_values)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TarrantMaterializationResult:
+    """The validation report and, only if the release was accepted, its records."""
+
+    report: TarrantValidationReport
+    records: tuple[TarrantCertifiedSourceRecord, ...]
+
+
 def validate_certified_member(
     data: bytes | str,
     *,
@@ -212,32 +337,79 @@ def validate_certified_member(
     diagnostic vocabulary describes the source, never the caller.
     """
 
+    return _process_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        expected_source_year=expected_source_year,
+        materialize=False,
+    ).report
+
+
+def materialize_certified_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    expected_source_year: int,
+) -> TarrantMaterializationResult:
+    """Validate one member and materialize the rows it accepted.
+
+    Reuses the validation :func:`validate_certified_member` performs rather than
+    repeating it, so the two entry points cannot drift about what a valid row is.
+    A rejected release yields an empty record tuple: there is no partial output.
+    """
+
+    return _process_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        expected_source_year=expected_source_year,
+        materialize=True,
+    )
+
+
+def _process_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    expected_source_year: int,
+    materialize: bool,
+) -> TarrantMaterializationResult:
+    """The one traversal both entry points share."""
+
     _require_caller_identity(release_identifier, source_member_name, expected_source_year)
 
     text = _decode(data)
     if text is None:
-        return _rejected(TarrantDiagnostic(TarrantDiagnosticCode.INVALID_ENCODING))
+        return _no_records(_rejected(TarrantDiagnostic(TarrantDiagnosticCode.INVALID_ENCODING)))
     if text.startswith(_TEXT_BOM):
-        return _rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNEXPECTED_BOM))
+        return _no_records(_rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNEXPECTED_BOM)))
 
     records = _scan_records(text)
     if not records:
-        return _rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNSUPPORTED_LAYOUT))
+        return _no_records(_rejected(TarrantDiagnostic(TarrantDiagnosticCode.UNSUPPORTED_LAYOUT)))
 
     header_row, header_fields, header_error = records[0]
     if header_error is not None:
-        return _rejected(TarrantDiagnostic(header_error, physical_row_number=header_row))
+        return _no_records(
+            _rejected(TarrantDiagnostic(header_error, physical_row_number=header_row))
+        )
 
     observed = tuple(header_fields)
     fingerprint = layout_fingerprint(observed)
     header_diagnostics = _validate_header(observed, fingerprint)
     if any(diagnostic.code not in _NONFATAL_CODES for diagnostic in header_diagnostics):
-        return _rejected(*header_diagnostics, headers=observed, fingerprint=fingerprint)
+        return _no_records(
+            _rejected(*header_diagnostics, headers=observed, fingerprint=fingerprint)
+        )
 
     diagnostics = list(header_diagnostics)
     index_of = {name: position for position, name in enumerate(observed)}
     accepted = 0
     seen_accounts: set[str] = set()
+    materialized: list[TarrantCertifiedSourceRecord] = []
 
     for offset, fields, error in records[1:]:
         if error is not None:
@@ -268,16 +440,155 @@ def validate_certified_member(
             seen_accounts=seen_accounts,
         )
         diagnostics.extend(row_diagnostics)
-        if not row_diagnostics:
-            accepted += 1
+        if row_diagnostics:
+            continue
+        accepted += 1
+        if materialize:
+            materialized.append(
+                _materialize_row(
+                    fields,
+                    index_of=index_of,
+                    observed=observed,
+                    fingerprint=fingerprint,
+                    physical_row_number=offset,
+                    release_identifier=release_identifier,
+                    source_member_name=source_member_name,
+                    expected_source_year=expected_source_year,
+                )
+            )
 
     blocking = any(diagnostic.code not in _NONFATAL_CODES for diagnostic in diagnostics)
-    return _report(
+    report = _report(
         diagnostics,
         headers=observed,
         fingerprint=fingerprint,
         accepted_row_count=0 if blocking else accepted,
         release_accepted=not blocking,
+    )
+    # Atomic with validation: a blocked release publishes nothing, so the rows
+    # already built are discarded rather than returned as a partial set.
+    return TarrantMaterializationResult(
+        report=report,
+        records=() if blocking else tuple(materialized),
+    )
+
+
+def _no_records(report: TarrantValidationReport) -> TarrantMaterializationResult:
+    return TarrantMaterializationResult(report=report, records=())
+
+
+def _optional_text(fields: list[str], index_of: Mapping[str, int], name: str) -> str | None:
+    """An absent optional field is `None`, never a blank string."""
+
+    raw = fields[index_of[name]].strip(_ASCII_WHITESPACE)
+    return raw or None
+
+
+def _materialize_row(
+    fields: list[str],
+    *,
+    index_of: Mapping[str, int],
+    observed: tuple[str, ...],
+    fingerprint: str,
+    physical_row_number: int,
+    release_identifier: str,
+    source_member_name: str,
+    expected_source_year: int,
+) -> TarrantCertifiedSourceRecord:
+    """Build one record from a row `_validate_row` already accepted.
+
+    Every value here has been validated; nothing is re-checked and nothing is
+    coerced beyond the exact decimal the approved monetary grammar produced.
+    """
+
+    values: dict[str, SourceNativeValue] = {}
+    for name in TARRANT_SOURCE_VALUE_FIELDS:
+        lexical = fields[index_of[name]]
+        stripped = lexical.strip(_ASCII_WHITESPACE)
+        if not stripped:
+            # Absence is an omitted entry.  A value holding no value would claim
+            # the column was observed empty, which is a different fact.
+            continue
+        parsed: str | Decimal = (
+            Decimal(stripped)
+            if name in _REQUIRED_MONETARY_FIELDS or name in _OPTIONAL_MONETARY_FIELDS
+            else stripped
+        )
+        values[name] = SourceNativeValue(
+            source_field=name,
+            value=parsed,
+            lexical_text=lexical,
+        )
+
+    shared = SourceProvenance(
+        jurisdiction_code=TARRANT_JURISDICTION_CODE,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        source_row_number=physical_row_number,
+        parser_contract_version=TARRANT_PARSER_CONTRACT_VERSION,
+        layout_fingerprint=fingerprint,
+        source_family=TARRANT_SOURCE_FAMILY,
+        source_status=TARRANT_SOURCE_STATUS,
+        source_year=expected_source_year,
+        observed_fields=observed,
+    )
+    provenance = TarrantSourceProvenance(
+        jurisdiction_code=TARRANT_JURISDICTION_CODE,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        expected_source_year=expected_source_year,
+        source_family=TARRANT_SOURCE_FAMILY,
+        source_status=TARRANT_SOURCE_STATUS,
+        observed_headers=observed,
+        # Empty by construction: either condition rejects the release, so no
+        # record can exist alongside one.
+        duplicate_header_names=(),
+        case_fold_collisions=(),
+        layout_fingerprint=fingerprint,
+        physical_row_number=physical_row_number,
+        parser_contract_version=TARRANT_PARSER_CONTRACT_VERSION,
+        shared=shared,
+    )
+    return TarrantCertifiedSourceRecord(
+        division_code=fields[index_of["RP"]].strip(_ASCII_WHITESPACE),
+        appraisal_year=int(fields[index_of["Appraisal_Year"]].strip(_ASCII_WHITESPACE)),
+        account_num=fields[index_of["Account_Num"]].strip(_ASCII_WHITESPACE),
+        pidn=_optional_text(fields, index_of, "PIDN"),
+        gis_link=_optional_text(fields, index_of, "GIS_Link"),
+        property_class=_optional_text(fields, index_of, "Property_Class"),
+        state_use_code=_optional_text(fields, index_of, "State_Use_Code"),
+        exemption_code=_optional_text(fields, index_of, "Exemption_Code"),
+        source_native_values=values,
+        provenance=provenance,
+    )
+
+
+def convert_tarrant_record(record: TarrantCertifiedSourceRecord) -> AppraisalSourceRecord:
+    """Convert one Tarrant-native record into exactly one shared record.
+
+    One row in, one record out.  No current, exemption, companion,
+    jurisdiction-taxable, or replacement record is synthesized, and no value or
+    identifier is copied between source families, because this member carries
+    exactly one family and inventing another would be fabrication.
+    """
+
+    identifiers = {"Account_Num": record.account_num}
+    if record.pidn is not None:
+        identifiers["PIDN"] = record.pidn
+    if record.gis_link is not None:
+        identifiers["GIS_Link"] = record.gis_link
+
+    return AppraisalSourceRecord(
+        jurisdiction_code=TARRANT_JURISDICTION_CODE,
+        source_account_id=record.account_num,
+        source_native_identifiers=identifiers,
+        appraisal_year=record.appraisal_year,
+        source_family=TARRANT_SOURCE_FAMILY,
+        source_status=TARRANT_SOURCE_STATUS,
+        # Tarrant publishes no parcel reference distinct from its account.
+        parcel_reference=None,
+        source_native_values=record.source_native_values,
+        provenance=record.provenance.shared,
     )
 
 
