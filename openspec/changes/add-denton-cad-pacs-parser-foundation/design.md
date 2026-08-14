@@ -54,7 +54,7 @@ The Denton capability specification in this change is the governing behavior con
 - **D4** (proposed by this change, requires human merge): core appraisal orphans block, legal orphans warn, and undocumented trailing regions **block**, because Issue #20 requires unknown trailing bytes to fail closed.
 - **D5** (proposed by this change, requires human merge): the child lexical bounds, decided here so task 6.3 is implementable rather than asking an implementer to choose them.
 
-D1 through D4 come from this change rather than from an issue comment, so they are listed explicitly and merging is what accepts them.
+D1 through D5 come from this change rather than from an issue comment, so they are listed explicitly and merging is what accepts them.
 
 - The foundation receives one already-selected, caller-supplied member; discovery, archives, and network access remain outside its scope.
 - The synthetic layout and lexical rules are a deterministic foundation contract and do not prove compatibility with a live Denton release.
