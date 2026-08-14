@@ -235,7 +235,9 @@ def validate_property_member(
     _require_caller_identity(release_identifier, source_member_name, expected_tax_year)
     layout = DENTON_PROPERTY_LAYOUT
 
-    if expected_layout_fingerprint != layout.fingerprint:
+    if not _assert_layout_approved(
+        layout, expected_layout_fingerprint, DENTON_EXPECTED_PROPERTY_FINGERPRINT
+    ):
         return _report(
             [_diagnostic(DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
             layout=layout,
@@ -368,7 +370,9 @@ def validate_child_member(
         raise ValueError("child_table is not an approved Denton child table")
 
     layout = DENTON_CHILD_LAYOUT
-    if expected_layout_fingerprint != layout.fingerprint:
+    if not _assert_layout_approved(
+        layout, expected_layout_fingerprint, DENTON_EXPECTED_CHILD_FINGERPRINT
+    ):
         return _report(
             [_diagnostic(DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
             layout=layout,
@@ -390,6 +394,19 @@ def validate_child_member(
     preflight = _preflight(records, layout)
     if preflight:
         return _report(preflight, layout=layout, accepted=0, owner_rows=0, trailing=0)
+
+    # A child member wider than its declared layout is drift just as a property
+    # member is. Checking only nonuniform and short records let a uniformly wide
+    # child member through with no diagnostic and no trailing byte count.
+    probe = layout.slice_record(records[0][1], encoding=DENTON_ENCODING)
+    if probe.trailing is not None:
+        return _report(
+            [_diagnostic(DentonDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)],
+            layout=layout,
+            accepted=0,
+            owner_rows=0,
+            trailing=probe.trailing.byte_length,
+        )
 
     diagnostics: list[DentonDiagnostic] = []
     accepted = 0
@@ -566,6 +583,20 @@ def _is_approved_percentage(value: str) -> bool:
     except InvalidOperation:
         return False
     return Decimal(0) <= parsed <= _MAX_PERCENTAGE
+
+
+def _assert_layout_approved(layout: PacsLayout, expected: str, pinned: str) -> bool:
+    """Both halves of the gate, in that order.
+
+    Comparing the caller's value against `layout.fingerprint` alone made the
+    pinned constant decorative: if the mapping drifted, the live digest drifted
+    with it, and a caller passing the current value sailed through while the
+    approved constant still held the old one. The declared layout is checked
+    against the pinned constant first, so repository drift fails regardless of
+    what the caller supplies; only then is the caller's value checked.
+    """
+
+    return layout.fingerprint == pinned and expected == pinned
 
 
 def _require_caller_identity(

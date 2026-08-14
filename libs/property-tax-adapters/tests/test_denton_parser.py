@@ -776,3 +776,79 @@ def test_a_fingerprinted_layout_cannot_be_relabelled() -> None:
             delattr(layout, attribute)
     assert layout.fingerprint == before
     assert layout.layout_version == "v1"
+
+
+# --------------------------------------------------------------------------
+# Automated review findings, carried over from the Ellis binding
+# --------------------------------------------------------------------------
+
+
+def test_repository_drift_fails_even_when_the_caller_supplies_the_live_digest() -> None:
+    """The gate compared the caller's value against the live layout digest.
+
+    That made the pinned constant decorative: a drifted mapping moves the live
+    digest with it, so a caller passing the current value passed the gate while
+    the approved constant still held the old one.
+    """
+
+    from property_tax_adapters.sources.pacs import PacsLayout
+    from property_tax_adapters.sources.texas.denton import (
+        DENTON_EXPECTED_PROPERTY_FINGERPRINT,
+        _assert_layout_approved,
+    )
+
+    drifted = PacsLayout("denton.property", "v1", tuple(DENTON_PROPERTY_LAYOUT.fields[:-1]))
+    assert drifted.fingerprint != DENTON_EXPECTED_PROPERTY_FINGERPRINT
+    assert not _assert_layout_approved(
+        drifted, drifted.fingerprint, DENTON_EXPECTED_PROPERTY_FINGERPRINT
+    )
+    assert _assert_layout_approved(
+        DENTON_PROPERTY_LAYOUT,
+        DENTON_EXPECTED_PROPERTY_FINGERPRINT,
+        DENTON_EXPECTED_PROPERTY_FINGERPRINT,
+    )
+
+
+def test_a_uniformly_wide_child_member_is_refused() -> None:
+    """The child path ignored trailing regions the property path rejects."""
+
+    wide = synthetic.member(
+        synthetic.child_row() + "EXTRA-TRAILING",
+        synthetic.child_row(prop_id="000124") + "EXTRA-TRAILING",
+    )
+    report = _validate_child(wide, accepted_account_ids=("000123", "000124"))
+    assert _codes(report) == ["undocumented_trailing_region"]
+    assert report.release_accepted is False
+    assert report.trailing_region_bytes == len("EXTRA-TRAILING")
+
+
+def test_every_declared_denton_code_is_actually_emitted() -> None:
+    """Set equality proves the vocabulary agrees with itself, not that any input
+    produces each code. This drives real inputs through the entry points."""
+
+    emitted: set[str] = set()
+
+    def collect(report: DentonValidationReport) -> None:
+        emitted.update(entry.code.value for entry in report.diagnostics)
+
+    row = synthetic.property_row
+    collect(_validate("\u2014" * synthetic.EXPECTED_PROPERTY_WIDTH))
+    collect(_validate(synthetic.UTF8_BOM))
+    collect(_validate(synthetic.WIDTH_MISMATCH))
+    collect(_validate(synthetic.VALID_LF, expected_layout_fingerprint="0" * 64))
+    collect(_validate(synthetic.WITH_TRAILING_REGION))
+    collect(_validate(synthetic.member(row(prop_id=""))))
+    collect(_validate(synthetic.member(row(prop_id="a b"))))
+    collect(_validate(synthetic.member(row(owner_sequence="abcd"))))
+    collect(_validate(synthetic.member(row(market_value="-1"))))
+    collect(_validate(synthetic.member(row(ownership_percentage="101"))))
+    collect(_validate(synthetic.member(row(tax_year="1899"))))
+    collect(_validate(synthetic.member(row(tax_year="2024"))))
+    collect(_validate((row() + "\r" + row()).encode("iso-8859-1")))
+    collect(_validate(synthetic.DUPLICATE_OWNER_ROW))
+    collect(_validate(synthetic.CONFLICTING_ACCOUNT_FACTS))
+    collect(_validate_child(synthetic.CHILD_ORPHANED))
+    collect(_validate_child(synthetic.CHILD_ORPHANED, child_table="arb"))
+
+    declared = {code.value for code in DentonDiagnosticCode}
+    assert declared - emitted == set(), f"declared but never emitted: {sorted(declared - emitted)}"
