@@ -13,4 +13,4 @@ adapter test suite so fixture changes remain explicit.
 ## Related
 
 - [Dallas parser foundation](../../../../docs/sources/dallas-parser-foundation.md)
-- [Normative OpenSpec contract](../../../../openspec/changes/add-dallas-cad-parser-foundation/specs/dallas-cad-source-contract/spec.md)
+- [Normative OpenSpec contract](../../../../openspec/specs/dallas-cad-source-contract/spec.md)
