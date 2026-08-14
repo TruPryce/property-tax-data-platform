@@ -39,7 +39,9 @@ A layout whose fingerprint does not match the expected Ellis value SHALL be reje
 
 ### Requirement: Identify the layout package by content rather than filename
 
-The adapter SHALL identify an appraisal layout package by its content and validated structure rather than its filename extension. An OpenDocument Spreadsheet package SHALL be recognised by its ZIP local-file-header signature followed by a first member named `mimetype` whose stored value is `application/vnd.oasis.opendocument.spreadsheet`.
+The adapter SHALL identify an appraisal layout package by its content and validated structure rather than its filename extension. An OpenDocument Spreadsheet package SHALL be recognised by parsing its ZIP local file header, not by searching for a marker. The header SHALL carry compression method `0` (stored), a file-name length of exactly eight, the first member name `mimetype`, and a compressed and uncompressed size each equal to the length of the media type. The bytes following the header and any extra field SHALL be exactly `application/vnd.oasis.opendocument.spreadsheet`.
+
+Declared sizes SHALL be validated rather than ignored: a header claiming zero bytes while carrying a media type describes a package that does not exist, and accepting it would let a hand-assembled prefix pass as a real one.
 
 A package whose name ends in `.xlsx.ods`, or in any other misleading compound extension, SHALL be classified from its content alone. A package whose signature is absent, truncated, or ambiguous SHALL fail closed and SHALL NOT be parsed by a format chosen from its name.
 
@@ -129,7 +131,7 @@ The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpec
 
 Every code in this vocabulary SHALL be reachable; `truncated_required_field` is deliberately absent for the reason the Denton contract gives.
 
-A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint, and those four fields SHALL be the whole type. `undocumented_trailing_region` SHALL be non-fatal; every other code SHALL reject the logical release. At most 100 diagnostics SHALL be retained, the total SHALL be preserved, and truncation SHALL be marked deterministically.
+A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint, and those four fields SHALL be the whole type. `legal_child_orphaned` SHALL be the only non-fatal code. Every other code, including `undocumented_trailing_region`, SHALL reject the logical release, because the governing issue requires unknown trailing bytes to fail closed; the region's structural fingerprint is retained so the rejection carries evidence of what was found. At most 100 diagnostics SHALL be retained, the total SHALL be preserved, and truncation SHALL be marked deterministically.
 
 #### Scenario: Truncate a large diagnostic set deterministically
 - **GIVEN** a synthetic member producing 120 blocking diagnostics
@@ -152,7 +154,7 @@ Owner names, mailing addresses, and situs addresses SHALL be classified as sensi
 
 ### Requirement: Expose the bounded Ellis validation result
 
-Until the shared adapter contracts owned by Issue #43 are accepted and implemented, the interim scope SHALL be a validator. Its complete public surface SHALL be `classify_layout_package` and `validate_property_member`, the latter returning one `EllisValidationReport`.
+Until the shared adapter contracts owned by Issue #43 are accepted and implemented, the interim scope SHALL be a validator. Its complete public surface SHALL be `classify_layout_package`, `validate_property_member`, and `validate_child_member`, the latter two each returning one `EllisValidationReport`.
 
 `EllisValidationReport` SHALL be a frozen dataclass with exactly these fields: `parser_contract_version: int`, `release_accepted: bool`, `layout_fingerprint: str`, `layout_version: str`, `release_label: str`, `accepted_row_count: int`, `owner_row_count: int`, `trailing_region_bytes: int`, `diagnostics: tuple[EllisDiagnostic, ...]`, `total_diagnostic_count: int`, and `diagnostics_truncated: bool`.
 

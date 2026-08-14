@@ -44,7 +44,7 @@ The Ellis capability specification in this change is the governing behaviour con
 - **D3** (proposed by this change, requires human merge): `certified-all-property` as the approved label, everything else rejected before records are read.
 - **D4** (proposed by this change, requires human merge): Ellis reuses the Denton lexical bounds, declared per county.
 
-D1 through D4 come from this change rather than from an issue comment, so they are listed explicitly and merging is what accepts them.
+D1 through D5 come from this change rather than from an issue comment, so they are listed explicitly and merging is what accepts them.
 
 - The foundation receives one already-selected, caller-supplied member and caller-supplied package bytes; discovery, downloads, and extraction remain outside its scope.
 - The synthetic layout and lexical rules are a deterministic foundation contract and do not prove compatibility with a live Ellis release.
