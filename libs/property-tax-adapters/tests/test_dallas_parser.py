@@ -17,6 +17,7 @@ from fixtures.dallas_synthetic import (
     VALID_REORDERED,
     VALID_ROW,
 )
+from property_tax_adapters.sources.texas import dallas as dallas_module
 from property_tax_adapters.sources.texas.dallas import (
     DALLAS_PARSER_CONTRACT_VERSION,
     AppraisalSourceRecord,
@@ -117,6 +118,7 @@ def test_adapter_conversion_retains_only_source_native_total_semantics() -> None
     assert record.parcel_reference == "Parcel-0007"
     assert record.source_native_values == {
         "TOT_VAL": SourceNativeValue(
+            source_field="TOT_VAL",
             lexical_text="-001.20",
             value=Decimal("-001.20"),
         )
@@ -356,11 +358,14 @@ def test_provenance_is_complete_and_equal_across_both_record_types() -> None:
     assert source_provenance.layout_fingerprint == REQUIRED_LAYOUT_FINGERPRINT
     assert source_provenance.source_row_number == 2
     assert source_provenance.parser_contract_version == DALLAS_PARSER_CONTRACT_VERSION == 1
+    # The vendor-neutral provenance carries the same evidence; the header
+    # vectors moved to the shared optional field names.
     assert output_provenance == type(output_provenance)(
+        jurisdiction_code="tx-dallas",
         source_member_name=source_provenance.source_member_name,
         release_identifier=source_provenance.release_identifier,
-        observed_headers=source_provenance.observed_headers,
-        normalized_headers=source_provenance.normalized_headers,
+        observed_fields=source_provenance.observed_headers,
+        normalized_fields=source_provenance.normalized_headers,
         layout_fingerprint=source_provenance.layout_fingerprint,
         source_row_number=source_provenance.source_row_number,
         parser_contract_version=source_provenance.parser_contract_version,
@@ -525,3 +530,56 @@ def test_synthetic_fixture_checksums(
 
 def codes_from_result(result: DallasParseResult) -> tuple[DallasDiagnosticCode, ...]:
     return tuple(diagnostic.code for diagnostic in result.diagnostics)
+
+
+# --------------------------------------------------------------------------
+# Shared-contract migration: the MODIFIED dallas-cad-source-contract delta
+# --------------------------------------------------------------------------
+
+
+def test_dallas_defines_no_copy_of_a_shared_contract() -> None:
+    """The duplication the shared module exists to remove."""
+
+    import ast
+    import pathlib
+
+    module = ast.parse(
+        pathlib.Path(dallas_module.__file__).read_text(encoding="utf-8"), type_comments=False
+    )
+    defined = {node.name for node in ast.walk(module) if isinstance(node, ast.ClassDef)}
+    assert not defined & {"SourceNativeValue", "SourceProvenance", "AppraisalSourceRecord"}
+    # County-native records are required and stay.
+    assert {"DallasSourceProvenance", "DallasAppraisalSourceRecord"} <= defined
+
+
+def test_dallas_never_emits_a_null_account_or_a_foreign_jurisdiction() -> None:
+    """The shared field is `str | None`; the accepted Dallas guarantee is not.
+
+    Without this the nullable shared type would silently downgrade a contract
+    that promises `source_account_id: str`.
+    """
+
+    for record in parse().records:
+        assert record.jurisdiction_code == "tx-dallas"
+        assert isinstance(record.source_account_id, str) and record.source_account_id.strip()
+        assert isinstance(record.parcel_reference, str) and record.parcel_reference.strip()
+        assert record.provenance.jurisdiction_code == "tx-dallas"
+
+
+def test_value_keys_are_the_normalized_header_and_agree_with_the_value() -> None:
+    """`extras` is keyed by normalized header, so `source_field` must match it."""
+
+    record = parse(VALID_QUOTED_EXTRA).records[0]
+    assert "NOTE" in record.source_native_values
+    for key, value in record.source_native_values.items():
+        assert value.source_field == key
+    assert record.provenance.observed_fields == tuple(REQUIRED_HEADER.split(",")) + ("NOTE",)
+
+
+def test_an_empty_extra_column_stays_an_empty_text() -> None:
+    """Treating "" as absence would have changed what Dallas emits."""
+
+    member = f"{REQUIRED_HEADER},NOTE\n{VALID_ROW},\n".encode()
+    value = parse(member).records[0].source_native_values["NOTE"]
+    assert value.lexical_text == ""
+    assert value.value == ""

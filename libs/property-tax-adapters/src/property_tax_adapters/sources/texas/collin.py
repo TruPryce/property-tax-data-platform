@@ -14,6 +14,13 @@ from typing import Literal, Never, cast
 from property_tax_application import AcquisitionMethod, CountySourceDefinition
 from property_tax_domain import CountySlug, county_by_slug
 
+from property_tax_adapters.sources.contracts import (
+    AppraisalSourceRecord,
+    SourceNativeValue,
+    SourceProvenance,
+)
+
+COLLIN_JURISDICTION_CODE = "tx-collin"
 COLLIN_PARSER_CONTRACT_VERSION = 1
 COLLIN_TABLE_NAME = "AD_Public"
 COLLIN_NUMERIC_BUFFER_WIDTH = 17
@@ -150,42 +157,24 @@ class CollinValidatedSchema:
 
 
 @dataclass(frozen=True, slots=True)
-class CollinSourceNativeValue:
-    """Exact Collin NUMERIC value without broader canonical semantics."""
-
-    value: Decimal
-    precision: int
-    scale: int
-    source_column: str
-    classification: Literal["source-native"] = COLLIN_SOURCE_NATIVE_CLASSIFICATION
-
-
-@dataclass(frozen=True, slots=True)
-class CollinSourceProvenance:
-    """Caller and physical-row provenance shared by one source record."""
-
-    source_member_name: str
-    release_identifier: str
-    table_name: str
-    source_row_number: int
-    parser_contract_version: int
-    schema_fingerprint: str
-
-
-@dataclass(frozen=True, slots=True)
 class CollinObservationProvenance:
     """Family-specific provenance retained by one logical observation."""
 
-    source_member_name: str
-    release_identifier: str
-    table_name: str
-    source_row_number: int
-    parser_contract_version: int
-    schema_fingerprint: str
+    shared: SourceProvenance
     source_family: CollinSourceFamily
     source_year: int
     property_status: CollinPropertyStatus
     value_source_columns: tuple[str, ...]
+
+    @property
+    def schema_fingerprint(self) -> str:
+        """Collin name for what the shared contract calls a layout fingerprint.
+
+        The digest is the same digest; only the vocabulary differs, so it maps
+        onto `layout_fingerprint` rather than becoming a second field.
+        """
+
+        return self.shared.layout_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,9 +186,9 @@ class CollinAppraisalSourceRecord:
     property_status: CollinPropertyStatus
     current_value_year: int
     certified_value_year: int | None
-    current_values: Mapping[str, CollinSourceNativeValue | None]
-    certified_values: Mapping[str, CollinSourceNativeValue | None]
-    provenance: CollinSourceProvenance
+    current_values: Mapping[str, SourceNativeValue | None]
+    certified_values: Mapping[str, SourceNativeValue | None]
+    provenance: SourceProvenance
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_values", _immutable_mapping(self.current_values))
@@ -215,7 +204,7 @@ class CollinAppraisalObservation:
     source_family: CollinSourceFamily
     source_year: int
     classification: CollinPropertyStatus
-    values: Mapping[str, CollinSourceNativeValue | None]
+    values: Mapping[str, SourceNativeValue | None]
     provenance: CollinObservationProvenance
 
     def __post_init__(self) -> None:
@@ -547,13 +536,14 @@ def convert_collin_row(
             )
         )
 
-    source_provenance = CollinSourceProvenance(
+    source_provenance = SourceProvenance(
+        jurisdiction_code=COLLIN_JURISDICTION_CODE,
         source_member_name=source_member_name,
         release_identifier=release_identifier,
         table_name=COLLIN_TABLE_NAME,
         source_row_number=source_row_number,
         parser_contract_version=COLLIN_PARSER_CONTRACT_VERSION,
-        schema_fingerprint=schema.schema_fingerprint,
+        layout_fingerprint=schema.schema_fingerprint,
     )
     source_record = CollinAppraisalSourceRecord(
         prop_id=prop_id,
@@ -597,7 +587,7 @@ def _build_observation(
     source_family: CollinSourceFamily,
     source_year: int,
     classification: CollinPropertyStatus,
-    values: Mapping[str, CollinSourceNativeValue | None],
+    values: Mapping[str, SourceNativeValue | None],
 ) -> CollinAppraisalObservation:
     provenance = source_record.provenance
     return CollinAppraisalObservation(
@@ -608,18 +598,62 @@ def _build_observation(
         classification=classification,
         values=values,
         provenance=CollinObservationProvenance(
-            source_member_name=provenance.source_member_name,
-            release_identifier=provenance.release_identifier,
-            table_name=provenance.table_name,
-            source_row_number=provenance.source_row_number,
-            parser_contract_version=provenance.parser_contract_version,
-            schema_fingerprint=provenance.schema_fingerprint,
+            shared=provenance,
             source_family=source_family,
             source_year=source_year,
             property_status=source_record.property_status,
             value_source_columns=tuple(
                 column for column, value in values.items() if value is not None
             ),
+        ),
+    )
+
+
+def convert_collin_observation(
+    observation: CollinAppraisalObservation,
+) -> AppraisalSourceRecord:
+    """Convert one Collin observation to one vendor-neutral record.
+
+    One observation in, one record out.  Current and certified never merge, and
+    no value is copied between them, because the accepted Collin contract
+    forbids filling a missing value from the other family.
+
+    `source_account_id` is `None` on purpose.  Collin approves no account key:
+    `prop_id` "MUST NOT be declared a unique or canonical account key" and
+    `geo_id` "MUST NOT be equated with `prop_id`".  Both are preserved as
+    source-native identifiers under their exact source names, as two distinct
+    entries asserting no equivalence between them.
+    """
+
+    provenance = observation.provenance
+    shared = provenance.shared
+    return AppraisalSourceRecord(
+        jurisdiction_code=COLLIN_JURISDICTION_CODE,
+        source_account_id=None,
+        source_native_identifiers={
+            "prop_id": str(observation.prop_id),
+            "geo_id": observation.geo_id,
+        },
+        appraisal_year=observation.source_year,
+        source_family=observation.source_family,
+        source_status=observation.classification,
+        parcel_reference=None,
+        # An absent value is an omitted entry.  A value holding no value would
+        # claim the column was observed empty, which is a different fact.
+        source_native_values={
+            column: value for column, value in observation.values.items() if value is not None
+        },
+        provenance=SourceProvenance(
+            jurisdiction_code=shared.jurisdiction_code,
+            release_identifier=shared.release_identifier,
+            source_member_name=shared.source_member_name,
+            source_row_number=shared.source_row_number,
+            parser_contract_version=shared.parser_contract_version,
+            layout_fingerprint=shared.layout_fingerprint,
+            table_name=shared.table_name,
+            source_family=provenance.source_family,
+            source_year=provenance.source_year,
+            source_status=provenance.property_status,
         ),
     )
 
@@ -709,7 +743,7 @@ def _decode_monetary_value(
     descriptor: CollinColumnDescriptor,
     schema: CollinValidatedSchema,
     source_row_number: int,
-) -> CollinSourceNativeValue | None:
+) -> SourceNativeValue | None:
     if value is None:
         return None
     decoded = decode_collin_numeric(
@@ -727,11 +761,14 @@ def _decode_monetary_value(
             schema,
             source_row_number,
         )
-    return CollinSourceNativeValue(
+    return SourceNativeValue(
+        source_field=descriptor.name,
         value=decoded.value,
+        # The approved 17-byte wrapper is binary; there is no original text to
+        # preserve, and `""` would claim an empty text was observed.
+        lexical_text=None,
         precision=decoded.precision,
         scale=decoded.scale,
-        source_column=descriptor.name,
     )
 
 
@@ -951,6 +988,7 @@ __all__ = [
     "CollinAccessPhysicalType",
     "CollinAppraisalObservation",
     "CollinAppraisalSourceRecord",
+    "convert_collin_observation",
     "CollinColumnDescriptor",
     "CollinContractError",
     "CollinDecodedNumeric",
@@ -961,9 +999,10 @@ __all__ = [
     "CollinPropertyStatus",
     "CollinRowConversionResult",
     "CollinSourceFamily",
-    "CollinSourceNativeValue",
-    "CollinSourceProvenance",
     "CollinValidatedSchema",
+    "AppraisalSourceRecord",
+    "SourceNativeValue",
+    "SourceProvenance",
     "convert_collin_row",
     "decode_collin_numeric",
     "fingerprint_collin_schema",
