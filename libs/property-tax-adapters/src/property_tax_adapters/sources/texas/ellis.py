@@ -192,11 +192,10 @@ class EllisDiagnosticCode(StrEnum):
     CONFLICTING_ACCOUNT_FACTS = "conflicting_account_facts"
 
 
+#: `undocumented_trailing_region` is deliberately absent: the governing issue
+#: requires unknown trailing regions to fail closed, as the Denton binding notes.
 _NONFATAL_CODES: Final[frozenset[EllisDiagnosticCode]] = frozenset(
-    {
-        EllisDiagnosticCode.UNDOCUMENTED_TRAILING_REGION,
-        EllisDiagnosticCode.LEGAL_CHILD_ORPHANED,
-    }
+    {EllisDiagnosticCode.LEGAL_CHILD_ORPHANED}
 )
 
 

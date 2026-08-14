@@ -258,10 +258,13 @@ def test_a_uniformly_short_member_is_refused() -> None:
     assert _codes(_validate(synthetic.TRUNCATED_REQUIRED)) == ["record_width_mismatch"]
 
 
-def test_a_trailing_region_warns_once_and_is_not_carried() -> None:
+def test_an_undocumented_trailing_region_fails_closed() -> None:
+    """The governing issue requires unknown trailing bytes to be rejected."""
+
     report = _validate(synthetic.WITH_TRAILING_REGION)
     assert _codes(report) == ["undocumented_trailing_region"]
-    assert report.release_accepted is True
+    assert report.release_accepted is False
+    assert report.accepted_row_count == 0
     assert report.trailing_region_bytes == len(synthetic.TRAILING_REGION_TEXT)
     assert synthetic.TRAILING_REGION_TEXT not in repr(report)
 
@@ -611,3 +614,17 @@ def test_every_declared_ellis_code_is_reachable() -> None:
         "core_child_orphaned",
         "legal_child_orphaned",
     }
+
+
+def test_a_fingerprinted_layout_cannot_be_relabelled() -> None:
+    """A settable version let a mutated layout report the old approved digest."""
+
+    from property_tax_adapters.sources.pacs import PacsField, PacsLayout
+
+    layout = PacsLayout("t", "v1", (PacsField("a", 1, 3),))
+    before = layout.fingerprint
+    for attribute, value in (("layout_version", "mutated-v2"), ("layout_id", "other")):
+        with pytest.raises(AttributeError):
+            setattr(layout, attribute, value)
+    assert layout.fingerprint == before
+    assert layout.layout_version == "v1"

@@ -125,8 +125,10 @@ A diagnostic carries only its stable code and, where applicable, an approved fie
 one-based physical row number, and the layout fingerprint — the whole type, so there is nowhere to
 put a record, an account value, an owner name, an address, a credential, or a host path.
 
-`undocumented_trailing_region` is non-fatal. Every other code rejects the logical release, which
-reports `release_accepted` false with `accepted_row_count` zero. At most 100 diagnostics are retained,
+`legal_child_orphaned` is the only non-fatal code. Every other code rejects the logical release,
+which reports `release_accepted` false with `accepted_row_count` zero, including
+`undocumented_trailing_region` — the governing issue requires unknown trailing bytes to fail closed,
+as the Denton document explains. At most 100 diagnostics are retained,
 the total is preserved, and truncation is marked deterministically.
 
 ## Interim Output
