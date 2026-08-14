@@ -179,7 +179,6 @@ class EllisDiagnosticCode(StrEnum):
     UNSUPPORTED_SCENARIO_LABEL = "unsupported_scenario_label"
     CORE_CHILD_ORPHANED = "core_child_orphaned"
     LEGAL_CHILD_ORPHANED = "legal_child_orphaned"
-    UNRECOGNISED_LAYOUT_PACKAGE = "unrecognised_layout_package"
     BLANK_REQUIRED_KEY = "blank_required_key"
     INVALID_ACCOUNT_ID = "invalid_account_id"
     INVALID_OWNER_SEQUENCE = "invalid_owner_sequence"
@@ -200,7 +199,13 @@ _NONFATAL_CODES: Final[frozenset[EllisDiagnosticCode]] = frozenset(
 
 
 class LayoutPackageKind(StrEnum):
-    """What a caller-supplied layout package is, judged from its content."""
+    """What a caller-supplied layout package is, judged from its content.
+
+    This is the reportable outcome of classification, and it is why the
+    diagnostic vocabulary carries no `unrecognised_layout_package` code: a
+    caller receives `UNRECOGNISED` directly, and a declared code that no path
+    can emit promises a diagnostic that never arrives.
+    """
 
     OPENDOCUMENT_SPREADSHEET = "opendocument_spreadsheet"
     UNRECOGNISED = "unrecognised"
@@ -324,7 +329,9 @@ def validate_property_member(
             trailing=0,
         )
 
-    if expected_layout_fingerprint != layout.fingerprint:
+    if not _assert_layout_approved(
+        layout, expected_layout_fingerprint, ELLIS_EXPECTED_LAYOUT_FINGERPRINT
+    ):
         return _report(
             [_diagnostic(EllisDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
             layout=layout,
@@ -460,7 +467,9 @@ def validate_child_member(
     layout = ELLIS_CHILD_LAYOUT
     if release_label != ELLIS_CERTIFIED_LABEL:
         return _fail(EllisDiagnosticCode.UNSUPPORTED_SCENARIO_LABEL, layout, ELLIS_REJECTED_LABEL)
-    if expected_layout_fingerprint != layout.fingerprint:
+    if not _assert_layout_approved(
+        layout, expected_layout_fingerprint, ELLIS_EXPECTED_CHILD_FINGERPRINT
+    ):
         return _fail(EllisDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, release_label)
 
     text = _decode(data)
@@ -477,6 +486,20 @@ def validate_child_member(
     if preflight:
         return _report(
             preflight, layout=layout, label=release_label, accepted=0, owner_rows=0, trailing=0
+        )
+
+    # A child member wider than its declared layout is drift just as a property
+    # member is. Checking only nonuniform and short records let a uniformly wide
+    # child member through with no diagnostic and no trailing byte count.
+    probe = layout.slice_record(records[0][1], encoding=ELLIS_ENCODING)
+    if probe.trailing is not None:
+        return _report(
+            [_diagnostic(EllisDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)],
+            layout=layout,
+            label=release_label,
+            accepted=0,
+            owner_rows=0,
+            trailing=probe.trailing.byte_length,
         )
 
     accounts = {str(value) for value in accepted_account_ids}
@@ -638,6 +661,20 @@ def _is_approved_percentage(value: str) -> bool:
     except InvalidOperation:
         return False
     return Decimal(0) <= parsed <= _MAX_PERCENTAGE
+
+
+def _assert_layout_approved(layout: PacsLayout, expected: str, pinned: str) -> bool:
+    """Both halves of the gate, in that order.
+
+    Comparing the caller's value against `layout.fingerprint` alone made the
+    pinned constant decorative: if the mapping drifted, the live digest drifted
+    with it, and a caller passing the current value sailed through while the
+    approved constant still held the old one. The declared layout is checked
+    against the pinned constant first, so repository drift fails regardless of
+    what the caller supplies; only then is the caller's value checked.
+    """
+
+    return layout.fingerprint == pinned and expected == pinned
 
 
 def _require_caller_identity(

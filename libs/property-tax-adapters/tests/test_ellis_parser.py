@@ -338,7 +338,6 @@ def test_the_diagnostic_vocabulary_is_closed() -> None:
         "unsupported_scenario_label",
         "core_child_orphaned",
         "legal_child_orphaned",
-        "unrecognised_layout_package",
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
@@ -598,7 +597,46 @@ def test_the_child_binding_applies_the_label_and_fingerprint_gates() -> None:
     assert _codes(fingerprinted) == ["unsupported_layout_fingerprint"]
 
 
-def test_every_declared_ellis_code_is_reachable() -> None:
+def test_every_declared_ellis_code_is_actually_emitted() -> None:
+    """Named for a property the previous version did not check.
+
+    Comparing the enum against a literal set proves the two agree, not that any
+    input produces each code. `unrecognised_layout_package` passed that test for
+    three rounds while nothing could emit it. This drives real inputs through
+    the public entry points and collects what comes back, so a code with no
+    producing path fails here.
+    """
+
+    emitted: set[str] = set()
+
+    def collect(report: EllisValidationReport) -> None:
+        emitted.update(entry.code.value for entry in report.diagnostics)
+
+    row = synthetic.property_row
+    collect(_validate("\u2014" * synthetic.EXPECTED_PROPERTY_WIDTH))
+    collect(_validate(synthetic.UTF8_BOM))
+    collect(_validate(synthetic.WIDTH_MISMATCH))
+    collect(_validate(synthetic.VALID_LF, expected_layout_fingerprint="0" * 64))
+    collect(_validate(synthetic.WITH_TRAILING_REGION))
+    collect(_validate(synthetic.VALID_LF, release_label="mineral-only"))
+    collect(_validate(synthetic.member(row(prop_id=""))))
+    collect(_validate(synthetic.member(row(prop_id="a b"))))
+    collect(_validate(synthetic.member(row(owner_sequence="abcd"))))
+    collect(_validate(synthetic.member(row(market_value="-1"))))
+    collect(_validate(synthetic.member(row(ownership_percentage="101"))))
+    collect(_validate(synthetic.member(row(tax_year="1899"))))
+    collect(_validate(synthetic.member(row(tax_year="2024"))))
+    collect(_validate((row() + "\r" + row()).encode("iso-8859-1")))
+    collect(_validate(synthetic.DUPLICATE_OWNER_ROW))
+    collect(_validate(synthetic.CONFLICTING_ACCOUNT_FACTS))
+    collect(_validate_child(synthetic.CHILD_ORPHANED))
+    collect(_validate_child(synthetic.CHILD_ORPHANED, child_table="arb"))
+
+    declared = {code.value for code in EllisDiagnosticCode}
+    assert declared - emitted == set(), f"declared but never emitted: {sorted(declared - emitted)}"
+
+
+def test_the_declared_vocabulary_matches_the_contract() -> None:
     """No code is declared that no path can emit."""
 
     assert {code.value for code in EllisDiagnosticCode} == {
@@ -608,7 +646,6 @@ def test_every_declared_ellis_code_is_reachable() -> None:
         "unsupported_layout_fingerprint",
         "undocumented_trailing_region",
         "unsupported_scenario_label",
-        "unrecognised_layout_package",
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
@@ -636,3 +673,53 @@ def test_a_fingerprinted_layout_cannot_be_relabelled() -> None:
             setattr(layout, attribute, value)
     assert layout.fingerprint == before
     assert layout.layout_version == "v1"
+
+
+# --------------------------------------------------------------------------
+# Automated review findings
+# --------------------------------------------------------------------------
+
+
+def test_repository_drift_fails_even_when_the_caller_supplies_the_live_digest() -> None:
+    """The gate compared the caller's value against the live layout digest.
+
+    That made the pinned constant decorative: if the mapping drifted, the live
+    digest drifted with it, so a caller passing the current value passed the
+    gate while the approved constant still held the old one.
+    """
+
+    from property_tax_adapters.sources.pacs import PacsLayout
+    from property_tax_adapters.sources.texas.ellis import _assert_layout_approved
+
+    drifted = PacsLayout("ellis.property", "v1", tuple(ELLIS_PROPERTY_LAYOUT.fields[:-1]))
+    assert drifted.fingerprint != ELLIS_EXPECTED_LAYOUT_FINGERPRINT
+    # The caller supplies the drifted layout's own digest: both sides agree, and
+    # both are wrong. That is the bypass.
+    assert not _assert_layout_approved(
+        drifted, drifted.fingerprint, ELLIS_EXPECTED_LAYOUT_FINGERPRINT
+    )
+    assert _assert_layout_approved(
+        ELLIS_PROPERTY_LAYOUT,
+        ELLIS_EXPECTED_LAYOUT_FINGERPRINT,
+        ELLIS_EXPECTED_LAYOUT_FINGERPRINT,
+    )
+
+
+def test_a_uniformly_wide_child_member_is_refused() -> None:
+    """The child path ignored trailing regions the property path rejects."""
+
+    wide = synthetic.member(
+        synthetic.child_row() + "EXTRA-TRAILING",
+        synthetic.child_row(prop_id="000124") + "EXTRA-TRAILING",
+    )
+    report = _validate_child(wide, accepted_account_ids=("000123", "000124"))
+    assert _codes(report) == ["undocumented_trailing_region"]
+    assert report.release_accepted is False
+    assert report.trailing_region_bytes == len("EXTRA-TRAILING")
+
+
+def test_classification_reports_through_its_own_type() -> None:
+    """`unrecognised_layout_package` was declared and unemittable for three rounds."""
+
+    assert "unrecognised_layout_package" not in {code.value for code in EllisDiagnosticCode}
+    assert classify_layout_package(synthetic.NOT_A_PACKAGE) is LayoutPackageKind.UNRECOGNISED

@@ -116,10 +116,12 @@ or assessed value are rejected with `conflicting_account_facts`.
 
 The closed vocabulary is `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`,
 `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`,
-`unrecognised_layout_package`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`,
+`blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`,
 `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`,
 `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and
-`legal_child_orphaned`. Every code in it is reachable.
+`legal_child_orphaned`. Every code in it is reachable, proved by driving inputs through the public entry points rather than by comparing the vocabulary with itself.
+
+There is no `unrecognised_layout_package` code: `classify_layout_package` returns a `LayoutPackageKind`, which is the reportable outcome, so a code for it would promise a report no entry point produces.
 
 A diagnostic carries only its stable code and, where applicable, an approved field name, the
 one-based physical row number, and the layout fingerprint — the whole type, so there is nowhere to

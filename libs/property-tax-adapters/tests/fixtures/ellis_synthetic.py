@@ -250,7 +250,7 @@ CHILD_ORPHANED = member(child_row(prop_id="999999"))
 
 #: Literal expectations authored from the contract, not from the parser.
 EXPECTED_PROPERTY_WIDTH = 290
-EXPECTED_DIAGNOSTIC_CODE_COUNT = 19
+EXPECTED_DIAGNOSTIC_CODE_COUNT = 18
 EXPECTED_VALID_ROWS = 2
 UNSUPPORTED_LABELS = (
     "RC2 Potential",
