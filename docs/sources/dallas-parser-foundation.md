@@ -3,7 +3,7 @@
 The Dallas parser foundation is an adapter-local, deterministic boundary for small inputs that
 match the approved synthetic source contract. It does not download, persist, orchestrate, or
 publish appraisal data, and it is not evidence of compatibility with a live Dallas CAD release.
-The [Dallas OpenSpec delta](../../openspec/changes/add-dallas-cad-parser-foundation/specs/dallas-cad-source-contract/spec.md)
+The [Dallas OpenSpec delta](../../openspec/specs/dallas-cad-source-contract/spec.md)
 is the normative behavior contract.
 
 ## Adapter Boundary
@@ -64,5 +64,5 @@ adapter requires separately approved source evidence and compatibility work.
 
 - [Source onboarding](README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
-- [Dallas OpenSpec delta](../../openspec/changes/add-dallas-cad-parser-foundation/specs/dallas-cad-source-contract/spec.md)
+- [Dallas OpenSpec delta](../../openspec/specs/dallas-cad-source-contract/spec.md)
 - [Architecture](../architecture/README.md)
