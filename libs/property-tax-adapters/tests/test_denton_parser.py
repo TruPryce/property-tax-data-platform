@@ -1131,12 +1131,10 @@ def test_children_are_not_rolled_up_to_the_parent_account() -> None:
 def test_a_core_orphan_blocks_and_a_legal_orphan_warns_without_blocking() -> None:
     """Contract: keep the core-blocking and legal-warning classification intact.
 
-    The earlier version asserted a legal orphan produced one record, which was
-    this implementation's behaviour rather than the contract's.  An unresolved
-    child is not an accepted row either way -- the report counts zero -- so a
-    record for it would contradict the report it came with.  What differs
-    between the two classes is whether the release is rejected, not whether an
-    unresolved child materializes.
+    What differs between the two classes is whether the release is rejected.  A
+    legal orphan warns and is kept -- counted and materialized -- because a
+    warning must not delete the row it warns about.  A core orphan blocks, and a
+    blocked release publishes nothing at all.
     """
 
     core = _materialize_child(synthetic.CHILD_ORPHANED)

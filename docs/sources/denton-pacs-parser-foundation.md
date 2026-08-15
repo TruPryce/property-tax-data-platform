@@ -128,11 +128,26 @@ child — `land`, `improvement`, `mobile_home` — that does not resolve to an a
 the release with `core_child_orphaned`. A legal child — `arb`, `lawsuit` — records the non-fatal
 `legal_child_orphaned` and does not block.
 
+An unresolved legal child is **still counted and materialized**. A warning must not delete the row
+it warns about: dropping it would be a third behaviour, neither blocking nor
+warning-and-continuing, and a child the county published would vanish from a release that was
+accepted. A core orphan needs no such rule — its code is blocking, and a blocked release publishes
+no records at all.
+
+| Child field | Rule | Code when violated |
+| --- | --- | --- |
+| `child_sequence` | Required, one to four ASCII digits | `blank_required_key` when blank, `invalid_child_sequence` otherwise |
+| `child_value` | Optional, `[0-9]+(?:\.[0-9]{1,2})?`, exact `Decimal`, 0 through `10**26 - 1` | `invalid_monetary_value` |
+
+`invalid_child_sequence` names the child field rather than borrowing `invalid_owner_sequence`: the
+owner and child sequences are separate facts even where their grammars agree today.
+
 ## Diagnostics and Atomicity
 
 The closed vocabulary is `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`,
 `unsupported_layout_fingerprint`, `undocumented_trailing_region`,
-`blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`,
+`blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`,
+`invalid_child_sequence`, `invalid_monetary_value`,
 `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`,
 `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and
 `legal_child_orphaned`.

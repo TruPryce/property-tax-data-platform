@@ -858,9 +858,10 @@ def _process_child_member(
             )
             continue
 
-        # D5, applied here so both entry points enforce it.  The vocabulary is
-        # closed at seventeen codes and has no child-specific member, so the
-        # sequence and monetary codes carry the child field name instead.
+        # D5, applied here so both entry points enforce it.  A malformed
+        # sequence reports `invalid_child_sequence`, the eighteenth code, rather
+        # than borrowing the owner code: the two sequences are separate facts
+        # even where their grammars agree today.
         row_diagnostics = _validate_child_values(values, layout, row_number)
         if row_diagnostics:
             diagnostics.extend(row_diagnostics)
