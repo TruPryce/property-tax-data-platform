@@ -112,7 +112,9 @@ The processor SHALL follow exactly this order for one logical release:
 
 Every operation that may fail SHALL complete before step 9. The reader is closed at step 7, **before** the commit, so no reader failure can occur after records become visible.
 
-A stage's `__exit__` after a successful commit SHALL NOT fail. That is part of the stage contract, and it is what makes step 10 safe to place after the only step that changes visibility.
+A stage's `__exit__` SHALL NOT fail after **either** a successful commit or an abort. That is part of the stage contract, it is what makes step 10 safe to place after the only step that changes visibility, and the conformance suite tests both paths.
+
+A stage exit that raises despite that contract is a defect in trusted code, not source data. It SHALL propagate rather than becoming a diagnostic, consistent with how this library already treats authoring defects — a malformed `PacsLayout` raises `ValueError` rather than producing a diagnostic. Giving it a code would imply the boundary can absorb a stage that does not meet its contract, and it cannot.
 
 The final progress event SHALL precede finalization and commit, so a raising final callback can still reject while zero records are visible.
 
@@ -133,6 +135,12 @@ No outcome SHALL report rejection after a commit has succeeded.
 - **WHEN** the processor runs
 - **THEN** the observed order is final progress event, reader exit, finalize, commit, stage exit
 - **THEN** no failable operation follows the commit
+
+#### Scenario: A reader that fails to open is not reported as a layout failure
+- **GIVEN** a reader whose `__enter__` raises
+- **WHEN** the processor runs
+- **THEN** the outcome reports `source_open_failed`, not `layout_rejected`
+- **THEN** no stage was entered
 
 #### Scenario: A reader that fails on close still rejects before visibility
 - **GIVEN** a reader whose `__exit__` raises
@@ -202,6 +210,12 @@ This change SHALL provide a stage conformance suite, and a file-backed standard-
 - **WHEN** its backing store is inspected
 - **THEN** no accepted record remains and scratch resources are cleaned up
 
+#### Scenario: Stage exit is safe after both commit and abort
+- **GIVEN** a conforming stage driven to a successful commit, and separately to an abort
+- **WHEN** its `__exit__` runs in each case
+- **THEN** it does not raise in either
+- **THEN** a stage that raises there fails conformance rather than producing a diagnostic
+
 ### Requirement: Check a caller-supplied resource guard at deterministic checkpoints
 
 The boundary SHALL declare a `ResourceGuard` protocol with one synchronous method taking the physical rows processed and the staged record count and returning nothing. A guard that raises SHALL reject the release with `resource_limit_exceeded`.
@@ -231,15 +245,16 @@ The guard's exception text SHALL NOT be retained.
 
 ### Requirement: Close the failure vocabulary and fix the phase-to-code mapping
 
-The boundary vocabulary SHALL be **exactly** these eleven codes and no others: `layout_rejected`, `record_rejected`, `duplicate_record_key`, `stage_open_failed`, `stage_write_failed`, `stage_finalize_failed`, `stage_commit_failed`, `stage_abort_failed`, `source_close_failed`, `progress_callback_failed`, and `resource_limit_exceeded`.
+The boundary vocabulary SHALL be **exactly** these twelve codes and no others: `source_open_failed`, `layout_rejected`, `record_rejected`, `duplicate_record_key`, `stage_open_failed`, `stage_write_failed`, `stage_finalize_failed`, `stage_commit_failed`, `stage_abort_failed`, `source_close_failed`, `progress_callback_failed`, and `resource_limit_exceeded`.
 
-Issue #43 D5 names eight as a minimum. The three additional codes cover lifecycle failures the boundary can genuinely reach — entering a stage, aborting one, and closing a reader — and a failure with no code would otherwise have to borrow one that names a different phase.
+Issue #43 D5 names eight as a minimum. The four additional codes cover lifecycle failures the boundary can genuinely reach — opening a source, entering a stage, aborting one, and closing a reader — and a failure with no code would otherwise have to borrow one that names a different phase. `source_open_failed` exists for exactly that reason: entering the reader is not layout validation, and reporting it as `layout_rejected` would name a phase that had not yet begun.
 
 The mapping SHALL be deterministic and exhaustive:
 
 | failure | code |
 | --- | --- |
-| reader entry, preparation, or layout validation | `layout_rejected` |
+| reader `__enter__` | `source_open_failed` |
+| reader preparation or layout validation | `layout_rejected` |
 | reader iteration or decode | `record_rejected` |
 | envelope marked rejected | `record_rejected` |
 | record disagrees with its release or row | `record_rejected` |
@@ -259,10 +274,10 @@ At most 100 diagnostics SHALL be retained per release, the total SHALL be preser
 
 A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint. Exception text SHALL NOT be retained, from any source.
 
-#### Scenario: The vocabulary is exactly eleven codes
+#### Scenario: The vocabulary is exactly twelve codes
 - **GIVEN** the declared boundary vocabulary
 - **WHEN** its members are enumerated
-- **THEN** there are exactly eleven
+- **THEN** there are exactly twelve
 - **THEN** each is produced by some input driven through the processor
 
 #### Scenario: Each failure phase maps to one code
@@ -336,25 +351,35 @@ A callback that raises SHALL reject and abort the release with `progress_callbac
 
 The conformance suite SHALL detect input-proportional accumulation by construction, not by observing memory.
 
-It SHALL drive a candidate reader from a **guarded pull source** recording the interleaving of pulls and writes, and SHALL compute the *lead* as pulls minus records written at each write. A reader conforms if its maximum observed lead does not exceed a declared constant and **does not grow with release size**: the suite SHALL run the same reader over two releases of materially different length and require the maximum lead to be the same.
+It SHALL drive a candidate reader from a **guarded pull source** recording every pull, and SHALL compute the *lead* as source pulls minus **row envelopes the processor has consumed**.
 
-A reader holding a constant-size buffer therefore conforms, because its lead is the same at any release length. A reader that materializes its member does not, because its lead grows with the member.
+The denominator SHALL NOT be records written. A physical row may produce zero or several records, so records and rows are different quantities; and the processor deliberately stops writing at the first rejected row while continuing to read, so a conforming reader on a rejected release would show a lead that grows without bound against a frozen write count. Envelopes consumed is the only quantity that advances once per row for exactly as long as the reader is pulling.
+
+A reader conforms if its maximum observed lead does not exceed the approved constant **and does not grow with release size**. The approved constant SHALL be declared as a named value in the conformance suite and SHALL be 64 envelopes, which admits a fixed block buffer while remaining far below any fixture length. The suite SHALL run the same reader over two fixtures of 1,000 and 8,000 envelopes and require the maximum lead to be equal in both; both lengths exceed the constant by more than an order of magnitude, so a reader that materializes its member reports a maximum lead near 1,000 in one and near 8,000 in the other and cannot pass.
+
+A reader holding a constant-size buffer conforms, because its lead is the same at either length. A reader that materializes its member does not, because its lead scales with the member.
 
 A county SHALL enter the suite through a **reader factory** taking the guarded source, so a real county reader is exercised by the same harness as a synthetic one.
 
 This requirement SHALL NOT depend on measured memory, and SHALL read no resident set size, cgroup file, or allocation counter.
 
-#### Scenario: A bounded one-row buffer conforms
-- **GIVEN** a reader that pulls one row ahead and holds it
-- **WHEN** the suite drives it over a short release and a long one
-- **THEN** the maximum lead is the same in both
-- **THEN** the reader passes
+#### Scenario: A bounded buffer conforms at both fixture lengths
+- **GIVEN** a reader that holds a fixed block of rows ahead of the processor
+- **WHEN** the suite drives it over the 1,000-envelope and 8,000-envelope fixtures
+- **THEN** the maximum lead does not exceed 64 in either
+- **THEN** the two maxima are equal and the reader passes
 
 #### Scenario: An eager reader fails
 - **GIVEN** a reader that consumes the guarded source fully before yielding
-- **WHEN** the suite drives it over the same two releases
-- **THEN** the maximum lead grows with release length
-- **THEN** the reader fails
+- **WHEN** the suite drives it over the same two fixtures
+- **THEN** the maximum lead is near 1,000 in one and near 8,000 in the other
+- **THEN** the maxima differ and the reader fails
+
+#### Scenario: The metric survives a rejected release
+- **GIVEN** a conforming single-pass reader over a release whose first row is rejected
+- **WHEN** the processor stops writing and continues reading to collect diagnostics
+- **THEN** the lead is measured against envelopes consumed, not records written
+- **THEN** the reader still conforms, because its lead does not grow while the write count is frozen
 
 #### Scenario: The check needs no memory measurement
 - **GIVEN** the conformance suite
@@ -403,7 +428,7 @@ Documentation SHALL state that this change implements issue #43 decisions D1, D2
 
 It SHALL state that the 900 MiB target supersedes the issue body's 1 GiB wording, because the scheduler's measured 400 MiB peak shares the same 4 GiB container.
 
-It SHALL state that the `ResourceGuard` protocol fixes when the boundary asks and never what is measured, and that the vocabulary is eleven codes because D5's eight are a minimum and three lifecycle failures would otherwise have no code.
+It SHALL state that the `ResourceGuard` protocol fixes when the boundary asks and never what is measured, and that the vocabulary is twelve codes because D5's eight are a minimum and four lifecycle failures would otherwise have no code.
 
 It SHALL state that durable quarantine persistence and the production unique index remain owned by bootstrap tasks 3.4 and 3.5, and that the SQLite stage is a test fixture rather than a production stage.
 
