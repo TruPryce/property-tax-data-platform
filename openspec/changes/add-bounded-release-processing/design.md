@@ -25,7 +25,7 @@ release/progress.py     ReleaseProgressEvent
 release/processor.py    process_release(reader, stage, ...) -> ReleaseOutcome
 ```
 
-The processor is a function, not a class (D10). It receives a reader and a stage the caller opened, drives D2's order, and returns a bounded outcome. Nothing survives the call.
+The processor is a function, not a class (D10). It receives a reader and a stage the caller *supplied* — and enters both itself, in the order the lifecycle fixes — then returns a bounded outcome. The caller chooses which implementations to hand over; the processor decides when each is entered and exited, because that ordering is the atomicity guarantee. Nothing survives the call.
 
 ### The order, and why each step is where it is
 

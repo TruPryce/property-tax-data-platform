@@ -293,11 +293,11 @@ A diagnostic SHALL carry only its stable code and, where applicable, an approved
 
 ### Requirement: Populate the outcome when preparation never completed
 
-`ReleaseOutcome` SHALL declare `layout_fingerprint` as `str | None` and `parser_contract_version` as `int | None`. Both SHALL be `None` when the failure occurred before reader preparation produced a `PreparedRelease`, and SHALL carry the prepared values otherwise.
+`ReleaseOutcome` SHALL declare `layout_fingerprint` as `str | None` and `parser_contract_version` as `int | None`. Both SHALL be `None` when no `PreparedRelease` was produced, and both SHALL carry the prepared values when one was. A half-populated outcome — one field set and the other `None` — SHALL NOT occur, because both come from the same `PreparedRelease` and it either exists or does not.
 
 `boundary_contract_version` SHALL always be populated, because it is the boundary's own constant and is known before any reader is touched.
 
-A `source_open_failed` outcome cannot carry a fingerprint or a parser version: the reader never opened, so neither exists. A `layout_rejected` outcome may or may not, depending on whether validation failed before or after the fingerprint was computed. Declaring these fields as always-present would force an implementation to invent a placeholder, and a fabricated fingerprint is worse than an absent one — it would be indistinguishable from a real one in a diagnostic.
+A `source_open_failed` outcome carries neither: the reader never opened. A `layout_rejected` outcome carries neither either, because layout validation is part of preparation and a failure there means preparation did not complete — whatever a reader computed internally before failing is not a prepared release and SHALL NOT be reported as one. An earlier draft said such an outcome "may or may not" carry a fingerprint, which would have permitted exactly the half-populated outcome this rule forbids. Declaring these fields as always-present would force an implementation to invent a placeholder, and a fabricated fingerprint is worse than an absent one — it would be indistinguishable from a real one in a diagnostic.
 
 The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, which is already optional for this reason.
 
@@ -308,11 +308,12 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, which is al
 - **THEN** `layout_fingerprint` and `parser_contract_version` are both `None`
 - **THEN** `boundary_contract_version` is populated
 
-#### Scenario: A layout failure before the fingerprint exists reports none
-- **GIVEN** a reader whose preparation fails before computing a fingerprint
-- **WHEN** the processor runs
-- **THEN** the outcome reports `layout_rejected`
-- **THEN** `layout_fingerprint` is `None` rather than a placeholder
+#### Scenario: A layout failure reports neither field, however far it got
+- **GIVEN** one reader whose preparation fails before computing a fingerprint, and another that computes one internally and then fails validation
+- **WHEN** the processor runs against each
+- **THEN** both outcomes report `layout_rejected`
+- **THEN** `layout_fingerprint` and `parser_contract_version` are `None` in both
+- **THEN** neither outcome is half-populated
 
 #### Scenario: A prepared release populates both
 - **GIVEN** a reader that prepares successfully and then fails on a later row
