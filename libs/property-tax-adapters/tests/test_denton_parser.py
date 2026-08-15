@@ -1125,13 +1125,105 @@ def test_children_are_not_rolled_up_to_the_parent_account() -> None:
     assert not any(hasattr(record, "total") for record in records)
 
 
-def test_a_core_orphan_blocks_materialization_and_a_legal_orphan_does_not() -> None:
-    """Contract: ...keep the core-blocking and legal-warning classification intact."""
+def test_a_core_orphan_blocks_and_a_legal_orphan_warns_without_blocking() -> None:
+    """Contract: keep the core-blocking and legal-warning classification intact.
+
+    The earlier version asserted a legal orphan produced one record, which was
+    this implementation's behaviour rather than the contract's.  An unresolved
+    child is not an accepted row either way -- the report counts zero -- so a
+    record for it would contradict the report it came with.  What differs
+    between the two classes is whether the release is rejected, not whether an
+    unresolved child materializes.
+    """
 
     core = _materialize_child(synthetic.CHILD_ORPHANED)
     assert core.report.release_accepted is False
+    assert _codes(core.report) == ["core_child_orphaned"]
     assert core.records == ()
 
     legal = _materialize_child(synthetic.CHILD_ORPHANED, child_table="arb")
     assert legal.report.release_accepted is True
-    assert len(legal.records) == 1
+    assert _codes(legal.report) == ["legal_child_orphaned"]
+    assert legal.report.accepted_row_count == 0
+    assert legal.records == ()
+
+
+def test_a_child_record_exists_for_exactly_the_accepted_rows() -> None:
+    """One traversal, so the report and the records cannot disagree."""
+
+    mixed = synthetic.member(
+        synthetic.child_row(prop_id="000123", sequence="1"),
+        synthetic.child_row(prop_id="999999", sequence="2"),
+    )
+    result = _materialize_child(mixed, child_table="arb")
+
+    assert result.report.release_accepted is True
+    assert result.report.accepted_row_count == len(result.records) == 1
+    assert result.records[0].prop_id == "000123"
+
+
+@pytest.mark.parametrize(
+    ("sequence", "code"),
+    [
+        ("", "blank_required_key"),
+        ("   ", "blank_required_key"),
+        ("abcd", "invalid_owner_sequence"),
+        ("1.2", "invalid_owner_sequence"),
+        ("-1", "invalid_owner_sequence"),
+    ],
+    ids=["blank", "whitespace", "letters", "decimal", "negative"],
+)
+def test_a_child_sequence_outside_the_d5_bounds_is_rejected(sequence: str, code: str) -> None:
+    """Contract: child_sequence SHALL be required and one to four ASCII digits.
+
+    The upper bound has no negative case here because the field is four
+    characters wide: a five-digit sequence cannot be written into this layout at
+    all, so the length rule is enforced by the layout before the grammar sees
+    it.  The grammar still carries the rule for any layout that widens the field.
+    """
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", sequence=sequence))
+    result = _materialize_child(member)
+
+    assert _codes(result.report) == [code]
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-1.00", "1.000", "1,000.00", "$100", "1e5", "100.", "abc"],
+    ids=["negative", "three-decimals", "grouped", "currency", "exponent", "trailing-point", "text"],
+)
+def test_a_child_value_outside_the_d5_grammar_is_rejected(value: str) -> None:
+    """Contract: a nonblank child_value SHALL match the property monetary grammar."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", value=value))
+    result = _materialize_child(member)
+
+    assert _codes(result.report) == ["invalid_monetary_value"]
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_a_child_value_at_the_d5_bounds_is_accepted() -> None:
+    """Contract: ...and fall from zero through 10**26 - 1 inclusive."""
+
+    from decimal import Decimal
+
+    for text in ("0", "0.00", "1000.00"):
+        member = synthetic.member(synthetic.child_row(prop_id="000123", value=text.rjust(15)))
+        result = _materialize_child(member)
+        assert result.report.release_accepted is True, text
+        assert result.records[0].child_value is not None
+        assert result.records[0].child_value.value == Decimal(text)
+
+
+def test_whitespace_only_child_value_is_absence_not_a_malformed_amount() -> None:
+    """Contract: empty text after trimming SHALL be the only null."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", value="   "))
+    result = _materialize_child(member)
+
+    assert result.report.release_accepted is True
+    assert result.records[0].child_value is None

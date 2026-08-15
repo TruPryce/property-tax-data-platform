@@ -9,13 +9,19 @@ Ellis binds to as well. Everything county-specific lives here: field names,
 lexical grammars, the owner-row grain, child classification, thresholds, the
 diagnostic vocabulary, and privacy policy.
 
-The public surface is a **validator**, not a row producer. The typed Denton and
-vendor-neutral records that Issue #20 names both require contracts Issue #43
-owns, and those do not exist yet; returning rows today would mean writing a
-county-local ``SourceNativeValue``, which the accepted decisions forbid. So
-:func:`validate_property_member` and :func:`validate_child_member` return a
-bounded :class:`DentonValidationReport` carrying counts, diagnostics, and layout
-provenance, and no field values at all.
+Each member kind has a validator and a materializing sibling over one shared
+traversal: `validate_property_member` with `materialize_property_member`, and
+`validate_child_member` with `materialize_child_member`. Records correspond
+exactly to the rows the report counted as accepted, and `convert_denton_record`
+converts a property record into the vendor-neutral contract Issue #43 owns.
+
+Materialization is atomic with validation: a rejected release yields no records.
+
+The validators remain what they were: :func:`validate_property_member` and
+:func:`validate_child_member` return a bounded :class:`DentonValidationReport`
+carrying counts, diagnostics, and layout provenance, and no field values at all.
+No county-local substitute for a shared contract exists, and that prohibition
+has not lifted -- only the wait for the real thing has ended.
 """
 
 from __future__ import annotations
@@ -681,38 +687,25 @@ def materialize_child_member(
 ) -> DentonChildMaterializationResult:
     """Validate one child member and materialize the rows it accepted.
 
+    Shares `validate_child_member`'s traversal rather than re-walking the
+    member, so a record exists for exactly the rows the report counted.  An
+    unresolved child is not an accepted row, whether it blocks the release or
+    only warns, so it produces no record either way.
+
     Each child stays at its measured source grain.  Nothing is rolled up to the
     parent account: summing children would invent an account figure the county
-    never published, and D5's core-blocking and legal-warning classification is
-    about which children are *usable*, not about combining them.
+    never published.
     """
 
-    report = validate_child_member(
+    return _process_child_member(
         data,
         release_identifier=release_identifier,
         source_member_name=source_member_name,
         accepted_account_ids=accepted_account_ids,
         child_table=child_table,
         expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=True,
     )
-    if not report.release_accepted:
-        return DentonChildMaterializationResult(report=report, records=())
-
-    layout = DENTON_CHILD_LAYOUT
-    records, early = _records(data, layout)
-    if early is not None:  # pragma: no cover - validation already accepted it
-        return DentonChildMaterializationResult(report=report, records=())
-
-    materialized = [
-        _materialize_child_row(
-            layout.slice_record(record, encoding=DENTON_ENCODING).values,
-            layout=layout,
-            row_number=row_number,
-            child_table=child_table,
-        )
-        for row_number, record in records
-    ]
-    return DentonChildMaterializationResult(report=report, records=tuple(materialized))
 
 
 def _materialize_child_row(
@@ -769,6 +762,29 @@ def validate_child_member(
     legal child warns without blocking.
     """
 
+    return _process_child_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        accepted_account_ids=accepted_account_ids,
+        child_table=child_table,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=False,
+    ).report
+
+
+def _process_child_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    child_table: str,
+    accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str,
+    materialize: bool,
+) -> DentonChildMaterializationResult:
+    """The one traversal both child entry points share."""
+
     _require_caller_identity(release_identifier, source_member_name, _MIN_YEAR)
     if child_table not in DENTON_CORE_CHILD_TABLES | DENTON_LEGAL_CHILD_TABLES:
         raise ValueError("child_table is not an approved Denton child table")
@@ -777,12 +793,18 @@ def validate_child_member(
     if not _assert_layout_approved(
         layout, expected_layout_fingerprint, DENTON_EXPECTED_CHILD_FINGERPRINT
     ):
-        return _report(
-            [_diagnostic(DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None)],
-            layout=layout,
-            accepted=0,
-            owner_rows=0,
-            trailing=0,
+        return _no_child_records(
+            _report(
+                [
+                    _diagnostic(
+                        DentonDiagnosticCode.UNSUPPORTED_LAYOUT_FINGERPRINT, layout, None, None
+                    )
+                ],
+                layout=layout,
+                accepted=0,
+                owner_rows=0,
+                trailing=0,
+            )
         )
     accounts = {str(value) for value in accepted_account_ids}
     orphan_code = (
@@ -793,48 +815,115 @@ def validate_child_member(
 
     records, early = _records(data, layout)
     if early is not None:
-        return _report([early], layout=layout, accepted=0, owner_rows=0, trailing=0)
+        return _no_child_records(
+            _report([early], layout=layout, accepted=0, owner_rows=0, trailing=0)
+        )
 
     preflight = _preflight(records, layout)
     if preflight:
-        return _report(preflight, layout=layout, accepted=0, owner_rows=0, trailing=0)
+        return _no_child_records(
+            _report(preflight, layout=layout, accepted=0, owner_rows=0, trailing=0)
+        )
 
     # A child member wider than its declared layout is drift just as a property
     # member is. Checking only nonuniform and short records let a uniformly wide
     # child member through with no diagnostic and no trailing byte count.
     probe = layout.slice_record(records[0][1], encoding=DENTON_ENCODING)
     if probe.trailing is not None:
-        return _report(
-            [_diagnostic(DentonDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)],
-            layout=layout,
-            accepted=0,
-            owner_rows=0,
-            trailing=probe.trailing.byte_length,
+        return _no_child_records(
+            _report(
+                [_diagnostic(DentonDiagnosticCode.UNDOCUMENTED_TRAILING_REGION, layout, None, 1)],
+                layout=layout,
+                accepted=0,
+                owner_rows=0,
+                trailing=probe.trailing.byte_length,
+            )
         )
 
     diagnostics: list[DentonDiagnostic] = []
     accepted = 0
+    materialized: list[DentonChildRecord] = []
     for row_number, record in records:
         sliced = layout.slice_record(record, encoding=DENTON_ENCODING)
-        prop_id = sliced.values["prop_id"].strip(_ASCII_WHITESPACE)
+        values = sliced.values
+        prop_id = values["prop_id"].strip(_ASCII_WHITESPACE)
         if not prop_id:
             diagnostics.append(
                 _diagnostic(DentonDiagnosticCode.BLANK_REQUIRED_KEY, layout, "prop_id", row_number)
             )
             continue
+
+        # D5, applied here so both entry points enforce it.  The vocabulary is
+        # closed at seventeen codes and has no child-specific member, so the
+        # sequence and monetary codes carry the child field name instead.
+        row_diagnostics = _validate_child_values(values, layout, row_number)
+        if row_diagnostics:
+            diagnostics.extend(row_diagnostics)
+            continue
+
         if prop_id not in accounts:
             diagnostics.append(_diagnostic(orphan_code, layout, None, row_number))
             continue
         accepted += 1
+        if materialize:
+            materialized.append(
+                _materialize_child_row(
+                    values, layout=layout, row_number=row_number, child_table=child_table
+                )
+            )
 
     blocking = any(entry.code not in _NONFATAL_CODES for entry in diagnostics)
-    return _report(
+    report = _report(
         diagnostics,
         layout=layout,
         accepted=0 if blocking else accepted,
         owner_rows=0,
         trailing=0,
     )
+    return DentonChildMaterializationResult(
+        report=report, records=() if blocking else tuple(materialized)
+    )
+
+
+def _no_child_records(report: DentonValidationReport) -> DentonChildMaterializationResult:
+    return DentonChildMaterializationResult(report=report, records=())
+
+
+def _validate_child_values(
+    values: Mapping[str, str], layout: PacsLayout, row_number: int
+) -> list[DentonDiagnostic]:
+    """D5: the child lexical bounds this plan decided rather than discovered.
+
+    `child_sequence` is required and one to four ASCII digits.  `child_value`
+    may be blank as source absence; a nonblank value uses the property monetary
+    grammar bounded zero through `10**26 - 1`.  Empty text after trimming is the
+    only null, so a whitespace-only field is absence rather than a malformed
+    amount.
+    """
+
+    diagnostics: list[DentonDiagnostic] = []
+    sequence = values.get("child_sequence", "").strip(_ASCII_WHITESPACE)
+    if not sequence:
+        diagnostics.append(
+            _diagnostic(
+                DentonDiagnosticCode.BLANK_REQUIRED_KEY, layout, "child_sequence", row_number
+            )
+        )
+    elif _OWNER_SEQUENCE_PATTERN.fullmatch(sequence) is None:
+        diagnostics.append(
+            _diagnostic(
+                DentonDiagnosticCode.INVALID_OWNER_SEQUENCE, layout, "child_sequence", row_number
+            )
+        )
+
+    value = values.get("child_value", "").strip(_ASCII_WHITESPACE)
+    if value and not _is_approved_monetary(value):
+        diagnostics.append(
+            _diagnostic(
+                DentonDiagnosticCode.INVALID_MONETARY_VALUE, layout, "child_value", row_number
+            )
+        )
+    return diagnostics
 
 
 def _preflight(records: list[tuple[int, str]], layout: PacsLayout) -> list[DentonDiagnostic]:
