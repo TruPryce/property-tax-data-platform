@@ -291,6 +291,35 @@ A diagnostic SHALL carry only its stable code and, where applicable, an approved
 - **WHEN** the processor runs against each
 - **THEN** that text appears in no diagnostic, outcome field, or progress event
 
+### Requirement: Populate the outcome when preparation never completed
+
+`ReleaseOutcome` SHALL declare `layout_fingerprint` as `str | None` and `parser_contract_version` as `int | None`. Both SHALL be `None` when the failure occurred before reader preparation produced a `PreparedRelease`, and SHALL carry the prepared values otherwise.
+
+`boundary_contract_version` SHALL always be populated, because it is the boundary's own constant and is known before any reader is touched.
+
+A `source_open_failed` outcome cannot carry a fingerprint or a parser version: the reader never opened, so neither exists. A `layout_rejected` outcome may or may not, depending on whether validation failed before or after the fingerprint was computed. Declaring these fields as always-present would force an implementation to invent a placeholder, and a fabricated fingerprint is worse than an absent one — it would be indistinguishable from a real one in a diagnostic.
+
+The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, which is already optional for this reason.
+
+#### Scenario: A reader that never opened reports no fingerprint
+- **GIVEN** a reader whose `__enter__` raises
+- **WHEN** the processor runs
+- **THEN** the outcome reports `source_open_failed`
+- **THEN** `layout_fingerprint` and `parser_contract_version` are both `None`
+- **THEN** `boundary_contract_version` is populated
+
+#### Scenario: A layout failure before the fingerprint exists reports none
+- **GIVEN** a reader whose preparation fails before computing a fingerprint
+- **WHEN** the processor runs
+- **THEN** the outcome reports `layout_rejected`
+- **THEN** `layout_fingerprint` is `None` rather than a placeholder
+
+#### Scenario: A prepared release populates both
+- **GIVEN** a reader that prepares successfully and then fails on a later row
+- **WHEN** the processor runs
+- **THEN** `layout_fingerprint` and `parser_contract_version` carry the prepared values
+- **THEN** they are not cleared by the later failure
+
 ### Requirement: Define exactly what the outcome counts
 
 `ReleaseOutcome` SHALL carry four counts with these exact meanings, and SHALL NOT carry an ambiguous "accepted" or "rejected" count:
@@ -361,7 +390,7 @@ A reader holding a constant-size buffer conforms, because its lead is the same a
 
 A county SHALL enter the suite through a **reader factory** taking the guarded source, so a real county reader is exercised by the same harness as a synthetic one.
 
-This requirement SHALL NOT depend on measured memory, and SHALL read no resident set size, cgroup file, or allocation counter.
+This requirement SHALL observe pull and envelope-consumption order only. It SHALL NOT depend on measured memory, and SHALL read no resident set size, cgroup file, or allocation counter.
 
 #### Scenario: A bounded buffer conforms at both fixture lengths
 - **GIVEN** a reader that holds a fixed block of rows ahead of the processor
@@ -384,7 +413,7 @@ This requirement SHALL NOT depend on measured memory, and SHALL read no resident
 #### Scenario: The check needs no memory measurement
 - **GIVEN** the conformance suite
 - **WHEN** its implementation is inspected
-- **THEN** it observes pull and write order only
+- **THEN** it observes pull and envelope-consumption order only
 - **THEN** it reads no resident set size, cgroup file, or allocation counter
 
 ### Requirement: Keep the dependency direction one-way without stranding county readers
