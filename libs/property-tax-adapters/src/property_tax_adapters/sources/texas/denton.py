@@ -168,6 +168,7 @@ class DentonDiagnosticCode(StrEnum):
     BLANK_REQUIRED_KEY = "blank_required_key"
     INVALID_ACCOUNT_ID = "invalid_account_id"
     INVALID_OWNER_SEQUENCE = "invalid_owner_sequence"
+    INVALID_CHILD_SEQUENCE = "invalid_child_sequence"
     INVALID_MONETARY_VALUE = "invalid_monetary_value"
     INVALID_OWNERSHIP_PERCENTAGE = "invalid_ownership_percentage"
     INVALID_TAX_YEAR = "invalid_tax_year"
@@ -760,6 +761,10 @@ def validate_child_member(
 
     D4: an unresolved core appraisal child blocks the release; an unresolved
     legal child warns without blocking.
+
+    A warned row is still a row: an unresolved legal child is counted and, on
+    the materializing path, produces a record.  Only an unresolved core child is
+    withheld, and that is because it rejects the release outright.
     """
 
     return _process_child_member(
@@ -862,8 +867,16 @@ def _process_child_member(
             continue
 
         if prop_id not in accounts:
+            # An orphan is diagnosed and then kept: a warning does not delete the
+            # row it warns about, and dropping one would be a third behaviour,
+            # neither blocking nor warning-and-continuing.
+            #
+            # A *core* orphan needs no special case here. Its code is blocking,
+            # and a blocking diagnostic zeroes both the accepted count and the
+            # records below, so skipping the row as well would be a branch no
+            # input could distinguish. The test asserting `core_child_orphaned`
+            # is not in `_NONFATAL_CODES` is what keeps that true.
             diagnostics.append(_diagnostic(orphan_code, layout, None, row_number))
-            continue
         accepted += 1
         if materialize:
             materialized.append(
@@ -902,6 +915,10 @@ def _validate_child_values(
     """
 
     diagnostics: list[DentonDiagnostic] = []
+    # `invalid_child_sequence` is this change's eighteenth code.  Borrowing the
+    # owner code would have reported a child defect under a name that names a
+    # different field, and the owner and child sequences are separate facts even
+    # though their grammars agree today.
     sequence = values.get("child_sequence", "").strip(_ASCII_WHITESPACE)
     if not sequence:
         diagnostics.append(
@@ -912,7 +929,7 @@ def _validate_child_values(
     elif _OWNER_SEQUENCE_PATTERN.fullmatch(sequence) is None:
         diagnostics.append(
             _diagnostic(
-                DentonDiagnosticCode.INVALID_OWNER_SEQUENCE, layout, "child_sequence", row_number
+                DentonDiagnosticCode.INVALID_CHILD_SEQUENCE, layout, "child_sequence", row_number
             )
         )
 

@@ -444,6 +444,7 @@ def test_the_diagnostic_vocabulary_is_closed() -> None:
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
+        "invalid_child_sequence",
         "invalid_monetary_value",
         "invalid_ownership_percentage",
         "invalid_tax_year",
@@ -750,6 +751,7 @@ def test_every_declared_denton_code_is_reachable() -> None:
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
+        "invalid_child_sequence",
         "invalid_monetary_value",
         "invalid_ownership_percentage",
         "invalid_tax_year",
@@ -859,6 +861,7 @@ def test_every_declared_denton_code_is_actually_emitted() -> None:
     collect(_validate(synthetic.CONFLICTING_ACCOUNT_FACTS))
     collect(_validate_child(synthetic.CHILD_ORPHANED))
     collect(_validate_child(synthetic.CHILD_ORPHANED, child_table="arb"))
+    collect(_validate_child(synthetic.member(synthetic.child_row(sequence="abcd"))))
 
     declared = {code.value for code in DentonDiagnosticCode}
     assert declared - emitted == set(), f"declared but never emitted: {sorted(declared - emitted)}"
@@ -1144,8 +1147,12 @@ def test_a_core_orphan_blocks_and_a_legal_orphan_warns_without_blocking() -> Non
     legal = _materialize_child(synthetic.CHILD_ORPHANED, child_table="arb")
     assert legal.report.release_accepted is True
     assert _codes(legal.report) == ["legal_child_orphaned"]
-    assert legal.report.accepted_row_count == 0
-    assert legal.records == ()
+    # Warned, and kept.  A warning that deleted its row would be a third
+    # behaviour, neither blocking nor warning-and-continuing, and the child the
+    # county published would be gone from an accepted release.
+    assert legal.report.accepted_row_count == 1
+    assert len(legal.records) == 1
+    assert legal.records[0].prop_id == "999999"
 
 
 def test_a_child_record_exists_for_exactly_the_accepted_rows() -> None:
@@ -1158,8 +1165,26 @@ def test_a_child_record_exists_for_exactly_the_accepted_rows() -> None:
     result = _materialize_child(mixed, child_table="arb")
 
     assert result.report.release_accepted is True
-    assert result.report.accepted_row_count == len(result.records) == 1
-    assert result.records[0].prop_id == "000123"
+    assert result.report.accepted_row_count == len(result.records) == 2
+    assert [record.prop_id for record in result.records] == ["000123", "999999"]
+
+    # The same member under a core table rejects the release, and then nothing
+    # materializes -- including the row that resolved.
+    core = _materialize_child(mixed, child_table="land")
+    assert core.report.release_accepted is False
+    assert core.report.accepted_row_count == 0
+    assert core.records == ()
+
+
+def test_a_row_failing_d5_never_materializes_even_when_it_resolves() -> None:
+    """A lexical failure is about the row, not its relationship."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", sequence="abcd"))
+    result = _materialize_child(member, child_table="arb")
+
+    assert _codes(result.report) == ["invalid_child_sequence"]
+    assert result.report.release_accepted is False
+    assert result.records == ()
 
 
 @pytest.mark.parametrize(
@@ -1167,9 +1192,9 @@ def test_a_child_record_exists_for_exactly_the_accepted_rows() -> None:
     [
         ("", "blank_required_key"),
         ("   ", "blank_required_key"),
-        ("abcd", "invalid_owner_sequence"),
-        ("1.2", "invalid_owner_sequence"),
-        ("-1", "invalid_owner_sequence"),
+        ("abcd", "invalid_child_sequence"),
+        ("1.2", "invalid_child_sequence"),
+        ("-1", "invalid_child_sequence"),
     ],
     ids=["blank", "whitespace", "letters", "decimal", "negative"],
 )
@@ -1227,3 +1252,18 @@ def test_whitespace_only_child_value_is_absence_not_a_malformed_amount() -> None
 
     assert result.report.release_accepted is True
     assert result.records[0].child_value is None
+
+
+def test_only_the_legal_orphan_code_is_non_fatal() -> None:
+    """Contract: legal_child_orphaned SHALL be non-fatal; every other code rejects.
+
+    The child path keeps an orphaned row rather than skipping it, and relies on
+    this to zero a core orphan's output. If `core_child_orphaned` ever became
+    non-fatal, a blocked member would start emitting records, so the invariant is
+    pinned here rather than assumed.
+    """
+
+    from property_tax_adapters.sources.texas.denton import _NONFATAL_CODES
+
+    assert _NONFATAL_CODES == frozenset({DentonDiagnosticCode.LEGAL_CHILD_ORPHANED})
+    assert DentonDiagnosticCode.CORE_CHILD_ORPHANED not in _NONFATAL_CODES

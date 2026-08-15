@@ -156,9 +156,9 @@ Records sharing `prop_id` that disagree on a declared account-level fact SHALL b
 
 The Denton adapter SHALL validate child records against a caller-supplied set of accepted `prop_id` values and SHALL apply relationship rules by child type rather than one county-wide orphan rule.
 
-A core appraisal child — land, improvement, or mobile home — that does not resolve to an accepted account SHALL be rejected with `core_child_orphaned`. A legal child — ARB or lawsuit — that does not resolve SHALL record the non-fatal `legal_child_orphaned` and SHALL NOT reject the release.
+A core appraisal child — land, improvement, or mobile home — that does not resolve to an accepted account SHALL be rejected with `core_child_orphaned`. A legal child — ARB or lawsuit — that does not resolve SHALL record the non-fatal `legal_child_orphaned` and SHALL NOT reject the release. Such a child SHALL still be counted and materialized: a warning SHALL NOT delete the row it warns about, and dropping it would lose a child the county published from a release that was accepted.
 
-A child record's `child_sequence` SHALL be required and one to four ASCII digits. Its `child_value` MAY be blank as source absence, and a nonblank value SHALL match `[0-9]+(?:\.[0-9]{1,2})?`, parse with `decimal.Decimal`, and fall from zero through `10**26 - 1` inclusive. Empty text after trimming SHALL be the only null.
+A child record's `child_sequence` SHALL be required and one to four ASCII digits. A blank `child_sequence` SHALL be rejected with `blank_required_key` and one outside that grammar with `invalid_child_sequence`, which names the child field rather than borrowing the owner code: the two sequences are separate facts even where their grammars agree. A `child_value` outside its grammar SHALL be rejected with `invalid_monetary_value`. These codes SHALL be emitted by both `validate_child_member` and any materializing sibling, which SHALL share one traversal so that a record exists for exactly the rows the report counted as accepted. Its `child_value` MAY be blank as source absence, and a nonblank value SHALL match `[0-9]+(?:\.[0-9]{1,2})?`, parse with `decimal.Decimal`, and fall from zero through `10**26 - 1` inclusive. Empty text after trimming SHALL be the only null.
 
 #### Scenario: Block a core appraisal orphan
 - **GIVEN** an accepted property set containing one `prop_id`
@@ -176,7 +176,7 @@ A child record's `child_sequence` SHALL be required and one to four ASCII digits
 
 ### Requirement: Emit only the closed Denton diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_child_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
 
 Every code in this vocabulary SHALL be reachable. `truncated_required_field` is deliberately absent: once the observed width is required to reach the declared width, a required field can never end beyond it, so a county emitting that code would be declaring something no input can produce. Truncation remains a shared-component concept, reported by `slice_record` for callers that slice directly.
 
