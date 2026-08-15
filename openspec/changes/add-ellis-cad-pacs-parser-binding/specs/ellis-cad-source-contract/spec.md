@@ -174,13 +174,70 @@ Only the documented Ellis monetary facts and the ownership percentage SHALL norm
 
 The report SHALL NOT carry parsed field values, records, or any per-row payload, and the adapter MUST NOT define a county-local replacement for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`.
 
-#### Scenario: Validate without constructing a record
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
+#### Scenario: The validator stays record-free
 - **GIVEN** a valid synthetic member and a certified all-property label
 - **WHEN** the caller invokes `validate_property_member`
-- **THEN** one `EllisValidationReport` is returned
-- **THEN** no typed Ellis or vendor-neutral record is constructed
+- **THEN** one `EllisValidationReport` is returned and nothing else
+- **THEN** the report exposes no record, row, or per-row payload field
 - **THEN** no county-local replacement for a shared contract is defined
+
+#### Scenario: The materializer returns the same report alongside typed records
+- **GIVEN** the same member and label
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** the report equals the one `validate_property_member` returned
+- **THEN** the record count equals the report's `accepted_row_count`
+- **THEN** each record carries the release label it was accepted under
+
+#### Scenario: A rejected release yields no records
+- **GIVEN** a member whose first row is valid and whose second row is rejected
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** `release_accepted` is false
+- **THEN** no record is returned, including for the row that was valid
+
+#### Scenario: A scenario roll yields no records
+- **GIVEN** a valid synthetic member and a mineral-only label
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** `unsupported_scenario_label` is recorded before any record is read
+- **THEN** no record is returned
+
+#### Scenario: Only documented facts change type
+- **GIVEN** a valid synthetic member
+- **WHEN** the caller materializes it
+- **THEN** each monetary value and the ownership percentage is a `decimal.Decimal`
+- **THEN** the tax year is an `int`
+- **THEN** every other value retains its source text
+
+#### Scenario: A child sequence outside its grammar is rejected
+- **GIVEN** a child member whose `child_sequence` is not one to four ASCII digits
+- **WHEN** the caller invokes `validate_child_member` or `materialize_child_member`
+- **THEN** `invalid_child_sequence` is recorded with the physical row number
+- **THEN** a blank `child_sequence` records `blank_required_key` instead
+- **THEN** `release_accepted` is false and no child record is returned
+
+#### Scenario: A child value outside its grammar is rejected
+- **GIVEN** a child member whose nonblank `child_value` is negative, carries three decimal places, or is otherwise malformed
+- **WHEN** the caller invokes `materialize_child_member`
+- **THEN** `invalid_monetary_value` is recorded
+- **THEN** no child record is returned
+
+#### Scenario: An empty child value is absence rather than a malformed amount
+- **GIVEN** a child member whose `child_value` is empty after trimming
+- **WHEN** the caller materializes it
+- **THEN** the release is accepted
+- **THEN** the child record's value is absent rather than an amount
+
+#### Scenario: An unresolved legal child is kept
+- **GIVEN** an accepted property set and an ARB child referencing a different `prop_id`
+- **WHEN** the caller invokes `materialize_child_member` for the ARB table
+- **THEN** `legal_child_orphaned` is recorded and `release_accepted` is true
+- **THEN** the child is counted in `accepted_row_count`
+- **THEN** one child record is returned, because a warning does not delete the row it warns about
+
+#### Scenario: An unresolved core child is withheld
+- **GIVEN** the same accepted property set and a land child referencing a different `prop_id`
+- **WHEN** the caller invokes `materialize_child_member` for the land table
+- **THEN** `core_child_orphaned` is recorded and `release_accepted` is false
+- **THEN** no child record is returned
 
 ### Requirement: Keep the Ellis foundation adapter-local and non-production
 
