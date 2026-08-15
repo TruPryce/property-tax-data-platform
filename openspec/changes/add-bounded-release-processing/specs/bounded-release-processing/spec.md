@@ -1,20 +1,28 @@
 ## ADDED Requirements
 
-### Requirement: Provide a single-pass reader carrying release metadata and row envelopes
+### Requirement: Provide a single-pass reader carrying release metadata, row envelopes, and row rejections
 
-The production release boundary SHALL be a single-pass, context-managed county reader plus a caller-supplied atomic release stage, provided as `typing.Protocol` classes in `property_tax_adapters.release` so a county supplies a reader without inheriting a base class.
+The production release boundary SHALL be a single-pass, context-managed county reader plus a caller-supplied atomic release stage, provided as `typing.Protocol` classes in `property_tax_adapters.release`.
 
-A prepared reader SHALL validate its complete layout or schema before iteration begins and SHALL then expose `PreparedRelease` metadata carrying the jurisdiction code, the release identifier, the source member name, the layout fingerprint, and the parser contract version. That metadata SHALL be readable without reading any record, so an empty release still has a complete identity.
+A prepared reader SHALL validate its complete layout or schema before iteration begins and SHALL then expose `PreparedRelease` metadata carrying the jurisdiction code, release identifier, source member name, layout fingerprint, and parser contract version. That metadata SHALL be readable without reading any record, so an empty release still has a complete identity.
 
-Iteration SHALL yield one `SourceRowEnvelope` per **physical row**, carrying the one-based physical row number and the zero or more `AppraisalSourceRecord` values that row produced. A physical row producing no record and a physical row producing several are both ordinary: one accepted Collin row already produces one record per observed family. The envelope is what makes row completion explicit, so physical rows and staged records are counted from the same traversal rather than inferred from one another.
+Iteration SHALL yield one `SourceRowEnvelope` per **physical row**, carrying the one-based physical row number, the zero or more `AppraisalSourceRecord` values that row produced, and a bounded `rejected` indicator with an optional approved field name.
+
+An envelope SHALL distinguish three cases that would otherwise be indistinguishable:
+
+| envelope | meaning |
+| --- | --- |
+| records, not rejected | the row produced output |
+| no records, not rejected | the row legitimately produced none |
+| rejected, with or without records | the row is invalid |
+
+A reader SHALL signal an invalid row by marking the envelope rejected, **not** by raising. Raising ends iteration at the first bad row, which would make the 100-diagnostic retention cap unreachable and would report one defect where a member has many.
 
 The processor SHALL stage records and SHALL NOT return or yield accepted production records to its caller.
 
 A whole-release `bytes | str -> tuple` API SHALL NOT be a production input.
 
-The processor SHALL NOT create a disk spool, implicitly or otherwise. Any future spool requires separately approved bounded volume, byte limit, cleanup contract, and retry behaviour.
-
-The release package SHALL import no county module, and no county module SHALL import the release package.
+The processor SHALL NOT create a disk spool, implicitly or otherwise.
 
 #### Scenario: Release identity is complete before the first record
 - **GIVEN** a prepared reader over a release containing no physical rows
@@ -22,26 +30,46 @@ The release package SHALL import no county module, and no county module SHALL im
 - **THEN** the jurisdiction, release identifier, source member name, layout fingerprint, and parser contract version are all readable
 - **THEN** no record was read to obtain them
 
+#### Scenario: A legitimately empty row is not a rejected row
+- **GIVEN** one envelope with no records and not rejected, and one envelope marked rejected
+- **WHEN** the processor runs
+- **THEN** the first contributes to the physical row count and produces no diagnostic
+- **THEN** the second produces exactly one `record_rejected` diagnostic
+
 #### Scenario: A physical row may produce zero, one, or several records
 - **GIVEN** a reader yielding one envelope with no record, one with a single record, and one with two records
 - **WHEN** the processor runs
-- **THEN** the physical row count is three
-- **THEN** the staged record count is three
+- **THEN** the physical row count is three and the staged record count is three
 - **THEN** neither count is derived from the other
 
-#### Scenario: The boundary depends on no county
-- **GIVEN** each module in `property_tax_adapters.release` parsed with `ast` and its docstrings removed
-- **WHEN** its imports are collected
-- **THEN** no import resolves to a county module or a third-party package
-- **THEN** no county module imports the release package
+#### Scenario: Many rejected rows reach the retention cap
+- **GIVEN** a release of 150 physical rows, every one marked rejected
+- **WHEN** the processor runs
+- **THEN** iteration does not stop at the first rejected row
+- **THEN** 100 diagnostics are retained, the preserved total is 150, and truncation is marked
+
+### Requirement: Continue collecting diagnostics after a row is rejected, and stop writing
+
+On the first rejected row the processor SHALL record `record_rejected`, SHALL cease writing records to the stage, and SHALL continue iterating in order to collect further row diagnostics up to the retention cap.
+
+At end-of-input the processor SHALL abort the stage and return a rejected outcome. It SHALL NOT finalize and SHALL NOT commit.
+
+Continuing the traversal is what makes a member's full diagnostic picture available and the retention cap meaningful; ceasing writes is what keeps a doomed release from doing stage work that will be discarded. This mirrors the accepted county parsers, which continue past a bad row and decide blocking at end-of-input.
+
+#### Scenario: Writing stops at the first rejection but reading does not
+- **GIVEN** a release whose second of five rows is rejected
+- **WHEN** the processor runs with a stage that records its writes
+- **THEN** only the first row's records were written
+- **THEN** all five physical rows were read
+- **THEN** the stage was aborted and neither `finalize` nor `commit` ran
 
 ### Requirement: Bound the release identity so a host path is unrepresentable
 
-`release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters, containing only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. A value outside that shape SHALL be rejected before the release is processed, and SHALL NOT be coerced.
+`release_identifier` and `source_member_name` SHALL each be a `str` of 1 through 128 characters, containing only ASCII letters, digits, `.`, `_`, and `-`, and SHALL NOT begin with `.` or `-`. A value outside that shape SHALL be rejected before the release is processed and SHALL NOT be coerced.
 
-This is the bound the accepted Tarrant contract already sets for the same two fields, adopted here rather than a second one invented. That alphabet admits no `/`, `\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are unrepresentable in a progress event rather than merely discouraged.
+This is the bound the accepted Tarrant contract already sets for the same two fields, adopted rather than reinvented. That alphabet admits no `/`, `\`, `:`, whitespace, or control character, so an absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are unrepresentable in a progress event rather than merely discouraged.
 
-`jurisdiction_code` SHALL be the shape the shared contracts already require: a lowercase state prefix, a hyphen, and a county slug.
+`jurisdiction_code` SHALL take the shape the shared contracts already require.
 
 #### Scenario: A host path cannot reach a progress event
 - **GIVEN** a release identifier of `/var/tmp/dallas-2026` or `../../etc/passwd`
@@ -49,86 +77,101 @@ This is the bound the accepted Tarrant contract already sets for the same two fi
 - **THEN** the release is rejected before any row is read
 - **THEN** the value is not coerced into an acceptable one
 
-#### Scenario: The accepted bound is reused rather than redefined
-- **GIVEN** the boundary's identity rule and the accepted Tarrant contract's rule
-- **WHEN** the two are compared
-- **THEN** the permitted length, alphabet, and leading-character restriction are identical
+### Requirement: Require every staged record to agree with its release and its row
 
-### Requirement: Validate, stage, and commit in one fixed order
+Before writing a record, the processor SHALL verify that the record's `jurisdiction_code`, and its provenance's `release_identifier`, `source_member_name`, `parser_contract_version`, and `layout_fingerprint`, each equal the corresponding `PreparedRelease` value, and that the provenance's `source_row_number` equals the envelope's `physical_row_number`.
+
+A disagreement SHALL reject the row with `record_rejected` and SHALL NOT be written, corrected, or coerced. A record that disagrees with the release it arrived in is evidence of a reader defect, and staging it would attribute a row to a release or a position it did not come from.
+
+#### Scenario: A record from the wrong release is refused
+- **GIVEN** an envelope whose record carries a different `release_identifier` than the prepared release
+- **WHEN** the processor runs
+- **THEN** the row is rejected with `record_rejected`
+- **THEN** the record is not written to the stage
+
+#### Scenario: A record claiming the wrong row is refused
+- **GIVEN** an envelope at physical row 7 whose record's provenance reports row 6
+- **WHEN** the processor runs
+- **THEN** the row is rejected with `record_rejected`
+- **THEN** the mismatch is not corrected to match the envelope
+
+### Requirement: Fix the lifecycle order so nothing failable follows the commit
 
 The processor SHALL follow exactly this order for one logical release:
 
-1. open the immutable source through the county reader;
-2. validate the complete required layout or schema and capture its fingerprint;
-3. open one atomic stage for the logical release;
-4. for each physical row envelope, write its records only to the invisible stage;
-5. at end-of-input, emit the final progress event;
-6. finalize release-wide checks;
-7. commit exactly once, only after every blocking check succeeds.
+1. enter the county reader;
+2. prepare it and validate the complete layout, capturing `PreparedRelease`;
+3. enter the stage;
+4. call the resource guard once, before the first write;
+5. for each row envelope: verify agreement, write its records to the invisible stage, and at every 100,000-physical-row boundary call the guard and emit a non-final progress event;
+6. at end-of-input call the guard once and emit exactly one final progress event;
+7. exit the reader;
+8. finalize;
+9. commit exactly once;
+10. exit the stage.
 
-No accepted record SHALL be consumer-visible during steps 1 through 6.
+Every operation that may fail SHALL complete before step 9. The reader is closed at step 7, **before** the commit, so no reader failure can occur after records become visible.
 
-A layout failure SHALL occur before the first stage write, and SHALL NOT open a stage at all.
+A stage's `__exit__` after a successful commit SHALL NOT fail. That is part of the stage contract, and it is what makes step 10 safe to place after the only step that changes visibility.
 
-A row failure after any number of internal writes SHALL abort the complete stage.
+The final progress event SHALL precede finalization and commit, so a raising final callback can still reject while zero records are visible.
 
-The final progress event SHALL be emitted **before** finalization and commit. A final callback that raises must be able to reject the release while zero records are still visible, which is impossible if the event follows the commit it is meant to be able to prevent.
+A layout failure SHALL occur before the stage is entered and SHALL NOT enter it.
 
-#### Scenario: A layout failure never opens a stage
+On rejection the processor SHALL abort instead of finalizing and committing, and SHALL abort **if and only if the stage was entered**.
+
+No outcome SHALL report rejection after a commit has succeeded.
+
+#### Scenario: A layout failure never enters a stage
 - **GIVEN** a member whose layout fails validation
-- **WHEN** the processor runs with a stage that records whether it was opened
+- **WHEN** the processor runs with a stage that records whether it was entered
 - **THEN** the outcome reports `layout_rejected`
-- **THEN** the stage was never opened, and `abort` was never called
-- **THEN** no record was written
+- **THEN** the stage was never entered and `abort` was never called
 
-#### Scenario: A row failure after staged writes aborts everything
-- **GIVEN** a member whose first row is valid and whose second row fails validation
-- **WHEN** the processor runs with a stage that records whether `abort` ran
-- **THEN** the first row was written to the stage
-- **THEN** `abort` ran and `commit` did not
-- **THEN** the outcome reports zero accepted records, including for the row that was valid
+#### Scenario: The reader is closed before the commit
+- **GIVEN** a passing release and a reader that records when it was exited
+- **WHEN** the processor runs
+- **THEN** the observed order is final progress event, reader exit, finalize, commit, stage exit
+- **THEN** no failable operation follows the commit
 
-#### Scenario: Commit happens exactly once and last
+#### Scenario: A reader that fails on close still rejects before visibility
+- **GIVEN** a reader whose `__exit__` raises
+- **WHEN** the processor runs an otherwise passing release
+- **THEN** the outcome reports `source_close_failed`
+- **THEN** `commit` was never called and zero accepted records are exposed
+
+#### Scenario: Commit happens exactly once and is the last thing that can change visibility
 - **GIVEN** a member whose rows and release-wide checks all pass
 - **WHEN** the processor runs
-- **THEN** the observed call order is write, final progress event, finalize, commit
 - **THEN** `commit` is called exactly once
+- **THEN** the outcome is accepted, and no later step can change that
 
 ### Requirement: Reject the logical release on any boundary failure
 
-A reader, parser, row-validation, duplicate, resource-guard, progress-callback, stage-write, finalize, or commit failure SHALL reject the logical release.
-
-Rejection SHALL abort the stage **if and only if the stage was entered**. A failure before the stage is opened SHALL NOT call `abort`, because there is nothing to abort and calling it would require a stage the contract says was never created.
+A reader, layout, row-rejection, provenance-disagreement, duplicate, resource-guard, progress-callback, stage-entry, stage-write, finalize, commit, abort, or reader-close failure SHALL reject the logical release.
 
 Rejection SHALL return a bounded rejected outcome and SHALL NOT return staged records.
 
 An aborted stage, and a commit that fails, SHALL expose zero accepted records.
 
-#### Scenario: Rejection before the stage exists calls no abort
-- **GIVEN** a failure that occurs before the stage is opened
-- **WHEN** the processor runs
-- **THEN** the outcome disposition is rejected
-- **THEN** `abort` is not called
-- **THEN** zero accepted records are exposed
+An `abort` that itself fails SHALL be reported as `stage_abort_failed` and SHALL NOT change the disposition, which is already rejected.
 
-#### Scenario: Rejection after the first staged record aborts
-- **GIVEN** a failure that occurs after at least one record has been written to the stage
+#### Scenario: Rejection before the stage exists calls no abort
+- **GIVEN** a failure that occurs before the stage is entered
 - **WHEN** the processor runs
-- **THEN** `abort` is called exactly once
-- **THEN** zero accepted records are exposed
+- **THEN** the outcome disposition is rejected and `abort` is not called
 
 #### Scenario: Rejection during finalize or commit
 - **GIVEN** a stage whose `finalize` raises, and separately one whose `commit` raises
 - **WHEN** the processor runs against each
 - **THEN** the outcome reports `stage_finalize_failed` and `stage_commit_failed` respectively
-- **THEN** `abort` is called in both cases
-- **THEN** zero accepted records are exposed
+- **THEN** `abort` is called in both cases and zero accepted records are exposed
 
-#### Scenario: A rejected outcome carries no records
-- **GIVEN** any rejected release
-- **WHEN** the outcome is inspected
-- **THEN** it carries counts, codes, and contract metadata
-- **THEN** it exposes no record, row, or per-row payload field
+#### Scenario: A failing abort does not hide the original failure
+- **GIVEN** a release rejected for a row failure, whose `abort` also raises
+- **WHEN** the processor runs
+- **THEN** both `record_rejected` and `stage_abort_failed` are recorded
+- **THEN** the disposition remains rejected
 
 ### Requirement: Enforce cross-row constraints in the stage, not in the processor
 
@@ -136,125 +179,136 @@ The processor SHALL NOT retain the complete key set for a release.
 
 Duplicate and other release-wide constraints SHALL be enforced by the atomic stage through a bounded external unique or index contract.
 
-The stage SHALL signal a duplicate by raising `DuplicateRecordKey`, a typed exception the release package declares. Any other exception from `write` is an ordinary write failure. Without a typed signal the processor would have to inspect exception text to tell the two apart, which the privacy rules forbid and which no stage implementation could be relied on to phrase consistently.
+A stage SHALL signal a duplicate by raising `DuplicateRecordKey`, a typed exception the release package declares. It MAY raise it from `write`, where an eager index detects the collision, or from `finalize`, where a deferred index does. Both SHALL map to `duplicate_record_key`. Any *other* exception from `write` is `stage_write_failed`, and any other exception from `finalize` is `stage_finalize_failed`.
 
-This change SHALL provide a stage conformance suite, and a file-backed standard-library test stage or equivalent deterministic fixture, proving duplicate rejection and rollback without introducing production persistence or a new dependency.
+Permitting both points is deliberate: requiring detection at `write` would exclude any stage whose index is deferred until the end, which is how a bulk-loaded relational stage typically behaves.
 
-A scratch-backed test implementation SHALL use a caller-supplied directory, an explicit page or byte ceiling, and cleanup on success, on failure, and on retry.
+This change SHALL provide a stage conformance suite, and a file-backed standard-library test stage, proving duplicate rejection and rollback without introducing production persistence or a new dependency, using a caller-supplied directory, an explicit ceiling, and cleanup on success, failure, and retry.
 
 #### Scenario: A duplicate is distinguished from a write failure
-- **GIVEN** a stage that raises `DuplicateRecordKey` for a repeated key and a different exception for a disk failure
+- **GIVEN** a stage raising `DuplicateRecordKey` for a repeated key and a different exception for a disk failure
 - **WHEN** the processor runs against each
-- **THEN** the first is reported as `duplicate_record_key`
-- **THEN** the second is reported as `stage_write_failed`
+- **THEN** the first is `duplicate_record_key` and the second is `stage_write_failed`
 - **THEN** neither decision inspects exception text
 
-#### Scenario: The duplicate is caught by the stage
-- **GIVEN** a member containing two records with the same key
-- **WHEN** the processor runs against a conforming stage
-- **THEN** the release is rejected with `duplicate_record_key`
-- **THEN** the processor retained no key set of its own
+#### Scenario: A deferred index reports at finalize
+- **GIVEN** a stage that accepts every write and raises `DuplicateRecordKey` from `finalize`
+- **WHEN** the processor runs a release containing a repeated key
+- **THEN** the outcome reports `duplicate_record_key`, not `stage_finalize_failed`
+- **THEN** zero accepted records are exposed
 
 #### Scenario: Rollback leaves nothing behind
 - **GIVEN** a stage that has written records and is then aborted
 - **WHEN** its backing store is inspected
-- **THEN** no accepted record remains
-- **THEN** scratch resources are cleaned up
-
-#### Scenario: The test stage adds no dependency
-- **GIVEN** the test stage implementation
-- **WHEN** its imports are collected
-- **THEN** every import resolves to the standard library
-- **THEN** it is not presented as a production stage
+- **THEN** no accepted record remains and scratch resources are cleaned up
 
 ### Requirement: Check a caller-supplied resource guard at deterministic checkpoints
 
 The boundary SHALL declare a `ResourceGuard` protocol with one synchronous method taking the physical rows processed and the staged record count and returning nothing. A guard that raises SHALL reject the release with `resource_limit_exceeded`.
 
-The processor SHALL call the guard at exactly these checkpoints, and at no others: once immediately after the stage is opened and before the first write, once at every 100,000-physical-row boundary alongside the progress event, and once at end-of-input before finalization. Those checkpoints are a function of the row count alone, so two runs over one member call the guard the same number of times in the same places.
+The processor SHALL call the guard at exactly these checkpoints and no others: once immediately after the stage is entered and before the first write, once at every 100,000-physical-row boundary alongside the progress event, and once at end-of-input before the final progress event. The sequence is a function of the row count alone.
 
-The boundary SHALL define **what** it calls and **when**, and SHALL NOT define what the guard measures, in what units, or by what probe. A guard that measures nothing and never raises is a conforming guard, and is the default when a caller supplies none. The measured resource target, the probe, and the acceptance benchmark belong to the second change; this change fixes the contract that change plugs into.
+The boundary SHALL define **what** it calls and **when**, and SHALL NOT define what the guard measures, in what units, or by what probe. A guard that measures nothing and never raises conforms and is the default when a caller supplies none. The measured target, probe, and acceptance benchmark belong to the second change.
 
 The guard's exception text SHALL NOT be retained.
 
 #### Scenario: The guard is called at the specified checkpoints only
 - **GIVEN** a recording guard and a release of exactly 250,000 physical rows
 - **WHEN** the processor runs
-- **THEN** the guard is called after the stage opens, at 100,000, at 200,000, and once at end-of-input
-- **THEN** it is called at no other point
+- **THEN** the guard is called after the stage is entered, at 100,000, at 200,000, and once at end-of-input
 - **THEN** two runs over the same member produce the same call sequence
 
 #### Scenario: A raising guard rejects the release
 - **GIVEN** a guard that raises on its second call
 - **WHEN** the processor runs
 - **THEN** the release is rejected with `resource_limit_exceeded`
-- **THEN** the stage is aborted and zero accepted records are exposed
-- **THEN** the guard's exception text is not retained
+- **THEN** the stage is aborted and the guard's exception text is not retained
 
 #### Scenario: The default guard changes nothing
 - **GIVEN** a caller supplying no guard
 - **WHEN** the processor runs an otherwise valid release
-- **THEN** the release is accepted
-- **THEN** no `resource_limit_exceeded` diagnostic is produced
+- **THEN** the release is accepted and no `resource_limit_exceeded` diagnostic is produced
 
 ### Requirement: Close the failure vocabulary and fix the phase-to-code mapping
 
-The boundary vocabulary SHALL be **exactly** these eight codes and no others: `layout_rejected`, `record_rejected`, `duplicate_record_key`, `stage_write_failed`, `stage_finalize_failed`, `stage_commit_failed`, `progress_callback_failed`, and `resource_limit_exceeded`.
+The boundary vocabulary SHALL be **exactly** these eleven codes and no others: `layout_rejected`, `record_rejected`, `duplicate_record_key`, `stage_open_failed`, `stage_write_failed`, `stage_finalize_failed`, `stage_commit_failed`, `stage_abort_failed`, `source_close_failed`, `progress_callback_failed`, and `resource_limit_exceeded`.
 
-The mapping from failure to code SHALL be deterministic and exhaustive:
+Issue #43 D5 names eight as a minimum. The three additional codes cover lifecycle failures the boundary can genuinely reach — entering a stage, aborting one, and closing a reader — and a failure with no code would otherwise have to borrow one that names a different phase.
+
+The mapping SHALL be deterministic and exhaustive:
 
 | failure | code |
 | --- | --- |
-| reader preparation or layout validation | `layout_rejected` |
-| reader iteration, decode, or row validation | `record_rejected` |
-| `DuplicateRecordKey` from `write` | `duplicate_record_key` |
+| reader entry, preparation, or layout validation | `layout_rejected` |
+| reader iteration or decode | `record_rejected` |
+| envelope marked rejected | `record_rejected` |
+| record disagrees with its release or row | `record_rejected` |
+| stage `__enter__` | `stage_open_failed` |
+| `DuplicateRecordKey` from `write` or `finalize` | `duplicate_record_key` |
 | any other exception from `write` | `stage_write_failed` |
-| any exception from `finalize` | `stage_finalize_failed` |
+| any other exception from `finalize` | `stage_finalize_failed` |
 | any exception from `commit` | `stage_commit_failed` |
+| any exception from `abort` | `stage_abort_failed` |
+| any exception from reader `__exit__` | `source_close_failed` |
 | any exception from a progress callback | `progress_callback_failed` |
 | any exception from the resource guard | `resource_limit_exceeded` |
 
 Every declared code SHALL be reachable, proved by driving inputs through the boundary rather than by comparing the vocabulary with itself.
 
-At most 100 diagnostics SHALL be retained per release, the total count SHALL be preserved, and truncation SHALL be marked deterministically: the retained entries SHALL be the first 100 in encounter order, so two runs over one member agree.
+At most 100 diagnostics SHALL be retained per release, the total SHALL be preserved, and truncation SHALL be marked deterministically: the retained entries SHALL be the first 100 in encounter order.
 
-A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint. Those SHALL be the whole type, so there is nowhere to put a complete row, an arbitrary source value, exception text, a credential, an identity, an address, or a host-local path.
+A diagnostic SHALL carry only its stable code and, where applicable, an approved field name, the one-based physical row number, and the layout fingerprint. Exception text SHALL NOT be retained, from any source.
 
-Exception text SHALL NOT be retained, from any source.
-
-#### Scenario: The vocabulary is exactly eight codes
+#### Scenario: The vocabulary is exactly eleven codes
 - **GIVEN** the declared boundary vocabulary
 - **WHEN** its members are enumerated
-- **THEN** there are exactly eight
+- **THEN** there are exactly eleven
 - **THEN** each is produced by some input driven through the processor
 
 #### Scenario: Each failure phase maps to one code
-- **GIVEN** a failure injected at each phase in the mapping table
+- **GIVEN** a failure injected at each row of the mapping table
 - **WHEN** the processor runs against each
 - **THEN** the code observed is the one the table names
 - **THEN** no phase produces a code belonging to another phase
 
-#### Scenario: Truncation is deterministic
-- **GIVEN** a release producing more than 100 diagnostics
-- **WHEN** the processor runs twice over the same member
-- **THEN** exactly 100 are retained in both runs, and they are the same 100 in the same order
-- **THEN** the preserved total exceeds 100 and truncation is marked
-
 #### Scenario: An exception message never reaches the outcome
 - **GIVEN** a reader, a stage, a callback, and a guard that each raise with identifiable text
 - **WHEN** the processor runs against each
-- **THEN** the outcome reports the stable code from the mapping table
 - **THEN** that text appears in no diagnostic, outcome field, or progress event
+
+### Requirement: Define exactly what the outcome counts
+
+`ReleaseOutcome` SHALL carry four counts with these exact meanings, and SHALL NOT carry an ambiguous "accepted" or "rejected" count:
+
+| count | meaning |
+| --- | --- |
+| `physical_rows_processed` | envelopes read, whether or not they produced records |
+| `staged_record_count` | records written to the stage |
+| `committed_record_count` | records visible after a successful commit; zero unless the release was committed |
+| `rejected_row_count` | envelopes rejected, whether by the reader or by disagreement |
+
+D12 separates physical rows from staged records, so a single count could not have meant both. `committed_record_count` is distinct from `staged_record_count` because a staged record is not an accepted one until the commit that makes it visible.
+
+#### Scenario: A rejected release commits nothing
+- **GIVEN** a release whose third row is rejected after two rows were written
+- **WHEN** the processor runs
+- **THEN** `staged_record_count` reflects what was written before the rejection
+- **THEN** `committed_record_count` is zero
+- **THEN** `rejected_row_count` is at least one
+
+#### Scenario: An accepted release commits what it staged
+- **GIVEN** a release whose rows all pass
+- **WHEN** the processor runs
+- **THEN** `committed_record_count` equals `staged_record_count`
+- **THEN** `rejected_row_count` is zero
 
 ### Requirement: Emit a bounded, deterministic progress contract
 
-`ReleaseProgressEvent` SHALL be immutable and SHALL carry exactly the progress contract version, jurisdiction, release identifier, source member name, parser contract version, layout fingerprint, physical rows processed, staged adapter record count, a deterministic sequence number, and a `final` indicator, and no other field.
+`ReleaseProgressEvent` SHALL be immutable and SHALL carry exactly the progress contract version, jurisdiction, release identifier, source member name, parser contract version, layout fingerprint, physical rows processed, staged record count, a deterministic sequence number, and a `final` indicator, and no other field.
 
-Identity fields SHALL come from the reader's `PreparedRelease` metadata, so an empty release emits a complete event.
+Identity fields SHALL come from `PreparedRelease`, so an empty release emits a complete event.
 
-The callback protocol SHALL be synchronous.
-
-A non-final event SHALL be emitted after every 100,000 physical rows, and exactly one final event SHALL be emitted at end-of-input, including when the row count is an exact multiple of 100,000 and when the release is empty. The final event SHALL precede finalization and commit.
+The callback protocol SHALL be synchronous. A non-final event SHALL be emitted after every 100,000 physical rows, and exactly one final event at end-of-input, including for an exact multiple and for an empty release. The final event SHALL precede reader close, finalization, and commit.
 
 Sequence numbers SHALL be deterministic and gapless within a release, starting at zero.
 
@@ -263,52 +317,44 @@ A callback that raises SHALL reject and abort the release with `progress_callbac
 #### Scenario: An exact multiple still emits one final event
 - **GIVEN** a release of exactly 200,000 physical rows
 - **WHEN** the processor runs
-- **THEN** two non-final events are emitted, at 100,000 and 200,000
-- **THEN** exactly one final event is emitted, and it is the last
-- **THEN** the sequence numbers are 0, 1, 2 with no gap
+- **THEN** non-final events are emitted at 100,000 and 200,000
+- **THEN** exactly one final event is emitted last, with sequence numbers 0, 1, 2
 
 #### Scenario: An empty release still emits one complete final event
 - **GIVEN** a release containing no physical rows
 - **WHEN** the processor runs
-- **THEN** no non-final event is emitted
-- **THEN** exactly one final event is emitted, reporting zero rows and zero staged records
-- **THEN** its jurisdiction, release identifier, source member name, and layout fingerprint are all populated from the prepared release
+- **THEN** no non-final event is emitted and exactly one final event is
+- **THEN** its identity fields are populated entirely from the prepared release
 
 #### Scenario: A failing final callback prevents the commit
 - **GIVEN** a small release whose rows all pass, and a callback that raises on the final event
 - **WHEN** the processor runs
 - **THEN** the release is rejected with `progress_callback_failed`
-- **THEN** `finalize` and `commit` are never called
-- **THEN** the stage is aborted and zero accepted records are exposed
+- **THEN** `finalize` and `commit` are never called and the stage is aborted
 
-#### Scenario: A failing non-final callback rejects mid-release
-- **GIVEN** a callback that raises on its first non-final event
-- **WHEN** the processor runs
-- **THEN** the release is rejected with `progress_callback_failed`
-- **THEN** the stage is aborted and zero accepted records are exposed
-- **THEN** the callback's exception text is not retained
+### Requirement: Reject input-proportional read-ahead without forbidding bounded buffering
 
-### Requirement: Detect read-ahead deterministically rather than by resource behaviour
+The conformance suite SHALL detect input-proportional accumulation by construction, not by observing memory.
 
-The conformance suite SHALL detect a reader that reads ahead by construction, not by observing memory.
+It SHALL drive a candidate reader from a **guarded pull source** recording the interleaving of pulls and writes, and SHALL compute the *lead* as pulls minus records written at each write. A reader conforms if its maximum observed lead does not exceed a declared constant and **does not grow with release size**: the suite SHALL run the same reader over two releases of materially different length and require the maximum lead to be the same.
 
-It SHALL drive a candidate reader from a **guarded pull source** that records the order of pulls and writes. A reader conforms only if, at the moment the processor writes the records of physical row *n*, the guarded source has been pulled at most *n* times. A reader that materializes its member pulls the source to exhaustion before the first write and fails that check on any release of two or more rows.
+A reader holding a constant-size buffer therefore conforms, because its lead is the same at any release length. A reader that materializes its member does not, because its lead grows with the member.
 
-A county enters the suite through a **reader factory** taking the guarded source, so a real county reader is exercised by the same harness as a synthetic one, and conformance is a property the county can be tested for rather than asserted about.
+A county SHALL enter the suite through a **reader factory** taking the guarded source, so a real county reader is exercised by the same harness as a synthetic one.
 
-This requirement SHALL NOT depend on measured memory. The peak-RSS target, its probe, and the benchmark belong to the second change; read-ahead is a structural property observable without them.
+This requirement SHALL NOT depend on measured memory, and SHALL read no resident set size, cgroup file, or allocation counter.
 
-#### Scenario: An eager reader fails on a two-row release
+#### Scenario: A bounded one-row buffer conforms
+- **GIVEN** a reader that pulls one row ahead and holds it
+- **WHEN** the suite drives it over a short release and a long one
+- **THEN** the maximum lead is the same in both
+- **THEN** the reader passes
+
+#### Scenario: An eager reader fails
 - **GIVEN** a reader that consumes the guarded source fully before yielding
-- **WHEN** the conformance suite drives it over two physical rows
-- **THEN** the pull count exceeds one before the first write
-- **THEN** the reader fails conformance
-
-#### Scenario: A single-pass reader passes
-- **GIVEN** a reader that pulls one row, yields its envelope, and repeats
-- **WHEN** the suite drives it over the same release
-- **THEN** the pull count never exceeds the number of rows written
-- **THEN** the reader passes conformance
+- **WHEN** the suite drives it over the same two releases
+- **THEN** the maximum lead grows with release length
+- **THEN** the reader fails
 
 #### Scenario: The check needs no memory measurement
 - **GIVEN** the conformance suite
@@ -316,13 +362,30 @@ This requirement SHALL NOT depend on measured memory. The peak-RSS target, its p
 - **THEN** it observes pull and write order only
 - **THEN** it reads no resident set size, cgroup file, or allocation counter
 
+### Requirement: Keep the dependency direction one-way without stranding county readers
+
+The `property_tax_adapters.release` package SHALL import no county module.
+
+A county module MAY import the neutral contract surface — the release records and protocols — because a county reader must construct `PreparedRelease` and `SourceRowEnvelope` values to satisfy the protocol at all. Forbidding that would make the boundary unimplementable by the counties it exists for.
+
+A county module SHALL NOT import the processor. Driving a release is the caller's job, not a county's, and a county that imported the processor could invoke a release from inside a parser.
+
+#### Scenario: The boundary depends on no county
+- **GIVEN** each module in `property_tax_adapters.release` parsed with `ast` and its docstrings removed
+- **WHEN** its imports are collected
+- **THEN** no import resolves to a county module or a third-party package
+
+#### Scenario: A county may build envelopes but may not drive releases
+- **GIVEN** each county module parsed with `ast`
+- **WHEN** its imports are collected
+- **THEN** importing the release records or protocols is permitted
+- **THEN** importing the release processor is not
+
 ### Requirement: Keep the Dallas whole-member helper out of the production path
 
-`parse_dallas_appraisal_csv` SHALL remain a synthetic fixture and contract helper. It SHALL NOT be wrapped and presented as the production streaming boundary, and no production DAG or release processor SHALL import or invoke it.
+`parse_dallas_appraisal_csv` SHALL remain a synthetic fixture and contract helper, SHALL NOT be wrapped as the production streaming boundary, and no production DAG or release processor SHALL import or invoke it.
 
 All 52 existing Dallas contract cases SHALL remain collected unchanged, or migrate case-for-case with no scenario lost.
-
-A future Dallas production reader SHALL implement the prepared-reader protocol directly and emit only the shared adapter output its caller selected.
 
 #### Scenario: The boundary does not reach for the helper
 - **GIVEN** each module in `property_tax_adapters.release` parsed with `ast`
@@ -338,11 +401,11 @@ A future Dallas production reader SHALL implement the prepared-reader protocol d
 
 Documentation SHALL state that this change implements issue #43 decisions D1, D2, D3, D4, D6, D8, and the diagnostic portion of D5, and that the remainder of D5 — the 900 MiB peak-RSS target, the requirement that memory not grow linearly with row count, the cgroup `memory.peak` and `ru_maxrss` measurement method, and the reproducible 1,000,000-row, 90-column benchmark — belongs to a second change that depends on this one.
 
-It SHALL state that the 900 MiB target supersedes the issue body's earlier 1 GiB wording, because the scheduler's measured 400 MiB peak shares the same 4 GiB container.
+It SHALL state that the 900 MiB target supersedes the issue body's 1 GiB wording, because the scheduler's measured 400 MiB peak shares the same 4 GiB container.
 
-It SHALL state that the `ResourceGuard` protocol defines when the boundary asks, and that what is measured is the second change's to supply.
+It SHALL state that the `ResourceGuard` protocol fixes when the boundary asks and never what is measured, and that the vocabulary is eleven codes because D5's eight are a minimum and three lifecycle failures would otherwise have no code.
 
-It SHALL state that durable quarantine persistence and the production unique index remain owned by bootstrap tasks 3.4 and 3.5, and that the SQLite stage is a test fixture proving the conformance suite has a passing implementation rather than a production stage.
+It SHALL state that durable quarantine persistence and the production unique index remain owned by bootstrap tasks 3.4 and 3.5, and that the SQLite stage is a test fixture rather than a production stage.
 
 Documentation SHALL contain no county bytes, production rows, owner values, addresses, layouts, credentials, or archive locations.
 
@@ -351,7 +414,6 @@ Documentation SHALL contain no county bytes, production rows, owner values, addr
 - **WHEN** it is read
 - **THEN** the resource target, its measurement method, and the benchmark are each named as the second change
 - **THEN** the 900 MiB figure is stated as superseding the issue body's 1 GiB
-- **THEN** the guard is described as fixing when the boundary asks, not what is measured
 
 #### Scenario: The test stage is not mistaken for a production one
 - **GIVEN** the boundary document

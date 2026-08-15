@@ -30,26 +30,33 @@ The processor is a function, not a class (D10). It receives a reader and a stage
 ### The order, and why each step is where it is
 
 ```
-1  open the immutable source through the county reader
-2  validate the complete layout, capture PreparedRelease       <- before any stage exists
-3  open one atomic stage; guard checkpoint before first write
-4  per row envelope: write its records to the invisible stage  <- progress + guard every 100,000
-5  at end-of-input: guard checkpoint, then the final progress event
-6  finalize release-wide checks
-7  commit exactly once
+ 1  enter the county reader
+ 2  prepare, validate the layout, capture PreparedRelease   <- before any stage exists
+ 3  enter the stage
+ 4  guard checkpoint, before the first write
+ 5  per row envelope: verify agreement, write records       <- progress + guard every 100,000
+ 6  end-of-input: guard checkpoint, then the final progress event
+ 7  exit the reader                                         <- last failable cleanup
+ 8  finalize
+ 9  commit exactly once
+10  exit the stage                                          <- may not fail, by contract
 ```
 
 Step 2 precedes step 3 deliberately: a layout failure must occur before the first stage write, so a misidentified member never opens a stage at all. That also means a pre-stage failure calls no `abort` — there is nothing to abort, and requiring one would contradict the step that says no stage was created.
 
 Step 5 precedes steps 6 and 7 for a reason that is easy to get backwards. A final progress callback that raises must be able to reject the release, and it can only do that while zero records are still visible. Emitting the final event after the commit would leave a callback able to report a failure it can no longer prevent.
 
-Step 6 is where duplicate detection lands, because the stage holds the index and the processor holds no key set (D4).
+Steps 7 through 10 are ordered so that **nothing failable follows the commit** (D19). The reader is closed at step 7, before committing, because a reader that fails on close after a successful commit would otherwise force the outcome to report rejection while records were already visible. A stage's exit may not fail after a successful commit, which is what makes step 10 safe to place where it is.
+
+Duplicate detection is the stage's, because it holds the index and the processor holds no key set (D4). A stage may raise `DuplicateRecordKey` from `write` if its index is eager or from `finalize` if it is deferred; both map to the same code. Requiring one point would exclude bulk-loaded stages, which is most relational ones.
 
 ### What each protocol owes
 
 `PreparedReader` is a context manager. After preparation and before iteration it exposes a `PreparedRelease` carrying the jurisdiction, release identifier, source member name, layout fingerprint, and parser contract version — the whole identity, so an empty release still emits a complete progress event. Taking identity from the first record would work only for releases that have one.
 
-Iterating yields a `SourceRowEnvelope` per **physical row**, not a bare record. D8 counts physical rows and staged records separately, and the two are not the same number: one accepted Collin row already produces one record per observed family, and a row may produce none. Yielding bare records would force the processor to infer row boundaries it cannot see. The envelope carries the row number and that row's records, so both counts come from one traversal.
+Iterating yields a `SourceRowEnvelope` per **physical row**, not a bare record. D8 counts physical rows and staged records separately, and the two are not the same number: one accepted Collin row already produces one record per observed family, and a row may produce none. Yielding bare records would force the processor to infer row boundaries it cannot see.
+
+The envelope also carries a bounded rejected indicator, and that is what makes a zero-record envelope legible: without it, a row that legitimately produced nothing and a row that was invalid look identical. A reader signals invalidity by marking the envelope, never by raising — raising ends iteration at the first bad row, which would report one defect for a member with many and would make the 100-entry cap unreachable. On the first rejection the processor stops writing and keeps reading, which is exactly what the accepted county parsers do.
 
 `ReleaseStage` is a context manager with `write`, `finalize`, `abort`, and `commit`. Its contract is the atomicity guarantee: nothing written is visible until `commit` returns, and `abort` or a failed `commit` exposes zero accepted records.
 
@@ -61,9 +68,11 @@ Duplicate keys are the stage's job, and it signals one by raising the typed `Dup
 
 ## Dependency direction
 
-`release` → `sources.contracts` → standard library. The release package imports no county module, and no county module imports the release package. A county is a *supplier* of a reader, not a dependency of the boundary, which is what lets the test stage and the conformance suite exist without any county at all.
+`release` → `sources.contracts` → standard library. The release package imports no county module.
 
-An architecture test asserts both directions, parsing the AST and stripping docstrings.
+The reverse is not a blanket prohibition, and an earlier draft made it one by mistake. A county reader has to construct `PreparedRelease` and `SourceRowEnvelope` values to satisfy the protocol at all, so a county module **may** import the release records and protocols. What it may not import is the processor: driving a release is the caller's job, and a county able to invoke one from inside a parser would invert the boundary (D16).
+
+An architecture test asserts each direction separately, parsing the AST and stripping docstrings.
 
 ## Data and contract changes
 
@@ -93,7 +102,9 @@ One assumption remains, checkable at implementation time: SQLite's `UNIQUE` cons
 
 The boundary is new, so nothing existing changes behaviour and the 52 Dallas cases are untouched. The risk is subtler: a conformance suite that only checks *shape* would pass a reader that materializes its whole member, which is precisely the defect this change exists to prevent.
 
-The suite therefore drives a candidate reader from a **guarded pull source** that records the interleaving of pulls and writes, and requires that when row *n* is written the source has been pulled at most *n* times. An eager reader pulls to exhaustion before the first write and fails on any release of two or more rows. A county enters through a **reader factory** taking that source, so a real county reader is exercised by the same harness as a synthetic one rather than being asserted about in prose.
+The suite therefore drives a candidate reader from a **guarded pull source** that records the interleaving of pulls and writes, computes the *lead* as pulls minus records written, and requires the maximum lead to stay within a declared constant **and to be identical across two releases of materially different length**. A county enters through a **reader factory** taking that source, so a real county reader is exercised by the same harness as a synthetic one rather than being asserted about in prose.
+
+Comparing two lengths is the part that matters. An earlier draft required pulls to be at most the number of rows written, which is a stricter rule than the property being protected: it fails a reader holding one row of constant-size lookahead, whose memory is perfectly bounded. What must be rejected is accumulation that *scales with the input*, and a lead that is the same at both lengths cannot be scaling.
 
 This is deliberately structural. An earlier draft proposed a generator that "would exhaust memory if consumed eagerly", which depends on the resource behaviour this change defers to change two and would not fail deterministically. Read-ahead is observable without measuring memory, and observing it that way keeps the two changes genuinely separable.
 
