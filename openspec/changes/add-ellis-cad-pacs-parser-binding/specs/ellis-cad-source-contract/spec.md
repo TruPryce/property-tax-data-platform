@@ -127,7 +127,7 @@ Monetary fields SHALL match `[0-9]+(?:\.[0-9]{1,2})?` and fall from zero through
 
 ### Requirement: Emit only the closed Ellis diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_child_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
 
 Every code in this vocabulary SHALL be reachable, and reachability SHALL be established by driving inputs through the public entry points rather than by comparing the vocabulary with itself. `truncated_required_field` is deliberately absent for the reason the Denton contract gives, and `unrecognised_layout_package` likewise: `classify_layout_package` returns a `LayoutPackageKind`, which is the reportable outcome, so a diagnostic code for it would promise a report that no entry point produces.
 

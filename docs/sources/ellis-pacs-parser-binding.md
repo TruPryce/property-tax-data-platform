@@ -90,6 +90,18 @@ same label, fingerprint, control-character, and width gates. A core appraisal ch
 a legal child — `arb`, `lawsuit` — records the non-fatal `legal_child_orphaned`. A child member from
 a scenario roll is no more parseable than a property member from one.
 
+An unresolved legal child is **still counted and materialized**. A warning must not delete the row
+it warns about: dropping it would be a third behaviour, neither blocking nor
+warning-and-continuing, and a child the county published would vanish from a release that was
+accepted. A core orphan needs no such rule — its code is blocking, and a blocked release publishes
+no records at all.
+
+`child_sequence` is required and one to four ASCII digits: blank is `blank_required_key`, anything
+else outside the grammar is `invalid_child_sequence`. `child_value` is optional under the property
+monetary grammar bounded 0 through `10**26 - 1`, and a violation is `invalid_monetary_value`.
+`invalid_child_sequence` names the child field rather than borrowing `invalid_owner_sequence`: the
+owner and child sequences are separate facts even where their grammars agree today.
+
 | Field | Rule |
 | --- | --- |
 | `prop_id` | Required, trimmed, 1–32 visible ASCII characters, preserved as text |

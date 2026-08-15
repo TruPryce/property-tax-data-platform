@@ -25,11 +25,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final, Literal
 
 from property_tax_application import AcquisitionMethod, CountySourceDefinition
 from property_tax_domain import CountySlug, county_by_slug
 
+from property_tax_adapters.sources.contracts import (
+    AppraisalSourceRecord,
+    SourceNativeValue,
+    SourceProvenance,
+)
 from property_tax_adapters.sources.pacs import PacsField, PacsLayout
 
 ELLIS_JURISDICTION_CODE: Literal["tx-ellis"] = "tx-ellis"
@@ -182,6 +188,7 @@ class EllisDiagnosticCode(StrEnum):
     BLANK_REQUIRED_KEY = "blank_required_key"
     INVALID_ACCOUNT_ID = "invalid_account_id"
     INVALID_OWNER_SEQUENCE = "invalid_owner_sequence"
+    INVALID_CHILD_SEQUENCE = "invalid_child_sequence"
     INVALID_MONETARY_VALUE = "invalid_monetary_value"
     INVALID_OWNERSHIP_PERCENTAGE = "invalid_ownership_percentage"
     INVALID_TAX_YEAR = "invalid_tax_year"
@@ -300,6 +307,127 @@ def classify_layout_package(package_bytes: bytes) -> LayoutPackageKind:
     return LayoutPackageKind.OPENDOCUMENT_SPREADSHEET
 
 
+#: The Ellis fields whose values travel as source-native values. Owner name,
+#: owner address, and situs address are absent by construction: a declared
+#: position may participate in layout provenance, a value never enters a record.
+ELLIS_SOURCE_VALUE_FIELDS: Final[tuple[str, ...]] = (
+    "tax_year",
+    "ownership_percentage",
+    "market_value",
+    "appraised_value",
+    "assessed_value",
+    "land_value",
+    "improvement_value",
+    "agricultural_value",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EllisSourceProvenance:
+    """County-native provenance for one materialized Ellis row.
+
+    Holds the shared provenance as a stored field rather than deriving it, and
+    checks that the county fields it duplicates agree with it at construction.
+
+    `release_label` is Ellis-specific and load-bearing: a mineral-only scenario
+    roll is not certified current state, and a record that did not carry the
+    label it was accepted under could not be told apart from one that was.
+    """
+
+    jurisdiction_code: Literal["tx-ellis"]
+    release_identifier: str
+    source_member_name: str
+    release_label: str
+    tax_year: int
+    layout_fingerprint: str
+    layout_version: str
+    field_positions: Mapping[str, tuple[int, int]]
+    physical_row_number: int
+    parser_contract_version: int
+    shared: SourceProvenance
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "field_positions", MappingProxyType(dict(self.field_positions)))
+        mismatched = [
+            name
+            for name, county, neutral in (
+                ("jurisdiction_code", self.jurisdiction_code, self.shared.jurisdiction_code),
+                ("release_identifier", self.release_identifier, self.shared.release_identifier),
+                ("source_member_name", self.source_member_name, self.shared.source_member_name),
+                ("layout_fingerprint", self.layout_fingerprint, self.shared.layout_fingerprint),
+                ("physical_row_number", self.physical_row_number, self.shared.source_row_number),
+                (
+                    "parser_contract_version",
+                    self.parser_contract_version,
+                    self.shared.parser_contract_version,
+                ),
+                ("tax_year", self.tax_year, self.shared.source_year),
+                ("release_label", self.release_label, self.shared.source_status),
+            )
+            if county != neutral
+        ]
+        if mismatched:
+            raise ValueError(
+                "shared provenance disagrees with Ellis provenance on: " + ", ".join(mismatched)
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class EllisSourceRecord:
+    """One validated owner row, at `(prop_id, owner_sequence)` grain."""
+
+    prop_id: str
+    owner_sequence: str
+    source_native_values: Mapping[str, SourceNativeValue]
+    provenance: EllisSourceProvenance
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "source_native_values",
+            MappingProxyType(dict(self.source_native_values)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EllisChildProvenance:
+    """Provenance for one child row, naming the table and the release label."""
+
+    jurisdiction_code: Literal["tx-ellis"]
+    child_table: str
+    release_label: str
+    layout_fingerprint: str
+    layout_version: str
+    physical_row_number: int
+    parser_contract_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class EllisChildRecord:
+    """One child row at its measured source grain, with no roll-up derived."""
+
+    prop_id: str
+    child_sequence: str
+    child_value: SourceNativeValue | None
+    provenance: EllisChildProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class EllisMaterializationResult:
+    """The validation report and, only if the release was accepted, its records."""
+
+    report: EllisValidationReport
+    records: tuple[EllisSourceRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EllisChildMaterializationResult:
+    """The child validation report and, if accepted, its child records."""
+
+    report: EllisValidationReport
+    records: tuple[EllisChildRecord, ...]
+
+
 def validate_property_member(
     data: bytes | str,
     *,
@@ -315,6 +443,103 @@ def validate_property_member(
     "is this the artifact we think it is?", and reading records from a
     misidentified artifact is precisely the failure the Ellis contract forbids.
     """
+
+    return _process_property_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        expected_tax_year=expected_tax_year,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=False,
+    ).report
+
+
+def materialize_property_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    expected_tax_year: int,
+    expected_layout_fingerprint: str = ELLIS_EXPECTED_LAYOUT_FINGERPRINT,
+) -> EllisMaterializationResult:
+    """Validate one property member and materialize the rows it accepted.
+
+    Shares `validate_property_member`'s traversal rather than repeating it, so a
+    record exists for exactly the rows the report counted.
+    """
+
+    return _process_property_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        expected_tax_year=expected_tax_year,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=True,
+    )
+
+
+def _process_property_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    expected_tax_year: int,
+    expected_layout_fingerprint: str,
+    materialize: bool,
+) -> EllisMaterializationResult:
+    """Run the walk once, then decide what may leave with the report.
+
+    Records are withheld unless the release was accepted.  Deciding that here,
+    from the report the walk returned, means every early exit inside the walk
+    keeps its exact behaviour and none can be overlooked.
+    """
+
+    materialized: list[EllisSourceRecord] = []
+    report = _walk_property_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        expected_tax_year=expected_tax_year,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialized=materialized if materialize else None,
+    )
+    return EllisMaterializationResult(
+        report=report,
+        records=tuple(materialized) if report.release_accepted else (),
+    )
+
+
+def _field_positions(layout: PacsLayout) -> dict[str, tuple[int, int]]:
+    """The 1-indexed inclusive span each named field was sliced from.
+
+    Sensitive fields are excluded.  Their positions may participate in layout
+    provenance generally, but a record is per-row evidence and carrying them
+    there would put an owner-name span beside the row it belongs to.
+    """
+
+    return {
+        field.name: (field.start, field.end)
+        for field in layout.fields
+        if field.name not in ELLIS_SENSITIVE_FIELDS
+    }
+
+
+def _walk_property_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    expected_tax_year: int,
+    expected_layout_fingerprint: str,
+    materialized: list[EllisSourceRecord] | None,
+) -> EllisValidationReport:
+    """The validation, unchanged, optionally collecting records as it goes."""
 
     _require_caller_identity(release_identifier, source_member_name, expected_tax_year)
     layout = ELLIS_PROPERTY_LAYOUT
@@ -431,6 +656,20 @@ def validate_property_member(
             continue
 
         accepted += 1
+        if materialized is not None:
+            materialized.append(
+                _materialize_property_row(
+                    values,
+                    layout=layout,
+                    prop_id=prop_id,
+                    owner_sequence=sequence,
+                    row_number=row_number,
+                    release_identifier=release_identifier,
+                    source_member_name=source_member_name,
+                    release_label=release_label,
+                    expected_tax_year=expected_tax_year,
+                )
+            )
 
     blocking = any(entry.code not in _NONFATAL_CODES for entry in diagnostics)
     return _report(
@@ -440,6 +679,105 @@ def validate_property_member(
         accepted=0 if blocking else accepted,
         owner_rows=0 if blocking else len(owner_rows),
         trailing=trailing_bytes,
+    )
+
+
+def _materialize_property_row(
+    values: Mapping[str, str],
+    *,
+    layout: PacsLayout,
+    prop_id: str,
+    owner_sequence: str,
+    row_number: int,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    expected_tax_year: int,
+) -> EllisSourceRecord:
+    """Build one record from a row the validation above already accepted.
+
+    Only the documented Ellis monetary facts and the percentage normalize to
+    `Decimal`; the tax year to `int`.  Anything else keeps the text it arrived
+    as, because normalizing an undocumented field would assert a type the
+    contract never approved.
+    """
+
+    native: dict[str, SourceNativeValue] = {}
+    for name in ELLIS_SOURCE_VALUE_FIELDS:
+        raw = values.get(name)
+        if raw is None:
+            continue
+        stripped = raw.strip(_ASCII_WHITESPACE)
+        if not stripped:
+            # Empty text after trimming is the only null, and a null is an
+            # omitted entry rather than a value holding no value.
+            continue
+        parsed: str | int | Decimal
+        if name in ELLIS_MONETARY_FIELDS or name == "ownership_percentage":
+            parsed = Decimal(stripped)
+        elif name == "tax_year":
+            parsed = int(stripped)
+        else:
+            parsed = stripped
+        native[name] = SourceNativeValue(
+            source_field=name,
+            value=parsed,
+            lexical_text=stripped,
+        )
+
+    shared = SourceProvenance(
+        jurisdiction_code=ELLIS_JURISDICTION_CODE,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        source_row_number=row_number,
+        parser_contract_version=ELLIS_PARSER_CONTRACT_VERSION,
+        layout_fingerprint=layout.fingerprint,
+        table_name=layout.layout_id,
+        source_year=expected_tax_year,
+        source_status=release_label,
+    )
+    return EllisSourceRecord(
+        prop_id=prop_id,
+        owner_sequence=owner_sequence,
+        source_native_values=native,
+        provenance=EllisSourceProvenance(
+            jurisdiction_code=ELLIS_JURISDICTION_CODE,
+            release_identifier=release_identifier,
+            source_member_name=source_member_name,
+            release_label=release_label,
+            tax_year=expected_tax_year,
+            layout_fingerprint=layout.fingerprint,
+            layout_version=layout.layout_version,
+            field_positions=_field_positions(layout),
+            physical_row_number=row_number,
+            parser_contract_version=ELLIS_PARSER_CONTRACT_VERSION,
+            shared=shared,
+        ),
+    )
+
+
+def convert_ellis_record(record: EllisSourceRecord) -> AppraisalSourceRecord:
+    """Convert one Ellis owner row into exactly one shared record.
+
+    The `(prop_id, owner_sequence)` grain survives conversion: one owner row
+    produces one shared record, and `owner_sequence` travels as a source-native
+    identifier.  No account roll-up is derived, because summing an allocation
+    would invent an account figure the county never published.
+    """
+
+    return AppraisalSourceRecord(
+        jurisdiction_code=ELLIS_JURISDICTION_CODE,
+        source_account_id=record.prop_id,
+        source_native_identifiers={
+            "prop_id": record.prop_id,
+            "owner_sequence": record.owner_sequence,
+        },
+        appraisal_year=record.provenance.tax_year,
+        source_family=None,
+        source_status=record.provenance.release_label,
+        parcel_reference=None,
+        source_native_values=record.source_native_values,
+        provenance=record.provenance.shared,
     )
 
 
@@ -458,7 +796,172 @@ def validate_child_member(
     Child facts and relationship provenance are part of the Ellis contract, and
     the same label and fingerprint gates apply: a child member from a scenario
     roll is no more parseable than a property member from one.
+
+    An unresolved legal child warns and is kept.  A warning does not delete the
+    row it warns about; only a core orphan withholds output, and that is because
+    it rejects the release outright.
     """
+
+    return _process_child_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        child_table=child_table,
+        accepted_account_ids=accepted_account_ids,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=False,
+    ).report
+
+
+def materialize_child_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    child_table: str,
+    accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str = ELLIS_EXPECTED_CHILD_FINGERPRINT,
+) -> EllisChildMaterializationResult:
+    """Validate one child member and materialize the rows it accepted.
+
+    Each child stays at its measured source grain.  Nothing is rolled up to the
+    parent account: summing children would invent an account figure the county
+    never published.
+    """
+
+    return _process_child_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        child_table=child_table,
+        accepted_account_ids=accepted_account_ids,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialize=True,
+    )
+
+
+def _process_child_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    child_table: str,
+    accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str,
+    materialize: bool,
+) -> EllisChildMaterializationResult:
+    """Run the child walk once, then decide what may leave with the report."""
+
+    materialized: list[EllisChildRecord] = []
+    report = _walk_child_member(
+        data,
+        release_identifier=release_identifier,
+        source_member_name=source_member_name,
+        release_label=release_label,
+        child_table=child_table,
+        accepted_account_ids=accepted_account_ids,
+        expected_layout_fingerprint=expected_layout_fingerprint,
+        materialized=materialized if materialize else None,
+    )
+    return EllisChildMaterializationResult(
+        report=report,
+        records=tuple(materialized) if report.release_accepted else (),
+    )
+
+
+def _validate_child_values(
+    values: Mapping[str, str], layout: PacsLayout, row_number: int
+) -> list[EllisDiagnostic]:
+    """D5: the child lexical bounds this plan decided rather than discovered.
+
+    `child_sequence` is required and one to four ASCII digits.  `child_value`
+    may be blank as source absence; a nonblank value uses the property monetary
+    grammar bounded zero through `10**26 - 1`.  Empty text after trimming is the
+    only null, so a whitespace-only field is absence rather than a malformed
+    amount.
+
+    A malformed sequence reports `invalid_child_sequence` rather than borrowing
+    the owner code: the two sequences are separate facts even where their
+    grammars agree today.
+    """
+
+    diagnostics: list[EllisDiagnostic] = []
+    sequence = values.get("child_sequence", "").strip(_ASCII_WHITESPACE)
+    if not sequence:
+        diagnostics.append(
+            _diagnostic(
+                EllisDiagnosticCode.BLANK_REQUIRED_KEY, layout, "child_sequence", row_number
+            )
+        )
+    elif _OWNER_SEQUENCE_PATTERN.fullmatch(sequence) is None:
+        diagnostics.append(
+            _diagnostic(
+                EllisDiagnosticCode.INVALID_CHILD_SEQUENCE, layout, "child_sequence", row_number
+            )
+        )
+
+    value = values.get("child_value", "").strip(_ASCII_WHITESPACE)
+    if value and not _is_approved_monetary(value):
+        diagnostics.append(
+            _diagnostic(
+                EllisDiagnosticCode.INVALID_MONETARY_VALUE, layout, "child_value", row_number
+            )
+        )
+    return diagnostics
+
+
+def _materialize_child_row(
+    values: Mapping[str, str],
+    *,
+    layout: PacsLayout,
+    row_number: int,
+    child_table: str,
+    release_label: str,
+) -> EllisChildRecord:
+    """Build one child record from a row validation already accepted."""
+
+    raw_value = values.get("child_value", "").strip(_ASCII_WHITESPACE)
+    child_value = (
+        SourceNativeValue(
+            source_field="child_value",
+            value=Decimal(raw_value),
+            lexical_text=raw_value,
+        )
+        if raw_value
+        else None
+    )
+    return EllisChildRecord(
+        prop_id=values["prop_id"].strip(_ASCII_WHITESPACE),
+        child_sequence=values["child_sequence"].strip(_ASCII_WHITESPACE),
+        child_value=child_value,
+        provenance=EllisChildProvenance(
+            jurisdiction_code=ELLIS_JURISDICTION_CODE,
+            child_table=child_table,
+            release_label=release_label,
+            layout_fingerprint=layout.fingerprint,
+            layout_version=layout.layout_version,
+            physical_row_number=row_number,
+            parser_contract_version=ELLIS_PARSER_CONTRACT_VERSION,
+        ),
+    )
+
+
+def _walk_child_member(
+    data: bytes | str,
+    *,
+    release_identifier: str,
+    source_member_name: str,
+    release_label: str,
+    child_table: str,
+    accepted_account_ids: Iterable[str],
+    expected_layout_fingerprint: str,
+    materialized: list[EllisChildRecord] | None,
+) -> EllisValidationReport:
+    """The child validation, optionally collecting records as it goes."""
 
     _require_caller_identity(release_identifier, source_member_name, _MIN_YEAR)
     if child_table not in ELLIS_CORE_CHILD_TABLES | ELLIS_LEGAL_CHILD_TABLES:
@@ -513,16 +1016,36 @@ def validate_child_member(
     accepted = 0
     for row_number, record in records:
         sliced = layout.slice_record(record, encoding=ELLIS_ENCODING)
-        prop_id = sliced.values["prop_id"].strip(_ASCII_WHITESPACE)
+        values = sliced.values
+        prop_id = values["prop_id"].strip(_ASCII_WHITESPACE)
         if not prop_id:
             diagnostics.append(
                 _diagnostic(EllisDiagnosticCode.BLANK_REQUIRED_KEY, layout, "prop_id", row_number)
             )
             continue
-        if prop_id not in accounts:
-            diagnostics.append(_diagnostic(orphan_code, layout, None, row_number))
+
+        # D5, applied in the shared walk so both entry points enforce it.
+        row_diagnostics = _validate_child_values(values, layout, row_number)
+        if row_diagnostics:
+            diagnostics.extend(row_diagnostics)
             continue
+
+        if prop_id not in accounts:
+            # An orphan is diagnosed and then kept: a warning does not delete
+            # the row it warns about. A core orphan needs no special case, since
+            # its code is blocking and a blocked release publishes nothing.
+            diagnostics.append(_diagnostic(orphan_code, layout, None, row_number))
         accepted += 1
+        if materialized is not None:
+            materialized.append(
+                _materialize_child_row(
+                    values,
+                    layout=layout,
+                    row_number=row_number,
+                    child_table=child_table,
+                    release_label=release_label,
+                )
+            )
 
     blocking = any(entry.code not in _NONFATAL_CODES for entry in diagnostics)
     return _report(
@@ -751,6 +1274,16 @@ def _report(
 
 
 __all__ = [
+    "ELLIS_SOURCE_VALUE_FIELDS",
+    "EllisChildMaterializationResult",
+    "EllisChildProvenance",
+    "EllisChildRecord",
+    "EllisMaterializationResult",
+    "EllisSourceProvenance",
+    "EllisSourceRecord",
+    "convert_ellis_record",
+    "materialize_child_member",
+    "materialize_property_member",
     "ELLIS_ACCOUNT_FACTS",
     "ELLIS_CHILD_LAYOUT",
     "ELLIS_CORE_CHILD_TABLES",
