@@ -246,10 +246,11 @@ The entry point SHALL be `validate_certified_member(data, *, release_identifier,
 
 The report SHALL NOT carry parsed field values, rows, or any per-row payload. It MUST NOT be persisted, cached, logged, or returned across a process boundary, and its lifetime SHALL end with the caller that received it. It is not a substitute for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`, and it MUST NOT grow row-carrying fields to become one.
 
-When Issue #43 lands, row materialization SHALL be added as a separate entry point returning `TarrantCertifiedSourceRecord` values, reusing this validation rather than reimplementing it. `TarrantValidationReport` SHALL remain valid at that point and MUST NOT be removed or repurposed to carry records.
+Issue #43 has landed, and row materialization is a separate entry point, `materialize_certified_member`, returning `TarrantCertifiedSourceRecord` values and reusing this validation rather than reimplementing it. `TarrantValidationReport` remains valid and SHALL NOT be removed or repurposed to carry records.
+
+Materialization SHALL be atomic with validation: a release rejected for any blocking reason SHALL yield zero records, never a partial set, including when other rows in the same member were valid.
 
 #### Scenario: Validate an accepted release without constructing a record
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
 - **GIVEN** a valid synthetic member of three data rows and complete caller-supplied release identity
 - **WHEN** the caller invokes `validate_certified_member`
 - **THEN** one `TarrantValidationReport` is returned with `release_accepted` true
@@ -285,13 +286,24 @@ No Tarrant field SHALL populate or imply canonical market, appraised, assessed, 
 - **THEN** the record carries the approved native fields and a `TarrantSourceProvenance`
 - **THEN** no `property_tax_domain` or `property_tax_application` object is constructed
 
-#### Scenario: Parse and validate while the shared contracts are absent
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
+#### Scenario: The validator constructs no record
 - **GIVEN** a valid synthetic member and complete caller-supplied release identity
 - **WHEN** the parser decodes, binds headers, and validates the approved lexical grammars
 - **THEN** one `TarrantValidationReport` is returned
-- **THEN** no `TarrantCertifiedSourceRecord` is constructed
+- **THEN** no `TarrantCertifiedSourceRecord` is constructed, because records come from `materialize_certified_member`
 - **THEN** no county-local replacement for a shared contract is defined
+
+#### Scenario: The materializer returns the same report alongside typed records
+- **GIVEN** the same member and release identity
+- **WHEN** the caller invokes `materialize_certified_member`
+- **THEN** the report equals the one `validate_certified_member` returned
+- **THEN** the record count equals the report's `accepted_row_count`
+
+#### Scenario: A rejected release yields no records
+- **GIVEN** a member whose first row is valid and whose second row is rejected
+- **WHEN** the caller invokes `materialize_certified_member`
+- **THEN** `release_accepted` is false
+- **THEN** no record is returned, including for the row that was valid
 
 #### Scenario: Retain a decoded quoted value on a constructed record
 - **GIVEN** accepted and implemented shared `SourceNativeValue` contracts from Issue #43
@@ -335,7 +347,6 @@ One certified-core physical row SHALL produce one certified shared record. No cu
 - **THEN** parcel reference and canonical semantic fields are absent
 
 #### Scenario: Wait rather than substitute while Issue #43 is open
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
 - **WHEN** a maintainer reviews the Tarrant adapter module
 - **THEN** no county-local `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord` replacement is defined
 - **THEN** the native parsing, validation, and diagnostic behavior is present and executable

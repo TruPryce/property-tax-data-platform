@@ -224,12 +224,12 @@ Until the shared adapter contracts owned by Issue #43 are accepted and implement
 
 The report SHALL NOT carry parsed field values, records, or any per-row payload. It MUST NOT be persisted, cached, or logged, its lifetime SHALL end with the caller that received it, and it is not a substitute for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`. The adapter MUST NOT define a county-local replacement for any of those three.
 
-#### Scenario: Validate without constructing a record
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
+#### Scenario: The validator stays record-free
 - **GIVEN** a valid synthetic member and complete caller-supplied release identity
 - **WHEN** the caller invokes `validate_property_member`
-- **THEN** one `DentonValidationReport` is returned
-- **THEN** no typed Denton or vendor-neutral record is constructed
+- **THEN** one `DentonValidationReport` is returned and nothing else
+- **THEN** the report exposes no record, row, or per-row payload field
+- **THEN** records are produced only by `materialize_property_member`, which shares this validation
 - **THEN** no county-local replacement for a shared contract is defined
 
 ### Requirement: Keep the Denton foundation adapter-local and non-production
