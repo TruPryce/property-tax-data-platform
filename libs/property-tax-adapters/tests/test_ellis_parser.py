@@ -341,6 +341,7 @@ def test_the_diagnostic_vocabulary_is_closed() -> None:
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
+        "invalid_child_sequence",
         "invalid_monetary_value",
         "invalid_ownership_percentage",
         "invalid_tax_year",
@@ -435,16 +436,27 @@ def test_the_report_carries_no_row_payload() -> None:
 
 
 def test_no_county_local_shared_contract_is_defined() -> None:
-    source = _ellis_code()
-    for forbidden in (
-        "class SourceNativeValue",
-        "class SourceProvenance",
-        "class AppraisalSourceRecord",
-        "class EllisSourceNativeValue",
-        "class EllisAppraisalSourceRecord",
-    ):
-        assert forbidden not in source, forbidden
-    assert "sources.contracts" not in source
+    """Tasks 6.1 to 6.3 end the wait; they do not license a copy.
+
+    Before the shared module existed this also asserted that nothing referenced
+    it, because waiting was the only correct behaviour.  The prohibition is now
+    expressed as a check on what this module *defines* rather than what it
+    imports.
+    """
+
+    import ast
+
+    source = _ellis_source()
+    assert "from property_tax_adapters.sources.contracts import" in source
+
+    defined = {node.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ClassDef)}
+    assert not defined & {
+        "SourceNativeValue",
+        "SourceProvenance",
+        "AppraisalSourceRecord",
+        "EllisSourceNativeValue",
+        "EllisAppraisalSourceRecord",
+    }
 
 
 def test_the_domain_and_application_packages_gain_no_parser_vocabulary() -> None:
@@ -498,6 +510,7 @@ def test_the_binding_adds_no_dependency_outside_the_standard_library() -> None:
         "dataclasses",
         "decimal",
         "enum",
+        "types",
         "typing",
     }, imported
 
@@ -631,6 +644,7 @@ def test_every_declared_ellis_code_is_actually_emitted() -> None:
     collect(_validate(synthetic.CONFLICTING_ACCOUNT_FACTS))
     collect(_validate_child(synthetic.CHILD_ORPHANED))
     collect(_validate_child(synthetic.CHILD_ORPHANED, child_table="arb"))
+    collect(_validate_child(synthetic.member(synthetic.child_row(sequence="abcd"))))
 
     declared = {code.value for code in EllisDiagnosticCode}
     assert declared - emitted == set(), f"declared but never emitted: {sorted(declared - emitted)}"
@@ -649,6 +663,7 @@ def test_the_declared_vocabulary_matches_the_contract() -> None:
         "blank_required_key",
         "invalid_account_id",
         "invalid_owner_sequence",
+        "invalid_child_sequence",
         "invalid_monetary_value",
         "invalid_ownership_percentage",
         "invalid_tax_year",
@@ -723,3 +738,326 @@ def test_classification_reports_through_its_own_type() -> None:
 
     assert "unrecognised_layout_package" not in {code.value for code in EllisDiagnosticCode}
     assert classify_layout_package(synthetic.NOT_A_PACKAGE) is LayoutPackageKind.UNRECOGNISED
+
+
+# --------------------------------------------------------------------------
+# Tasks 6.1, 6.2, 6.3
+# --------------------------------------------------------------------------
+
+
+def _materialize(data: bytes | str = None, **overrides: object):  # type: ignore[assignment]
+    from property_tax_adapters.sources.texas.ellis import materialize_property_member
+
+    payload = synthetic.VALID_LF if data is None else data
+    return materialize_property_member(payload, **{**IDENTITY, **overrides})  # type: ignore[arg-type]
+
+
+def _materialize_child(data: bytes = None, **overrides: object):  # type: ignore[assignment]
+    from property_tax_adapters.sources.texas.ellis import materialize_child_member
+
+    payload = synthetic.CHILD_RESOLVED if data is None else data
+    return materialize_child_member(
+        payload,
+        release_identifier=synthetic.RELEASE_IDENTIFIER,
+        source_member_name=synthetic.SOURCE_MEMBER_NAME,
+        release_label=overrides.pop("release_label", synthetic.CERTIFIED_LABEL),  # type: ignore[arg-type]
+        child_table=overrides.pop("child_table", "land"),  # type: ignore[arg-type]
+        accepted_account_ids=overrides.pop("accepted_account_ids", synthetic.ACCEPTED_ACCOUNT_IDS),  # type: ignore[arg-type]
+    )
+
+
+def test_materialization_reuses_validation_rather_than_repeating_it() -> None:
+    """Contract: a row-materialization entry point that reuses the existing validation."""
+
+    validated = _validate(synthetic.VALID_LF)
+    result = _materialize(synthetic.VALID_LF)
+
+    assert result.report == validated
+    assert len(result.records) == validated.accepted_row_count
+
+
+def test_the_report_stays_valid_and_record_free() -> None:
+    """Contract: keep EllisValidationReport valid and record-free."""
+
+    from dataclasses import fields as dataclass_fields
+
+    declared = {field.name for field in dataclass_fields(EllisValidationReport)}
+    assert not declared & {"records", "rows", "values", "source_native_values"}
+
+
+def test_a_record_carries_the_owner_grain_and_the_release_label() -> None:
+    """Contract: provenance carries jurisdiction, release label, tax year, and positions."""
+
+    from property_tax_adapters.sources.contracts import SourceProvenance
+    from property_tax_adapters.sources.texas.ellis import ELLIS_PROPERTY_LAYOUT
+
+    record = _materialize().records[0]
+    provenance = record.provenance
+
+    assert record.prop_id
+    assert record.owner_sequence
+    assert provenance.jurisdiction_code == "tx-ellis"
+    assert provenance.release_label == synthetic.CERTIFIED_LABEL
+    assert provenance.tax_year == synthetic.EXPECTED_TAX_YEAR
+    assert provenance.layout_fingerprint == ELLIS_PROPERTY_LAYOUT.fingerprint
+    assert provenance.layout_version == ELLIS_PROPERTY_LAYOUT.layout_version
+    assert provenance.physical_row_number == 1
+    assert isinstance(provenance.shared, SourceProvenance)
+    assert provenance.field_positions["prop_id"] == (1, 12)
+
+    for name, value in record.source_native_values.items():
+        assert value.source_field == name
+        assert value.lexical_text == value.lexical_text.strip()
+
+
+def test_no_sensitive_field_position_or_value_reaches_a_record() -> None:
+    """Contract: sensitive values MUST NOT enter any output."""
+
+    record = _materialize().records[0]
+
+    assert not set(record.source_native_values) & ELLIS_SENSITIVE_FIELDS
+    assert not set(record.provenance.field_positions) & ELLIS_SENSITIVE_FIELDS
+
+
+def test_a_rejected_release_materializes_nothing() -> None:
+    """Release-level atomicity, with a valid row present to actually discard."""
+
+    mixed = synthetic.member(
+        synthetic.property_row(),
+        synthetic.property_row(prop_id="000124", tax_year="1899"),
+    )
+    result = _materialize(mixed)
+
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_a_scenario_roll_materializes_nothing() -> None:
+    """The label gate runs before any record is read, so no row escapes it."""
+
+    result = _materialize(synthetic.VALID_LF, release_label="mineral-only")
+
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_a_stored_shared_provenance_may_not_disagree_with_its_county_fields() -> None:
+    from dataclasses import replace
+
+    from property_tax_adapters.sources.texas.ellis import EllisSourceProvenance
+
+    provenance = _materialize().records[0].provenance
+    with pytest.raises(ValueError, match="disagrees with Ellis provenance"):
+        EllisSourceProvenance(
+            jurisdiction_code=provenance.jurisdiction_code,
+            release_identifier=provenance.release_identifier,
+            source_member_name=provenance.source_member_name,
+            release_label=provenance.release_label,
+            tax_year=provenance.tax_year,
+            layout_fingerprint=provenance.layout_fingerprint,
+            layout_version=provenance.layout_version,
+            field_positions=provenance.field_positions,
+            physical_row_number=provenance.physical_row_number,
+            parser_contract_version=provenance.parser_contract_version,
+            shared=replace(provenance.shared, source_row_number=99),
+        )
+
+
+def test_conversion_uses_prop_id_and_preserves_the_owner_grain() -> None:
+    """Contract: prop_id as source account ID; preserve owner-row grain, no roll-up."""
+
+    from property_tax_adapters.sources.texas.ellis import convert_ellis_record
+
+    allocation = synthetic.member(
+        synthetic.property_row(owner_sequence="1"),
+        synthetic.property_row(owner_sequence="2"),
+    )
+    records = _materialize(allocation).records
+    assert len(records) == 2
+
+    converted = [convert_ellis_record(record) for record in records]
+    assert len(converted) == 2
+    assert {shared.source_account_id for shared in converted} == {records[0].prop_id}
+    assert {shared.source_native_identifiers["owner_sequence"] for shared in converted} == {
+        "1",
+        "2",
+    }
+    for shared, native in zip(converted, records, strict=True):
+        assert shared.jurisdiction_code == "tx-ellis"
+        assert shared.provenance is native.provenance.shared
+        assert shared.parcel_reference is None
+
+
+def test_conversion_normalizes_only_documented_facts() -> None:
+    """Contract: normalize only the documented Ellis facts to matching types."""
+
+    from decimal import Decimal
+
+    from property_tax_adapters.sources.texas.ellis import (
+        ELLIS_MONETARY_FIELDS,
+        convert_ellis_record,
+    )
+
+    shared = convert_ellis_record(_materialize().records[0])
+    for name, value in shared.source_native_values.items():
+        if name in ELLIS_MONETARY_FIELDS or name == "ownership_percentage":
+            assert isinstance(value.value, Decimal), name
+        elif name == "tax_year":
+            assert isinstance(value.value, int), name
+        else:
+            assert isinstance(value.value, str), name
+
+
+def test_conversion_populates_no_canonical_field() -> None:
+    """Contract: populate no canonical semantic field.
+
+    The Ellis *field names* are market_value and the rest, and they travel as
+    source-native values keyed by the county's own name.  The prohibition is
+    about the record growing a canonical attribute, so that is what is checked.
+    """
+
+    from dataclasses import fields as dataclass_fields
+
+    from property_tax_adapters.sources.contracts import AppraisalSourceRecord
+
+    declared = {field.name for field in dataclass_fields(AppraisalSourceRecord)}
+    assert not declared & {
+        "market_value",
+        "appraised_value",
+        "assessed_value",
+        "taxable_value",
+        "tax_amount",
+        "exemption_entitlement",
+    }
+
+
+def test_a_child_record_carries_its_measured_grain_and_label() -> None:
+    """Contract: child provenance carries the child table, release label, fingerprint,
+    version, and the one-based physical row number."""
+
+    from decimal import Decimal
+
+    from property_tax_adapters.sources.texas.ellis import ELLIS_CHILD_LAYOUT
+
+    record = _materialize_child().records[0]
+
+    assert record.prop_id == "000123"
+    assert record.child_sequence == "1"
+    assert record.child_value is not None
+    assert record.child_value.value == Decimal("1000.00")
+    assert record.provenance.child_table == "land"
+    assert record.provenance.release_label == synthetic.CERTIFIED_LABEL
+    assert record.provenance.layout_fingerprint == ELLIS_CHILD_LAYOUT.fingerprint
+    assert record.provenance.layout_version == ELLIS_CHILD_LAYOUT.layout_version
+    assert record.provenance.physical_row_number == 1
+
+
+@pytest.mark.parametrize(
+    ("sequence", "code"),
+    [
+        ("", "blank_required_key"),
+        ("   ", "blank_required_key"),
+        ("abcd", "invalid_child_sequence"),
+        ("1.2", "invalid_child_sequence"),
+        ("-1", "invalid_child_sequence"),
+    ],
+    ids=["blank", "whitespace", "letters", "decimal", "negative"],
+)
+def test_a_child_sequence_outside_the_d5_bounds_is_rejected(sequence: str, code: str) -> None:
+    """Contract: child_sequence SHALL be required and one to four ASCII digits."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", sequence=sequence))
+    result = _materialize_child(member)
+
+    assert _codes(result.report) == [code]
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-1.00", "1.000", "1,000.00", "$100", "1e5", "100.", "abc"],
+    ids=["negative", "three-decimals", "grouped", "currency", "exponent", "trailing-point", "text"],
+)
+def test_a_child_value_outside_the_d5_grammar_is_rejected(value: str) -> None:
+    """Contract: a nonblank child_value SHALL match the property monetary grammar."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", value=value))
+    result = _materialize_child(member)
+
+    assert _codes(result.report) == ["invalid_monetary_value"]
+    assert result.report.release_accepted is False
+    assert result.records == ()
+
+
+def test_whitespace_only_child_value_is_absence_not_a_malformed_amount() -> None:
+    """Contract: empty text after trimming SHALL be the only null."""
+
+    member = synthetic.member(synthetic.child_row(prop_id="000123", value="   "))
+    result = _materialize_child(member)
+
+    assert result.report.release_accepted is True
+    assert result.records[0].child_value is None
+
+
+def test_a_core_orphan_blocks_and_a_legal_orphan_warns_without_blocking() -> None:
+    """Contract: keep the core-blocking and legal-warning classification intact.
+
+    A legal orphan warns and is kept -- counted and materialized -- because a
+    warning must not delete the row it warns about.  A core orphan blocks, and a
+    blocked release publishes nothing at all.
+    """
+
+    core = _materialize_child(synthetic.CHILD_ORPHANED)
+    assert core.report.release_accepted is False
+    assert _codes(core.report) == ["core_child_orphaned"]
+    assert core.records == ()
+
+    legal = _materialize_child(synthetic.CHILD_ORPHANED, child_table="arb")
+    assert legal.report.release_accepted is True
+    assert _codes(legal.report) == ["legal_child_orphaned"]
+    assert legal.report.accepted_row_count == 1
+    assert len(legal.records) == 1
+
+
+def test_children_are_not_rolled_up_to_the_parent_account() -> None:
+    """Contract: preserve each child at its measured source grain, derive no roll-up."""
+
+    two = synthetic.member(
+        synthetic.child_row(prop_id="000123", sequence="1", value="1000.00"),
+        synthetic.child_row(prop_id="000123", sequence="2", value="2500.00"),
+    )
+    records = _materialize_child(two).records
+
+    assert len(records) == 2
+    assert {record.child_sequence for record in records} == {"1", "2"}
+    assert not any(hasattr(record, "total") for record in records)
+
+
+def test_only_the_legal_orphan_code_is_non_fatal() -> None:
+    """The invariant the child path relies on to zero a core orphan's output."""
+
+    from property_tax_adapters.sources.texas.ellis import _NONFATAL_CODES
+
+    assert _NONFATAL_CODES == frozenset({EllisDiagnosticCode.LEGAL_CHILD_ORPHANED})
+    assert EllisDiagnosticCode.CORE_CHILD_ORPHANED not in _NONFATAL_CODES
+
+
+def test_the_public_surface_declares_the_record_layer() -> None:
+    """A name absent from `__all__` is not part of the module's contract."""
+
+    from property_tax_adapters.sources.texas import ellis
+
+    assert {
+        "EllisSourceRecord",
+        "EllisSourceProvenance",
+        "EllisChildRecord",
+        "EllisChildProvenance",
+        "EllisMaterializationResult",
+        "EllisChildMaterializationResult",
+        "materialize_property_member",
+        "materialize_child_member",
+        "convert_ellis_record",
+    } <= set(ellis.__all__)
+    for name in ellis.__all__:
+        assert hasattr(ellis, name), name

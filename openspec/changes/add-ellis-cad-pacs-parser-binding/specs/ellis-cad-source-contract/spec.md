@@ -96,6 +96,12 @@ The Ellis adapter MUST parse one already-selected, caller-supplied member and MU
 
 The adapter SHALL also validate child members against a caller-supplied set of accepted `prop_id` values, applying the same label, fingerprint, control-character, and width gates, rejecting an unresolved core appraisal child with `core_child_orphaned` and recording the non-fatal `legal_child_orphaned` for an unresolved legal child.
 
+A child record's `child_sequence` SHALL be required and one to four ASCII digits. A blank `child_sequence` SHALL be rejected with `blank_required_key` and one outside that grammar with `invalid_child_sequence`, which names the child field rather than borrowing the owner code: the two sequences are separate facts even where their grammars agree. Its `child_value` MAY be blank as source absence, and a nonblank value SHALL match `[0-9]+(?:\.[0-9]{1,2})?`, parse with `decimal.Decimal`, and fall from zero through `10**26 - 1` inclusive; a violation SHALL be rejected with `invalid_monetary_value`. Empty text after trimming SHALL be the only null.
+
+An unresolved legal child SHALL still be counted and materialized. A warning SHALL NOT delete the row it warns about, and dropping it would lose a child the county published from a release that was accepted. An unresolved core child needs no separate rule: its code is blocking, and a rejected release publishes no records at all.
+
+A validator and its materializing sibling SHALL share one traversal, for property members and child members alike, so that a record exists for exactly the rows the report counted as accepted and the two can never disagree about what a valid Ellis row is.
+
 `prop_id` SHALL be the Ellis account identifier, trimmed, 1 through 32 visible ASCII characters, preserved as text and never parsed numerically. `owner_sequence` SHALL be one to four ASCII digits. `(prop_id, owner_sequence)` SHALL be the physical owner-row grain, preserved distinctly with no deduplication, no summing, and no arbitrary-row selection, and no account-level roll-up SHALL be derived.
 
 Two records sharing both key parts SHALL be rejected with `duplicate_owner_row`. Records sharing `prop_id` that disagree on a declared account-level fact SHALL be rejected with `conflicting_account_facts`.
@@ -127,7 +133,7 @@ Monetary fields SHALL match `[0-9]+(?:\.[0-9]{1,2})?` and fall from zero through
 
 ### Requirement: Emit only the closed Ellis diagnostic vocabulary
 
-The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
+The adapter SHALL emit only these diagnostic codes: `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`, `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`, `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`, `invalid_child_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`, `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and `legal_child_orphaned`.
 
 Every code in this vocabulary SHALL be reachable, and reachability SHALL be established by driving inputs through the public entry points rather than by comparing the vocabulary with itself. `truncated_required_field` is deliberately absent for the reason the Denton contract gives, and `unrecognised_layout_package` likewise: `classify_layout_package` returns a `LayoutPackageKind`, which is the reportable outcome, so a diagnostic code for it would promise a report that no entry point produces.
 
@@ -158,19 +164,80 @@ Owner names, mailing addresses, and situs addresses SHALL be classified as sensi
 
 ### Requirement: Expose the bounded Ellis validation result
 
-Until the shared adapter contracts owned by Issue #43 are accepted and implemented, the interim scope SHALL be a validator. Its complete public surface SHALL be `classify_layout_package`, `validate_property_member`, and `validate_child_member`, the latter two each returning one `EllisValidationReport`.
+The shared adapter contracts owned by Issue #43 are accepted and implemented, so the scope is no longer validation alone. The public surface SHALL be `classify_layout_package`, `validate_property_member` and `validate_child_member` each returning one `EllisValidationReport`, `materialize_property_member` and `materialize_child_member` each returning that same report alongside typed records, and `convert_ellis_record`. The adapter SHALL NOT define a county-local substitute for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`; that prohibition does not lift with the wait.
+
+Materialization SHALL be atomic with validation: a release rejected for any blocking reason SHALL yield zero records, never a partial set, including when other rows in the same member were valid. Every record SHALL carry the release label it was accepted under, because a record without it could not be distinguished from one accepted under a different label.
+
+Only the documented Ellis monetary facts and the ownership percentage SHALL normalize to `decimal.Decimal`, and the tax year to `int`. Any other value SHALL retain its source text, because normalizing an undocumented field would assert a type this contract has not approved.
 
 `EllisValidationReport` SHALL be a frozen dataclass with exactly these fields: `parser_contract_version: int`, `release_accepted: bool`, `layout_fingerprint: str`, `layout_version: str`, `release_label: str`, `accepted_row_count: int`, `owner_row_count: int`, `trailing_region_bytes: int`, `diagnostics: tuple[EllisDiagnostic, ...]`, `total_diagnostic_count: int`, and `diagnostics_truncated: bool`.
 
 The report SHALL NOT carry parsed field values, records, or any per-row payload, and the adapter MUST NOT define a county-local replacement for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`.
 
-#### Scenario: Validate without constructing a record
-- **GIVEN** the shared Issue #43 contracts are absent from the repository
+#### Scenario: The validator stays record-free
 - **GIVEN** a valid synthetic member and a certified all-property label
 - **WHEN** the caller invokes `validate_property_member`
-- **THEN** one `EllisValidationReport` is returned
-- **THEN** no typed Ellis or vendor-neutral record is constructed
+- **THEN** one `EllisValidationReport` is returned and nothing else
+- **THEN** the report exposes no record, row, or per-row payload field
 - **THEN** no county-local replacement for a shared contract is defined
+
+#### Scenario: The materializer returns the same report alongside typed records
+- **GIVEN** the same member and label
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** the report equals the one `validate_property_member` returned
+- **THEN** the record count equals the report's `accepted_row_count`
+- **THEN** each record carries the release label it was accepted under
+
+#### Scenario: A rejected release yields no records
+- **GIVEN** a member whose first row is valid and whose second row is rejected
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** `release_accepted` is false
+- **THEN** no record is returned, including for the row that was valid
+
+#### Scenario: A scenario roll yields no records
+- **GIVEN** a valid synthetic member and a mineral-only label
+- **WHEN** the caller invokes `materialize_property_member`
+- **THEN** `unsupported_scenario_label` is recorded before any record is read
+- **THEN** no record is returned
+
+#### Scenario: Only documented facts change type
+- **GIVEN** a valid synthetic member
+- **WHEN** the caller materializes it
+- **THEN** each monetary value and the ownership percentage is a `decimal.Decimal`
+- **THEN** the tax year is an `int`
+- **THEN** every other value retains its source text
+
+#### Scenario: A child sequence outside its grammar is rejected
+- **GIVEN** a child member whose `child_sequence` is not one to four ASCII digits
+- **WHEN** the caller invokes `validate_child_member` or `materialize_child_member`
+- **THEN** `invalid_child_sequence` is recorded with the physical row number
+- **THEN** a blank `child_sequence` records `blank_required_key` instead
+- **THEN** `release_accepted` is false and no child record is returned
+
+#### Scenario: A child value outside its grammar is rejected
+- **GIVEN** a child member whose nonblank `child_value` is negative, carries three decimal places, or is otherwise malformed
+- **WHEN** the caller invokes `materialize_child_member`
+- **THEN** `invalid_monetary_value` is recorded
+- **THEN** no child record is returned
+
+#### Scenario: An empty child value is absence rather than a malformed amount
+- **GIVEN** a child member whose `child_value` is empty after trimming
+- **WHEN** the caller materializes it
+- **THEN** the release is accepted
+- **THEN** the child record's value is absent rather than an amount
+
+#### Scenario: An unresolved legal child is kept
+- **GIVEN** an accepted property set and an ARB child referencing a different `prop_id`
+- **WHEN** the caller invokes `materialize_child_member` for the ARB table
+- **THEN** `legal_child_orphaned` is recorded and `release_accepted` is true
+- **THEN** the child is counted in `accepted_row_count`
+- **THEN** one child record is returned, because a warning does not delete the row it warns about
+
+#### Scenario: An unresolved core child is withheld
+- **GIVEN** the same accepted property set and a land child referencing a different `prop_id`
+- **WHEN** the caller invokes `materialize_child_member` for the land table
+- **THEN** `core_child_orphaned` is recorded and `release_accepted` is false
+- **THEN** no child record is returned
 
 ### Requirement: Keep the Ellis foundation adapter-local and non-production
 
