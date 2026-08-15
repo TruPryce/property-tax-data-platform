@@ -17,8 +17,10 @@ What already exists and this change builds on:
 One new package, `property_tax_adapters.release`:
 
 ```
-release/protocols.py    PreparedReader, ReleaseStage, ProgressCallback  (typing.Protocol)
-release/outcome.py      ReleaseOutcome, ReleaseDiagnostic, ReleaseDiagnosticCode
+release/protocols.py    PreparedReader, ReleaseStage, ProgressCallback, ResourceGuard
+release/records.py      PreparedRelease, SourceRowEnvelope
+release/outcome.py      ReleaseOutcome, ReleaseDiagnostic, ReleaseDiagnosticCode,
+                        DuplicateRecordKey
 release/progress.py     ReleaseProgressEvent
 release/processor.py    process_release(reader, stage, ...) -> ReleaseOutcome
 ```
@@ -29,20 +31,31 @@ The processor is a function, not a class (D10). It receives a reader and a stage
 
 ```
 1  open the immutable source through the county reader
-2  validate the complete layout, capture the fingerprint      <- before any stage exists
-3  open one atomic stage for the logical release
-4  per row: decode, validate, write to the invisible stage    <- progress every 100,000
-5  finalize release-wide checks after end-of-input
-6  commit exactly once
+2  validate the complete layout, capture PreparedRelease       <- before any stage exists
+3  open one atomic stage; guard checkpoint before first write
+4  per row envelope: write its records to the invisible stage  <- progress + guard every 100,000
+5  at end-of-input: guard checkpoint, then the final progress event
+6  finalize release-wide checks
+7  commit exactly once
 ```
 
-Step 2 precedes step 3 deliberately: a layout failure must occur before the first stage write, so a misidentified member never opens a stage at all. Step 5 is where duplicate detection lands, because the stage holds the index and the processor holds no key set (D4).
+Step 2 precedes step 3 deliberately: a layout failure must occur before the first stage write, so a misidentified member never opens a stage at all. That also means a pre-stage failure calls no `abort` — there is nothing to abort, and requiring one would contradict the step that says no stage was created.
+
+Step 5 precedes steps 6 and 7 for a reason that is easy to get backwards. A final progress callback that raises must be able to reject the release, and it can only do that while zero records are still visible. Emitting the final event after the commit would leave a callback able to report a failure it can no longer prevent.
+
+Step 6 is where duplicate detection lands, because the stage holds the index and the processor holds no key set (D4).
 
 ### What each protocol owes
 
-`PreparedReader` is a context manager. It exposes the layout fingerprint and parser contract version *after* preparation and before iteration, so the processor can record provenance without reading a row. Iterating yields one validated observation at a time; a reader that materialized its member first would satisfy the type and defeat the purpose, so the conformance suite drives readers with a generator that would exhaust memory if consumed eagerly.
+`PreparedReader` is a context manager. After preparation and before iteration it exposes a `PreparedRelease` carrying the jurisdiction, release identifier, source member name, layout fingerprint, and parser contract version — the whole identity, so an empty release still emits a complete progress event. Taking identity from the first record would work only for releases that have one.
 
-`ReleaseStage` is a context manager with `write`, `finalize`, `abort`, and `commit`. Its contract is the atomicity guarantee: nothing written is visible until `commit` returns, and `abort` or a failed `commit` exposes zero accepted records. Duplicate keys are the stage's job, reported as `duplicate_record_key`.
+Iterating yields a `SourceRowEnvelope` per **physical row**, not a bare record. D8 counts physical rows and staged records separately, and the two are not the same number: one accepted Collin row already produces one record per observed family, and a row may produce none. Yielding bare records would force the processor to infer row boundaries it cannot see. The envelope carries the row number and that row's records, so both counts come from one traversal.
+
+`ReleaseStage` is a context manager with `write`, `finalize`, `abort`, and `commit`. Its contract is the atomicity guarantee: nothing written is visible until `commit` returns, and `abort` or a failed `commit` exposes zero accepted records.
+
+Duplicate keys are the stage's job, and it signals one by raising the typed `DuplicateRecordKey`. Any other exception from `write` is an ordinary write failure. The alternative — inspecting exception text — is forbidden by the privacy rules and could not be relied on across implementations anyway, so the distinction is carried by type.
+
+`ResourceGuard` is one synchronous method over the row and record counts, called at checkpoints the processor fixes and the guard cannot influence. The boundary defines *when* it asks; what is measured, in what units, by what probe, is the guard's and change two's. A guard that measures nothing conforms, and is the default.
 
 `ProgressCallback` is synchronous and returns nothing. A callback that raises rejects the release — progress is part of the contract, not a best-effort notification, because a DAG that silently loses progress cannot tell a stalled release from a slow one.
 
@@ -54,7 +67,7 @@ An architecture test asserts both directions, parsing the AST and stripping docs
 
 ## Data and contract changes
 
-Four new types and one function. No existing type changes. `parse_dallas_appraisal_csv` is untouched, and a test asserts the release package does not import it (D6).
+Six new frozen types, one typed exception, four protocols, and one function. No existing type changes. `parse_dallas_appraisal_csv` is untouched, and a test asserts the release package does not import it (D6).
 
 ## Alternatives considered
 
@@ -66,12 +79,11 @@ Four new types and one function. No existing type changes. `parse_dallas_apprais
 
 ## Decisions and assumptions
 
-D1 through D8 are issue #43's; D9 through D11 are proposed here and stated in the proposal.
+D1 through D8 are issue #43's; D9 through D15 are proposed here and stated in the proposal.
 
-Assumptions, both checkable at implementation time:
+`resource_limit_exceeded` is reachable here without measuring anything, because the guard protocol makes reachability a property of the *contract* rather than of a measurement: a test guard that raises on its second call provokes the code deterministically. That is the difference between the current D11 and the earlier draft, which described a "caller-supplied bound" with no resource, units, probe, cadence, or failure mechanism and then called its sufficiency an assumption.
 
-- A caller-supplied resource bound is enough to make `resource_limit_exceeded` reachable without measuring RSS. If it is not, the code stays unreachable until change two, and that would be a finding rather than an acceptable gap.
-- SQLite's `UNIQUE` constraint and transaction semantics are sufficient for the test stage's duplicate rejection and rollback. `sqlite3` is standard library, so this adds no dependency.
+One assumption remains, checkable at implementation time: SQLite's `UNIQUE` constraint and transaction semantics are sufficient for the test stage's duplicate rejection and rollback. `sqlite3` is standard library, so this adds no dependency.
 
 ## Unresolved decisions
 
@@ -79,7 +91,11 @@ Assumptions, both checkable at implementation time:
 
 ## Risks and compatibility
 
-The boundary is new, so nothing existing changes behaviour and the 52 Dallas cases are untouched. The risk is subtler: a conformance suite that only checks *shape* would pass a reader that materializes its whole member, which is precisely the defect this change exists to prevent. The suite therefore drives readers with input that cannot be consumed eagerly, and asserts on observed peak retention rather than on types alone.
+The boundary is new, so nothing existing changes behaviour and the 52 Dallas cases are untouched. The risk is subtler: a conformance suite that only checks *shape* would pass a reader that materializes its whole member, which is precisely the defect this change exists to prevent.
+
+The suite therefore drives a candidate reader from a **guarded pull source** that records the interleaving of pulls and writes, and requires that when row *n* is written the source has been pulled at most *n* times. An eager reader pulls to exhaustion before the first write and fails on any release of two or more rows. A county enters through a **reader factory** taking that source, so a real county reader is exercised by the same harness as a synthetic one rather than being asserted about in prose.
+
+This is deliberately structural. An earlier draft proposed a generator that "would exhaust memory if consumed eagerly", which depends on the resource behaviour this change defers to change two and would not fail deterministically. Read-ahead is observable without measuring memory, and observing it that way keeps the two changes genuinely separable.
 
 The second risk is the test stage becoming the specification by accident. It exists to prove the conformance suite has at least one passing implementation; the suite is the contract, and a production stage that satisfies it is bootstrap task 3.4's work.
 
@@ -89,9 +105,13 @@ Protocols and outcome first, then the processor, then the conformance suite and 
 
 ## Testing strategy
 
-Conformance tests prove the D2 order by construction: a layout failure with a stage that records whether it was ever opened, and a row failure after the first staged write with a stage that records whether `abort` ran. D3's three rejection points each get a test — before staging, after the first staged record, and during finalize and commit.
+Conformance tests prove the D2 order by construction: a layout failure with a stage that records whether it was ever opened, and a row failure after the first staged write with a stage that records whether `abort` ran. A pre-stage failure additionally asserts `abort` was *not* called, which is the lifecycle rule the earlier draft contradicted.
 
-Progress tests cover the boundary cases D8 names specifically: an exact multiple of 100,000, and an empty release, both of which must still emit exactly one final event.
+D3's rejection points each get a test — before staging, after the first staged record, during finalize, and during commit. The failure-to-code mapping gets one test per row of its table, so no phase can quietly borrow another's code.
+
+Progress tests cover the boundary cases D8 names specifically: an exact multiple of 100,000, and an empty release, both of which must still emit exactly one final event, the empty one populated entirely from `PreparedRelease`. A separate test raises from the *final* callback on a small release and asserts `finalize` and `commit` were never called — the case that distinguishes a progress contract that can prevent a commit from one that merely reports after it.
+
+Guard tests assert the checkpoint sequence exactly: after the stage opens, at each 100,000-row boundary, and once at end-of-input, with two runs over one member producing identical sequences.
 
 Privacy tests assert the outcome carries no exception text, no complete row, no arbitrary value, and no host-local path, driven by a stage and a reader that raise with identifiable secrets in their messages, so a leak fails rather than being argued about.
 
