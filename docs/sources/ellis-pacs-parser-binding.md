@@ -129,7 +129,7 @@ or assessed value are rejected with `conflicting_account_facts`.
 The closed vocabulary is `invalid_encoding`, `unexpected_bom`, `record_width_mismatch`,
 `unsupported_layout_fingerprint`, `undocumented_trailing_region`, `unsupported_scenario_label`,
 `blank_required_key`, `invalid_account_id`, `invalid_owner_sequence`,
-`invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`,
+`invalid_child_sequence`, `invalid_monetary_value`, `invalid_ownership_percentage`, `invalid_tax_year`, `tax_year_mismatch`,
 `invalid_source_text`, `duplicate_owner_row`, `conflicting_account_facts`, `core_child_orphaned`, and
 `legal_child_orphaned`. Every code in it is reachable, proved by driving inputs through the public entry points rather than by comparing the vocabulary with itself.
 
@@ -145,12 +145,32 @@ which reports `release_accepted` false with `accepted_row_count` zero, including
 as the Denton document explains. At most 100 diagnostics are retained,
 the total is preserved, and truncation is marked deterministically.
 
-## Interim Output
+## Output
 
-The public surface is a **validator, not a row producer**, matching Denton. Issue #21's acceptance
-criteria name a typed Ellis record and a vendor-neutral record, and both require the contracts owned
-by [Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43), which do not exist
-yet. Typed record output is deferred rather than duplicated into a county-local substitute.
+Each member kind has a validator and a materializing sibling over one traversal, matching Denton.
+`materialize_property_member` and `materialize_child_member` return the same report their
+validators return, alongside typed `EllisSourceRecord` and `EllisChildRecord` rows, and
+`convert_ellis_record` converts a property record into the vendor-neutral `AppraisalSourceRecord`
+that [Issue #43](https://github.com/TruPryce/property-tax-data-platform/issues/43) decision D7 owns
+— now implemented in
+[the shared adapter source contracts](shared-adapter-source-contracts.md).
+
+Materialization is atomic with validation: a release rejected for any blocking reason yields zero
+records, never a partial set. That includes a scenario roll, because the label gate runs before any
+record is read.
+
+Records keep the grain the source published. A property record is one `(prop_id, owner_sequence)`
+owner row and conversion preserves it, so an allocation stays two records rather than one account
+figure. Only the documented Ellis monetary facts and the ownership percentage normalize to
+`Decimal`, and the tax year to `int`; anything else keeps the text it arrived as, because
+normalizing an undocumented field would assert a type the contract never approved.
+
+Every record carries the release label it was accepted under. A mineral-only scenario roll is not
+certified current state, and a record that did not carry its label could not be told apart from one
+that was.
+
+No county-local substitute for a shared contract exists, and that prohibition has not lifted — only
+the wait for the real thing has ended.
 
 `EllisValidationReport` carries the parser contract version, an acceptance flag, the layout
 fingerprint and version, the accepted release label, the accepted row and owner-row counts, the

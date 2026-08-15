@@ -96,6 +96,12 @@ The Ellis adapter MUST parse one already-selected, caller-supplied member and MU
 
 The adapter SHALL also validate child members against a caller-supplied set of accepted `prop_id` values, applying the same label, fingerprint, control-character, and width gates, rejecting an unresolved core appraisal child with `core_child_orphaned` and recording the non-fatal `legal_child_orphaned` for an unresolved legal child.
 
+A child record's `child_sequence` SHALL be required and one to four ASCII digits. A blank `child_sequence` SHALL be rejected with `blank_required_key` and one outside that grammar with `invalid_child_sequence`, which names the child field rather than borrowing the owner code: the two sequences are separate facts even where their grammars agree. Its `child_value` MAY be blank as source absence, and a nonblank value SHALL match `[0-9]+(?:\.[0-9]{1,2})?`, parse with `decimal.Decimal`, and fall from zero through `10**26 - 1` inclusive; a violation SHALL be rejected with `invalid_monetary_value`. Empty text after trimming SHALL be the only null.
+
+An unresolved legal child SHALL still be counted and materialized. A warning SHALL NOT delete the row it warns about, and dropping it would lose a child the county published from a release that was accepted. An unresolved core child needs no separate rule: its code is blocking, and a rejected release publishes no records at all.
+
+A validator and its materializing sibling SHALL share one traversal, for property members and child members alike, so that a record exists for exactly the rows the report counted as accepted and the two can never disagree about what a valid Ellis row is.
+
 `prop_id` SHALL be the Ellis account identifier, trimmed, 1 through 32 visible ASCII characters, preserved as text and never parsed numerically. `owner_sequence` SHALL be one to four ASCII digits. `(prop_id, owner_sequence)` SHALL be the physical owner-row grain, preserved distinctly with no deduplication, no summing, and no arbitrary-row selection, and no account-level roll-up SHALL be derived.
 
 Two records sharing both key parts SHALL be rejected with `duplicate_owner_row`. Records sharing `prop_id` that disagree on a declared account-level fact SHALL be rejected with `conflicting_account_facts`.
@@ -158,7 +164,11 @@ Owner names, mailing addresses, and situs addresses SHALL be classified as sensi
 
 ### Requirement: Expose the bounded Ellis validation result
 
-Until the shared adapter contracts owned by Issue #43 are accepted and implemented, the interim scope SHALL be a validator. Its complete public surface SHALL be `classify_layout_package`, `validate_property_member`, and `validate_child_member`, the latter two each returning one `EllisValidationReport`.
+The shared adapter contracts owned by Issue #43 are accepted and implemented, so the scope is no longer validation alone. The public surface SHALL be `classify_layout_package`, `validate_property_member` and `validate_child_member` each returning one `EllisValidationReport`, `materialize_property_member` and `materialize_child_member` each returning that same report alongside typed records, and `convert_ellis_record`. The adapter SHALL NOT define a county-local substitute for `SourceNativeValue`, `SourceProvenance`, or `AppraisalSourceRecord`; that prohibition does not lift with the wait.
+
+Materialization SHALL be atomic with validation: a release rejected for any blocking reason SHALL yield zero records, never a partial set, including when other rows in the same member were valid. Every record SHALL carry the release label it was accepted under, because a record without it could not be distinguished from one accepted under a different label.
+
+Only the documented Ellis monetary facts and the ownership percentage SHALL normalize to `decimal.Decimal`, and the tax year to `int`. Any other value SHALL retain its source text, because normalizing an undocumented field would assert a type this contract has not approved.
 
 `EllisValidationReport` SHALL be a frozen dataclass with exactly these fields: `parser_contract_version: int`, `release_accepted: bool`, `layout_fingerprint: str`, `layout_version: str`, `release_label: str`, `accepted_row_count: int`, `owner_row_count: int`, `trailing_region_bytes: int`, `diagnostics: tuple[EllisDiagnostic, ...]`, `total_diagnostic_count: int`, and `diagnostics_truncated: bool`.
 
