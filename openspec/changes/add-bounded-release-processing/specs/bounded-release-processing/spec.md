@@ -467,15 +467,18 @@ The boundary SHALL provide a `ReleaseNotice` channel separate from `ReleaseDiagn
 | `code` | `str` | 1 through 64 characters matching `[a-z][a-z0-9_]*` |
 | `field_name` | `str \| None` | an approved field name, never a value |
 | `physical_row_number` | `int \| None` | one-based when present |
-| `layout_fingerprint` | `str \| None` | the prepared fingerprint when one exists |
 
 Those SHALL be the whole type, so a notice has nowhere to put a complete row, an arbitrary source value, exception text, a credential, an identity, an address, or a host-local path — the same prohibition a diagnostic carries.
 
-A notice's lineage SHALL agree with the carrier it arrived on. A notice whose `layout_fingerprint` is not `None` SHALL equal the prepared release's, and a notice carried on a row envelope SHALL have `physical_row_number` equal to that envelope's. A disagreement SHALL reject the row with `record_rejected`, and a disagreement on a layout notice SHALL reject the release with `layout_rejected`. Neither SHALL be corrected. An accepted outcome carrying a notice that names a fingerprint or a row it did not come from is false lineage, and false lineage on an accepted release is worse than a rejected one, because nothing downstream has cause to doubt it.
+A notice SHALL NOT carry a layout fingerprint. Every carrier exists only after `prepare()` returned, so the fingerprint is a property of the release rather than of each notice, and the outcome already carries it once. Repeating it per notice would create a disagreement that has to be checked and a `None` that has to be interpreted, for provenance the outcome already establishes.
 
-Each carrier SHALL itself be bounded: `PreparedRelease.notices` and `SourceRowEnvelope.notices` SHALL each hold at most `MAX_CARRIER_NOTICES`, which is `100`. Supplying more SHALL raise `ValueError` at construction, because a reader handing over an unbounded tuple is a defect in trusted code rather than something a source did — the same treatment a malformed `PacsLayout` receives. The outcome's 100-entry retention applies *after* receipt and cannot bound what a carrier already materialized.
+A notice carried on a row envelope SHALL have `physical_row_number` equal to that envelope's, and a disagreement SHALL reject the row with `record_rejected` and SHALL NOT be corrected. An accepted outcome carrying a notice that names a row it did not come from is false lineage, and false lineage on an accepted release is worse than a rejected one, because nothing downstream has cause to doubt it.
 
-Every notice received SHALL count toward `total_notice_count`, whether retained or not, so the preserved total describes the release rather than the retention window.
+Each carrier SHALL bound what it **retains** without rejecting what it observed. `PreparedRelease` and `SourceRowEnvelope` SHALL each carry at most `MAX_CARRIER_NOTICES` retained notices, which is `100`, alongside a preserved total of everything observed and a truncation flag, on the same terms the outcome uses. A carrier SHALL NOT raise on overflow.
+
+Raising would make a non-fatal notice fatal, which contradicts the rule that a notice never rejects: an overflow inside `prepare()` would surface as `layout_rejected` and one inside iteration as `record_rejected`. That is not hypothetical. Dallas emits one `extra_columns_present` per unknown header and its accepted contract sets no limit on how many a release may have, so a release with 101 extra columns would be refused for having too many warnings.
+
+The processor SHALL sum every carrier's preserved total into the outcome's `total_notice_count`, whether retained or not, so the total describes the release rather than any retention window.
 
 A notice code SHALL be a caller-supplied stable identifier of 1 through 64 characters matching `[a-z][a-z0-9_]*`. The boundary SHALL NOT enumerate notice codes, because they are county vocabulary and each county's is closed by its own contract; the accepted Dallas code `extra_columns_present` is an example, not a boundary member. The bound is what keeps a county from putting free text where a code belongs.
 
@@ -495,23 +498,24 @@ At most 100 notices SHALL be retained per release, the total SHALL be preserved,
 - **THEN** the release is accepted and the records are committed
 - **THEN** the notice appears on the outcome, and no diagnostic does
 
-#### Scenario: A notice may not claim lineage it does not have
-- **GIVEN** a layout notice whose `layout_fingerprint` differs from the prepared release's
-- **WHEN** the processor runs
-- **THEN** the release is rejected with `layout_rejected`
-- **THEN** the mismatch is not corrected to match
-
 #### Scenario: A row notice may not claim another row
 - **GIVEN** an envelope at physical row 7 carrying a notice reporting row 6
 - **WHEN** the processor runs
 - **THEN** the row is rejected with `record_rejected`
 - **THEN** no accepted outcome carries a notice naming a row it did not come from
 
-#### Scenario: A carrier cannot hand over an unbounded tuple
-- **GIVEN** a `PreparedRelease` or a `SourceRowEnvelope` constructed with 101 notices
-- **WHEN** it is constructed
-- **THEN** `ValueError` is raised, because the retention cap applies only after receipt
-- **THEN** the tuple is not silently truncated
+#### Scenario: Overflowing notices are truncated, never fatal
+- **GIVEN** a layout observing 150 notices, as a Dallas release with 150 unknown columns would
+- **WHEN** the carrier is constructed and the processor runs
+- **THEN** the carrier retains 100, preserves a total of 150, and marks truncation
+- **THEN** no `ValueError` is raised and the release is still accepted
+- **THEN** the outcome's `total_notice_count` reflects all 150
+
+#### Scenario: A notice carries no fingerprint of its own
+- **GIVEN** any notice on an accepted outcome
+- **WHEN** its fields are enumerated
+- **THEN** it declares no layout fingerprint
+- **THEN** the outcome carries the fingerprint once, for every notice on it
 
 #### Scenario: A notice cannot carry free text
 - **GIVEN** a notice code of `Extra Columns!` or one exceeding 64 characters
