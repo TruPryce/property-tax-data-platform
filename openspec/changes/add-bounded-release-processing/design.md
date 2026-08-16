@@ -20,7 +20,7 @@ One new package, `property_tax_adapters.release`:
 release/protocols.py    PreparedReader, ReleaseStage, ProgressCallback, ResourceGuard
 release/records.py      PreparedRelease, SourceRowEnvelope
 release/outcome.py      ReleaseOutcome, ReleaseDiagnostic, ReleaseDiagnosticCode,
-                        DuplicateRecordKey
+                        ReleaseNotice, DuplicateRecordKey
 release/progress.py     ReleaseProgressEvent
 release/processor.py    process_release(reader, stage, ...) -> ReleaseOutcome
 ```
@@ -88,7 +88,7 @@ Six new frozen types, one typed exception, four protocols, and one function. No 
 
 ## Decisions and assumptions
 
-D1 through D8 are issue #43's; D9 through D25 are proposed here and stated in the proposal.
+D1 through D8 are issue #43's; D9 through D26 are proposed here and stated in the proposal.
 
 `resource_limit_exceeded` is reachable here without measuring anything, because the guard protocol makes reachability a property of the *contract* rather than of a measurement: a test guard that raises on its second call provokes the code deterministically. That is the difference between the current D11 and the earlier draft, which described a "caller-supplied bound" with no resource, units, probe, cadence, or failure mechanism and then called its sufficiency an assumption.
 

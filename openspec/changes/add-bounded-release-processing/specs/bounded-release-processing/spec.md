@@ -377,7 +377,10 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHAL
 
 | field | type | invariant |
 | --- | --- | --- |
-| `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected`; `accepted` exactly when `total_diagnostic_count` is zero |
+| `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected`; `accepted` exactly when `total_diagnostic_count` is zero. Notices do not affect it |
+| `notices` | `tuple[ReleaseNotice, ...]` | at most 100 entries, in encounter order |
+| `total_notice_count` | `int` | not negative; `len(notices)` equals `min(total_notice_count, 100)` |
+| `notices_truncated` | `bool` | true exactly when `total_notice_count` exceeds 100 |
 | `boundary_contract_version` | `int` | always populated; equals `BOUNDARY_CONTRACT_VERSION`, which is `1` |
 | `parser_contract_version` | `int \| None` | `None` unless `prepare()` returned |
 | `layout_fingerprint` | `str \| None` | `None` unless `prepare()` returned |
@@ -391,7 +394,9 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHAL
 
 An underspecified outcome is one every implementation renders differently, which is the opposite of a contract.
 
-Disposition is not independent of the diagnostics. Every code in this vocabulary is a failure code — unlike a county vocabulary, this one has no non-fatal member — so a release is accepted exactly when it produced no diagnostic. Leaving the two free of each other would permit an accepted outcome carrying `stage_commit_failed`, which asserts two contradictory things at once. The disposition is a closed enumeration rather than a `bool` or a free string so a third state cannot be invented; the counts are separate named integers for the reason D18 gives; and the truncation flag is derivable from the total, so stating the relationship keeps the two from disagreeing.
+Disposition is not independent of the diagnostics. Every code in the **diagnostic** vocabulary is a failure code, so a release is accepted exactly when it produced no diagnostic. Leaving the two free of each other would permit an accepted outcome carrying `stage_commit_failed`, which asserts two contradictory things at once.
+
+Notices are the separate channel that makes this rule survivable. County contracts already require warnings on accepted releases — the accepted Dallas contract requires unknown columns to be *accepted* and reported with `extra_columns_present` — and with only one channel a future Dallas reader would have to reject a valid layout or discard a required warning. Notices carry that reporting without touching the disposition. The disposition is a closed enumeration rather than a `bool` or a free string so a third state cannot be invented; the counts are separate named integers for the reason D18 gives; and the truncation flag is derivable from the total, so stating the relationship keeps the two from disagreeing.
 
 #### Scenario: The declared schema is exactly this
 - **GIVEN** `ReleaseOutcome`
@@ -416,7 +421,7 @@ Disposition is not independent of the diagnostics. Every code in this vocabulary
 #### Scenario: The disposition follows from the diagnostics
 - **GIVEN** an accepted outcome and a rejected one
 - **WHEN** each is inspected
-- **THEN** the accepted outcome carries no diagnostic at all
+- **THEN** the accepted outcome carries no diagnostic at all, though it may carry notices
 - **THEN** the rejected outcome carries at least one
 - **THEN** no outcome is accepted while carrying a failure code, and none is rejected while carrying none
 
@@ -450,6 +455,42 @@ D12 separates physical rows from staged records, so a single count could not hav
 - **WHEN** the processor runs
 - **THEN** `committed_record_count` equals `staged_record_count`
 - **THEN** `rejected_row_count` is zero
+
+### Requirement: Carry non-fatal source notices without rejecting the release
+
+The boundary SHALL provide a `ReleaseNotice` channel separate from `ReleaseDiagnostic`. A notice SHALL NOT affect the disposition, SHALL NOT reject a release, and SHALL NOT be counted in `total_diagnostic_count`.
+
+A `ReleaseNotice` SHALL carry only a stable code, and where applicable an approved field name, a one-based physical row number, and a layout fingerprint. Those SHALL be the whole type, so a notice has nowhere to put a complete row, an arbitrary source value, exception text, a credential, an identity, an address, or a host-local path — the same prohibition a diagnostic carries.
+
+A notice code SHALL be a caller-supplied stable identifier of 1 through 64 characters matching `[a-z][a-z0-9_]*`. The boundary SHALL NOT enumerate notice codes, because they are county vocabulary and each county's is closed by its own contract; the accepted Dallas code `extra_columns_present` is an example, not a boundary member. The bound is what keeps a county from putting free text where a code belongs.
+
+Notices SHALL be reportable at two points: on `PreparedRelease`, for an observation about the layout as a whole, and on `SourceRowEnvelope`, for one about a particular row. Dallas's is layout-level, being a fact about the header set rather than any row.
+
+At most 100 notices SHALL be retained per release, the total SHALL be preserved, and truncation SHALL be marked, on the same terms as diagnostics: the retained entries are the first 100 in encounter order, and `len(notices)` equals `min(total_notice_count, 100)`.
+
+#### Scenario: A warning does not reject an accepted release
+- **GIVEN** a release whose layout carries one notice and whose rows all pass
+- **WHEN** the processor runs
+- **THEN** the disposition is `accepted`
+- **THEN** `total_diagnostic_count` is zero and the notice is carried on the outcome
+
+#### Scenario: The accepted Dallas warning survives the boundary
+- **GIVEN** a reader reporting `extra_columns_present` as a layout notice, as the accepted Dallas contract requires for unknown columns
+- **WHEN** the processor runs an otherwise valid release
+- **THEN** the release is accepted and the records are committed
+- **THEN** the notice appears on the outcome, and no diagnostic does
+
+#### Scenario: A notice cannot carry free text
+- **GIVEN** a notice code of `Extra Columns!` or one exceeding 64 characters
+- **WHEN** the notice is constructed
+- **THEN** `ValueError` is raised
+- **THEN** the code is not truncated or normalized into an acceptable one
+
+#### Scenario: Notices truncate on the same terms as diagnostics
+- **GIVEN** a release producing 150 notices and no diagnostic
+- **WHEN** the outcome is inspected
+- **THEN** exactly 100 are retained in encounter order and truncation is marked
+- **THEN** the disposition is still `accepted`
 
 ### Requirement: Emit a bounded, deterministic progress contract
 
