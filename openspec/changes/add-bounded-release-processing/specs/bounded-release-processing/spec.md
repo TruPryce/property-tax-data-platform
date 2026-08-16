@@ -4,7 +4,17 @@
 
 The production release boundary SHALL be a single-pass, context-managed county reader plus a caller-supplied atomic release stage, provided as `typing.Protocol` classes in `property_tax_adapters.release`.
 
-A prepared reader SHALL validate its complete layout or schema before iteration begins and SHALL then expose `PreparedRelease` metadata carrying the jurisdiction code, release identifier, source member name, layout fingerprint, and parser contract version. That metadata SHALL be readable without reading any record, so an empty release still has a complete identity.
+`PreparedReader` SHALL declare three operations and no fourth:
+
+| operation | obligation | failure code |
+| --- | --- | --- |
+| `__enter__` / `__exit__` | open and close the immutable source | `source_open_failed` / `source_close_failed` |
+| `prepare() -> PreparedRelease` | validate the complete layout or schema and return the release metadata | `layout_rejected` |
+| `__iter__` | yield one `SourceRowEnvelope` per physical row | `record_rejected` |
+
+`prepare()` is a named method rather than an implicit phase, because the lifecycle and the diagnostic table already distinguish opening a source from validating its layout and assign the two different codes. Without a call to attribute each failure to, an implementation could not decide between `source_open_failed` and `layout_rejected` except by guessing where in `__enter__` the exception arose.
+
+`prepare()` SHALL be called exactly once, after `__enter__` and before the first iteration, and SHALL return metadata carrying the jurisdiction code, release identifier, source member name, layout fingerprint, and parser contract version. It SHALL NOT read a record, so an empty release still has a complete identity.
 
 Iteration SHALL yield one `SourceRowEnvelope` per **physical row**, carrying the one-based physical row number, the zero or more `AppraisalSourceRecord` values that row produced, and a bounded `rejected` indicator with an optional approved field name.
 
@@ -299,7 +309,7 @@ A diagnostic SHALL carry only its stable code and, where applicable, an approved
 
 A `source_open_failed` outcome carries neither: the reader never opened. A `layout_rejected` outcome carries neither either, because layout validation is part of preparation and a failure there means preparation did not complete — whatever a reader computed internally before failing is not a prepared release and SHALL NOT be reported as one. An earlier draft said such an outcome "may or may not" carry a fingerprint, which would have permitted exactly the half-populated outcome this rule forbids. Declaring these fields as always-present would force an implementation to invent a placeholder, and a fabricated fingerprint is worse than an absent one — it would be indistinguishable from a real one in a diagnostic.
 
-The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, which is already optional for this reason.
+The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHALL be enforced rather than merely permitted: a diagnostic raised before `prepare()` returned SHALL carry `None`, and every diagnostic raised afterwards SHALL carry the prepared fingerprint. Leaving it `None` throughout would satisfy an optional type while discarding the provenance the field exists to carry.
 
 #### Scenario: A reader that never opened reports no fingerprint
 - **GIVEN** a reader whose `__enter__` raises
@@ -315,11 +325,55 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, which is al
 - **THEN** `layout_fingerprint` and `parser_contract_version` are `None` in both
 - **THEN** neither outcome is half-populated
 
+#### Scenario: A diagnostic carries the fingerprint once one exists
+- **GIVEN** a reader that prepares successfully and then rejects a row
+- **WHEN** the processor runs
+- **THEN** the `record_rejected` diagnostic carries the prepared layout fingerprint
+- **THEN** a diagnostic from a failure before `prepare()` returned carries `None` instead
+
 #### Scenario: A prepared release populates both
 - **GIVEN** a reader that prepares successfully and then fails on a later row
 - **WHEN** the processor runs
 - **THEN** `layout_fingerprint` and `parser_contract_version` carry the prepared values
 - **THEN** they are not cleared by the later failure
+
+### Requirement: Fix the outcome schema exactly
+
+`ReleaseOutcome` SHALL be a frozen dataclass whose fields, types, and invariants are exactly these:
+
+| field | type | invariant |
+| --- | --- | --- |
+| `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected` |
+| `boundary_contract_version` | `int` | always populated, positive |
+| `parser_contract_version` | `int \| None` | `None` unless `prepare()` returned |
+| `layout_fingerprint` | `str \| None` | `None` unless `prepare()` returned |
+| `diagnostics` | `tuple[ReleaseDiagnostic, ...]` | at most 100 entries, in encounter order |
+| `total_diagnostic_count` | `int` | not less than `len(diagnostics)` |
+| `diagnostics_truncated` | `bool` | true exactly when `total_diagnostic_count` exceeds 100 |
+| `physical_rows_processed` | `int` | not negative |
+| `staged_record_count` | `int` | not negative |
+| `committed_record_count` | `int` | zero unless `disposition` is `accepted`; equal to `staged_record_count` when it is |
+| `rejected_row_count` | `int` | not negative; zero when `disposition` is `accepted` |
+
+An underspecified outcome is one every implementation renders differently, which is the opposite of a contract. The disposition is a closed enumeration rather than a `bool` or a free string so a third state cannot be invented; the counts are separate named integers for the reason D18 gives; and the truncation flag is derivable from the total, so stating the relationship keeps the two from disagreeing.
+
+#### Scenario: The declared schema is exactly this
+- **GIVEN** `ReleaseOutcome`
+- **WHEN** its fields and annotations are enumerated
+- **THEN** they are exactly the eleven above, with those types
+- **THEN** the type is frozen and refuses attribute assignment after construction
+
+#### Scenario: The invariants hold together
+- **GIVEN** a constructed outcome
+- **WHEN** its counts and flags are compared
+- **THEN** `diagnostics_truncated` is true exactly when the total exceeds 100
+- **THEN** `committed_record_count` is zero unless the disposition is `accepted`
+- **THEN** `rejected_row_count` is zero when the disposition is `accepted`
+
+#### Scenario: The disposition admits no third state
+- **GIVEN** `ReleaseDisposition`
+- **WHEN** its members are enumerated
+- **THEN** there are exactly two, `accepted` and `rejected`
 
 ### Requirement: Define exactly what the outcome counts
 
