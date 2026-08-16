@@ -77,7 +77,16 @@ An architecture test asserts each direction separately, parsing the AST and stri
 
 ## Data and contract changes
 
-Six new frozen types, one typed exception, four protocols, and one function. No existing type changes. `parse_dallas_appraisal_csv` is untouched, and a test asserts the release package does not import it (D6).
+The new surface, listed rather than counted, because a count of it has now drifted twice:
+
+- **Frozen types**: `PreparedRelease`, `SourceRowEnvelope`, `NoticeSet`, `ReleaseNotice`, `ReleaseDiagnostic`, `ReleaseOutcome`, `ReleaseProgressEvent`
+- **Enumerations**: `ReleaseDiagnosticCode`, `ReleaseDisposition`
+- **Exception**: `DuplicateRecordKey`
+- **Protocols**: `PreparedReader`, `ReleaseStage`, `ProgressCallback`, `ResourceGuard`
+- **Function**: `process_release`
+- **Constants**: `BOUNDARY_CONTRACT_VERSION`, `PROGRESS_CONTRACT_VERSION`, `MAX_CARRIER_NOTICES`
+
+No existing type changes. `parse_dallas_appraisal_csv` is untouched, and a test asserts the release package does not import it (D6).
 
 ## Alternatives considered
 

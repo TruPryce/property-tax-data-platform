@@ -532,6 +532,12 @@ At most 100 notices SHALL be retained per release, the total SHALL be preserved,
 - **THEN** the set never holds more than 100 at any point during construction
 - **THEN** a construction that built the full sequence before trimming fails this
 
+#### Scenario: A notice set cannot be reached into
+- **GIVEN** a constructed `NoticeSet`
+- **WHEN** a caller tries to append to its retained notices or assign to any field
+- **THEN** the operation raises
+- **THEN** the set holds no reference to the iterable it was built from, so a discarded observation is not reachable through the set that counted it
+
 #### Scenario: A notice carries no fingerprint of its own
 - **GIVEN** any notice on an accepted outcome
 - **WHEN** its fields are enumerated
