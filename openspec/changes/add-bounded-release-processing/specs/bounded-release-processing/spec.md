@@ -20,8 +20,12 @@ Every other callable on the boundary SHALL likewise declare an exact signature, 
 
 | callable | signature |
 | --- | --- |
+| `PreparedReader.__enter__` | `() -> PreparedReader` |
+| `PreparedReader.__exit__` | `(exc_type: type[BaseException] \| None, exc: BaseException \| None, traceback: TracebackType \| None) -> None` |
 | `PreparedReader.prepare` | `() -> PreparedRelease` |
 | `PreparedReader.__iter__` | `() -> Iterator[SourceRowEnvelope]` |
+| `ReleaseStage.__enter__` | `() -> ReleaseStage` |
+| `ReleaseStage.__exit__` | `(exc_type: type[BaseException] \| None, exc: BaseException \| None, traceback: TracebackType \| None) -> None` |
 | `ReleaseStage.write` | `(records: Sequence[AppraisalSourceRecord]) -> None` |
 | `ReleaseStage.finalize` | `() -> None` |
 | `ReleaseStage.abort` | `() -> None` |
@@ -32,9 +36,13 @@ Every other callable on the boundary SHALL likewise declare an exact signature, 
 
 `write` SHALL take one physical row's records together, because a row is the unit that is accepted or rejected: splitting it across calls would let a stage hold half a row when the row is refused. An envelope with no records SHALL NOT be written at all.
 
+A `write` call SHALL be all-or-nothing. If it raises, the stage SHALL contain none of that call's records, not the prefix it managed before failing. Otherwise a stage could hold part of a row while the processor counted none of it, and `staged_record_count` would describe neither what was attempted nor what is present. This is a per-call guarantee and is independent of the release-level atomicity that `abort` and `commit` provide.
+
 `process_release` SHALL take only keyword arguments, so a caller cannot transpose the reader and the stage, and both optional collaborators SHALL default to absent.
 
-`__exit__` on either context manager SHALL NOT suppress an exception. A suppressing exit would hide a failure the processor must map to a code.
+`__enter__` SHALL return the entered object itself, so a caller holds one identity for the resource it opened rather than a proxy whose lifetime it does not control.
+
+`__exit__` SHALL be annotated as returning `None`, not `bool`. A suppressing exit would hide a failure the processor must map to a code, and a `None` return is always falsy, so the prohibition is carried by the signature rather than left to prose an implementation could overlook.
 
 Iteration SHALL yield one `SourceRowEnvelope` per **physical row**, carrying the one-based physical row number, the zero or more `AppraisalSourceRecord` values that row produced, and a bounded `rejected` indicator with an optional approved field name.
 
@@ -223,6 +231,12 @@ Permitting both points is deliberate: requiring detection at `write` would exclu
 
 This change SHALL provide a stage conformance suite, and a file-backed standard-library test stage, proving duplicate rejection and rollback without introducing production persistence or a new dependency, using a caller-supplied directory, an explicit ceiling, and cleanup on success, failure, and retry.
 
+#### Scenario: A failed write leaves none of its row staged
+- **GIVEN** a stage that accepts the first record of a three-record row and then raises
+- **WHEN** the processor runs and the release is aborted
+- **THEN** the stage contains none of that row's records, not one of them
+- **THEN** `staged_record_count` does not count a partially written row
+
 #### Scenario: A duplicate is distinguished from a write failure
 - **GIVEN** a stage raising `DuplicateRecordKey` for a repeated key and a different exception for a disk failure
 - **WHEN** the processor runs against each
@@ -363,7 +377,7 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHAL
 
 | field | type | invariant |
 | --- | --- | --- |
-| `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected` |
+| `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected`; `accepted` exactly when `total_diagnostic_count` is zero |
 | `boundary_contract_version` | `int` | always populated; equals `BOUNDARY_CONTRACT_VERSION`, which is `1` |
 | `parser_contract_version` | `int \| None` | `None` unless `prepare()` returned |
 | `layout_fingerprint` | `str \| None` | `None` unless `prepare()` returned |
@@ -375,7 +389,9 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHAL
 | `committed_record_count` | `int` | zero unless `disposition` is `accepted`; equal to `staged_record_count` when it is |
 | `rejected_row_count` | `int` | not negative; zero when `disposition` is `accepted` |
 
-An underspecified outcome is one every implementation renders differently, which is the opposite of a contract. The disposition is a closed enumeration rather than a `bool` or a free string so a third state cannot be invented; the counts are separate named integers for the reason D18 gives; and the truncation flag is derivable from the total, so stating the relationship keeps the two from disagreeing.
+An underspecified outcome is one every implementation renders differently, which is the opposite of a contract.
+
+Disposition is not independent of the diagnostics. Every code in this vocabulary is a failure code — unlike a county vocabulary, this one has no non-fatal member — so a release is accepted exactly when it produced no diagnostic. Leaving the two free of each other would permit an accepted outcome carrying `stage_commit_failed`, which asserts two contradictory things at once. The disposition is a closed enumeration rather than a `bool` or a free string so a third state cannot be invented; the counts are separate named integers for the reason D18 gives; and the truncation flag is derivable from the total, so stating the relationship keeps the two from disagreeing.
 
 #### Scenario: The declared schema is exactly this
 - **GIVEN** `ReleaseOutcome`
@@ -396,6 +412,13 @@ An underspecified outcome is one every implementation renders differently, which
 - **THEN** `diagnostics_truncated` is true exactly when the total exceeds 100
 - **THEN** `committed_record_count` is zero unless the disposition is `accepted`
 - **THEN** `rejected_row_count` is zero when the disposition is `accepted`
+
+#### Scenario: The disposition follows from the diagnostics
+- **GIVEN** an accepted outcome and a rejected one
+- **WHEN** each is inspected
+- **THEN** the accepted outcome carries no diagnostic at all
+- **THEN** the rejected outcome carries at least one
+- **THEN** no outcome is accepted while carrying a failure code, and none is rejected while carrying none
 
 #### Scenario: The disposition admits no third state
 - **GIVEN** `ReleaseDisposition`
