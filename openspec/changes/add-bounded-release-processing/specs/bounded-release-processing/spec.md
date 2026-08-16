@@ -474,7 +474,21 @@ A notice SHALL NOT carry a layout fingerprint. Every carrier exists only after `
 
 A notice carried on a row envelope SHALL have `physical_row_number` equal to that envelope's, and a disagreement SHALL reject the row with `record_rejected` and SHALL NOT be corrected. An accepted outcome carrying a notice that names a row it did not come from is false lineage, and false lineage on an accepted release is worse than a rejected one, because nothing downstream has cause to doubt it.
 
-Each carrier SHALL bound what it **retains** without rejecting what it observed. `PreparedRelease` and `SourceRowEnvelope` SHALL each carry at most `MAX_CARRIER_NOTICES` retained notices, which is `100`, alongside a preserved total of everything observed and a truncation flag, on the same terms the outcome uses. A carrier SHALL NOT raise on overflow.
+Each carrier SHALL bound what it **retains** without rejecting what it observed, through one shared frozen `NoticeSet` whose fields, types, and invariants are exactly these:
+
+| field | type | invariant |
+| --- | --- | --- |
+| `retained` | `tuple[ReleaseNotice, ...]` | the first `MAX_CARRIER_NOTICES` in encounter order |
+| `total` | `int` | not negative; every notice observed, retained or not |
+| `truncated` | `bool` | true exactly when `total` exceeds `MAX_CARRIER_NOTICES` |
+
+`len(retained)` SHALL equal `min(total, MAX_CARRIER_NOTICES)`, which is `100`.
+
+`PreparedRelease.notices` and `SourceRowEnvelope.notices` SHALL each be a `NoticeSet`. One type rather than three loose fields on each carrier means the invariant is stated once and cannot drift between them.
+
+A `NoticeSet` SHALL be constructed from an iterable of observations consumed **incrementally**, retaining a notice only while fewer than `MAX_CARRIER_NOTICES` are held and counting every one. It SHALL NOT materialize its input first and truncate afterwards: a carrier that built a 150-entry tuple before trimming it to 100 would have already held what the bound exists to prevent, and on a release with many unknown columns that is the memory this change was written to bound. Peak retention SHALL therefore be `MAX_CARRIER_NOTICES` regardless of how many observations arrive.
+
+A carrier SHALL NOT raise on overflow.
 
 Raising would make a non-fatal notice fatal, which contradicts the rule that a notice never rejects: an overflow inside `prepare()` would surface as `layout_rejected` and one inside iteration as `record_rejected`. That is not hypothetical. Dallas emits one `extra_columns_present` per unknown header and its accepted contract sets no limit on how many a release may have, so a release with 101 extra columns would be refused for having too many warnings.
 
@@ -510,6 +524,13 @@ At most 100 notices SHALL be retained per release, the total SHALL be preserved,
 - **THEN** the carrier retains 100, preserves a total of 150, and marks truncation
 - **THEN** no `ValueError` is raised and the release is still accepted
 - **THEN** the outcome's `total_notice_count` reflects all 150
+
+#### Scenario: Retention is incremental, not trim-after-the-fact
+- **GIVEN** a generator yielding 10,000 notices, which records how many have been produced
+- **WHEN** a `NoticeSet` is constructed from it
+- **THEN** the generator is consumed to exhaustion so `total` is 10,000
+- **THEN** the set never holds more than 100 at any point during construction
+- **THEN** a construction that built the full sequence before trimming fails this
 
 #### Scenario: A notice carries no fingerprint of its own
 - **GIVEN** any notice on an accepted outcome

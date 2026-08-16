@@ -18,7 +18,8 @@ One new package, `property_tax_adapters.release`:
 
 ```
 release/protocols.py    PreparedReader, ReleaseStage, ProgressCallback, ResourceGuard
-release/records.py      PreparedRelease, SourceRowEnvelope, MAX_CARRIER_NOTICES
+release/records.py      PreparedRelease, SourceRowEnvelope, NoticeSet,
+                        MAX_CARRIER_NOTICES
 release/outcome.py      ReleaseOutcome, ReleaseDiagnostic, ReleaseDiagnosticCode,
                         ReleaseNotice, DuplicateRecordKey
 release/progress.py     ReleaseProgressEvent
