@@ -401,7 +401,7 @@ Notices are the separate channel that makes this rule survivable. County contrac
 #### Scenario: The declared schema is exactly this
 - **GIVEN** `ReleaseOutcome`
 - **WHEN** its fields and annotations are enumerated
-- **THEN** they are exactly the eleven above, with those types
+- **THEN** they are exactly the fourteen above, with those types
 - **THEN** the type is frozen and refuses attribute assignment after construction
 
 #### Scenario: Nothing is dropped below the cap
@@ -460,7 +460,22 @@ D12 separates physical rows from staged records, so a single count could not hav
 
 The boundary SHALL provide a `ReleaseNotice` channel separate from `ReleaseDiagnostic`. A notice SHALL NOT affect the disposition, SHALL NOT reject a release, and SHALL NOT be counted in `total_diagnostic_count`.
 
-A `ReleaseNotice` SHALL carry only a stable code, and where applicable an approved field name, a one-based physical row number, and a layout fingerprint. Those SHALL be the whole type, so a notice has nowhere to put a complete row, an arbitrary source value, exception text, a credential, an identity, an address, or a host-local path — the same prohibition a diagnostic carries.
+`ReleaseNotice` SHALL be a frozen type whose fields, types, and invariants are exactly these:
+
+| field | type | invariant |
+| --- | --- | --- |
+| `code` | `str` | 1 through 64 characters matching `[a-z][a-z0-9_]*` |
+| `field_name` | `str \| None` | an approved field name, never a value |
+| `physical_row_number` | `int \| None` | one-based when present |
+| `layout_fingerprint` | `str \| None` | the prepared fingerprint when one exists |
+
+Those SHALL be the whole type, so a notice has nowhere to put a complete row, an arbitrary source value, exception text, a credential, an identity, an address, or a host-local path — the same prohibition a diagnostic carries.
+
+A notice's lineage SHALL agree with the carrier it arrived on. A notice whose `layout_fingerprint` is not `None` SHALL equal the prepared release's, and a notice carried on a row envelope SHALL have `physical_row_number` equal to that envelope's. A disagreement SHALL reject the row with `record_rejected`, and a disagreement on a layout notice SHALL reject the release with `layout_rejected`. Neither SHALL be corrected. An accepted outcome carrying a notice that names a fingerprint or a row it did not come from is false lineage, and false lineage on an accepted release is worse than a rejected one, because nothing downstream has cause to doubt it.
+
+Each carrier SHALL itself be bounded: `PreparedRelease.notices` and `SourceRowEnvelope.notices` SHALL each hold at most `MAX_CARRIER_NOTICES`, which is `100`. Supplying more SHALL raise `ValueError` at construction, because a reader handing over an unbounded tuple is a defect in trusted code rather than something a source did — the same treatment a malformed `PacsLayout` receives. The outcome's 100-entry retention applies *after* receipt and cannot bound what a carrier already materialized.
+
+Every notice received SHALL count toward `total_notice_count`, whether retained or not, so the preserved total describes the release rather than the retention window.
 
 A notice code SHALL be a caller-supplied stable identifier of 1 through 64 characters matching `[a-z][a-z0-9_]*`. The boundary SHALL NOT enumerate notice codes, because they are county vocabulary and each county's is closed by its own contract; the accepted Dallas code `extra_columns_present` is an example, not a boundary member. The bound is what keeps a county from putting free text where a code belongs.
 
@@ -479,6 +494,24 @@ At most 100 notices SHALL be retained per release, the total SHALL be preserved,
 - **WHEN** the processor runs an otherwise valid release
 - **THEN** the release is accepted and the records are committed
 - **THEN** the notice appears on the outcome, and no diagnostic does
+
+#### Scenario: A notice may not claim lineage it does not have
+- **GIVEN** a layout notice whose `layout_fingerprint` differs from the prepared release's
+- **WHEN** the processor runs
+- **THEN** the release is rejected with `layout_rejected`
+- **THEN** the mismatch is not corrected to match
+
+#### Scenario: A row notice may not claim another row
+- **GIVEN** an envelope at physical row 7 carrying a notice reporting row 6
+- **WHEN** the processor runs
+- **THEN** the row is rejected with `record_rejected`
+- **THEN** no accepted outcome carries a notice naming a row it did not come from
+
+#### Scenario: A carrier cannot hand over an unbounded tuple
+- **GIVEN** a `PreparedRelease` or a `SourceRowEnvelope` constructed with 101 notices
+- **WHEN** it is constructed
+- **THEN** `ValueError` is raised, because the retention cap applies only after receipt
+- **THEN** the tuple is not silently truncated
 
 #### Scenario: A notice cannot carry free text
 - **GIVEN** a notice code of `Extra Columns!` or one exceeding 64 characters
