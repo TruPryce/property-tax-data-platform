@@ -44,13 +44,27 @@ _IDENTIFIER_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _JURISDICTION_PATTERN: Final = re.compile(r"[a-z]{2}-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def _require_identifier(value: str, field_name: str) -> None:
+def require_identifier(value: str, field_name: str) -> None:
+    """Apply the release-identity bound.
+
+    Shared with the progress event rather than restated there: an identity the
+    reader may not hold and the event may is not a bound, and a progress stream
+    is the one place a host-local path would otherwise reach a log.
+    """
+
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a str, not coerced from {type(value).__name__}")
     if _IDENTIFIER_PATTERN.fullmatch(value) is None or value[0] in {".", "-"}:
         raise ValueError(
             f"{field_name} must be 1 to 128 characters of [A-Za-z0-9._-] not beginning "
             "with '.' or '-', so a host-local path cannot be represented"
+        )
+
+
+def require_jurisdiction_code(value: str) -> None:
+    if not isinstance(value, str) or _JURISDICTION_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "jurisdiction_code must be a lowercase state prefix, a hyphen, and a county slug"
         )
 
 
@@ -110,12 +124,9 @@ class PreparedRelease:
     notices: NoticeSet = field(default_factory=NoticeSet)
 
     def __post_init__(self) -> None:
-        if _JURISDICTION_PATTERN.fullmatch(self.jurisdiction_code) is None:
-            raise ValueError(
-                "jurisdiction_code must be a lowercase state prefix, a hyphen, and a county slug"
-            )
-        _require_identifier(self.release_identifier, "release_identifier")
-        _require_identifier(self.source_member_name, "source_member_name")
+        require_jurisdiction_code(self.jurisdiction_code)
+        require_identifier(self.release_identifier, "release_identifier")
+        require_identifier(self.source_member_name, "source_member_name")
         if not isinstance(self.layout_fingerprint, str) or not self.layout_fingerprint.strip():
             raise ValueError("layout_fingerprint must be a non-blank str")
         if isinstance(self.parser_contract_version, bool) or not isinstance(

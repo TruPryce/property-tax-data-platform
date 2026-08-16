@@ -14,6 +14,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
+from property_tax_adapters.release.records import (
+    require_identifier,
+    require_jurisdiction_code,
+)
+
 __all__ = ["PROGRESS_CONTRACT_VERSION", "ReleaseProgressEvent"]
 
 #: Pinned, for the same reason the boundary version is.
@@ -45,10 +50,12 @@ class ReleaseProgressEvent:
     def __post_init__(self) -> None:
         if self.progress_contract_version != PROGRESS_CONTRACT_VERSION:
             raise ValueError(f"progress_contract_version must be {PROGRESS_CONTRACT_VERSION}")
-        for name in ("jurisdiction_code", "release_identifier", "source_member_name"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} must be a non-blank str")
+        # The same bound `PreparedRelease` applies, not a weaker one.  A
+        # non-blank string would have admitted an absolute path as a member
+        # name, and a progress stream is precisely where that would be logged.
+        require_jurisdiction_code(self.jurisdiction_code)
+        require_identifier(self.release_identifier, "release_identifier")
+        require_identifier(self.source_member_name, "source_member_name")
         if not isinstance(self.layout_fingerprint, str) or not self.layout_fingerprint.strip():
             raise ValueError("layout_fingerprint must be a non-blank str")
         for name in (

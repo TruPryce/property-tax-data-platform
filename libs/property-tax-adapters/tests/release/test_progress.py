@@ -20,7 +20,6 @@ from release.support import (
     MEMBER,
     RELEASE,
     Reader,
-    RecordingGuard,
     RecordingProgress,
     RecordingStage,
     envelopes,
@@ -110,53 +109,24 @@ def test_both_contract_versions_are_pinned() -> None:
     assert progress.events[0].progress_contract_version == 1
 
 
-# --------------------------------------------------------------------------
-# The resource guard
-# --------------------------------------------------------------------------
+def test_a_callback_raising_on_a_non_final_event_rejects_the_release() -> None:
+    """The boundary event, not the last one: reading continues past it."""
 
-
-def test_the_guard_is_called_at_the_fixed_checkpoints_only() -> None:
-    guard = RecordingGuard()
-
-    process_release(
-        reader=Reader(envelopes(PROGRESS_ROW_INTERVAL)),
-        stage=RecordingStage(),
-        guard=guard,
-    )
-
-    # After the stage opens, at the 100,000 boundary, and once at end-of-input.
-    assert guard.calls == [
-        (0, 0),
-        (PROGRESS_ROW_INTERVAL, PROGRESS_ROW_INTERVAL),
-        (PROGRESS_ROW_INTERVAL, PROGRESS_ROW_INTERVAL),
-    ]
-
-
-def test_two_runs_produce_the_same_guard_sequence() -> None:
-    first, second = RecordingGuard(), RecordingGuard()
-
-    process_release(reader=Reader(envelopes(5)), stage=RecordingStage(), guard=first)
-    process_release(reader=Reader(envelopes(5)), stage=RecordingStage(), guard=second)
-
-    assert first.calls == second.calls
-
-
-def test_a_raising_guard_rejects_and_aborts() -> None:
     stage = RecordingStage()
+    progress = RecordingProgress(raise_on_index=0)
+
     outcome = process_release(
-        reader=Reader(envelopes(3)),
+        reader=Reader(envelopes(PROGRESS_ROW_INTERVAL + 5)),
         stage=stage,
-        guard=RecordingGuard(raise_on_call=1),
+        progress=progress,
     )
 
-    assert [entry.code.value for entry in outcome.diagnostics] == ["resource_limit_exceeded"]
+    assert [entry.code.value for entry in outcome.diagnostics] == ["progress_callback_failed"]
+    assert len(progress.events) == 1, "events continued after the callback failed"
+    assert progress.events[0].final is False
+    assert outcome.physical_rows_processed == PROGRESS_ROW_INTERVAL, (
+        "the rejection was not raised at the boundary event"
+    )
+    assert "commit" not in stage.calls
     assert "abort" in stage.calls
     assert outcome.committed_record_count == 0
-    assert "SECRET-GUARD" not in repr(outcome)
-
-
-def test_the_absent_guard_changes_nothing() -> None:
-    outcome = process_release(reader=Reader(envelopes(3)), stage=RecordingStage())
-
-    assert outcome.disposition is ReleaseDisposition.ACCEPTED
-    assert outcome.total_diagnostic_count == 0

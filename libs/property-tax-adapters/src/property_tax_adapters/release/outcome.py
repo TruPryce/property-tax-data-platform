@@ -197,8 +197,10 @@ class ReleaseOutcome:
         ):
             self._require_count(name)
 
-        self._require_retention("diagnostics", "total_diagnostic_count", "diagnostics_truncated")
-        self._require_retention("notices", "total_notice_count", "notices_truncated")
+        self._require_retention(
+            "diagnostics", "total_diagnostic_count", "diagnostics_truncated", ReleaseDiagnostic
+        )
+        self._require_retention("notices", "total_notice_count", "notices_truncated", ReleaseNotice)
 
         accepted = self.disposition is ReleaseDisposition.ACCEPTED
         # Every diagnostic code is a failure code, so acceptance and diagnostics
@@ -217,10 +219,17 @@ class ReleaseOutcome:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative int")
 
-    def _require_retention(self, retained: str, total: str, truncated: str) -> None:
+    def _require_retention(
+        self, retained: str, total: str, truncated: str, entry_type: type
+    ) -> None:
         entries = getattr(self, retained)
-        if not isinstance(entries, tuple):
-            raise ValueError(f"{retained} must be a tuple")
+        # The element type is the carrier.  A tuple of the right length whose
+        # entries are strings would satisfy every count here while carrying
+        # exactly the free text these types exist to make unrepresentable.
+        if not isinstance(entries, tuple) or not all(
+            isinstance(entry, entry_type) for entry in entries
+        ):
+            raise ValueError(f"{retained} must be a tuple of {entry_type.__name__}")
         observed, flag = getattr(self, total), getattr(self, truncated)
         if len(entries) != min(observed, DIAGNOSTIC_RETENTION_LIMIT):
             raise ValueError(

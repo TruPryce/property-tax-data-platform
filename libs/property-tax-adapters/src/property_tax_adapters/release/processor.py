@@ -15,7 +15,6 @@ both resources it supplied.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from contextlib import suppress
 from typing import Final
 
 from property_tax_adapters.release.outcome import (
@@ -116,7 +115,7 @@ def process_release(
     prepared: PreparedRelease | None = None
     rows = staged = rejected_rows = 0
     sequence = 0
-    stage_entered = False
+    reader_entered = reader_closed = stage_entered = False
     writing = True
 
     def emit(final: bool) -> None:
@@ -141,6 +140,24 @@ def process_release(
         except Exception as error:  # noqa: BLE001 - mapped to a code, text discarded
             raise _Rejected(_CODE.PROGRESS_CALLBACK_FAILED) from error
 
+    def close_reader() -> None:
+        """Close the reader exactly once, and only if it ever opened.
+
+        A reader that failed to open has no resource to release, and one already
+        closed may not be closed again: `__exit__` is a lifecycle call, not an
+        idempotent cleanup hook, and calling it twice is a defect this boundary
+        would otherwise introduce into every conforming reader.
+        """
+
+        nonlocal reader_closed
+        if not reader_entered or reader_closed:
+            return
+        reader_closed = True
+        try:
+            reader.__exit__(None, None, None)
+        except Exception as error:  # noqa: BLE001 - mapped to a code, text discarded
+            raise _Rejected(_CODE.SOURCE_CLOSE_FAILED) from error
+
     def ask_guard() -> None:
         if guard is None:
             return
@@ -154,6 +171,7 @@ def process_release(
             reader.__enter__()
         except Exception as error:  # noqa: BLE001
             raise _Rejected(_CODE.SOURCE_OPEN_FAILED) from error
+        reader_entered = True
 
         try:
             prepared = reader.prepare()
@@ -211,10 +229,7 @@ def process_release(
         ask_guard()
         emit(final=True)
 
-        try:
-            reader.__exit__(None, None, None)
-        except Exception as error:  # noqa: BLE001
-            raise _Rejected(_CODE.SOURCE_CLOSE_FAILED) from error
+        close_reader()
 
         if recorder.total_diagnostics:
             raise _Rejected(_CODE.RECORD_REJECTED)
@@ -247,8 +262,17 @@ def process_release(
                     _CODE.STAGE_ABORT_FAILED,
                     fingerprint=None if prepared is None else prepared.layout_fingerprint,
                 )
-        with suppress(Exception):
-            reader.__exit__(None, None, None)
+        # A close that fails here is a second failure, not a detail of the
+        # first.  Suppressing it would lose the only report of a source left
+        # open, and `close_reader` has already returned if the close that
+        # rejected us is the one being cleaned up after.
+        try:
+            close_reader()
+        except _Rejected as close_failure:
+            recorder.fail(
+                close_failure.code,
+                fingerprint=None if prepared is None else prepared.layout_fingerprint,
+            )
         return _outcome(
             recorder,
             prepared,

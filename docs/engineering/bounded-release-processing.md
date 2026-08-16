@@ -64,6 +64,13 @@ step that changes visibility. A stage's `__exit__` may not fail after either a c
 which is what makes step 10 safe where it is; a stage that raises there regardless is a
 trusted-code defect and propagates, exactly as a malformed layout raises rather than diagnosing.
 
+**The reader is closed exactly once, and only if it opened.** `__exit__` is a lifecycle call, not
+an idempotent cleanup hook: a reader whose `__enter__` raised holds no resource to release, and one
+already closed may not be closed again. Rejection cleanup therefore closes only a reader that both
+opened and has not yet been closed. A close that fails during that cleanup is recorded as a second
+`source_close_failed` diagnostic rather than suppressed — a source left open is a fact the caller
+needs, and the failure that rejected the release is not a licence to lose it.
+
 ## Rows, Records, and Rejections
 
 An envelope is one **physical row**, not one record, because the two are different counts: an
@@ -153,6 +160,20 @@ Fourteen fields, with the invariants stated rather than implied. Notably:
   either, and a fabricated placeholder would be indistinguishable from a real fingerprint.
 - `committed_record_count` is zero unless accepted, and equals `staged_record_count` when it is. A
   staged record is not an accepted one until the commit that makes it visible.
+- `diagnostics` and `notices` are checked **element by element**, not merely for being tuples of the
+  right length. The element type is the carrier: a correctly-counted tuple of strings would satisfy
+  every count above while holding exactly the free text these types exist to make unrepresentable.
+
+## The Release-Identity Bound
+
+`jurisdiction_code`, `release_identifier`, and `source_member_name` are bounded identifiers — the
+bound the accepted Tarrant contract already sets. The alphabet admits no path separator, so an
+absolute path, a UNC path, a drive-qualified path, and a parent-directory traversal are
+*unrepresentable* rather than merely discouraged.
+
+`ReleaseProgressEvent` applies the same bound as `PreparedRelease`, not a weaker one. An identity a
+reader may not hold but an event may is not a bound, and a progress stream is precisely where a
+host-local path would otherwise reach a log.
 
 ## Dependency Direction
 
@@ -178,6 +199,13 @@ The resource half of issue #43 D5 is a separate change that depends on this one:
 Also excluded: durable quarantine persistence and the production unique index, owned by bootstrap
 tasks 3.4 and 3.5. The SQLite stage in the test suite is a **fixture** proving the conformance
 suite has a passing implementation — it is not a production stage.
+
+That fixture takes the key it indexes on **from its caller**. Reading `source_account_id` itself
+would assert that the field is a record's canonical identifier, which the accepted Collin contract
+prohibits: Collin sets it to `None` and preserves `prop_id` and `geo_id` under their own source
+names. A stage that chose for the caller would report a conforming Collin release as a duplicate.
+The fixture also removes its file on success, on failure, and on a partial `__enter__`, since a
+caller who supplied a directory did not ask to be left a database in it.
 
 `parse_dallas_appraisal_csv` remains a synthetic fixture helper. No production processor imports or
 invokes it, and all its contract cases still collect unchanged.

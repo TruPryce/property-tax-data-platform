@@ -108,6 +108,34 @@ class Reader:
             raise RuntimeError("SECRET-ITERATION")
 
 
+class CountingReader(Reader):
+    """A reader that counts how many times it was closed.
+
+    `Reader.exited` is a flag, and a flag cannot tell one close from two.  The
+    processor must call `__exit__` exactly once and only on a reader that
+    opened, so the count is the observation the contract needs.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.exits = 0
+        self.enters = 0
+
+    def __enter__(self) -> CountingReader:
+        super().__enter__()
+        self.enters += 1
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.exits += 1
+        super().__exit__(exc_type, exc, traceback)
+
+
 class RecordingStage:
     """Records the order of every lifecycle call, and what is visible when."""
 
@@ -196,6 +224,69 @@ class RecordingGuard:
         self.calls.append((physical_rows_processed, staged_record_count))
         if self._raise_on_call is not None and len(self.calls) == self._raise_on_call:
             raise RuntimeError("SECRET-GUARD")
+
+
+def account_key(record: AppraisalSourceRecord) -> str:
+    """Key a stage on the account and year, for records that have an account.
+
+    Supplied by the test rather than read by the stage: the accepted Collin
+    contract sets `source_account_id` to `None`, so a fixture that reached for
+    it would be asserting a canonical identifier Collin does not have.
+    """
+
+    return f"{record.source_account_id}:{record.appraisal_year}"
+
+
+def native_identifier_key(record: AppraisalSourceRecord) -> str:
+    """Key a Collin-shaped record on its preserved source-native identifiers."""
+
+    identifiers = record.source_native_identifiers
+    return "|".join(f"{name}={identifiers[name]}" for name in sorted(identifiers))
+
+
+def collin_shaped(row: int, **identifiers: str) -> AppraisalSourceRecord:
+    """A valid shared record with no account id, as Collin's contract requires."""
+
+    return AppraisalSourceRecord(
+        jurisdiction_code=JURISDICTION,
+        appraisal_year=2026,
+        provenance=SourceProvenance(
+            jurisdiction_code=JURISDICTION,
+            release_identifier=RELEASE,
+            source_member_name=MEMBER,
+            source_row_number=row,
+            parser_contract_version=PARSER_VERSION,
+            layout_fingerprint=FINGERPRINT,
+        ),
+        source_account_id=None,
+        source_native_identifiers=dict(identifiers) or {"prop_id": f"P{row:06d}"},
+    )
+
+
+class LazyReader:
+    """Yields bare envelopes on demand, for releases too long to materialize."""
+
+    def __init__(self, rows: int) -> None:
+        self._rows = rows
+        self.exited = False
+
+    def __enter__(self) -> LazyReader:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.exited = True
+
+    def prepare(self) -> PreparedRelease:
+        return prepared()
+
+    def __iter__(self) -> Iterator[SourceRowEnvelope]:
+        for row in range(1, self._rows + 1):
+            yield SourceRowEnvelope(physical_row_number=row)
 
 
 def envelopes(count: int, *, rejected: Sequence[int] = ()) -> list[SourceRowEnvelope]:

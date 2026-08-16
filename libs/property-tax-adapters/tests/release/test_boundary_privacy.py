@@ -6,6 +6,8 @@ leak fails a test rather than being argued about.
 
 from __future__ import annotations
 
+import gc
+from collections.abc import Iterator
 from dataclasses import fields, is_dataclass
 
 import pytest
@@ -15,7 +17,9 @@ from property_tax_adapters.release import (
     PreparedRelease,
     ReleaseDiagnostic,
     ReleaseDiagnosticCode,
+    ReleaseDisposition,
     ReleaseNotice,
+    ReleaseOutcome,
     ReleaseProgressEvent,
     SourceRowEnvelope,
     process_release,
@@ -191,6 +195,94 @@ def test_notice_retention_is_incremental_not_trim_after_the_fact() -> None:
     assert produced == 10_000, "the generator was not consumed to exhaustion"
     assert built.total == 10_000
     assert len(built.retained) == MAX_CARRIER_NOTICES
+
+
+def test_notice_retention_never_holds_more_than_the_cap_at_once() -> None:
+    """The shape after the fact cannot tell the two implementations apart.
+
+    A carrier that materialized ten thousand notices and then kept a hundred
+    produces exactly the same `NoticeSet` as one that never held more than a
+    hundred, so asserting the result passes the implementation the bound exists
+    to forbid.  Counting live notices *during* consumption is what separates
+    them, and on a Dallas release with many unknown columns that difference is
+    the memory this boundary was written to bound.
+    """
+
+    probe = "probe_retention_liveness"
+    observed = 0
+    peak_alive = 0
+
+    def observations() -> Iterator[ReleaseNotice]:
+        nonlocal observed, peak_alive
+        for index in range(MAX_CARRIER_NOTICES + 50):
+            if index == MAX_CARRIER_NOTICES + 49:
+                # Measured at the last observation, when a materializing carrier
+                # is holding every one it has seen and an incremental one holds
+                # the cap plus the one in flight.
+                peak_alive = sum(
+                    1
+                    for candidate in gc.get_objects()
+                    if type(candidate) is ReleaseNotice and candidate.code == probe
+                )
+            observed += 1
+            yield ReleaseNotice(code=probe)
+
+    built = NoticeSet.from_observations(observations())
+
+    assert observed == MAX_CARRIER_NOTICES + 50, "the generator was not consumed to exhaustion"
+    assert built.total == MAX_CARRIER_NOTICES + 50
+    assert len(built.retained) == MAX_CARRIER_NOTICES
+    assert peak_alive <= MAX_CARRIER_NOTICES + 2, (
+        f"{peak_alive} notices were alive at once, above the cap of {MAX_CARRIER_NOTICES}: "
+        "the carrier accumulated before trimming"
+    )
+
+
+def test_an_outcome_refuses_a_string_where_a_diagnostic_belongs() -> None:
+    """The element type is the carrier; the counts alone do not bound content."""
+
+    for field_name, total, hostile in (
+        ("diagnostics", "total_diagnostic_count", ("/home/mike/releases/dallas.txt",)),
+        ("notices", "total_notice_count", ("free text describing a row",)),
+    ):
+        with pytest.raises(ValueError, match="must be a tuple of"):
+            ReleaseOutcome(
+                disposition=ReleaseDisposition.REJECTED
+                if field_name == "diagnostics"
+                else ReleaseDisposition.ACCEPTED,
+                **{field_name: hostile, total: 1},
+            )
+
+
+def test_a_progress_event_refuses_a_host_local_path_as_an_identity() -> None:
+    """The event applies the same bound `PreparedRelease` does, not a weaker one."""
+
+    for hostile in ("/var/spool/dallas-2026.txt", "..\\..\\etc\\passwd", "C:\\releases\\x"):
+        with pytest.raises(ValueError, match="source_member_name"):
+            ReleaseProgressEvent(
+                jurisdiction_code="tx-dallas",
+                release_identifier="synthetic-release-2026",
+                source_member_name=hostile,
+                parser_contract_version=1,
+                layout_fingerprint="f" * 64,
+                physical_rows_processed=0,
+                staged_record_count=0,
+                sequence_number=0,
+                final=True,
+            )
+
+    with pytest.raises(ValueError, match="jurisdiction_code"):
+        ReleaseProgressEvent(
+            jurisdiction_code="/etc/passwd",
+            release_identifier="synthetic-release-2026",
+            source_member_name="member.txt",
+            parser_contract_version=1,
+            layout_fingerprint="f" * 64,
+            physical_rows_processed=0,
+            staged_record_count=0,
+            sequence_number=0,
+            final=True,
+        )
 
 
 def test_a_row_notice_may_not_claim_another_row() -> None:

@@ -11,14 +11,17 @@ import pytest
 from property_tax_adapters.release import (
     DIAGNOSTIC_RETENTION_LIMIT,
     DuplicateRecordKey,
+    ReleaseDiagnostic,
     ReleaseDiagnosticCode,
     ReleaseDisposition,
+    ReleaseOutcome,
     SourceRowEnvelope,
     process_release,
 )
 
 from release.support import (
     FINGERPRINT,
+    CountingReader,
     Reader,
     RecordingStage,
     envelopes,
@@ -228,6 +231,160 @@ def test_a_diagnostic_after_preparation_carries_the_fingerprint() -> None:
 
 def test_the_vocabulary_is_exactly_twelve_codes() -> None:
     assert len(ReleaseDiagnosticCode) == 12
+
+
+# --------------------------------------------------------------------------
+# The reader lifecycle: exactly once, and only if it opened
+# --------------------------------------------------------------------------
+
+
+def test_a_reader_that_never_opened_is_never_closed() -> None:
+    """`__exit__` is a lifecycle call, not an idempotent cleanup hook."""
+
+    reader = CountingReader([], fail_on_enter=True)
+
+    outcome = process_release(reader=reader, stage=RecordingStage())
+
+    assert codes(outcome) == ["source_open_failed"]
+    assert reader.exits == 0, "a reader that failed to open was closed anyway"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"fail_on_exit": True}, {"fail_on_iteration": True}],
+    ids=["rejected-release", "failing-close", "failing-iteration"],
+)
+def test_the_reader_is_closed_exactly_once(kwargs: dict) -> None:
+    """Neither the happy path nor the cleanup path may close it a second time."""
+
+    reader = CountingReader(envelopes(3, rejected=[2]), **kwargs)
+
+    process_release(reader=reader, stage=RecordingStage())
+
+    assert reader.exits == 1, f"the reader was closed {reader.exits} times"
+
+
+def test_a_failing_close_on_an_otherwise_accepted_release_is_the_only_code() -> None:
+    reader = CountingReader(envelopes(3), fail_on_exit=True)
+
+    outcome = process_release(reader=reader, stage=RecordingStage())
+
+    assert codes(outcome) == ["source_close_failed"]
+    assert reader.exits == 1
+
+
+def test_an_accepted_release_closes_its_reader_exactly_once() -> None:
+    reader = CountingReader(envelopes(3))
+
+    outcome = process_release(reader=reader, stage=RecordingStage())
+
+    assert reader.exits == 1
+    assert outcome.disposition is ReleaseDisposition.ACCEPTED
+
+
+def test_a_close_failure_during_cleanup_is_reported_not_swallowed() -> None:
+    """Two failures, both named: the rejection, and the source left open."""
+
+    reader = CountingReader(envelopes(3, rejected=[1]), fail_on_exit=True)
+
+    outcome = process_release(reader=reader, stage=RecordingStage())
+
+    assert codes(outcome) == ["record_rejected", "source_close_failed"]
+    assert reader.exits == 1
+    assert outcome.disposition is ReleaseDisposition.REJECTED
+    assert outcome.committed_record_count == 0
+
+
+# --------------------------------------------------------------------------
+# The outcome schema, exactly
+# --------------------------------------------------------------------------
+
+
+def test_the_outcome_declares_exactly_its_schema() -> None:
+    fields = {name: spec.type for name, spec in ReleaseOutcome.__dataclass_fields__.items()}
+
+    assert fields == {
+        "disposition": "ReleaseDisposition",
+        "boundary_contract_version": "int",
+        "parser_contract_version": "int | None",
+        "layout_fingerprint": "str | None",
+        "diagnostics": "tuple[ReleaseDiagnostic, ...]",
+        "total_diagnostic_count": "int",
+        "diagnostics_truncated": "bool",
+        "notices": "tuple[ReleaseNotice, ...]",
+        "total_notice_count": "int",
+        "notices_truncated": "bool",
+        "physical_rows_processed": "int",
+        "staged_record_count": "int",
+        "committed_record_count": "int",
+        "rejected_row_count": "int",
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"parser_contract_version": 1}, "set together or not at all"),
+        ({"layout_fingerprint": "f" * 64}, "set together or not at all"),
+        (
+            {
+                "diagnostics": (ReleaseDiagnostic(code=ReleaseDiagnosticCode.RECORD_REJECTED),),
+                "total_diagnostic_count": 1,
+            },
+            "accepted exactly when",
+        ),
+        ({"boundary_contract_version": 2}, "boundary_contract_version must be"),
+        ({"staged_record_count": 3}, "commits what it staged"),
+        ({"rejected_row_count": -1}, "non-negative int"),
+        ({"physical_rows_processed": True}, "non-negative int"),
+        ({"notices": ("a plain string",), "total_notice_count": 1}, "tuple of ReleaseNotice"),
+        ({"diagnostics": (7,), "total_diagnostic_count": 1}, "tuple of ReleaseDiagnostic"),
+        ({"diagnostics_truncated": True}, "exactly when"),
+    ],
+    ids=[
+        "half-prepared-version",
+        "half-prepared-fingerprint",
+        "accepted-with-diagnostic",
+        "wrong-contract-version",
+        "accepted-committing-less",
+        "negative-count",
+        "bool-as-count",
+        "string-in-notices",
+        "int-in-diagnostics",
+        "truncation-without-overflow",
+    ],
+)
+def test_each_outcome_invariant_refuses_its_violation(overrides: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        ReleaseOutcome(disposition=ReleaseDisposition.ACCEPTED, **overrides)
+
+
+def test_a_rejected_outcome_may_not_claim_a_commit() -> None:
+    with pytest.raises(ValueError, match="commits no record"):
+        ReleaseOutcome(
+            disposition=ReleaseDisposition.REJECTED,
+            diagnostics=(ReleaseDiagnostic(code=ReleaseDiagnosticCode.RECORD_REJECTED),),
+            total_diagnostic_count=1,
+            staged_record_count=1,
+            committed_record_count=1,
+        )
+
+
+def test_an_accepted_outcome_may_not_have_rejected_a_row() -> None:
+    with pytest.raises(ValueError, match="rejected no row"):
+        ReleaseOutcome(disposition=ReleaseDisposition.ACCEPTED, rejected_row_count=1)
+
+
+def test_forty_diagnostics_are_retained_whole_and_unmarked() -> None:
+    """Nothing is dropped below the cap, and truncation is not asserted early."""
+
+    outcome = process_release(
+        reader=Reader(envelopes(40, rejected=range(1, 41))), stage=RecordingStage()
+    )
+
+    assert len(outcome.diagnostics) == 40
+    assert outcome.total_diagnostic_count == 40
+    assert outcome.diagnostics_truncated is False
 
 
 def test_an_empty_release_is_accepted() -> None:

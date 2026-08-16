@@ -7,12 +7,19 @@ durable persistence and the production unique index are owned by bootstrap tasks
 It uses the standard-library `sqlite3` only, so it adds no dependency, and it
 takes a caller-supplied directory with an explicit page ceiling, cleaning up on
 success, on failure, and on retry.
+
+It takes the key it indexes on from the caller. A fixture that read
+`source_account_id` itself would be asserting that the field is the canonical
+identifier of a record, which the accepted Collin contract prohibits — Collin
+sets it to `None` and keeps `prop_id` and `geo_id` under their own source names.
+A stage that chose for the caller would report a conforming Collin release as a
+duplicate.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
 
@@ -22,33 +29,48 @@ from property_tax_adapters.sources.contracts import AppraisalSourceRecord
 #: An explicit ceiling, so a runaway release cannot fill the caller's disk.
 DEFAULT_MAX_PAGES = 4_096
 
+#: Names the one key a test stage indexes on. Supplied per stage, never guessed.
+StageKey = Callable[[AppraisalSourceRecord], str]
+
 
 class SqliteReleaseStage:
     """Writes into an uncommitted transaction; commit is what makes it visible."""
 
-    def __init__(self, directory: Path, *, max_pages: int = DEFAULT_MAX_PAGES) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        key: StageKey,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> None:
         self._path = Path(directory) / "release-stage.sqlite3"
+        self._key = key
         self._max_pages = max_pages
         self._connection: sqlite3.Connection | None = None
-        self._committed = False
 
     def __enter__(self) -> SqliteReleaseStage:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.unlink(missing_ok=True)
         connection = sqlite3.connect(self._path, isolation_level=None)
-        connection.execute(f"PRAGMA max_page_count = {self._max_pages}")
-        connection.execute(
-            "CREATE TABLE staged ("
-            "  account_id TEXT NOT NULL,"
-            "  appraisal_year INTEGER NOT NULL,"
-            "  source_row_number INTEGER NOT NULL,"
-            "  UNIQUE (account_id, appraisal_year)"
-            ")"
-        )
-        # Explicit transaction control: Python implicitly commits before a
-        # SAVEPOINT under the legacy isolation modes, which would make staged
-        # rows visible before the commit that is supposed to reveal them.
-        connection.execute("BEGIN")
+        try:
+            connection.execute(f"PRAGMA max_page_count = {self._max_pages}")
+            connection.execute(
+                "CREATE TABLE staged ("
+                "  record_key TEXT NOT NULL,"
+                "  source_row_number INTEGER NOT NULL,"
+                "  UNIQUE (record_key)"
+                ")"
+            )
+            # Explicit transaction control: Python implicitly commits before a
+            # SAVEPOINT under the legacy isolation modes, which would make staged
+            # rows visible before the commit that is supposed to reveal them.
+            connection.execute("BEGIN")
+        except Exception:
+            # A partial open owns a file and a handle exactly as a complete one
+            # does, and `__exit__` never runs for a context that failed to enter.
+            connection.close()
+            self._path.unlink(missing_ok=True)
+            raise
         self._connection = connection
         return self
 
@@ -63,8 +85,10 @@ class SqliteReleaseStage:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
-        if not self._committed:
-            self._path.unlink(missing_ok=True)
+        # Unconditionally, including after a successful commit: a fixture that
+        # cleaned up only on failure would leave a file behind on every passing
+        # run, in a directory the caller owns.
+        self._path.unlink(missing_ok=True)
 
     def write(self, records: Sequence[AppraisalSourceRecord]) -> None:
         """All or nothing: a savepoint per call, rolled back if any row fails.
@@ -78,20 +102,16 @@ class SqliteReleaseStage:
         try:
             for record in records:
                 connection.execute(
-                    "INSERT INTO staged VALUES (?, ?, ?)",
-                    (
-                        record.source_account_id,
-                        record.appraisal_year,
-                        record.provenance.source_row_number,
-                    ),
+                    "INSERT INTO staged VALUES (?, ?)",
+                    (self._require_key(record), record.provenance.source_row_number),
                 )
         except sqlite3.IntegrityError as error:
-            connection.execute("ROLLBACK TO row")
-            connection.execute("RELEASE row")
+            # The only constraint left on the table is the unique key, so this
+            # is a collision rather than a shape the fixture disagreed with.
+            self._undo()
             raise DuplicateRecordKey from error
         except Exception:
-            connection.execute("ROLLBACK TO row")
-            connection.execute("RELEASE row")
+            self._undo()
             raise
         connection.execute("RELEASE row")
 
@@ -107,9 +127,8 @@ class SqliteReleaseStage:
     def commit(self) -> None:
         connection = self._require_connection()
         connection.execute("COMMIT")
-        self._committed = True
 
-    def visible_records(self) -> list[tuple[str, int, int]]:
+    def visible_records(self) -> list[tuple[str, int]]:
         """What a separate connection can see — the definition of visible."""
 
         if not self._path.exists():
@@ -119,6 +138,29 @@ class SqliteReleaseStage:
                 return list(reader.execute("SELECT * FROM staged"))
             except sqlite3.OperationalError:
                 return []
+
+    def break_commit(self) -> None:
+        """End the transaction underneath the commit, so `commit` fails.
+
+        The conformance suite cannot sabotage a stage it knows nothing about, so
+        each implementation supplies the one way its own commit can fail.
+        """
+
+        self._require_connection().execute("ROLLBACK")
+
+    def _require_key(self, record: AppraisalSourceRecord) -> str:
+        key = self._key(record)
+        if not isinstance(key, str) or not key:
+            # Not a duplicate and not an integrity error: a key extractor that
+            # returned nothing is the caller's defect, and mapping it onto
+            # `DuplicateRecordKey` would report a collision that never happened.
+            raise ValueError("the supplied key extractor produced no key for a record")
+        return key
+
+    def _undo(self) -> None:
+        connection = self._require_connection()
+        connection.execute("ROLLBACK TO row")
+        connection.execute("RELEASE row")
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
