@@ -16,6 +16,26 @@ The production release boundary SHALL be a single-pass, context-managed county r
 
 `prepare()` SHALL be called exactly once, after `__enter__` and before the first iteration, and SHALL return metadata carrying the jurisdiction code, release identifier, source member name, layout fingerprint, and parser contract version. It SHALL NOT read a record, so an empty release still has a complete identity.
 
+Every other callable on the boundary SHALL likewise declare an exact signature, so two independent implementations are interchangeable rather than merely similarly shaped:
+
+| callable | signature |
+| --- | --- |
+| `PreparedReader.prepare` | `() -> PreparedRelease` |
+| `PreparedReader.__iter__` | `() -> Iterator[SourceRowEnvelope]` |
+| `ReleaseStage.write` | `(records: Sequence[AppraisalSourceRecord]) -> None` |
+| `ReleaseStage.finalize` | `() -> None` |
+| `ReleaseStage.abort` | `() -> None` |
+| `ReleaseStage.commit` | `() -> None` |
+| `ProgressCallback.__call__` | `(event: ReleaseProgressEvent) -> None` |
+| `ResourceGuard.check` | `(physical_rows_processed: int, staged_record_count: int) -> None` |
+| `process_release` | `(*, reader: PreparedReader, stage: ReleaseStage, progress: ProgressCallback \| None = None, guard: ResourceGuard \| None = None) -> ReleaseOutcome` |
+
+`write` SHALL take one physical row's records together, because a row is the unit that is accepted or rejected: splitting it across calls would let a stage hold half a row when the row is refused. An envelope with no records SHALL NOT be written at all.
+
+`process_release` SHALL take only keyword arguments, so a caller cannot transpose the reader and the stage, and both optional collaborators SHALL default to absent.
+
+`__exit__` on either context manager SHALL NOT suppress an exception. A suppressing exit would hide a failure the processor must map to a code.
+
 Iteration SHALL yield one `SourceRowEnvelope` per **physical row**, carrying the one-based physical row number, the zero or more `AppraisalSourceRecord` values that row produced, and a bounded `rejected` indicator with an optional approved field name.
 
 An envelope SHALL distinguish three cases that would otherwise be indistinguishable:
@@ -344,11 +364,11 @@ The same rule SHALL apply to `ReleaseDiagnostic.layout_fingerprint`, and it SHAL
 | field | type | invariant |
 | --- | --- | --- |
 | `disposition` | `ReleaseDisposition` | a `StrEnum` of exactly `accepted` and `rejected` |
-| `boundary_contract_version` | `int` | always populated, positive |
+| `boundary_contract_version` | `int` | always populated; equals `BOUNDARY_CONTRACT_VERSION`, which is `1` |
 | `parser_contract_version` | `int \| None` | `None` unless `prepare()` returned |
 | `layout_fingerprint` | `str \| None` | `None` unless `prepare()` returned |
 | `diagnostics` | `tuple[ReleaseDiagnostic, ...]` | at most 100 entries, in encounter order |
-| `total_diagnostic_count` | `int` | not less than `len(diagnostics)` |
+| `total_diagnostic_count` | `int` | not negative; `len(diagnostics)` equals `min(total_diagnostic_count, 100)` |
 | `diagnostics_truncated` | `bool` | true exactly when `total_diagnostic_count` exceeds 100 |
 | `physical_rows_processed` | `int` | not negative |
 | `staged_record_count` | `int` | not negative |
@@ -362,6 +382,13 @@ An underspecified outcome is one every implementation renders differently, which
 - **WHEN** its fields and annotations are enumerated
 - **THEN** they are exactly the eleven above, with those types
 - **THEN** the type is frozen and refuses attribute assignment after construction
+
+#### Scenario: Nothing is dropped below the cap
+- **GIVEN** a release producing exactly 40 diagnostics, and separately one producing 150
+- **WHEN** each outcome is inspected
+- **THEN** the first retains all 40 and is not marked truncated
+- **THEN** the second retains exactly 100 and is marked truncated
+- **THEN** in both, `len(diagnostics)` equals `min(total_diagnostic_count, 100)`
 
 #### Scenario: The invariants hold together
 - **GIVEN** a constructed outcome
@@ -403,7 +430,7 @@ D12 separates physical rows from staged records, so a single count could not hav
 
 ### Requirement: Emit a bounded, deterministic progress contract
 
-`ReleaseProgressEvent` SHALL be immutable and SHALL carry exactly the progress contract version, jurisdiction, release identifier, source member name, parser contract version, layout fingerprint, physical rows processed, staged record count, a deterministic sequence number, and a `final` indicator, and no other field.
+`ReleaseProgressEvent` SHALL be immutable and SHALL carry exactly a `progress_contract_version: int` equal to `PROGRESS_CONTRACT_VERSION`, which is `1`, jurisdiction, release identifier, source member name, parser contract version, layout fingerprint, physical rows processed, staged record count, a deterministic sequence number, and a `final` indicator, and no other field.
 
 Identity fields SHALL come from `PreparedRelease`, so an empty release emits a complete event.
 
@@ -412,6 +439,12 @@ The callback protocol SHALL be synchronous. A non-final event SHALL be emitted a
 Sequence numbers SHALL be deterministic and gapless within a release, starting at zero.
 
 A callback that raises SHALL reject and abort the release with `progress_callback_failed`, and its exception text SHALL NOT be retained.
+
+#### Scenario: Both contract versions are pinned
+- **GIVEN** `BOUNDARY_CONTRACT_VERSION` and `PROGRESS_CONTRACT_VERSION`
+- **WHEN** their values are read
+- **THEN** both are the integer `1`
+- **THEN** every outcome carries the first and every progress event carries the second
 
 #### Scenario: An exact multiple still emits one final event
 - **GIVEN** a release of exactly 200,000 physical rows
