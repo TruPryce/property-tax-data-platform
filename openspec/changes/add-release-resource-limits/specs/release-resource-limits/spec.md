@@ -22,6 +22,16 @@ A preference that cannot be overridden makes the benchmark unimplementable. Its 
 - **WHEN** `read_peak_rss()` is called naming `rusage`
 - **THEN** it returns a `rusage` sample rather than the preferred cgroup one
 
+A named source that cannot be read SHALL raise rather than fall back.
+
+Falling back would return a figure from a source the caller did not ask for, under a call that asked for a specific one. The benchmark's whole reason for naming `rusage` is comparability across processes, so a silent cgroup substitution would produce exactly the vacuous ratio the naming exists to prevent — and it would do so with no signal at all. `rusage` is available on every Linux host, so in practice this raises only for `cgroup_v2`.
+
+#### Scenario: A named source that cannot be read fails rather than substituting
+- **GIVEN** a host with no readable cgroup file
+- **WHEN** `read_peak_rss()` is called naming `cgroup_v2`
+- **THEN** it raises, naming the source that was unavailable
+- **THEN** it does not return a `rusage` sample under a request for a cgroup one
+
 #### Scenario: The preference applies when no source is named
 - **GIVEN** the same host
 - **WHEN** `read_peak_rss()` is called naming nothing
@@ -184,7 +194,24 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    The absolute check SHALL NOT use the `rusage` figures the ratio is built from. Issue #43 D5 makes the cgroup the authority the limit is enforced against, it is what the OOM killer reads, and this change states in its own text that the two sources are incomparable — so reporting a `rusage` number against a cgroup-derived budget would be the same defect the source-agreement rule exists to prevent, committed one paragraph later.
 
-   Because a cgroup peak is per-cgroup and sticky, the absolute measurement SHALL be taken in a cgroup containing only that run. Where the benchmark cannot establish one, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for. An indeterminate absolute SHALL NOT be reported as a pass.
+   Because a cgroup peak is per-cgroup and sticky, the absolute measurement SHALL be taken in a cgroup containing only that run, and the benchmark SHALL **verify** that rather than assume it.
+
+   Verification SHALL read `cgroup.procs` for the cgroup named by `/proc/self/cgroup` and SHALL require that it lists only the benchmark's own process tree. A cgroup containing any other process cannot yield a peak attributable to this run, and a benchmark that assumed isolation it did not have would report a neighbour's high-water mark as its own — the same defect as the shared-cgroup ratio, arriving through the absolute check instead.
+
+   Where the benchmark cannot establish or verify such a cgroup, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for.
+
+   An indeterminate absolute SHALL NOT be reported as a pass, and the command SHALL exit **non-zero**. A run that could not measure the thing it exists to measure has not demonstrated the target, and an exit status a caller reads as success is how an unproven claim becomes a settled one.
+
+#### Scenario: Isolation is verified rather than assumed
+- **GIVEN** a cgroup whose `cgroup.procs` lists a process outside this run
+- **WHEN** the benchmark checks isolation before the absolute measurement
+- **THEN** it treats the absolute as indeterminate rather than reporting a neighbour's peak
+
+#### Scenario: An indeterminate absolute fails the command
+- **GIVEN** a run that could not establish an isolated cgroup
+- **WHEN** the benchmark finishes
+- **THEN** it names the absolute check indeterminate
+- **THEN** it exits non-zero rather than reporting success
 2. **Scaling.** `scaling_ratio` SHALL be at most **1.5**, computed from the three `rusage` measurements, which is the only source that isolates one process from its siblings.
 
 The threshold of 1.5 follows from what each implementation shape produces. Rows increase fourfold between the two sizes, so a boundary retaining every row has `W2 ≈ 4 × W1` and a scaling ratio approaching **4.0**, while a boundary retaining nothing has `W2 ≈ W1` and a ratio approaching **1.0**. A limit of 1.5 permits the working set to grow by half while the row count grows by three hundred percent — at most one sixth of proportional growth — which is far below the linear signal and well above allocator variance and the generator's own per-row transients.
@@ -243,7 +270,9 @@ The benchmark SHALL be a `make` target rather than a `pytest` test, because issu
 
 It SHALL require no network.
 
-It SHALL report the row count, the column count, the measured peak for each size, the source of each measurement, and whether the target was met. A result that does not say what was run cannot be checked by a reader, and a peak that does not name its source cannot be compared with another.
+It SHALL report the row count, the column count, the baseline `B`, the two size peaks `P1` and `P2`, the derived working sets `W1` and `W2`, the computed `scaling_ratio`, the separate cgroup figure the absolute check used, the source of every measurement, whether the three comparative sources agreed, whether the cgroup was verified isolated, and the verdict of each of the two checks **separately** — including `indeterminate` where that is the answer.
+
+A result that does not say what was run cannot be checked by a reader; a peak that does not name its source cannot be compared with another; and two checks reported as one verdict hide which of them actually passed.
 
 Regular CI SHALL run deterministic bounded contract tests for the probe, the guard, and the generator, and SHALL NOT run the million-row benchmark.
 

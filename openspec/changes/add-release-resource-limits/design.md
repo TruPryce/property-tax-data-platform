@@ -77,7 +77,7 @@ D31 through D37 are stated in the proposal. Two assumptions, both checkable at i
 
 Nothing existing changes behaviour. The guard is optional, the generator is a test fixture, and the benchmark is a separate target.
 
-The real risk is a benchmark that passes for the wrong reason — a run that never actually exercised the boundary, or one whose two sizes were too close to distinguish shapes. The plan therefore requires the benchmark to report the row count, the column count, the measured peak, and the source of that measurement, so a reader can tell what was run rather than trusting that something was.
+The real risk is a benchmark that passes for the wrong reason — a run that never actually exercised the boundary, or one whose two sizes were too close to distinguish shapes. The plan therefore requires the benchmark to report every figure it derived a verdict from — the baseline, both size peaks, both working sets, the ratio, the separate cgroup measurement the absolute used, the source of each, whether the comparative sources agreed, whether the cgroup was verified isolated, and the two verdicts separately — so a reader can tell what was run rather than trusting that something was.
 
 ## Testing strategy
 
