@@ -3,8 +3,9 @@
 The production boundary a county release passes through: a single-pass reader, a
 caller-supplied atomic stage, and a processor that stages records which stay invisible until
 exactly one commit. The
-[OpenSpec delta](../../openspec/changes/add-bounded-release-processing/specs/bounded-release-processing/spec.md)
-is the normative contract.
+[OpenSpec capability](../../openspec/specs/bounded-release-processing/spec.md) is the normative
+contract; the change that introduced it is
+[archived](../../openspec/changes/archive/2026-08-17-add-bounded-release-processing/proposal.md).
 
 This implements issue #43 decisions **D1, D2, D3, D4, D6, D8**, and the diagnostic portion of
 **D5**.
