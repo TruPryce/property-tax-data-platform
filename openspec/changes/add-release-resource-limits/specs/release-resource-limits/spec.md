@@ -13,6 +13,20 @@ The source precedence SHALL be: cgroup v2 `/sys/fs/cgroup/memory.peak` when it i
 
 `tracemalloc` SHALL NOT be a source. One measured run recorded 663 MiB traced against 2,079 MiB resident — a factor of three — and the OOM killer reads resident set size, so a traced figure can sit comfortably under budget while the task is killed.
 
+`read_peak_rss()` SHALL accept an explicit source and SHALL return a sample from that source when one is named, falling back to the documented precedence only when none is.
+
+A preference that cannot be overridden makes the benchmark unimplementable. Its three comparative measurements require the per-process source, and on any host where the cgroup file is readable — the production-style host the benchmark exists to model — an unconditional preference would hand back the shared cgroup figure instead. A caller that names a source and cannot get it has no way to obtain a comparable measurement at all.
+
+#### Scenario: A named source is honoured over the preference
+- **GIVEN** a host whose cgroup file is readable
+- **WHEN** `read_peak_rss()` is called naming `rusage`
+- **THEN** it returns a `rusage` sample rather than the preferred cgroup one
+
+#### Scenario: The preference applies when no source is named
+- **GIVEN** the same host
+- **WHEN** `read_peak_rss()` is called naming nothing
+- **THEN** it returns a `cgroup_v2` sample
+
 Every reported measurement SHALL name its source. The cgroup is the authority the container limit is enforced against; `ru_maxrss` is a per-process high-water mark that does not account for unreaped children or sibling processes. Two numbers from different sources are not comparable, and a bare integer hides which one it is.
 
 The cgroup path SHALL be resolved from `/proc/self/cgroup` rather than assumed to be `/sys/fs/cgroup/memory.peak`.
@@ -147,6 +161,8 @@ The three measurements are:
 | `P1` | 250,000 | baseline plus the working set at the smaller size |
 | `P2` | 1,000,000 | baseline plus the working set at the acceptance size |
 
+All three are `rusage` figures and feed the scaling ratio only. The absolute check takes its own cgroup measurement, described below.
+
 The working set at each size SHALL be computed by subtracting the baseline, floored at zero because measurement noise can place a peak below it:
 
 ```
@@ -164,8 +180,12 @@ The floor is what makes the ratio stable when both working sets are small: witho
 
 The benchmark SHALL apply both checks and SHALL fail if either fails:
 
-1. **Absolute.** `P2` SHALL be under 900 MiB. This supersedes the issue body's 1 GiB because the scheduler's measured 400 MiB peak shares the same 4 GiB container at a parallelism of four.
-2. **Scaling.** `scaling_ratio` SHALL be at most **1.5**.
+1. **Absolute.** A peak at 1,000,000 rows SHALL be under 900 MiB, measured from the **cgroup**. This supersedes the issue body's 1 GiB because the scheduler's measured 400 MiB peak shares the same 4 GiB container at a parallelism of four.
+
+   The absolute check SHALL NOT use the `rusage` figures the ratio is built from. Issue #43 D5 makes the cgroup the authority the limit is enforced against, it is what the OOM killer reads, and this change states in its own text that the two sources are incomparable — so reporting a `rusage` number against a cgroup-derived budget would be the same defect the source-agreement rule exists to prevent, committed one paragraph later.
+
+   Because a cgroup peak is per-cgroup and sticky, the absolute measurement SHALL be taken in a cgroup containing only that run. Where the benchmark cannot establish one, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for. An indeterminate absolute SHALL NOT be reported as a pass.
+2. **Scaling.** `scaling_ratio` SHALL be at most **1.5**, computed from the three `rusage` measurements, which is the only source that isolates one process from its siblings.
 
 The threshold of 1.5 follows from what each implementation shape produces. Rows increase fourfold between the two sizes, so a boundary retaining every row has `W2 ≈ 4 × W1` and a scaling ratio approaching **4.0**, while a boundary retaining nothing has `W2 ≈ W1` and a ratio approaching **1.0**. A limit of 1.5 permits the working set to grow by half while the row count grows by three hundred percent — at most one sixth of proportional growth — which is far below the linear signal and well above allocator variance and the generator's own per-row transients.
 
@@ -174,10 +194,17 @@ A single absolute figure SHALL NOT be treated as evidence of boundedness. An imp
 The floor also bounds what the scaling check can detect, and that limit SHALL be stated rather than left implied. Solving `(4·W1 + F) / (W1 + F) ≤ 1.5` gives `W1 ≤ F/5`, so a genuinely linear implementation escapes the check only if its working set at 250,000 rows is under 1.6 MiB — about 6.7 bytes per row. No implementation retaining record objects can be that small, so the blind spot is unreachable by the defect the check exists to catch, but it is a blind spot and the document SHALL say so.
 
 #### Scenario: A bounded implementation passes both checks
-- **GIVEN** a boundary that retains no row after writing it
-- **WHEN** the benchmark takes all three measurements
-- **THEN** `P2` is under 900 MiB
-- **THEN** `scaling_ratio` is at most 1.5
+- **GIVEN** a boundary that retains no row after writing it, in an isolated cgroup
+- **WHEN** the benchmark takes its measurements
+- **THEN** the cgroup peak at 1,000,000 rows is under 900 MiB
+- **THEN** `scaling_ratio`, from the `rusage` samples, is at most 1.5
+
+#### Scenario: The absolute cannot be measured against its authority
+- **GIVEN** a host where the benchmark cannot establish a cgroup containing only its run
+- **WHEN** the benchmark evaluates the absolute check
+- **THEN** it reports the check as indeterminate and names why
+- **THEN** it does not substitute a `rusage` figure
+- **THEN** the indeterminate result is not reported as a pass
 
 #### Scenario: A linear implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose `P2` happens to fall under 900 MiB
