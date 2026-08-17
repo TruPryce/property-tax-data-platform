@@ -11,18 +11,22 @@ import pytest
 from property_tax_adapters.release import (
     DIAGNOSTIC_RETENTION_LIMIT,
     DuplicateRecordKey,
+    PreparedReader,
     ReleaseDiagnostic,
     ReleaseDiagnosticCode,
     ReleaseDisposition,
     ReleaseOutcome,
+    ReleaseStage,
     SourceRowEnvelope,
     process_release,
 )
 
+from release.conformance import assert_exit_returns_none
 from release.support import (
     FINGERPRINT,
     CountingReader,
     Reader,
+    RecordingProgress,
     RecordingStage,
     envelopes,
     prepared,
@@ -49,6 +53,64 @@ def test_an_accepted_release_runs_the_declared_order() -> None:
     assert reader.exited is True
     assert outcome.disposition is ReleaseDisposition.ACCEPTED
     assert outcome.committed_record_count == outcome.staged_record_count == 3
+
+
+def test_the_accepted_order_across_all_three_collaborators() -> None:
+    """One timeline, not three.
+
+    A stage's own call list cannot say whether the final progress event preceded
+    its finalize, or whether the reader closed before its commit — those are
+    facts about the order of *different* objects.  So reader, stage, and
+    callback all append to one journal, and the sequence is read off that.
+    """
+
+    journal: list[str] = []
+    reader = Reader(envelopes(2), journal=journal)
+    stage = RecordingStage(journal=journal)
+    progress = RecordingProgress(journal=journal)
+
+    outcome = process_release(reader=reader, stage=stage, progress=progress)
+
+    assert journal == [
+        "reader:enter",
+        "stage:enter",
+        "stage:write",
+        "stage:write",
+        "progress:final",
+        "reader:exit",
+        "stage:finalize",
+        "stage:commit",
+        "stage:exit",
+    ]
+    assert outcome.disposition is ReleaseDisposition.ACCEPTED
+
+
+def test_the_ordering_holds_when_the_release_is_rejected() -> None:
+    """Abort precedes the reader close, and neither finalize nor commit runs."""
+
+    journal: list[str] = []
+    reader = Reader(envelopes(3, rejected=[2]), journal=journal)
+    stage = RecordingStage(journal=journal)
+    progress = RecordingProgress(journal=journal)
+
+    process_release(reader=reader, stage=stage, progress=progress)
+
+    assert journal == [
+        "reader:enter",
+        "stage:enter",
+        "stage:write",
+        "progress:final",
+        "reader:exit",
+        "stage:abort",
+        "stage:exit",
+    ]
+    assert "stage:finalize" not in journal and "stage:commit" not in journal
+
+
+def test_the_protocol_exits_are_annotated_none() -> None:
+    """An `__exit__` annotated `-> bool` advertises that it may suppress."""
+
+    assert_exit_returns_none(PreparedReader, ReleaseStage, Reader, RecordingStage)
 
 
 def test_a_layout_failure_never_enters_a_stage() -> None:
@@ -340,6 +402,26 @@ def test_the_outcome_declares_exactly_its_schema() -> None:
         ({"notices": ("a plain string",), "total_notice_count": 1}, "tuple of ReleaseNotice"),
         ({"diagnostics": (7,), "total_diagnostic_count": 1}, "tuple of ReleaseDiagnostic"),
         ({"diagnostics_truncated": True}, "exactly when"),
+        # A declared type nothing checks at runtime is a comment.
+        ({"boundary_contract_version": True}, "must be the int 1"),
+        ({"boundary_contract_version": 1.0}, "must be the int 1"),
+        (
+            {"parser_contract_version": "one", "layout_fingerprint": "f" * 64},
+            "parser_contract_version must be an int or None",
+        ),
+        (
+            {"parser_contract_version": True, "layout_fingerprint": "f" * 64},
+            "parser_contract_version must be an int or None",
+        ),
+        (
+            {"layout_fingerprint": 123, "parser_contract_version": 1},
+            "layout_fingerprint must be a non-blank str or None",
+        ),
+        (
+            {"layout_fingerprint": "   ", "parser_contract_version": 1},
+            "layout_fingerprint must be a non-blank str or None",
+        ),
+        ({"notices_truncated": 0}, "notices_truncated must be a bool"),
     ],
     ids=[
         "half-prepared-version",
@@ -352,6 +434,13 @@ def test_the_outcome_declares_exactly_its_schema() -> None:
         "string-in-notices",
         "int-in-diagnostics",
         "truncation-without-overflow",
+        "bool-as-contract-version",
+        "float-as-contract-version",
+        "str-as-parser-version",
+        "bool-as-parser-version",
+        "int-as-fingerprint",
+        "blank-fingerprint",
+        "int-as-truncation-flag",
     ],
 )
 def test_each_outcome_invariant_refuses_its_violation(overrides: dict, message: str) -> None:

@@ -163,6 +163,10 @@ Fourteen fields, with the invariants stated rather than implied. Notably:
 - `diagnostics` and `notices` are checked **element by element**, not merely for being tuples of the
   right length. The element type is the carrier: a correctly-counted tuple of strings would satisfy
   every count above while holding exactly the free text these types exist to make unrepresentable.
+- Every field is checked against its declared type at runtime, because a declared type nothing
+  checks is a comment. Two cases need naming: `True == 1` in Python, so equality alone would admit a
+  bool as the contract version; and the pairing rule for the two prepared fields says only *when*
+  they may be absent, never *what* they may be.
 
 ## The Release-Identity Bound
 
@@ -216,6 +220,19 @@ The conformance suite detects **input-proportional** accumulation, not buffering
 candidate reader from a guarded pull source, computes the lead as pulls minus **envelopes
 consumed**, and requires the maximum to stay within a declared constant *and* be identical across
 fixtures of 1,000 and 8,000 envelopes.
+
+The rejected-release case is driven through that same metric rather than merely counted: a
+conforming reader whose **first** row is rejected still conforms, at both lengths. That is the case
+the denominator argument turns on — the processor stops writing at row one and reads to the end, so
+a lead measured against records written would climb against a count frozen at zero and condemn a
+reader behaving perfectly.
+
+The suite asserts the same context-manager contract on **both** halves: `__enter__` returns the
+object itself, `__exit__` suppresses nothing, and `__exit__` is annotated `-> None` on the protocols
+and their implementations alike. A reader handing back a different object would leave the processor
+holding one instance and iterating another, so the thing it closes is not the thing it read. Both
+verdicts are reached *after* the lifecycle completes rather than inside a `with`, since an assertion
+made inside one is swallowed by the very `__exit__` under test.
 
 Records are the wrong denominator twice over: a row may produce zero or several, and the processor
 stops writing at the first rejected row while it keeps reading, so a conforming reader on a

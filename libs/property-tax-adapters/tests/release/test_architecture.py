@@ -14,13 +14,15 @@ from collections.abc import Sequence
 
 import pytest
 from property_tax_adapters import release
-from property_tax_adapters.release import PreparedRelease, SourceRowEnvelope
+from property_tax_adapters.release import PreparedRelease, SourceRowEnvelope, process_release
 from property_tax_adapters.sources.contracts import AppraisalSourceRecord
 
 from release.conformance import (
     APPROVED_MAX_LEAD,
     GuardedPullSource,
+    assert_exit_returns_none,
     assert_failed_commit_exposes_nothing,
+    assert_reader_context_is_well_behaved,
     assert_reader_is_bounded,
     assert_stage_context_is_well_behaved,
     assert_stage_exit_is_safe,
@@ -32,6 +34,7 @@ from release.conformance import (
 from release.sqlite_stage import SqliteReleaseStage
 from release.support import (
     Reader,
+    RecordingStage,
     account_key,
     collin_shaped,
     envelopes,
@@ -214,15 +217,77 @@ def test_the_eager_lead_grows_with_release_size() -> None:
     assert short > APPROVED_MAX_LEAD and long > short
 
 
-def test_the_metric_survives_a_rejected_release() -> None:
-    """Writing stops at the first rejection; the lead is measured against rows."""
+class _ConformingRejecting(_Conforming):
+    """Conforming, over a release whose very first row is rejected.
 
-    reader = Reader(envelopes(5, rejected=[1]))
-    with reader as opened:
-        opened.prepare()
-        consumed = sum(1 for _ in opened)
+    The case the denominator argument turns on: the processor stops writing at
+    row one and keeps reading to the end, so a lead measured against records
+    written would climb against a count frozen at zero and condemn a reader that
+    is behaving perfectly.
+    """
 
-    assert consumed == 5
+    def __iter__(self):  # noqa: ANN204
+        for number in self._source:
+            if number == 1:
+                yield SourceRowEnvelope(physical_row_number=number, rejected=True)
+                continue
+            yield SourceRowEnvelope(physical_row_number=number, records=(record(number),))
+
+
+def test_a_conforming_reader_over_a_rejected_release_still_conforms() -> None:
+    """Driven through the real metric, not merely counted.
+
+    Counting envelopes from an ordinary reader would prove only that iteration
+    reaches the end.  This runs the same guarded pull source and the same
+    two-length lead comparison every other reader is judged by.
+    """
+
+    assert_reader_is_bounded(_ConformingRejecting)
+    assert max_lead_for(_ConformingRejecting, 1_000) == max_lead_for(_ConformingRejecting, 8_000)
+
+
+def test_the_frozen_write_count_is_why_records_are_the_wrong_denominator() -> None:
+    """Reading continues past the rejection while writing does not."""
+
+    stage = RecordingStage()
+    outcome = process_release(reader=Reader(envelopes(5, rejected=[1])), stage=stage)
+
+    assert outcome.physical_rows_processed == 5, "reading stopped at the rejection"
+    assert stage.calls.count("write") == 0, "writing continued past the first rejected row"
+    # Records written: zero.  Envelopes consumed: five.  A lead divided by the
+    # former is undefined here, which is the argument for the latter.
+    assert outcome.staged_record_count == 0
+
+
+def test_a_conforming_reader_returns_itself_and_suppresses_nothing() -> None:
+    assert_reader_context_is_well_behaved(_Conforming)
+
+
+def test_a_reader_that_hides_itself_or_suppresses_fails_conformance() -> None:
+    """The reader half of the suite's teeth."""
+
+    class _Impostor(_Conforming):
+        def __enter__(self) -> _Conforming:
+            return _Conforming(self._source)
+
+    with pytest.raises(AssertionError, match="other than the reader"):
+        assert_reader_context_is_well_behaved(_Impostor)
+
+    class _Swallowing(_Conforming):
+        def __exit__(self, *_: object) -> bool:
+            return True
+
+    with pytest.raises(AssertionError, match="suppressed an exception"):
+        assert_reader_context_is_well_behaved(_Swallowing)
+
+
+def test_a_reader_exit_annotated_bool_fails_conformance() -> None:
+    class _Suppressible(_Conforming):
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+    with pytest.raises(AssertionError, match="not None"):
+        assert_exit_returns_none(_Suppressible)
 
 
 class _Suppressing:

@@ -73,8 +73,10 @@ class Reader:
         fail_on_prepare: bool = False,
         fail_on_exit: bool = False,
         fail_on_iteration: bool = False,
+        journal: list[str] | None = None,
     ) -> None:
         self._envelopes = list(envelopes)
+        self.journal = journal if journal is not None else []
         self._release = release or prepared()
         self._fail_on_enter = fail_on_enter
         self._fail_on_prepare = fail_on_prepare
@@ -85,6 +87,7 @@ class Reader:
     def __enter__(self) -> Reader:
         if self._fail_on_enter:
             raise RuntimeError("SECRET-ENTER")
+        self.journal.append("reader:enter")
         return self
 
     def __exit__(
@@ -94,6 +97,7 @@ class Reader:
         traceback: TracebackType | None,
     ) -> None:
         self.exited = True
+        self.journal.append("reader:exit")
         if self._fail_on_exit:
             raise RuntimeError("SECRET-EXIT")
 
@@ -147,8 +151,10 @@ class RecordingStage:
         finalize_error: BaseException | None = None,
         commit_error: BaseException | None = None,
         abort_error: BaseException | None = None,
+        journal: list[str] | None = None,
     ) -> None:
         self.calls: list[str] = []
+        self.journal = journal if journal is not None else []
         self.staged: list[AppraisalSourceRecord] = []
         self.visible: list[AppraisalSourceRecord] = []
         self.entered = False
@@ -163,6 +169,7 @@ class RecordingStage:
             raise RuntimeError("SECRET-STAGE-ENTER")
         self.entered = True
         self.calls.append("enter")
+        self.journal.append("stage:enter")
         return self
 
     def __exit__(
@@ -172,26 +179,31 @@ class RecordingStage:
         traceback: TracebackType | None,
     ) -> None:
         self.calls.append("exit")
+        self.journal.append("stage:exit")
 
     def write(self, records: Sequence[AppraisalSourceRecord]) -> None:
         self.calls.append("write")
+        self.journal.append("stage:write")
         if self._write_error is not None:
             raise self._write_error
         self.staged.extend(records)
 
     def finalize(self) -> None:
         self.calls.append("finalize")
+        self.journal.append("stage:finalize")
         if self._finalize_error is not None:
             raise self._finalize_error
 
     def abort(self) -> None:
         self.calls.append("abort")
+        self.journal.append("stage:abort")
         self.staged.clear()
         if self._abort_error is not None:
             raise self._abort_error
 
     def commit(self) -> None:
         self.calls.append("commit")
+        self.journal.append("stage:commit")
         if self._commit_error is not None:
             raise self._commit_error
         self.visible.extend(self.staged)
@@ -200,13 +212,21 @@ class RecordingStage:
 class RecordingProgress:
     """Collects events, optionally raising on one of them."""
 
-    def __init__(self, *, raise_on_final: bool = False, raise_on_index: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on_final: bool = False,
+        raise_on_index: int | None = None,
+        journal: list[str] | None = None,
+    ) -> None:
         self.events: list[ReleaseProgressEvent] = []
+        self.journal = journal if journal is not None else []
         self._raise_on_final = raise_on_final
         self._raise_on_index = raise_on_index
 
     def __call__(self, event: ReleaseProgressEvent) -> None:
         self.events.append(event)
+        self.journal.append("progress:final" if event.final else "progress:interval")
         if self._raise_on_final and event.final:
             raise RuntimeError("SECRET-CALLBACK")
         if self._raise_on_index is not None and len(self.events) - 1 == self._raise_on_index:

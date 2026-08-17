@@ -14,6 +14,7 @@ write count that never moves again.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
@@ -93,6 +94,51 @@ def assert_reader_is_bounded(factory: ReaderFactory) -> None:
     assert short == long, (
         f"lead grew with release size: {short} at {SHORT_FIXTURE}, {long} at {LONG_FIXTURE}"
     )
+
+
+def assert_reader_context_is_well_behaved(factory: ReaderFactory) -> None:
+    """`__enter__` returns the reader itself, and `__exit__` suppresses nothing.
+
+    The reader half of the same contract the stage half asserts.  A reader
+    handing back a different object leaves the processor holding one instance
+    and iterating another, so the thing it closes is not the thing it read; one
+    that suppresses turns a rejected release into an accepted one by swallowing
+    the exception that rejected it.
+    """
+
+    # Entered and left by hand, with the verdict reached afterwards: a reader
+    # that suppresses would swallow an assertion made inside its own `with`.
+    reader = factory(GuardedPullSource(rows=SHORT_FIXTURE))
+    opened = reader.__enter__()
+    identical = opened is reader
+    reader.__exit__(None, None, None)
+    assert identical, "__enter__ returned something other than the reader"
+
+    sentinel = RuntimeError("conformance-propagation-probe")
+    escaped = None
+    try:
+        with factory(GuardedPullSource(rows=SHORT_FIXTURE)) as opened:
+            opened.prepare()
+            raise sentinel
+    except RuntimeError as error:
+        escaped = error
+    assert escaped is sentinel, "__exit__ suppressed an exception raised inside the reader"
+
+
+def assert_exit_returns_none(*candidates: object) -> None:
+    """`__exit__` is annotated `-> None`, on protocols and implementations alike.
+
+    An `__exit__` annotated `-> bool` advertises that it may suppress.  The
+    annotation is the contract a conforming implementation reads, so it is
+    asserted rather than assumed — including on the protocols themselves, which
+    are the only statement of it a county ever sees.
+    """
+
+    for candidate in candidates:
+        annotation = inspect.signature(candidate.__exit__).return_annotation  # type: ignore[attr-defined]
+        assert annotation in (None, "None", type(None)), (
+            f"{candidate!r}.__exit__ is annotated {annotation!r}, not None"
+        )
 
 
 StageFactory = Callable[[], ReleaseStage]

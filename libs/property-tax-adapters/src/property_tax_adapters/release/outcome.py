@@ -175,8 +175,30 @@ class ReleaseOutcome:
     def __post_init__(self) -> None:
         if not isinstance(self.disposition, ReleaseDisposition):
             raise ValueError("disposition must be a ReleaseDisposition")
-        if self.boundary_contract_version != BOUNDARY_CONTRACT_VERSION:
-            raise ValueError(f"boundary_contract_version must be {BOUNDARY_CONTRACT_VERSION}")
+        # `True == 1` in Python, so equality alone would admit a bool as the
+        # contract version, and `!=` alone never looks at the type at all.
+        if (
+            isinstance(self.boundary_contract_version, bool)
+            or not isinstance(self.boundary_contract_version, int)
+            or self.boundary_contract_version != BOUNDARY_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                f"boundary_contract_version must be the int {BOUNDARY_CONTRACT_VERSION}"
+            )
+
+        # The two prepared fields are declared `int | None` and `str | None`, and
+        # a declaration nothing checks is a comment.  Their pairing rule below
+        # says when they may be absent, never what they may be.
+        if self.parser_contract_version is not None and (
+            isinstance(self.parser_contract_version, bool)
+            or not isinstance(self.parser_contract_version, int)
+        ):
+            raise ValueError("parser_contract_version must be an int or None")
+        _require_optional_name(self.layout_fingerprint, "layout_fingerprint")
+
+        for name in ("diagnostics_truncated", "notices_truncated"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
 
         # The two prepared fields come from one `PreparedRelease`, so they are
         # set together or not at all.  A half-populated outcome would describe a
