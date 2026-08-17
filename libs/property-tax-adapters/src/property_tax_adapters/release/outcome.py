@@ -224,6 +224,18 @@ class ReleaseOutcome:
         )
         self._require_retention("notices", "total_notice_count", "notices_truncated", ReleaseNotice)
 
+        # One release has one layout, so a diagnostic naming a different
+        # fingerprint than the outcome it arrived in describes a release that
+        # did not happen.  Checking each carrier alone can never catch that: both
+        # values are individually valid, and only their disagreement is the
+        # defect.  A notice needs no such rule — it carries no fingerprint at all.
+        for entry in self.diagnostics:
+            if entry.layout_fingerprint != self.layout_fingerprint:
+                raise ValueError(
+                    "a diagnostic may not carry a layout fingerprint the outcome does not, "
+                    "since one release has one layout"
+                )
+
         accepted = self.disposition is ReleaseDisposition.ACCEPTED
         # Every diagnostic code is a failure code, so acceptance and diagnostics
         # are not independent.  Notices deliberately are.

@@ -86,7 +86,7 @@ def test_the_accepted_order_across_all_three_collaborators() -> None:
 
 
 def test_the_ordering_holds_when_the_release_is_rejected() -> None:
-    """Abort precedes the reader close, and neither finalize nor commit runs."""
+    """The reader closes before the abort, and neither finalize nor commit runs."""
 
     journal: list[str] = []
     reader = Reader(envelopes(3, rejected=[2]), journal=journal)
@@ -446,6 +446,54 @@ def test_the_outcome_declares_exactly_its_schema() -> None:
 def test_each_outcome_invariant_refuses_its_violation(overrides: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         ReleaseOutcome(disposition=ReleaseDisposition.ACCEPTED, **overrides)
+
+
+@pytest.mark.parametrize(
+    ("outcome_fingerprint", "diagnostic_fingerprint"),
+    [
+        ("f" * 64, "a" * 64),
+        ("f" * 64, None),
+        (None, "a" * 64),
+    ],
+    ids=["different-layout", "diagnostic-omits-it", "diagnostic-invents-it"],
+)
+def test_a_diagnostic_may_not_disagree_with_its_outcome_about_the_layout(
+    outcome_fingerprint: str | None, diagnostic_fingerprint: str | None
+) -> None:
+    """Both values are individually valid; only their disagreement is the defect.
+
+    Checking each carrier alone can never catch this, which is why the rule
+    lives on the outcome that holds them together.
+    """
+
+    diagnostic = ReleaseDiagnostic(
+        code=ReleaseDiagnosticCode.RECORD_REJECTED,
+        layout_fingerprint=diagnostic_fingerprint,
+    )
+
+    with pytest.raises(ValueError, match="layout fingerprint the outcome does not"):
+        ReleaseOutcome(
+            disposition=ReleaseDisposition.REJECTED,
+            diagnostics=(diagnostic,),
+            total_diagnostic_count=1,
+            layout_fingerprint=outcome_fingerprint,
+            parser_contract_version=None if outcome_fingerprint is None else 1,
+        )
+
+
+def test_every_outcome_the_processor_builds_agrees_with_its_diagnostics() -> None:
+    """The rule holds for what the processor produces, before and after preparation."""
+
+    for reader in (
+        Reader(envelopes(3, rejected=[2])),
+        Reader([], fail_on_enter=True),
+        Reader([], fail_on_prepare=True),
+        Reader(envelopes(2), fail_on_exit=True),
+    ):
+        outcome = process_release(reader=reader, stage=RecordingStage())
+        assert outcome.diagnostics, "a rejected release carried no diagnostic"
+        for entry in outcome.diagnostics:
+            assert entry.layout_fingerprint == outcome.layout_fingerprint
 
 
 def test_a_rejected_outcome_may_not_claim_a_commit() -> None:

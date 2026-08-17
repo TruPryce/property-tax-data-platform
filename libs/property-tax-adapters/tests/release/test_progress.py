@@ -6,11 +6,13 @@ sequence rather than by inspecting the code that produces it.
 
 from __future__ import annotations
 
+import pytest
 from property_tax_adapters.release import (
     BOUNDARY_CONTRACT_VERSION,
     PROGRESS_CONTRACT_VERSION,
     PROGRESS_ROW_INTERVAL,
     ReleaseDisposition,
+    ReleaseProgressEvent,
     process_release,
 )
 
@@ -96,6 +98,35 @@ def test_no_callback_exception_text_is_retained() -> None:
     )
 
     assert "SECRET-CALLBACK" not in repr(outcome)
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1", None], ids=["bool", "float", "str", "none"])
+def test_the_progress_version_refuses_anything_but_the_int(version: object) -> None:
+    """`True == 1` and `1.0 == 1`, so equality alone pins nothing."""
+
+    with pytest.raises(ValueError, match="progress_contract_version must be the int 1"):
+        ReleaseProgressEvent(
+            jurisdiction_code=JURISDICTION,
+            release_identifier=RELEASE,
+            source_member_name=MEMBER,
+            parser_contract_version=1,
+            layout_fingerprint=FINGERPRINT,
+            physical_rows_processed=0,
+            staged_record_count=0,
+            sequence_number=0,
+            final=True,
+            progress_contract_version=version,  # type: ignore[arg-type]
+        )
+
+
+def test_the_emitted_event_carries_the_int_not_merely_something_equal_to_it() -> None:
+    progress = RecordingProgress()
+
+    process_release(reader=Reader([]), stage=RecordingStage(), progress=progress)
+
+    emitted = progress.events[0].progress_contract_version
+    assert emitted == 1
+    assert type(emitted) is int, f"the contract version is a {type(emitted).__name__}"
 
 
 def test_both_contract_versions_are_pinned() -> None:

@@ -48,8 +48,16 @@ class ReleaseProgressEvent:
     progress_contract_version: int = PROGRESS_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
-        if self.progress_contract_version != PROGRESS_CONTRACT_VERSION:
-            raise ValueError(f"progress_contract_version must be {PROGRESS_CONTRACT_VERSION}")
+        # `True == 1` and `1.0 == 1` in Python, so equality alone admits a bool
+        # and a float as the contract version — the same defect the outcome had.
+        if (
+            isinstance(self.progress_contract_version, bool)
+            or not isinstance(self.progress_contract_version, int)
+            or self.progress_contract_version != PROGRESS_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                f"progress_contract_version must be the int {PROGRESS_CONTRACT_VERSION}"
+            )
         # The same bound `PreparedRelease` applies, not a weaker one.  A
         # non-blank string would have admitted an absolute path as a member
         # name, and a progress stream is precisely where that would be logged.
