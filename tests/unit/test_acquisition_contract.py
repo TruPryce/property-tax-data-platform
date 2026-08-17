@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from property_tax_application.acquisition import (
     ACQUISITION_CONTRACT_VERSION,
+    MAX_LOCATOR_CHARS,
     SANITIZED_HEADERS,
     AcquiredArtifact,
     AcquisitionError,
@@ -468,3 +469,31 @@ def test_a_plain_object_locator_is_accepted_unrewritten() -> None:
         "file:///var/bronze/roll.zip",
     ):
         assert artifact(locator=good).locator == good
+
+
+@pytest.mark.parametrize(
+    ("locator", "message"),
+    [
+        ("s3://bucket/" + "k" * 3_000, "exceeds 2048 characters"),
+        ("s3://bucket/key\r\ninjected: yes", "control character"),
+        ("s3://bucket/key\x00", "control character"),
+        ("  s3://bucket/key  ", "surrounding whitespace"),
+    ],
+    ids=["unbounded", "crlf-injection", "null-byte", "untrimmed"],
+)
+def test_a_locator_is_bounded_and_clean(locator: str, message: str) -> None:
+    """The same rules a header value obeys, against a different party.
+
+    The sink is trusted code, but a manifest field is a manifest field: an
+    unbounded one makes the record unbounded, and a control character forges a
+    line break wherever the record is later rendered.
+    """
+
+    with pytest.raises(ValueError, match=message):
+        artifact(locator=locator)
+
+
+def test_a_locator_at_the_bound_is_still_accepted() -> None:
+    at_limit = "s3://b/" + "k" * (MAX_LOCATOR_CHARS - len("s3://b/"))
+
+    assert len(artifact(locator=at_limit).locator) == MAX_LOCATOR_CHARS

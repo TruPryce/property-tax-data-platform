@@ -552,3 +552,91 @@ def test_a_signed_request_url_does_not_reach_the_provenance(tmp_path: Path) -> N
         assert secret not in rendered, f"{secret} survived into the artifact"
     assert acquired.final_url.endswith("/roll.txt")
     assert acquired.redirects[0].to_url.endswith("/roll.txt")
+
+
+# --------------------------------------------------------------------------
+# What `__exit__` owes: it may not fail, and it may not suppress
+# --------------------------------------------------------------------------
+
+
+def assert_sink_exit_is_safe(factory, records: bytes) -> None:
+    """A sink's exit may not fail after either a commit or an abort.
+
+    The reusable form of the rule, so a future sink — the S3 one task 3.2 adds
+    — is held to it rather than only this fixture. Exit is the last thing the
+    acquisition does, so a raise here reaches the caller after the artifact is
+    already durable.
+    """
+
+    committed = factory()
+    with committed as opened:
+        opened.write(records)
+        opened.commit()
+
+    aborted = factory()
+    with aborted as opened:
+        opened.write(records)
+        opened.abort()
+
+
+def test_the_file_sink_exit_is_safe_after_commit_and_after_abort(tmp_path: Path) -> None:
+    assert_sink_exit_is_safe(lambda: FileSink(tmp_path / "artifact.txt"), b"payload")
+
+
+def test_a_sink_raising_on_exit_after_a_commit_is_a_defect_not_a_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """It propagates rather than being mapped to a failure code.
+
+    The artifact committed, so there is no acquisition failure to report; what
+    happened is that trusted code broke its contract, and reporting it as an
+    acquisition failure would say the release did not land when it did.
+    """
+
+    class RaisingExit(FileSink):
+        def __exit__(self, *args: object) -> None:
+            super().__exit__(*args)  # type: ignore[arg-type]
+            raise RuntimeError("sink-exit-defect")
+
+    sink = RaisingExit(tmp_path / "artifact.txt")
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        with pytest.raises(RuntimeError, match="sink-exit-defect") as raised:
+            acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
+
+    assert not isinstance(raised.value, AcquisitionError), (
+        "a broken sink contract was reported as an acquisition failure"
+    )
+    assert sink.committed is True, "the artifact had already committed"
+    assert sink.destination.exists(), "the committed object was removed by a failing exit"
+
+
+def test_a_sink_exit_cannot_suppress_the_failure_that_rejected_the_release(
+    tmp_path: Path,
+) -> None:
+    """A suppressing exit would turn a rejected acquisition into a silent success."""
+
+    class SuppressingExit(FileSink):
+        def __exit__(self, *args: object) -> bool:
+            super().__exit__(*args)  # type: ignore[arg-type]
+            return True
+
+    with serving({"/roll.txt": Route(status=404)}) as server:
+        with pytest.raises(AcquisitionError) as raised:
+            acquire_artifact(
+                url=f"{base_url(server)}/roll.txt",
+                sink=SuppressingExit(tmp_path / "artifact.txt"),
+                policy=local_policy(),
+            )
+
+    assert raised.value.failure is AcquisitionFailure.UNSUPPORTED_STATUS
+
+
+def test_the_sink_protocol_annotates_exit_as_returning_none() -> None:
+    """`-> bool` would advertise that suppression is permitted."""
+
+    import inspect
+
+    from property_tax_application.acquisition import ArtifactSink
+
+    annotation = inspect.signature(ArtifactSink.__exit__).return_annotation
+    assert annotation in (None, "None", type(None)), annotation

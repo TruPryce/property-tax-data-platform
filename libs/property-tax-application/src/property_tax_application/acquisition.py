@@ -31,6 +31,7 @@ __all__ = [
     "ArtifactSink",
     "RedirectHop",
     "ResponseMetadata",
+    "MAX_LOCATOR_CHARS",
     "SANITIZED_HEADERS",
     "TRANSIENT_STATUSES",
     "sanitize_headers",
@@ -51,6 +52,11 @@ SANITIZED_HEADERS: frozenset[str] = frozenset(
 #: A preserved header value is bounded, so a hostile server cannot make the
 #: manifest large by answering with a megabyte of `ETag`.
 MAX_HEADER_VALUE_CHARS: int = 512
+
+#: A locator is bounded for the same reason, against a different party: the sink
+#: rather than the server.  S3 keys stop at 1,024 bytes and a scheme and bucket
+#: fit comfortably inside the remainder.
+MAX_LOCATOR_CHARS: int = 2_048
 
 #: Statuses a later attempt may resolve.  Everything else is a rule or a
 #: representation problem, which retrying only repeats.
@@ -238,6 +244,19 @@ def _require_sanitized_locator(locator: str) -> None:
 
     if not isinstance(locator, str) or not locator.strip():
         raise ValueError("locator must be the non-blank URI the sink's commit returned")
+    # Bounded and clean for the same reasons a header value is, against a
+    # different party.  The sink is trusted code, but a manifest field is a
+    # manifest field: an unbounded one makes the record unbounded, and a control
+    # character in it forges a line break wherever the record is later rendered.
+    if len(locator) > MAX_LOCATOR_CHARS:
+        raise ValueError(
+            f"locator exceeds {MAX_LOCATOR_CHARS} characters; a bounded manifest "
+            "cannot hold an unbounded locator"
+        )
+    if _CONTROL_CHARACTERS.search(locator) is not None:
+        raise ValueError("locator carries a control character")
+    if locator != locator.strip():
+        raise ValueError("locator carries surrounding whitespace")
     parts = urlsplit(locator)
     if not parts.scheme:
         raise ValueError("locator must name a scheme, so a consumer knows how to fetch it")
@@ -428,7 +447,24 @@ class ArtifactSink(Protocol):
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         traceback: TracebackType | None,
-    ) -> None: ...
+    ) -> None:
+        """Release the sink's own resources, and raise nothing.
+
+        Two obligations, and both are the caller's protection rather than the
+        implementation's convenience.
+
+        It SHALL NOT raise after a `commit` or an `abort` has run.  Exit is the
+        last thing the acquisition does, so an exception here arrives after the
+        artifact is already durable — the caller would receive a failure for an
+        acquisition that succeeded, and could not tell that from one that did
+        not.  A sink that raises there is a defect in trusted code, not a
+        condition to report, exactly as the release stage treats the same case.
+
+        It SHALL NOT suppress: annotated `-> None` rather than `-> bool`, so a
+        failure that rejected the acquisition cannot be swallowed on the way out
+        and reported as success.
+        """
+        ...
 
     def write(self, chunk: bytes) -> None:
         """Append one bounded chunk.  Never handed the complete artifact."""
