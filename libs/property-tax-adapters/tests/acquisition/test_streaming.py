@@ -421,10 +421,16 @@ def test_a_sink_that_fails_to_enter_is_still_aborted(tmp_path: Path) -> None:
     assert not sink.partial.exists() and not sink.destination.exists()
 
 
-def test_an_aborting_abort_does_not_mask_the_original_failure(tmp_path: Path) -> None:
+def test_a_failed_cleanup_is_reported_beside_the_original_failure(tmp_path: Path) -> None:
+    """Two facts, and a caller that cannot tell them apart assumes a clean sink.
+
+    The abort raises *before* removing anything, so the partial object really
+    does survive — a test whose abort cleans up first and then raises proves
+    nothing about the case that matters.
+    """
+
     class UnabortableSink(FileSink):
         def abort(self) -> None:
-            super().abort()
             raise OSError("SECRET-ABORT-FAILED")
 
     sink = UnabortableSink(tmp_path / "artifact.txt")
@@ -432,8 +438,46 @@ def test_an_aborting_abort_does_not_mask_the_original_failure(tmp_path: Path) ->
         with pytest.raises(AcquisitionError) as raised:
             acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
 
+    # The cause survives...
     assert raised.value.failure is AcquisitionFailure.UNSUPPORTED_STATUS
+    # ...and so does the news that cleanup did not happen.
+    assert raised.value.cleanup_failed is True
+    assert any("partial artifact may remain" in note for note in raised.value.__notes__)
+    assert sink.partial.exists(), "the premise failed: nothing was actually left behind"
     assert "SECRET-ABORT-FAILED" not in str(raised.value)
+    assert not any("SECRET-ABORT-FAILED" in note for note in raised.value.__notes__)
+
+
+def test_a_successful_cleanup_reports_no_cleanup_failure(tmp_path: Path) -> None:
+    with serving({"/roll.txt": Route(status=404)}) as server:
+        sink = sink_at(tmp_path)
+        with pytest.raises(AcquisitionError) as raised:
+            acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
+
+    assert raised.value.cleanup_failed is False
+    assert not sink.partial.exists()
+
+
+def test_a_failed_cleanup_after_an_interruption_is_still_noted(tmp_path: Path) -> None:
+    """The note reaches a BaseException too, which carries no failure code."""
+
+    class Interrupting(FileSink):
+        def write(self, chunk: bytes) -> None:
+            super().write(chunk)
+            raise KeyboardInterrupt
+
+        def abort(self) -> None:
+            raise OSError("SECRET-ABORT-FAILED")
+
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            acquire_artifact(
+                url=f"{base_url(server)}/roll.txt",
+                sink=Interrupting(tmp_path / "artifact.txt"),
+                policy=local_policy(),
+            )
+
+    assert any("partial artifact may remain" in note for note in raised.value.__notes__)
 
 
 def test_the_sink_is_left_exactly_once_on_the_happy_path(tmp_path: Path) -> None:

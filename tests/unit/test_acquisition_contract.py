@@ -391,3 +391,80 @@ def test_response_headers_cannot_be_changed_after_the_allowlist_check() -> None:
 
     with pytest.raises(TypeError):
         metadata.headers["etag"] = "injected"  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------
+# A carrier built by hand obeys the same rules as one built by the adapter
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("x" * 513, "exceeds 512 characters"),
+        ("text/csv\r\nInjected: yes", "control character"),
+        ("text/csv\x00", "control character"),
+        ("  text/csv  ", "surrounding whitespace"),
+    ],
+    ids=["unbounded", "crlf-injection", "null-byte", "untrimmed"],
+)
+def test_a_header_value_built_by_hand_obeys_the_sanitizer(value: str, message: str) -> None:
+    """The allowlist bounded which headers survive, not what they may contain.
+
+    `sanitize_headers` normalizes; a caller constructing the carrier directly
+    bypassed it entirely, so a value could carry five kilobytes or a CRLF that
+    splits a log line into a forged second record.
+    """
+
+    with pytest.raises(ValueError, match=message):
+        ResponseMetadata(status=200, headers={"content-type": value})
+
+
+def test_a_sanitized_header_passes_the_carrier_unchanged() -> None:
+    """The two rules agree: what the sanitizer emits, the carrier accepts."""
+
+    cleaned = sanitize_headers(
+        {"ETag": '"' + "a" * 5_000 + '"', "Content-Type": "text/csv\r\nX: y", "Content-Length": "9"}
+    )
+
+    metadata = ResponseMetadata(status=200, headers=cleaned)
+
+    assert metadata.headers == cleaned
+
+
+@pytest.mark.parametrize(
+    ("locator", "message"),
+    [
+        ("https://bronze.example/r.zip?X-Amz-Signature=SECRET", "query string"),
+        ("s3://key:SECRET@bucket/r.zip", "userinfo"),  # pragma: allowlist secret
+        ("https://bronze.example/r.zip#SECRET", "fragment"),
+        ("bronze/r.zip", "must name a scheme"),
+        ("   ", "non-blank"),
+    ],
+    ids=["signed-query", "userinfo", "fragment", "no-scheme", "blank"],
+)
+def test_a_locator_may_not_carry_access(locator: str, message: str) -> None:
+    """Where the bytes landed, not who may fetch them.
+
+    An object-store URL with a signature is a bearer credential, and task 3.2
+    persists this field into a manifest that outlives the signature's validity.
+    """
+
+    with pytest.raises(ValueError, match=message):
+        artifact(locator=locator)
+
+
+def test_a_plain_object_locator_is_accepted_unrewritten() -> None:
+    """Refused rather than rewritten: an object key is case-sensitive.
+
+    Lowercasing an authority the way a provenance URL is lowercased would name
+    a different object, so the dangerous parts are rejected and nothing else is
+    touched.
+    """
+
+    for good in (
+        "s3://bronze-tx/2026/Roll_CURRENT.zip",
+        "https://bronze.example/tx-dallas/roll.zip",
+        "file:///var/bronze/roll.zip",
+    ):
+        assert artifact(locator=good).locator == good

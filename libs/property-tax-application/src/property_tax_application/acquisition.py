@@ -106,6 +106,12 @@ class AcquisitionError(Exception):
     def __init__(self, failure: AcquisitionFailure, detail: str = "") -> None:
         self.failure = failure
         self.detail = detail
+        #: Set when cleanup after this failure itself failed, which means a
+        #: partial artifact may survive.  A separate fact from `failure`: one
+        #: says why the acquisition stopped, the other whether anything was
+        #: left behind, and a caller that cannot tell them apart will assume
+        #: the sink is clean.
+        self.cleanup_failed = False
         super().__init__(f"{failure.value}: {detail}" if detail else failure.value)
 
 
@@ -199,6 +205,53 @@ def sanitize_url(url: str) -> str:
     return urlunsplit((parts.scheme.casefold(), authority, parts.path, "", ""))
 
 
+def _require_sanitized_header_value(name: str, value: str) -> None:
+    """Refuse a header value that `sanitize_headers` would have changed.
+
+    The allowlist bounds which headers survive; it did not bound what they may
+    contain, so a value built by hand rather than passed through the sanitizer
+    could carry five kilobytes or a `\r\n` that splits a log line into a
+    forged second record.  Checked here because this type is what task 3.2
+    persists, and a rule only the adapter applies is a rule a second caller
+    does not.
+    """
+
+    if len(value) > MAX_HEADER_VALUE_CHARS:
+        raise ValueError(
+            f"the {name} header exceeds {MAX_HEADER_VALUE_CHARS} characters; "
+            "a bounded manifest cannot hold an unbounded value"
+        )
+    if _CONTROL_CHARACTERS.search(value) is not None:
+        raise ValueError(f"the {name} header carries a control character")
+    if value != value.strip():
+        raise ValueError(f"the {name} header carries surrounding whitespace")
+
+
+def _require_sanitized_locator(locator: str) -> None:
+    """A locator says where bytes landed; it may not say who may fetch them.
+
+    Not passed through `sanitize_url`, which lowercases an authority: an object
+    key is case-sensitive and rewriting one would name a different object. The
+    dangerous components are refused instead of removed, so a caller learns the
+    locator was wrong rather than silently receiving a different one.
+    """
+
+    if not isinstance(locator, str) or not locator.strip():
+        raise ValueError("locator must be the non-blank URI the sink's commit returned")
+    parts = urlsplit(locator)
+    if not parts.scheme:
+        raise ValueError("locator must name a scheme, so a consumer knows how to fetch it")
+    if parts.username or parts.password:
+        raise ValueError("locator must not carry userinfo, which is a credential")
+    if parts.query:
+        raise ValueError(
+            "locator must not carry a query string, which is where signed and expiring "
+            "access tokens live on object stores"
+        )
+    if parts.fragment:
+        raise ValueError("locator must not carry a fragment, which is never sent to a server")
+
+
 def _require_sanitized_url(url: str, field_name: str) -> None:
     """Refuse a URL that still carries what `sanitize_url` removes.
 
@@ -254,6 +307,7 @@ class ResponseMetadata:
         for name, value in self.headers.items():
             if not isinstance(value, str):
                 raise ValueError(f"the {name} header must be a str")
+            _require_sanitized_header_value(name, value)
         # Snapshotted behind a read-only view.  Without the copy a caller could
         # inject `set-cookie` after the allowlist check, or change
         # `content-length` and break an agreement an artifact already verified.
@@ -324,8 +378,7 @@ class AcquiredArtifact:
         # Required, not optional: the manifest task consumes this value, and an
         # artifact that completed but cannot say where it landed would make the
         # commit unfindable through the only port that performed it.
-        if not isinstance(self.locator, str) or not self.locator.strip():
-            raise ValueError("locator must be the non-blank URI the sink's commit returned")
+        _require_sanitized_locator(self.locator)
         _require_sanitized_url(self.final_url, "final_url")
         if isinstance(self.byte_count, bool) or not isinstance(self.byte_count, int):
             raise ValueError("byte_count must be an int")

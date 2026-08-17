@@ -110,14 +110,24 @@ def acquire_artifact(
                     expected_sha256=expected_sha256,
                 )
         raise AcquisitionError(AcquisitionFailure.TOO_MANY_REDIRECTS, str(policy.max_redirects))
-    except BaseException:
+    except BaseException as failure:
         # BaseException, not Exception: a KeyboardInterrupt or a cancelled task
         # leaves exactly the same partial object as a timeout does, and the
         # reason it stopped does not change what has to be cleaned up.
         try:
             sink.abort()
-        except Exception:  # noqa: BLE001 - the first failure is the one to report
-            pass
+        except Exception as cleanup_error:  # noqa: BLE001 - recorded, never swallowed
+            # Two facts, and neither replaces the other: the original failure is
+            # why the acquisition stopped, and a failed abort is the separate and
+            # more serious news that a partial object may have survived it.
+            # Raising the cleanup error instead would hide the cause; discarding
+            # it lets a caller believe the sink is clean when it is not.
+            failure.add_note(
+                f"cleanup failed with {type(cleanup_error).__name__}: "
+                "a partial artifact may remain at the sink"
+            )
+            if isinstance(failure, AcquisitionError):
+                failure.cleanup_failed = True
         raise
     finally:
         if entered:
