@@ -9,7 +9,7 @@ Read on `main` at the time of drafting.
 - It names the cgroup as the authority inside a container: `/sys/fs/cgroup/memory.peak`, cgroup v2, bytes.
 - It rejects `tracemalloc` with a measurement: 663 MiB traced against 2,079 MiB resident on the same run.
 
-`add-bounded-release-processing` is accepted and declares the seam this change fills: a `ResourceGuard` with `check(physical_rows_processed: int, staged_record_count: int) -> None`, called after the stage is entered, at every 100,000-row boundary, and once at end-of-input, with a raise mapping to `resource_limit_exceeded`. It states in as many words that what is measured belongs to a second change.
+The `bounded-release-processing` capability, introduced by the now-archived `add-bounded-release-processing` change and implemented on `main`, declares the seam this change fills: a `ResourceGuard` with `check(physical_rows_processed: int, staged_record_count: int) -> None`, called after the stage is entered, at every 100,000-row boundary, and once at end-of-input, with a raise mapping to `resource_limit_exceeded`. It states in as many words that what is measured belongs to a second change.
 
 Nothing in `libs/property-tax-adapters/` measures memory today, and there is no benchmark target in the `Makefile`.
 

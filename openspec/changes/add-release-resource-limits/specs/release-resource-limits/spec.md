@@ -33,9 +33,28 @@ Every reported measurement SHALL name its source. The cgroup is the authority th
 - **THEN** it declares exactly `peak_bytes` and `source`
 - **THEN** no code path returns a bare integer in its place
 
+### Requirement: Keep the measurement out of the boundary package
+
+The probe and the guard SHALL live in `property_tax_adapters.resources`, a package beside `property_tax_adapters.release` rather than inside it.
+
+The accepted boundary asserts, per module, that `property_tax_adapters.release` imports only `__future__`, `re`, `collections`, `contextlib`, `dataclasses`, `enum`, `types`, and `typing`. Reading a peak requires `resource` for `getrusage` and a filesystem read for the cgroup path, so a probe placed inside that package fails an accepted test that this change does not modify.
+
+That constraint is also the correct architecture rather than an obstacle worked around: the boundary declares *when* it asks and deliberately owns no measurement, so a package that acquires operating-system dependencies is exactly what must stay outside it. The dependency runs one way — `resources` imports the release protocols, and `release` imports nothing from `resources`.
+
+#### Scenario: The boundary package stays free of measurement imports
+- **GIVEN** the accepted per-module import allowlist for `property_tax_adapters.release`
+- **WHEN** this change adds the probe and the guard
+- **THEN** no module under `property_tax_adapters.release` is added or modified
+- **THEN** the accepted architecture test passes unchanged
+
+#### Scenario: The dependency runs one way
+- **WHEN** the two packages are inspected
+- **THEN** `property_tax_adapters.resources` imports the release protocols
+- **THEN** no module under `property_tax_adapters.release` imports `property_tax_adapters.resources`
+
 ### Requirement: Enforce a peak-RSS limit through the accepted guard protocol
 
-The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` protocol that `add-bounded-release-processing` declares, taking a limit in bytes and implementing `check(physical_rows_processed: int, staged_record_count: int) -> None`.
+The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` protocol that the `bounded-release-processing` capability declares, taking a limit in bytes and implementing `check(physical_rows_processed: int, staged_record_count: int) -> None`.
 
 `check` SHALL sample the peak and SHALL raise when it exceeds the configured limit. The boundary maps that raise to `resource_limit_exceeded` and rejects the release.
 
@@ -91,23 +110,66 @@ The generator SHALL retain no accumulated state across rows, so the instrument d
 
 ### Requirement: Prove boundedness by shape, not by a single number
 
-The acceptance benchmark SHALL run the boundary at **two** release sizes, 250,000 and 1,000,000 physical rows, and SHALL require that the measured peak does not scale with the row count.
+The acceptance benchmark SHALL take **three** peak-RSS measurements, each in its own subprocess, and SHALL evaluate two independent checks against them.
 
-A single absolute figure SHALL NOT be treated as evidence of boundedness. An implementation retaining every row can pass one absolute on a large enough machine and fail at the next order of magnitude with no warning; the fourfold row increase between the two sizes is what distinguishes a flat peak from a linear one.
+Each measurement SHALL run in a separate subprocess because a peak is a high-water mark: two sizes measured in one process report the larger of the two under both names, which would make a linear implementation indistinguishable from a bounded one.
 
-The peak at 1,000,000 rows SHALL be under 900 MiB, which supersedes the issue body's 1 GiB because the scheduler's measured 400 MiB peak shares the same 4 GiB container at a parallelism of four.
+The three measurements are:
+
+| symbol | rows | what it measures |
+| --- | --- | --- |
+| `B` | 0 | the baseline: interpreter, imports, and harness |
+| `P1` | 250,000 | baseline plus the working set at the smaller size |
+| `P2` | 1,000,000 | baseline plus the working set at the acceptance size |
+
+The working set at each size SHALL be computed by subtracting the baseline, floored at zero because measurement noise can place a peak below it:
+
+```
+W1 = max(P1 - B, 0)
+W2 = max(P2 - B, 0)
+```
+
+The scaling ratio SHALL be computed with a fixed noise floor `F` of 8 MiB added to both terms:
+
+```
+scaling_ratio = (W2 + F) / (W1 + F)
+```
+
+The floor is what makes the ratio stable when both working sets are small: without it, two nearly-identical bounded measurements a few kilobytes apart can produce an arbitrarily large quotient, and the check would fail on noise rather than on growth.
+
+The benchmark SHALL apply both checks and SHALL fail if either fails:
+
+1. **Absolute.** `P2` SHALL be under 900 MiB. This supersedes the issue body's 1 GiB because the scheduler's measured 400 MiB peak shares the same 4 GiB container at a parallelism of four.
+2. **Scaling.** `scaling_ratio` SHALL be at most **1.5**.
+
+The threshold of 1.5 follows from what each implementation shape produces. Rows increase fourfold between the two sizes, so a boundary retaining every row has `W2 ≈ 4 × W1` and a scaling ratio approaching **4.0**, while a boundary retaining nothing has `W2 ≈ W1` and a ratio approaching **1.0**. A limit of 1.5 permits the working set to grow by half while the row count grows by three hundred percent — at most one sixth of proportional growth — which is far below the linear signal and well above allocator variance and the generator's own per-row transients.
+
+A single absolute figure SHALL NOT be treated as evidence of boundedness. An implementation retaining every row can pass one absolute on a large enough machine and fail at the next order of magnitude with no warning.
+
+The floor also bounds what the scaling check can detect, and that limit SHALL be stated rather than left implied. Solving `(4·W1 + F) / (W1 + F) ≤ 1.5` gives `W1 ≤ F/5`, so a genuinely linear implementation escapes the check only if its working set at 250,000 rows is under 1.6 MiB — about 6.7 bytes per row. No implementation retaining record objects can be that small, so the blind spot is unreachable by the defect the check exists to catch, but it is a blind spot and the document SHALL say so.
 
 #### Scenario: A bounded implementation passes both checks
 - **GIVEN** a boundary that retains no row after writing it
-- **WHEN** the benchmark runs at 250,000 and 1,000,000 rows
-- **THEN** the peak at 1,000,000 rows is under 900 MiB
-- **THEN** the two peaks are close enough that the fourfold row increase did not scale memory
+- **WHEN** the benchmark takes all three measurements
+- **THEN** `P2` is under 900 MiB
+- **THEN** `scaling_ratio` is at most 1.5
 
 #### Scenario: A linear implementation fails even when it fits
-- **GIVEN** a boundary that accumulates rows, whose peak at 1,000,000 rows happens to fall under 900 MiB
-- **WHEN** the benchmark runs at both sizes
-- **THEN** the peak grows in proportion to the rows
-- **THEN** the benchmark fails on the ratio even though the absolute passed
+- **GIVEN** a boundary that accumulates rows, whose `P2` happens to fall under 900 MiB
+- **WHEN** the benchmark takes all three measurements
+- **THEN** `W2` is approximately four times `W1`
+- **THEN** `scaling_ratio` exceeds 1.5 and the benchmark fails on the scaling check even though the absolute check passed
+
+#### Scenario: Two bounded measurements a few kilobytes apart do not fail on noise
+- **GIVEN** a bounded boundary whose two working sets differ only by allocator variance
+- **WHEN** the scaling ratio is computed with the 8 MiB floor added to both terms
+- **THEN** the ratio remains near 1.0 rather than being amplified by the small denominator
+
+#### Scenario: Each size is measured in its own process
+- **GIVEN** a peak that is a high-water mark for the life of a process
+- **WHEN** the benchmark measures 250,000 and 1,000,000 rows
+- **THEN** each measurement runs in a separate subprocess
+- **THEN** neither reported peak includes the other size's allocations
 
 ### Requirement: Make the acceptance run reproducible, offline, and self-describing
 
@@ -137,7 +199,7 @@ Documentation SHALL state that the benchmark measures one process on the machine
 
 It SHALL state that what the benchmark does establish is that one task's peak fits the per-task budget and does not scale with release size.
 
-It SHALL state that the resource half of issue #43 D5 lands here while the boundary itself — the protocols, the lifecycle, the vocabulary, and the outcome — is owned by `add-bounded-release-processing` and is not modified.
+It SHALL state that the resource half of issue #43 D5 lands here while the boundary itself — the protocols, the lifecycle, the vocabulary, and the outcome — is owned by the `bounded-release-processing` capability and is not modified.
 
 Documentation SHALL contain no county bytes, production rows, owner values, addresses, layouts, credentials, or archive locations.
 
@@ -150,5 +212,5 @@ Documentation SHALL contain no county bytes, production rows, owner values, addr
 #### Scenario: Ownership is attributed
 - **GIVEN** the resource document
 - **WHEN** its scope section is read
-- **THEN** the boundary's protocols, lifecycle, vocabulary, and outcome are attributed to `add-bounded-release-processing`
+- **THEN** the boundary's protocols, lifecycle, vocabulary, and outcome are attributed to the `bounded-release-processing` capability
 - **THEN** this change is described as supplying an implementation of an already-declared protocol

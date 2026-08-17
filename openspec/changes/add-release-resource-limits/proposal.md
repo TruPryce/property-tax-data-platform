@@ -1,6 +1,6 @@
 ## Why
 
-The accepted `add-bounded-release-processing` change fixed the boundary and deliberately left the target unmeasured. It declares a `ResourceGuard` protocol — when the boundary asks, and what it passes — and says explicitly that what is measured belongs here.
+The `bounded-release-processing` capability fixed the boundary and deliberately left the target unmeasured. It declares a `ResourceGuard` protocol — when the boundary asks, and what it passes — and says explicitly that what is measured belongs here.
 
 So today three things are true at once. The 900 MiB per-task budget exists in `docs/engineering/airflow-implementation.md` and nothing enforces it. The guard seam exists and no implementation measures anything. And the 663 MiB retained on 200,000 rows that motivated all of this was measured against the *old* whole-file API, never against the boundary built to replace it.
 
@@ -12,7 +12,7 @@ Add `property_tax_adapters.release.resources`: a peak-RSS probe with a defined s
 
 - Originating issue: #43, the resource half of decision **D5**
 - Affected capability: release-resource-limits (ADDED)
-- Depends on: `add-bounded-release-processing`, whose `ResourceGuard` protocol this implements
+- Depends on: the `bounded-release-processing` capability, whose `ResourceGuard` protocol this implements (introduced by the archived `add-bounded-release-processing` change)
 
 ## What issue #43 D5 assigns here
 
@@ -70,7 +70,9 @@ These are **this change's** decisions, numbered from D31 so they cannot be confu
 
 Both changes belong to issue #43, so this is a sibling dependency rather than a cross-issue one.
 
-`add-bounded-release-processing` is accepted, which is what makes this change plannable. It is not yet **implemented**, and this change cannot be implemented until it is: `PeakRssGuard` implements a `ResourceGuard` protocol that change one task 1.3 creates, and the benchmark drives a `process_release` that its task 2.1 creates. Accepting this plan does not unblock its tasks.
+`add-bounded-release-processing` is now **implemented and archived**, and its eighteen requirements are the durable `bounded-release-processing` capability. That is what makes this change implementable rather than merely plannable: `PeakRssGuard` implements the `ResourceGuard` protocol that capability declares, and the benchmark drives the `process_release` it specifies, both of which now exist on `main`.
+
+One consequence is load-bearing. The capability's accepted tests assert, per module, which imports `property_tax_adapters.release` may contain, and a peak-RSS probe needs `resource` and a filesystem read. The probe therefore lands in `property_tax_adapters.resources`, beside the boundary rather than inside it, and this change modifies no module and no test belonging to that capability.
 
 Per the review sequencing, DAG work remains blocked until both changes merge and are implemented.
 
