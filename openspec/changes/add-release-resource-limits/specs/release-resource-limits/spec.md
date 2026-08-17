@@ -15,6 +15,16 @@ The source precedence SHALL be: cgroup v2 `/sys/fs/cgroup/memory.peak` when it i
 
 Every reported measurement SHALL name its source. The cgroup is the authority the container limit is enforced against; `ru_maxrss` is a per-process high-water mark that does not account for unreaped children or sibling processes. Two numbers from different sources are not comparable, and a bare integer hides which one it is.
 
+The cgroup path SHALL be resolved from `/proc/self/cgroup` rather than assumed to be `/sys/fs/cgroup/memory.peak`.
+
+A process in a nested cgroup — which is every process under systemd, and every container under a delegated slice — has no `memory.peak` at the mount root. On a measured host the root path was absent entirely while the file existed beneath the relative path `/proc/self/cgroup` reports. A probe hard-coding the root would silently fall back to `rusage` on exactly the hosts the cgroup source exists to serve.
+
+#### Scenario: The cgroup file is found beneath a nested path
+- **GIVEN** a host whose `/proc/self/cgroup` reports a non-root relative path
+- **WHEN** `read_peak_rss()` resolves the cgroup file
+- **THEN** it reads `/sys/fs/cgroup` joined with that relative path
+- **THEN** it reports `cgroup_v2` rather than falling back
+
 #### Scenario: The cgroup is preferred where it exists
 - **GIVEN** a host where `/sys/fs/cgroup/memory.peak` is readable
 - **WHEN** `read_peak_rss()` is called
@@ -56,7 +66,14 @@ That constraint is also the correct architecture rather than an obstacle worked 
 
 The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` protocol that the `bounded-release-processing` capability declares, taking a limit in bytes and implementing `check(physical_rows_processed: int, staged_record_count: int) -> None`.
 
-`check` SHALL sample the peak and SHALL raise when it exceeds the configured limit. The boundary maps that raise to `resource_limit_exceeded` and rejects the release.
+`check` SHALL sample the peak and SHALL raise when the sample is **at or above** the configured limit. The boundary maps that raise to `resource_limit_exceeded` and rejects the release.
+
+The comparison is `>=` rather than `>` so that the guard and the acceptance target agree exactly. The target is a peak strictly **under** 900 MiB; a guard raising only above its limit would admit a peak of exactly 900 MiB, which the benchmark then fails. One boundary condition cannot be a pass under one rule and a failure under the other.
+
+#### Scenario: The limit itself is not admitted
+- **GIVEN** a `PeakRssGuard` limited to 900 MiB and a sample of exactly 900 MiB
+- **WHEN** `check` is called
+- **THEN** it raises, because the target requires a peak strictly under the limit
 
 The guard SHALL NOT warn instead of raising. The alternative to rejecting a release that has exceeded its budget is being killed by the OOM killer, which produces no outcome, no diagnostic, and no progress event — a silent death is not a safer failure than a reported one.
 
@@ -112,7 +129,15 @@ The generator SHALL retain no accumulated state across rows, so the instrument d
 
 The acceptance benchmark SHALL take **three** peak-RSS measurements, each in its own subprocess, and SHALL evaluate two independent checks against them.
 
-Each measurement SHALL run in a separate subprocess because a peak is a high-water mark: two sizes measured in one process report the larger of the two under both names, which would make a linear implementation indistinguishable from a bounded one.
+Each measurement SHALL run in a separate subprocess **and** SHALL be taken with the `rusage` source, and the benchmark SHALL fail closed if the three samples do not all report the same source.
+
+A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` would therefore report one identical number, and the ratio would be exactly 1.0 for a linear implementation as readily as for a bounded one — the check would not merely be contaminated, it would pass vacuously.
+
+`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three measurements, and the benchmark SHALL NOT read the cgroup for them.
+
+This does not demote the cgroup source generally. The guard keeps preferring it, because in production the cgroup **is** the container and its number is what the OOM killer acts on. The benchmark needs comparability between three processes; the guard needs the authority a limit is enforced against. Those are different requirements and they select different sources.
+
+Requiring one source across all three is separate from choosing which. `ru_maxrss` and a cgroup figure account for different things — unreaped children and sibling processes among them — so a ratio taken across a mixed pair is arithmetic on incomparable quantities. The benchmark SHALL compare `PeakRssSample.source` across `B`, `P1`, and `P2` and SHALL fail rather than report a ratio when they differ.
 
 The three measurements are:
 
@@ -165,11 +190,25 @@ The floor also bounds what the scaling check can detect, and that limit SHALL be
 - **WHEN** the scaling ratio is computed with the 8 MiB floor added to both terms
 - **THEN** the ratio remains near 1.0 rather than being amplified by the small denominator
 
-#### Scenario: Each size is measured in its own process
+#### Scenario: Each size is measured in its own process, with a per-process source
 - **GIVEN** a peak that is a high-water mark for the life of a process
-- **WHEN** the benchmark measures 250,000 and 1,000,000 rows
+- **WHEN** the benchmark measures 0, 250,000, and 1,000,000 rows
 - **THEN** each measurement runs in a separate subprocess
-- **THEN** neither reported peak includes the other size's allocations
+- **THEN** each is taken from `rusage`, which is per-process
+- **THEN** neither reported peak includes another size's allocations
+
+#### Scenario: A shared cgroup peak would make the check vacuous
+- **GIVEN** three subprocesses in one cgroup whose `memory.peak` is sticky and shared
+- **WHEN** all three read that file
+- **THEN** they report one identical figure
+- **THEN** the scaling ratio is 1.0 for a linear implementation as readily as for a bounded one
+- **THEN** the benchmark SHALL NOT use the cgroup source for these measurements
+
+#### Scenario: Mixed sources are refused rather than ratioed
+- **GIVEN** three samples of which at least one names a different source
+- **WHEN** the benchmark computes the scaling ratio
+- **THEN** it fails closed and reports the disagreement
+- **THEN** no ratio across incomparable quantities is published
 
 ### Requirement: Make the acceptance run reproducible, offline, and self-describing
 

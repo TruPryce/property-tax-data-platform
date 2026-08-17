@@ -16,7 +16,7 @@ Nothing in `libs/property-tax-adapters/` measures memory today, and there is no 
 ## Proposed architecture
 
 ```
-release/resources.py    PeakRssSample, PeakRssSource, read_peak_rss, PeakRssGuard
+resources/peak_rss.py   PeakRssSample, PeakRssSource, read_peak_rss, PeakRssGuard
 tests/release/scale.py  synthetic_release(rows, columns) -> PreparedReader
 benchmarks/release_peak_rss.py   the acceptance command behind `make release-benchmark`
 ```
@@ -44,9 +44,9 @@ Ninety columns is the floor issue #43 D5 sets, so the generator's default meets 
 
 ## Dependency direction
 
-`release.resources` → `release.protocols` → `sources.contracts` → standard library. The benchmark and the generator live outside the library, in `benchmarks/` and `tests/`, so nothing shipped imports them.
+`resources.peak_rss` → `release.protocols` → `sources.contracts` → standard library. The probe sits beside `release` rather than within it: that package's accepted tests assert per module that it imports only eight standard-library names, and a probe needs `resource` and a filesystem read. The benchmark and the generator live outside the library, in `benchmarks/` and `tests/`, so nothing shipped imports them.
 
-The guard is the only new implementation of an accepted protocol, and it is a *caller-supplied* collaborator: `process_release` takes it as a keyword argument and works without one. Nothing in the boundary imports `resources`.
+The guard is the only new implementation of an accepted protocol, and it is a *caller-supplied* collaborator: `process_release` takes it as a keyword argument and works without one. Nothing in the boundary imports `resources`, and the dependency runs one way only.
 
 ## What this cannot show
 

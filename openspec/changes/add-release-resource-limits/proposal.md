@@ -6,7 +6,7 @@ So today three things are true at once. The 900 MiB per-task budget exists in `d
 
 ## Outcome
 
-Add `property_tax_adapters.release.resources`: a peak-RSS probe with a defined source precedence, a `PeakRssGuard` implementing the accepted `ResourceGuard` protocol, a streaming synthetic release generator, and a reproducible no-network benchmark command that reports the measured peak.
+Add `property_tax_adapters.resources`, a package beside the boundary rather than inside it: a peak-RSS probe with a defined source precedence, a `PeakRssGuard` implementing the accepted `ResourceGuard` protocol, a streaming synthetic release generator, and a reproducible no-network benchmark command that reports the measured peak.
 
 ## Scope
 
