@@ -44,7 +44,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - the stdlib's spelling
         routes: dict[str, Route] = self.server.routes  # type: ignore[attr-defined]
         self.server.requested.append(self.path)  # type: ignore[attr-defined]
-        route = routes.get(self.path)
+        # Routed on the path alone, as a real server does: the query string
+        # selects nothing here, and matching on it would make a signed URL
+        # unreachable in exactly the test that checks signatures are dropped.
+        route = routes.get(self.path.split("?", 1)[0])
         if route is None:
             self.send_response(404)
             self.send_header("Content-Length", "0")

@@ -351,13 +351,36 @@ def test_a_failing_commit_does_not_leave_a_committed_object(tmp_path: Path) -> N
     assert not sink.destination.exists()
 
 
-def test_an_error_status_is_not_treated_as_content(tmp_path: Path) -> None:
-    with serving({"/roll.txt": Route(status=503, body=b"try later")}) as server:
+@pytest.mark.parametrize(
+    ("status", "expected", "retryable"),
+    [
+        (503, AcquisitionFailure.TRANSIENT_STATUS, True),
+        (429, AcquisitionFailure.TRANSIENT_STATUS, True),
+        (408, AcquisitionFailure.TRANSIENT_STATUS, True),
+        (500, AcquisitionFailure.TRANSIENT_STATUS, True),
+        (404, AcquisitionFailure.UNSUPPORTED_STATUS, False),
+        (403, AcquisitionFailure.UNSUPPORTED_STATUS, False),
+        (204, AcquisitionFailure.UNSUPPORTED_STATUS, False),
+    ],
+    ids=["503", "429", "408", "500", "404", "403", "204"],
+)
+def test_an_error_status_is_classified_for_retry(
+    tmp_path: Path, status: int, expected: AcquisitionFailure, retryable: bool
+) -> None:
+    """A transient status and an unsupported one are different facts.
+
+    Retrying a 503 may succeed; retrying a 404 repeats it. Collapsing both into
+    one code would make an orchestrator either give up on an overloaded server
+    or hammer a missing file.
+    """
+
+    with serving({"/roll.txt": Route(status=status, body=b"not content")}) as server:
         sink = sink_at(tmp_path)
         with pytest.raises(AcquisitionError) as raised:
             acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
 
-    assert raised.value.failure is AcquisitionFailure.UNSUPPORTED_STATUS
+    assert raised.value.failure is expected
+    assert raised.value.failure.retryable is retryable
     assert sink.aborted is True
     assert not sink.destination.exists()
 
@@ -370,3 +393,118 @@ def test_no_sink_failure_text_reaches_the_error(tmp_path: Path) -> None:
 
     assert "SECRET-SINK-WRITE" not in str(raised.value)
     assert "SECRET-SINK-WRITE" not in repr(raised.value.detail)
+
+
+# --------------------------------------------------------------------------
+# The sink lifecycle, including the entry that fails
+# --------------------------------------------------------------------------
+
+
+def test_a_sink_that_fails_to_enter_is_still_aborted(tmp_path: Path) -> None:
+    """`with` would skip cleanup, because the block was never entered.
+
+    An entry that created its partial object and then failed has left exactly
+    what a mid-transfer failure leaves, so the same cleanup is owed.
+    """
+
+    class FailingEntry(FileSink):
+        def __enter__(self) -> FailingEntry:
+            super().__enter__()
+            raise OSError("SECRET-SINK-ENTER")
+
+    sink = FailingEntry(tmp_path / "artifact.txt")
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        with pytest.raises(OSError, match="SECRET-SINK-ENTER"):
+            acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
+
+    assert sink.aborted is True, "a failed entry skipped cleanup"
+    assert not sink.partial.exists() and not sink.destination.exists()
+
+
+def test_an_aborting_abort_does_not_mask_the_original_failure(tmp_path: Path) -> None:
+    class UnabortableSink(FileSink):
+        def abort(self) -> None:
+            super().abort()
+            raise OSError("SECRET-ABORT-FAILED")
+
+    sink = UnabortableSink(tmp_path / "artifact.txt")
+    with serving({"/roll.txt": Route(status=404)}) as server:
+        with pytest.raises(AcquisitionError) as raised:
+            acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy())
+
+    assert raised.value.failure is AcquisitionFailure.UNSUPPORTED_STATUS
+    assert "SECRET-ABORT-FAILED" not in str(raised.value)
+
+
+def test_the_sink_is_left_exactly_once_on_the_happy_path(tmp_path: Path) -> None:
+    exits: list[int] = []
+
+    class Counting(FileSink):
+        def __exit__(self, *args: object) -> None:
+            exits.append(1)
+            super().__exit__(*args)  # type: ignore[arg-type]
+
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        acquire_artifact(
+            url=f"{base_url(server)}/roll.txt",
+            sink=Counting(tmp_path / "artifact.txt"),
+            policy=local_policy(),
+        )
+
+    assert sum(exits) == 1
+
+
+# --------------------------------------------------------------------------
+# The locator, and provenance that carries no credential
+# --------------------------------------------------------------------------
+
+
+def test_the_committed_locator_reaches_the_artifact(tmp_path: Path) -> None:
+    """Task 3.2 builds the manifest from this; discarding it strands the object."""
+
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        sink = sink_at(tmp_path)
+        acquired = acquire_artifact(
+            url=f"{base_url(server)}/roll.txt", sink=sink, policy=local_policy()
+        )
+
+    assert acquired.locator == sink.destination.as_uri()
+    assert acquired.locator != acquired.final_url
+
+
+def test_a_sink_committing_without_a_locator_is_a_named_failure(tmp_path: Path) -> None:
+    class SilentCommit(FileSink):
+        def commit(self) -> str:
+            super().commit()
+            return ""
+
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        with pytest.raises(AcquisitionError) as raised:
+            acquire_artifact(
+                url=f"{base_url(server)}/roll.txt",
+                sink=SilentCommit(tmp_path / "artifact.txt"),
+                policy=local_policy(),
+            )
+
+    assert raised.value.failure is AcquisitionFailure.SINK_FAILED
+
+
+def test_a_signed_request_url_does_not_reach_the_provenance(tmp_path: Path) -> None:
+    """The request carries the token; the manifest must not."""
+
+    routes = {
+        "/start": Route(status=302, location="/roll.txt?signature=SECRET-SIGNATURE"),
+        "/roll.txt": Route(body=BODY),
+    }
+    with serving(routes) as server:
+        acquired = acquire_artifact(
+            url=f"{base_url(server)}/start?token=SECRET-TOKEN",
+            sink=sink_at(tmp_path),
+            policy=local_policy(),
+        )
+
+    rendered = repr(acquired)
+    for secret in ("SECRET-TOKEN", "SECRET-SIGNATURE", "signature=", "token="):
+        assert secret not in rendered, f"{secret} survived into the artifact"
+    assert acquired.final_url.endswith("/roll.txt")
+    assert acquired.redirects[0].to_url.endswith("/roll.txt")

@@ -15,11 +15,12 @@ rather than inside one transport's control flow.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit, urlunsplit
 
 __all__ = [
     "ACQUISITION_CONTRACT_VERSION",
@@ -31,7 +32,9 @@ __all__ = [
     "RedirectHop",
     "ResponseMetadata",
     "SANITIZED_HEADERS",
+    "TRANSIENT_STATUSES",
     "sanitize_headers",
+    "sanitize_url",
 ]
 
 #: The contract this boundary implements, pinned so a consumer can tell which.
@@ -49,6 +52,10 @@ SANITIZED_HEADERS: frozenset[str] = frozenset(
 #: manifest large by answering with a megabyte of `ETag`.
 MAX_HEADER_VALUE_CHARS: int = 512
 
+#: Statuses a later attempt may resolve.  Everything else is a rule or a
+#: representation problem, which retrying only repeats.
+TRANSIENT_STATUSES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -65,6 +72,7 @@ class AcquisitionFailure(StrEnum):
     TOO_MANY_REDIRECTS = "too_many_redirects"
     MISSING_REDIRECT_TARGET = "missing_redirect_target"
     UNSUPPORTED_STATUS = "unsupported_status"
+    TRANSIENT_STATUS = "transient_status"
     REQUEST_FAILED = "request_failed"
     ARTIFACT_TOO_LARGE = "artifact_too_large"
     TRUNCATED_ARTIFACT = "truncated_artifact"
@@ -82,6 +90,7 @@ class AcquisitionFailure(StrEnum):
 
         return self in {
             AcquisitionFailure.REQUEST_FAILED,
+            AcquisitionFailure.TRANSIENT_STATUS,
             AcquisitionFailure.TRUNCATED_ARTIFACT,
             AcquisitionFailure.SINK_FAILED,
         }
@@ -118,6 +127,15 @@ class AcquisitionPolicy:
     timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
+        # Copied and frozen, not merely annotated as frozen.  A caller passing a
+        # mutable set keeps a handle to it, and adding a host afterwards would
+        # widen a security rule on a value the type calls immutable.
+        for name in ("allowed_hosts", "allowed_schemes"):
+            supplied = getattr(self, name)
+            if isinstance(supplied, str) or not isinstance(supplied, Iterable):
+                raise ValueError(f"{name} must be a collection of strings")
+            object.__setattr__(self, name, frozenset(supplied))
+
         if not self.allowed_hosts:
             raise ValueError("allowed_hosts must name at least one host")
         if not self.allowed_schemes:
@@ -157,6 +175,47 @@ class AcquisitionPolicy:
             raise AcquisitionError(AcquisitionFailure.UNAPPROVED_HOST, host.casefold()[:255])
 
 
+def sanitize_url(url: str) -> str:
+    """Reduce a URL to the part that is safe to keep as provenance.
+
+    A request URL and a provenance URL are different things, and conflating
+    them is how a credential reaches a manifest.  The userinfo component — the
+    name and password an authority may carry before its `@` — is a credential
+    outright, and a query string carries signed tokens, session identifiers, and
+    expiring keys for most file-distribution hosts.
+    Neither is needed to say where an artifact came from; the scheme, host,
+    port, and path are.
+
+    The fragment goes too: it is never sent to a server, so preserving it would
+    record something the exchange never involved.
+    """
+
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.hostname:
+        raise ValueError("a provenance URL needs a scheme and a host")
+    authority = parts.hostname.casefold()
+    if parts.port is not None:
+        authority = f"{authority}:{parts.port}"
+    return urlunsplit((parts.scheme.casefold(), authority, parts.path, "", ""))
+
+
+def _require_sanitized_url(url: str, field_name: str) -> None:
+    """Refuse a URL that still carries what `sanitize_url` removes.
+
+    Checked on the carrier rather than trusted from the caller: the type is
+    what task 3.2 persists, so the rule belongs where it cannot be bypassed by
+    constructing the value some other way.
+    """
+
+    if not isinstance(url, str) or not url:
+        raise ValueError(f"{field_name} must be a non-empty str")
+    if url != sanitize_url(url):
+        raise ValueError(
+            f"{field_name} must be sanitized: userinfo, query, and fragment are removed, "
+            "because a request URL may carry a credential and a provenance URL may not"
+        )
+
+
 def sanitize_headers(headers: Mapping[str, str]) -> dict[str, str]:
     """Keep the allowlisted headers, bounded, lowercased, and control-free.
 
@@ -187,9 +246,18 @@ class ResponseMetadata:
             raise ValueError("status must be an int")
         if not 100 <= self.status <= 599:
             raise ValueError(f"status must be a valid HTTP status, got {self.status}")
+        if not isinstance(self.headers, Mapping):
+            raise ValueError("headers must be a mapping")
         unknown = set(self.headers) - SANITIZED_HEADERS
         if unknown:
             raise ValueError(f"headers outside the allowlist: {sorted(unknown)}")
+        for name, value in self.headers.items():
+            if not isinstance(value, str):
+                raise ValueError(f"the {name} header must be a str")
+        # Snapshotted behind a read-only view.  Without the copy a caller could
+        # inject `set-cookie` after the allowlist check, or change
+        # `content-length` and break an agreement an artifact already verified.
+        object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
 
     @property
     def declared_length(self) -> int | None:
@@ -223,6 +291,8 @@ class RedirectHop:
     def __post_init__(self) -> None:
         if not self.from_url or not self.to_url:
             raise ValueError("a redirect hop needs both of its endpoints")
+        _require_sanitized_url(self.from_url, "from_url")
+        _require_sanitized_url(self.to_url, "to_url")
         if not 300 <= self.status <= 399:
             raise ValueError(f"a redirect hop must carry a 3xx status, got {self.status}")
 
@@ -232,13 +302,18 @@ class AcquiredArtifact:
     """What one complete, verified acquisition established.
 
     There is no partial form of this value: it is constructed after the byte
-    count and checksum are final, so holding one is the evidence that the
-    artifact completed.
+    count and checksum are final and after the sink committed, so holding one is
+    the evidence that the artifact completed and is durable.
+
+    `final_url` is provenance and is sanitized; `locator` is where the bytes
+    landed, as the sink reported it.  They are different facts and neither
+    substitutes for the other.
     """
 
     sha256: str
     byte_count: int
     final_url: str
+    locator: str
     response: ResponseMetadata
     redirects: tuple[RedirectHop, ...] = ()
     acquisition_contract_version: int = ACQUISITION_CONTRACT_VERSION
@@ -246,6 +321,12 @@ class AcquiredArtifact:
     def __post_init__(self) -> None:
         if _SHA256_PATTERN.fullmatch(self.sha256) is None:
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
+        # Required, not optional: the manifest task consumes this value, and an
+        # artifact that completed but cannot say where it landed would make the
+        # commit unfindable through the only port that performed it.
+        if not isinstance(self.locator, str) or not self.locator.strip():
+            raise ValueError("locator must be the non-blank URI the sink's commit returned")
+        _require_sanitized_url(self.final_url, "final_url")
         if isinstance(self.byte_count, bool) or not isinstance(self.byte_count, int):
             raise ValueError("byte_count must be an int")
         if self.byte_count < 0:

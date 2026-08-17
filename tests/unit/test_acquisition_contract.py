@@ -18,6 +18,7 @@ from property_tax_application.acquisition import (
     RedirectHop,
     ResponseMetadata,
     sanitize_headers,
+    sanitize_url,
 )
 
 
@@ -178,6 +179,7 @@ def artifact(**overrides: object) -> AcquiredArtifact:
             "sha256": "a" * 64,
             "byte_count": 12,
             "final_url": "https://cad.example.gov/roll.zip",
+            "locator": "s3://bronze/tx-dallas/roll.zip",
             "response": ResponseMetadata(status=200),
             **overrides,
         }  # type: ignore[arg-type]
@@ -250,3 +252,142 @@ def test_the_sink_protocol_names_the_three_verbs_a_caller_needs() -> None:
 
     assert {"write", "commit", "abort"} <= set(dir(ArtifactSink))
     assert "content-length" in SANITIZED_HEADERS
+
+
+# --------------------------------------------------------------------------
+# Provenance may not carry a credential
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "https://user:pw@cad.example.gov/roll.zip",  # pragma: allowlist secret
+            "https://cad.example.gov/roll.zip",
+        ),
+        ("https://cad.example.gov/roll.zip?token=SECRET", "https://cad.example.gov/roll.zip"),
+        ("https://cad.example.gov/roll.zip#part", "https://cad.example.gov/roll.zip"),
+        ("HTTPS://CAD.Example.GOV/roll.zip", "https://cad.example.gov/roll.zip"),
+        ("https://cad.example.gov:8443/a/b.zip?k=v", "https://cad.example.gov:8443/a/b.zip"),
+    ],
+    ids=["userinfo", "query", "fragment", "case", "port-kept"],
+)
+def test_a_provenance_url_keeps_only_where_it_came_from(raw: str, expected: str) -> None:
+    assert sanitize_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "https://user:s3cr3t@cad.example.gov/roll.zip",  # pragma: allowlist secret
+        "https://cad.example.gov/roll.zip?signature=SECRET-TOKEN",
+        "https://cad.example.gov/roll.zip#SECRET",
+    ],
+    ids=["userinfo", "signed-query", "fragment"],
+)
+def test_a_carrier_refuses_an_unsanitized_url(hostile: str) -> None:
+    """Enforced on the carrier, since the carrier is what task 3.2 persists."""
+
+    with pytest.raises(ValueError, match="must be sanitized"):
+        artifact(final_url=hostile)
+
+    with pytest.raises(ValueError, match="must be sanitized"):
+        RedirectHop(from_url=hostile, to_url="https://b.example/y", status=302)
+
+    with pytest.raises(ValueError, match="must be sanitized"):
+        RedirectHop(from_url="https://a.example/x", to_url=hostile, status=302)
+
+
+def test_no_secret_survives_into_a_complete_artifact() -> None:
+    # Each raw URL carries something a manifest may not: userinfo, a signed
+    # query, or both.  They are synthetic, and the assertion is that none of it
+    # survives sanitization into the carrier.
+    raw_final = "https://user:s3cr3t@cad.example.gov/roll.zip?token=SECRET-TOKEN"  # noqa: E501, S105  # pragma: allowlist secret
+    raw_start = "https://u:p@start.example.gov/go?key=SECRET-KEY"  # pragma: allowlist secret
+    complete = artifact(
+        final_url=sanitize_url(raw_final),
+        redirects=(
+            RedirectHop(
+                from_url=sanitize_url(raw_start),
+                to_url=sanitize_url("https://cad.example.gov/roll.zip?sig=SECRET-SIG"),
+                status=302,
+            ),
+        ),
+    )
+
+    rendered = repr(complete)
+    for secret in ("s3cr3t", "SECRET-TOKEN", "SECRET-KEY", "SECRET-SIG", "token=", "sig="):
+        assert secret not in rendered, f"{secret} survived into the artifact"
+
+
+# --------------------------------------------------------------------------
+# The durable locator
+# --------------------------------------------------------------------------
+
+
+def test_an_artifact_must_say_where_its_bytes_landed() -> None:
+    """The manifest task consumes this; without it the commit is unfindable."""
+
+    assert artifact().locator == "s3://bronze/tx-dallas/roll.zip"
+
+    for missing in ("", "   "):
+        with pytest.raises(ValueError, match="locator must be"):
+            artifact(locator=missing)
+
+    with pytest.raises(ValueError, match="locator must be"):
+        artifact(locator=None)
+
+
+def test_the_locator_and_the_provenance_url_are_different_facts() -> None:
+    """One says where it came from, the other where it went; neither substitutes."""
+
+    complete = artifact(
+        final_url="https://cad.example.gov/roll.zip", locator="s3://bronze/2026/roll.zip"
+    )
+
+    assert complete.final_url != complete.locator
+    assert {"final_url", "locator"} <= set(AcquiredArtifact.__dataclass_fields__)
+
+
+# --------------------------------------------------------------------------
+# Frozen means frozen
+# --------------------------------------------------------------------------
+
+
+def test_a_policy_cannot_be_widened_after_construction() -> None:
+    """A frozen dataclass holding a caller's mutable set is not frozen."""
+
+    hosts = {"cad.example.gov"}
+    schemes = {"https"}
+    settled = AcquisitionPolicy(allowed_hosts=hosts, allowed_schemes=schemes)  # type: ignore[arg-type]
+
+    hosts.add("evil.example.com")
+    schemes.add("http")
+
+    assert isinstance(settled.allowed_hosts, frozenset)
+    with pytest.raises(AcquisitionError) as host_refusal:
+        settled.permits("https", "evil.example.com")
+    assert host_refusal.value.failure is AcquisitionFailure.UNAPPROVED_HOST
+
+    with pytest.raises(AcquisitionError) as scheme_refusal:
+        settled.permits("http", "cad.example.gov")
+    assert scheme_refusal.value.failure is AcquisitionFailure.UNAPPROVED_SCHEME
+
+
+def test_response_headers_cannot_be_changed_after_the_allowlist_check() -> None:
+    """Otherwise the check runs on one mapping and the carrier holds another."""
+
+    supplied = {"content-length": "10"}
+    metadata = ResponseMetadata(status=200, headers=supplied)
+    complete = artifact(byte_count=10, response=metadata)
+
+    supplied["content-length"] = "999"
+    supplied["set-cookie"] = "session=SECRET"
+
+    assert metadata.declared_length == 10, "a verified agreement was invalidated afterwards"
+    assert "set-cookie" not in metadata.headers, "an unsanitized header was injected"
+    assert complete.response.declared_length == complete.byte_count
+
+    with pytest.raises(TypeError):
+        metadata.headers["etag"] = "injected"  # type: ignore[index]

@@ -26,6 +26,7 @@ import re
 from urllib.parse import urlsplit
 
 from property_tax_application.acquisition import (
+    TRANSIENT_STATUSES,
     AcquiredArtifact,
     AcquisitionError,
     AcquisitionFailure,
@@ -34,6 +35,7 @@ from property_tax_application.acquisition import (
     RedirectHop,
     ResponseMetadata,
     sanitize_headers,
+    sanitize_url,
 )
 
 from property_tax_adapters.acquisition.transport import (
@@ -74,32 +76,52 @@ def acquire_artifact(
     redirects: list[RedirectHop] = []
     current = url
 
-    with sink as opened:
-        try:
-            for _ in range(policy.max_redirects + 1):
-                _require_permitted(current, policy)
-                with client.open(current, timeout=policy.timeout_seconds) as response:
-                    status = response.status
-                    if status in _REDIRECT_STATUSES:
-                        current = _hop(response, current, policy, redirects)
-                        continue
-                    if status != 200:
-                        raise AcquisitionError(AcquisitionFailure.UNSUPPORTED_STATUS, str(status))
-                    return _drain(
-                        response=response,
-                        sink=opened,
-                        policy=policy,
-                        final_url=current,
-                        redirects=tuple(redirects),
-                        expected_sha256=expected_sha256,
+    entered = False
+    try:
+        # Entered by hand so that a failure *inside* `__enter__` still aborts: a
+        # sink that created its partial object and then failed has left exactly
+        # what a mid-transfer failure leaves, and `with` would skip the cleanup
+        # because the block was never entered.
+        sink.__enter__()
+        entered = True
+        opened = sink
+        for _ in range(policy.max_redirects + 1):
+            _require_permitted(current, policy)
+            with client.open(current, timeout=policy.timeout_seconds) as response:
+                status = response.status
+                if status in _REDIRECT_STATUSES:
+                    current = _hop(response, current, policy, redirects)
+                    continue
+                if status != 200:
+                    # A transient status is a different fact from an unsupported
+                    # one: retrying 503 may succeed, retrying 404 repeats it.
+                    failure = (
+                        AcquisitionFailure.TRANSIENT_STATUS
+                        if status in TRANSIENT_STATUSES
+                        else AcquisitionFailure.UNSUPPORTED_STATUS
                     )
-            raise AcquisitionError(AcquisitionFailure.TOO_MANY_REDIRECTS, str(policy.max_redirects))
-        except BaseException:
-            # BaseException, not Exception: a KeyboardInterrupt or a cancelled
-            # task leaves exactly the same partial object as a timeout does, and
-            # the reason it stopped does not change what has to be cleaned up.
-            opened.abort()
-            raise
+                    raise AcquisitionError(failure, str(status))
+                return _drain(
+                    response=response,
+                    sink=opened,
+                    policy=policy,
+                    final_url=current,
+                    redirects=tuple(redirects),
+                    expected_sha256=expected_sha256,
+                )
+        raise AcquisitionError(AcquisitionFailure.TOO_MANY_REDIRECTS, str(policy.max_redirects))
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt or a cancelled task
+        # leaves exactly the same partial object as a timeout does, and the
+        # reason it stopped does not change what has to be cleaned up.
+        try:
+            sink.abort()
+        except Exception:  # noqa: BLE001 - the first failure is the one to report
+            pass
+        raise
+    finally:
+        if entered:
+            sink.__exit__(None, None, None)
 
 
 def _require_permitted(url: str, policy: AcquisitionPolicy) -> None:
@@ -126,7 +148,13 @@ def _hop(
     # Validated here, before the next iteration opens a connection, and recorded
     # only once it passed: a chain never holds a destination that was refused.
     _require_permitted(destination, policy)
-    redirects.append(RedirectHop(from_url=current, to_url=destination, status=response.status))
+    redirects.append(
+        RedirectHop(
+            from_url=sanitize_url(current),
+            to_url=sanitize_url(destination),
+            status=response.status,
+        )
+    )
     return destination
 
 
@@ -193,14 +221,21 @@ def _drain(
         raise AcquisitionError(AcquisitionFailure.CHECKSUM_MISMATCH, "content identity differs")
 
     try:
-        sink.commit()
+        locator = sink.commit()
     except Exception as error:
         raise AcquisitionError(AcquisitionFailure.SINK_FAILED, type(error).__name__) from error
+    if not isinstance(locator, str) or not locator.strip():
+        # The manifest task needs this value; a sink that commits without
+        # reporting where would make its own durable object unfindable.
+        raise AcquisitionError(AcquisitionFailure.SINK_FAILED, "commit returned no locator")
 
     return AcquiredArtifact(
         sha256=checksum,
         byte_count=received,
-        final_url=final_url,
+        # The request URL may carry userinfo or a signed query; provenance may
+        # not, and the reduction happens here rather than at the far end.
+        final_url=sanitize_url(final_url),
+        locator=locator,
         response=metadata,
         redirects=redirects,
     )

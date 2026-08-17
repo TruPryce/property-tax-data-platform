@@ -39,6 +39,8 @@ PERMITTED_ADAPTER_IMPORTS = {
 }
 
 #: The port is stricter still: it performs no I/O, so it needs no transport.
+#: `urllib.parse` is admitted deliberately — it is string manipulation with no
+#: network behaviour, and URL sanitization has to live with the rule it enforces.
 PERMITTED_PORT_IMPORTS = {
     "__future__",
     "collections",
@@ -47,6 +49,7 @@ PERMITTED_PORT_IMPORTS = {
     "re",
     "types",
     "typing",
+    "urllib",
 }
 
 
