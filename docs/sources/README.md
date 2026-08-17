@@ -26,6 +26,7 @@ Add a county source-contract capability only after its spike establishes source 
 - [Documentation hub](../README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
 - [Shared adapter source contracts](shared-adapter-source-contracts.md)
+- [Bounded release processing](../engineering/bounded-release-processing.md)
 - [Dallas parser foundation](dallas-parser-foundation.md)
 - [Tarrant parser foundation](tarrant-parser-foundation.md)
 - [Denton PACS parser foundation](denton-pacs-parser-foundation.md)
