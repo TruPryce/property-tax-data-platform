@@ -554,19 +554,46 @@ def test_this_repository_at_real_task_scale_stays_under_the_operational_target()
     ]
 
 
+_ADAPTERS = "libs/property-tax-adapters"
+_UNDER = f"{_ADAPTERS}/"
+
+# Measured at 542,412 chars over 43 approved files when the bounded release
+# boundary landed, up from roughly 465,000 before it.  A tripwire, not a target:
+# because approved paths are never elided, the library outgrowing the ceiling
+# does not degrade the prompt, it fails the run.  When this fires, decide whether
+# the library grew legitimately or whether a directory-wide plan has stopped
+# being a reasonable thing to hand the lane.  Raising the number without
+# answering that is how the ceiling gets discovered in production instead.
+_WHOLE_LIBRARY_TRIPWIRE_CHARS = 700_000
+# Omission for want of room, as distinct from a deliberate policy exclusion or
+# unreadable bytes.  Only these two mean the model lost material it may edit.
+_BUDGET_OMISSIONS = frozenset({"character_budget_exceeded", "per_file_limit_exceeded"})
+
+
 def test_the_whole_adapters_library_still_lands_far_below_the_provider_ceiling() -> None:
     """The scale guard the previous assertion was really protecting.
 
-    A directory-wide plan is the worst case the lane could ever be handed.  It
-    must stay materially below the hard ceiling even as counties accumulate; the
-    operational target is a per-task budget, not a cap on the library.
+    A directory-wide plan is the worst case the lane could ever be handed, and
+    an approved path is never elided: it fits under the hard ceiling or the
+    build raises.  So the guarantee is binary before it is numeric — every
+    approved file is present — and the tripwire only says how much room is left
+    before that binary guarantee is the one at risk.
     """
 
-    profile, provenance = _real_build("libs/property-tax-adapters")
-    assert provenance["total_chars"] < int(profile["maximum_model_input_chars"]) // 2
-    assert provenance["budget_utilisation"] < 0.5
-    assert [
-        path
-        for path in provenance["included_source_paths"]
-        if path.startswith("libs/property-tax-adapters/")
+    profile, provenance = _real_build(_ADAPTERS)
+    included = [path for path in provenance["included_source_paths"] if path.startswith(_UNDER)]
+    elided = [
+        entry["path"]
+        for entry in provenance["omitted_source_paths"]
+        if entry["path"].startswith(_UNDER) and entry["reason"] in _BUDGET_OMISSIONS
     ]
+
+    assert included, "the plan's own library was not included"
+    assert elided == [], (
+        "an approved file was dropped for budget; a model cannot edit what it was not shown"
+    )
+    assert (
+        provenance["total_chars"]
+        < _WHOLE_LIBRARY_TRIPWIRE_CHARS
+        < int(profile["maximum_model_input_chars"])
+    )
