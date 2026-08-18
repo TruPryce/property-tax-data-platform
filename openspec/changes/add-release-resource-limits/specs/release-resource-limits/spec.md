@@ -325,7 +325,9 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    The Airflow container specifically does **not** satisfy it. The 900 MiB figure is derived from that container holding a scheduler and four concurrent task processes, so its cgroup contains siblings by construction; a peak read there is the container's, not this run's. A rule that treated any container as isolated would be contradicted by the very deployment the budget was computed from. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
 
-   Attribution SHALL be established by **bracketing** rather than inferred from the cgroup's history. The benchmark SHALL read the cgroup peak before its measurements and after them, and SHALL treat an initial reading at or above the limit as **indeterminate**: a cgroup that arrived contaminated cannot yield an attributable figure, and no property of the cgroup observable from inside changes that. Initial below and final below is a pass; initial below and final at or above is a failure, since nothing but this run could have crossed it.
+   Attribution SHALL be established by **bracketing** rather than inferred from the cgroup's history. The benchmark SHALL read the cgroup peak before its measurements and after them, and SHALL treat an initial reading at or above the limit as **indeterminate**: a cgroup that arrived contaminated cannot yield an attributable figure, and no property of the cgroup observable from inside changes that. Initial below and final below is a pass; initial below and final at or above is a failure.
+
+   That failing verdict SHALL be described as **conservative rather than attributive**. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen, and the run would be failed for memory it did not allocate. Failing closed on a figure that may not be this run's is the safe direction to be wrong in; claiming the figure *is* this run's would not be, and the specification SHALL NOT claim it.
 
    A rule comparing the age of the cgroup's root process SHALL NOT be used for this. It appears to establish that the cgroup was created for the run and does not: a freshly started shell carrying a few seconds of prior work satisfies it.
 
@@ -438,7 +440,7 @@ The guard value also bounds what the scaling check can detect, and that limit is
 
 #### Scenario: A materially retaining implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
-- **WHEN** the benchmark takes its four measurements
+- **WHEN** the benchmark takes its five measurements
 - **THEN** `W2` is approximately four times `W1`
 - **THEN** `scaling_ratio` exceeds 1.5 and the benchmark fails on the scaling check even though the absolute check passed
 - **THEN** the passing absolute is read from the cgroup figure and not from `P2`, which is a `rusage` measurement and settles nothing about the limit
