@@ -25,6 +25,7 @@ from property_tax_adapters.release import ResourceGuard
 __all__ = [
     "CGROUP_MOUNT",
     "PeakRssGuard",
+    "PeakRssLimitError",
     "PeakRssSample",
     "PeakRssSource",
     "PeakRssSourceUnavailable",

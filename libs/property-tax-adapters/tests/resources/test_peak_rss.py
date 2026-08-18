@@ -412,3 +412,78 @@ def test_an_unreadable_proc_file_makes_the_source_unavailable(
     monkeypatch.setattr(peak_rss_module, "_PROC_SELF_CGROUP", tmp_path / "absent")
 
     assert resolve_cgroup_peak_path(tmp_path / "cgroup") is None
+
+
+# --------------------------------------------------------------------------
+# A cgroup v2 entry is hierarchy zero with an *empty* controllers field
+# --------------------------------------------------------------------------
+
+
+def write_proc(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> pathlib.Path:
+    probe = tmp_path / "proc-self-cgroup"
+    probe.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(peak_rss_module, "_PROC_SELF_CGROUP", probe)
+    mount = tmp_path / "cgroup"
+    mount.mkdir(exist_ok=True)
+    return mount
+
+
+@pytest.mark.parametrize(
+    ("label", "reported"),
+    [
+        ("v1-cpu-at-hierarchy-zero", "0:cpu:/scope\n"),
+        ("v1-memory-at-hierarchy-zero", "0:memory:/scope\n"),
+        ("v1-named-at-hierarchy-zero", "0:name=systemd:/scope\n"),
+    ],
+)
+def test_a_v1_controller_at_hierarchy_zero_is_not_cgroup_v2(
+    label: str, reported: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hierarchy zero alone is not the test; the controllers field must be empty.
+
+    Reading `memory.peak` beneath a v1 controller answers from a hierarchy with
+    its own path layout, which this probe does not understand.
+    """
+
+    mount = write_proc(tmp_path, monkeypatch, reported)
+
+    assert resolve_cgroup_peak_path(mount) is None, label
+
+    with pytest.raises(PeakRssSourceUnavailable):
+        read_peak_rss(PeakRssSource.CGROUP_V2, mount=mount)
+
+
+def test_a_mixed_file_finds_the_v2_line_among_v1_ones(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hybrid host lists v1 controllers and one v2 entry; the v2 entry wins."""
+
+    mount = write_proc(
+        tmp_path,
+        monkeypatch,
+        "12:pids:/user.slice\n5:memory:/user.slice\n0::/user.slice/app.scope\n",
+    )
+
+    resolved = resolve_cgroup_peak_path(mount)
+
+    assert resolved == mount / "user.slice" / "app.scope" / "memory.peak"
+
+
+def test_a_file_of_only_v1_entries_yields_no_path(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mount = write_proc(tmp_path, monkeypatch, "12:pids:/user.slice\n5:memory:/user.slice\n")
+
+    assert resolve_cgroup_peak_path(mount) is None
+
+
+def test_the_limit_error_is_exported() -> None:
+    """It is part of the module's surface, since a caller must catch it."""
+
+    import property_tax_adapters.resources as package
+
+    assert "PeakRssLimitError" in peak_rss_module.__all__
+    assert "PeakRssLimitError" in package.__all__
+    assert package.PeakRssLimitError is peak_rss_module.PeakRssLimitError

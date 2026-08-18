@@ -400,12 +400,65 @@ def test_a_comparable_run_publishes_its_ratio() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_pinned_cgroup_compares_device_and_inode_not_only_the_path() -> None:
-    """A cgroup can be removed and another created at the same name."""
+def test_a_replacement_cgroup_at_the_same_path_is_not_the_pinned_one() -> None:
+    """Behavioural, not structural: a field list would pass against `return True`.
 
-    fields = set(bench.PinnedCgroup.__dataclass_fields__)
+    A scope torn down and restarted carries the same name and a fresh, unrelated
+    peak. Comparing names calls those one cgroup; comparing device and inode
+    does not.
+    """
 
-    assert fields == {"peak_path", "device", "inode"}
+    pinned = bench.PinnedCgroup(pathlib.Path("/sys/fs/cgroup/x/memory.peak"), device=1, inode=100)
+    same_name_new_object = bench.PinnedCgroup(pinned.peak_path, device=1, inode=999)
+    same_object = bench.PinnedCgroup(pinned.peak_path, device=1, inode=100)
+
+    def current(replacement: bench.PinnedCgroup):
+        return lambda: replacement
+
+    original = bench.pin_cgroup
+    try:
+        bench.pin_cgroup = current(same_name_new_object)  # type: ignore[assignment]
+        assert pinned.still_current() is False, "a replacement at the same path was accepted"
+
+        bench.pin_cgroup = current(same_object)  # type: ignore[assignment]
+        assert pinned.still_current() is True
+
+        bench.pin_cgroup = lambda: None  # type: ignore[assignment]
+        assert pinned.still_current() is False, "an unavailable cgroup was treated as current"
+    finally:
+        bench.pin_cgroup = original  # type: ignore[assignment]
+
+
+def test_a_different_device_at_the_same_inode_is_not_the_pinned_one() -> None:
+    """Inode numbers are only unique within a device."""
+
+    pinned = bench.PinnedCgroup(pathlib.Path("/sys/fs/cgroup/x/memory.peak"), device=1, inode=100)
+    original = bench.pin_cgroup
+    try:
+        bench.pin_cgroup = lambda: bench.PinnedCgroup(pinned.peak_path, device=2, inode=100)  # type: ignore[assignment]
+        assert pinned.still_current() is False
+    finally:
+        bench.pin_cgroup = original  # type: ignore[assignment]
+
+
+def test_a_run_with_no_cgroup_reports_indeterminate_rather_than_crashing() -> None:
+    """The whole path when `pin_cgroup()` returns `None`."""
+
+    original_pin, original_measure = bench.pin_cgroup, bench.measure
+    try:
+        bench.pin_cgroup = lambda: None  # type: ignore[assignment]
+        bench.measure = lambda rows, columns, retain=0: PeakRssSample(  # type: ignore[assignment]
+            peak_bytes=20 * MIB, source=PeakRssSource.RUSAGE
+        )
+        report = bench.run_acceptance(1_000, 90)
+    finally:
+        bench.pin_cgroup, bench.measure = original_pin, original_measure  # type: ignore[assignment]
+
+    absolute = next(v for v in report.verdicts if v.name == "absolute")
+    assert absolute.result == bench.INDETERMINATE
+    assert report.initial_cgroup_bytes is None and report.cgroup_bytes is None
+    assert bench.exit_status(report.verdicts) == 1
+    assert "unreadable" in report.render()
 
 
 def test_the_report_names_each_measurement_source_rather_than_collapsing_them() -> None:
