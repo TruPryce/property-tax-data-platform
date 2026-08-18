@@ -105,7 +105,7 @@ The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` proto
 
 `PeakRssGuard` SHALL measure at the grain its limit is expressed in, and SHALL default to the per-process `rusage` source rather than to the probe's cgroup preference.
 
-The 900 MiB budget is **per task**, derived as `(4096 MiB − 400 MiB scheduler) / 4 tasks`. That arithmetic describes a container holding a scheduler and four concurrent tasks, so in the deployment the budget came from, the cgroup measures the container and the limit measures one task inside it. They are different grains, and a guard reading the cgroup against a per-task limit compares the wrong pair.
+The 900 MiB budget is **per task**, derived as `(4096 MiB − 419 MiB scheduler) / 4 tasks`. That arithmetic describes a container holding a scheduler and four concurrent tasks, so in the deployment the budget came from, the cgroup measures the container and the limit measures one task inside it. They are different grains, and a guard reading the cgroup against a per-task limit compares the wrong pair.
 
 The consequence is not theoretical. Measured on one host, a process whose own peak was 28.0 MiB sat in a cgroup whose sticky peak was 1,072.3 MiB; a `PeakRssGuard(900 MiB)` reading the cgroup would have rejected that task, and every other compliant task sharing the container, while a `rusage` reading accepted it correctly. A guard that rejects compliant work is worse than no guard, because it converts a healthy release into a failed one and does so more reliably the busier the container is.
 
@@ -239,7 +239,7 @@ The **scaling** check SHALL take **three** `rusage` measurements, each in its ow
 
 A figure from one group SHALL NOT be used to satisfy a check belonging to the other. That is the same incomparability this change states elsewhere, and it applies to the benchmark's own arithmetic first.
 
-A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` would therefore report one identical number, and the ratio would be exactly 1.0 for a linear implementation as readily as for a bounded one — the check would not merely be contaminated, it would pass vacuously.
+A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` therefore report figures that track the shared subtree rather than the reader — measured on the deployment host as 306.0, 449.5, and 454.2 MiB for siblings allocating 100, 200, and 400 MiB. The check would not merely be contaminated: the ratio computed from them is a function of read timing, which on that run gave 1.48, under the 1.5 threshold by a margin no implementation controls.
 
 `ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
 
@@ -270,11 +270,13 @@ The scaling ratio SHALL be computed with a fixed noise floor `F` of 8 MiB added 
 scaling_ratio = (W2 + F) / (W1 + F)
 ```
 
-The floor is what makes the ratio stable when both working sets are small: without it, two nearly-identical bounded measurements a few kilobytes apart can produce an arbitrarily large quotient, and the check would fail on noise rather than on growth.
+The floor is what makes the ratio stable when both working sets are small: without it, two nearly-identical bounded measurements a few kilobytes apart can produce an arbitrarily large quotient, and the check would fail on noise rather than on growth. That case is the expected one rather than an edge. Measured on the deployment host, a boundary retaining nothing held a working set of 0.02 MiB at both 25,000 and 100,000 rows, where the unfloored quotient is `0.02 / 0.02` and means nothing.
+
+`F` is therefore a degenerate-ratio guard rather than a noise floor, and SHALL be described as one. Run-to-run variance on that host was 0.00 MiB across twelve churn repetitions and 0.20 MiB across forty allocation repetitions, so 8 MiB clears observed noise by roughly forty times and is not sized from it. What the value costs is sensitivity: solving `(4W + F) / (W + F) = 1.5` gives 1.60 MiB as the largest working set behind which a fully linear implementation stays invisible, which at 250,000 rows is 6.7 bytes retained per row. No Python container reaches that — a `set` of key tuples lands near 25 MiB at that size and fails at a ratio near 3.3 — so the blind spot is arithmetic rather than reachable, and the value stands.
 
 The benchmark SHALL apply both checks and SHALL fail if either fails:
 
-1. **Absolute.** A peak at 1,000,000 rows SHALL be under 900 MiB, measured from the **cgroup**. This supersedes the issue body's 1 GiB because the scheduler's measured 400 MiB peak shares the same 4 GiB container at a parallelism of four.
+1. **Absolute.** A peak at 1,000,000 rows SHALL be under 900 MiB, measured from the **cgroup**. This supersedes the issue body's 1 GiB because the scheduler's measured 419 MiB peak shares the same 4 GiB container at a parallelism of four.
 
    The absolute check SHALL NOT use the `rusage` figures the ratio is built from. Issue #43 D5 makes the cgroup the authority the limit is enforced against, it is what the OOM killer reads, and this change states in its own text that the two sources are incomparable — so reporting a `rusage` number against a cgroup-derived budget would be the same defect the source-agreement rule exists to prevent, committed one paragraph later.
 
@@ -385,8 +387,8 @@ The floor also bounds what the scaling check can detect, and that limit SHALL be
 #### Scenario: A shared cgroup peak would make the check vacuous
 - **GIVEN** three subprocesses in one cgroup whose `memory.peak` is sticky and shared
 - **WHEN** all three read that file
-- **THEN** they report one identical figure
-- **THEN** the scaling ratio is 1.0 for a linear implementation as readily as for a bounded one
+- **THEN** none of them reports a figure describing its own process
+- **THEN** the ratio computed from them tracks read timing rather than either implementation's working set
 - **THEN** the benchmark SHALL NOT use the cgroup source for these measurements
 
 #### Scenario: Mixed sources are refused rather than ratioed
