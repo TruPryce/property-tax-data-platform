@@ -105,7 +105,7 @@ The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` proto
 
 `PeakRssGuard` SHALL measure at the grain its limit is expressed in, and SHALL default to the per-process `rusage` source rather than to the probe's cgroup preference.
 
-The 900 MiB budget is **per task**, derived as `(4096 MiB − 419 MiB scheduler) / 4 tasks`. That arithmetic describes a container holding a scheduler and four concurrent tasks, so in the deployment the budget came from, the cgroup measures the container and the limit measures one task inside it. They are different grains, and a guard reading the cgroup against a per-task limit compares the wrong pair.
+The 900 MiB budget is **per task**, derived as `(4096 MiB − 419 MiB) / 4 tasks`, where 419 MiB is the scheduler container's `memory.peak` with no task running — a subtree charge that only ever rises, so an upper bound on the scheduler's share rather than a measurement of it. That arithmetic describes a container holding a scheduler and four concurrent tasks, so in the deployment the budget came from, the cgroup measures the container and the limit measures one task inside it. They are different grains, and a guard reading the cgroup against a per-task limit compares the wrong pair.
 
 The consequence is not theoretical. Measured on one host, a process whose own peak was 28.0 MiB sat in a cgroup whose sticky peak was 1,072.3 MiB; a `PeakRssGuard(900 MiB)` reading the cgroup would have rejected that task, and every other compliant task sharing the container, while a `rusage` reading accepted it correctly. A guard that rejects compliant work is worse than no guard, because it converts a healthy release into a failed one and does so more reliably the busier the container is.
 
@@ -280,24 +280,30 @@ The floor is what makes the ratio stable when both working sets are small: witho
 
 What the value costs is sensitivity, and that cost SHALL be stated as measured rather than derived. Sweeping an accumulator that retains a known number of bytes per row, at 250,000 and 1,000,000 rows:
 
-| retained bytes/row | `W1` | `W2` | verdict at `F` = 8 MiB | verdict at `F` = 2 MiB |
-| ---: | ---: | ---: | --- | --- |
-| 1 | 0.00 | 0.00 | passes | passes |
-| 2 | 0.00 | 0.00 | passes | passes |
-| 4 | 0.00 | 1.48 | **passes** | fails |
-| 8 | 0.00 | 4.85 | fails | fails |
-| 16 | 1.18 | 12.94 | fails | fails |
-| 128 | 27.88 | 119.68 | fails | fails |
+| retained bytes/row | ratio at `F` = 2 MiB, five repeats | verdict |
+| ---: | --- | --- |
+| 1 | 1.000 every run | invisible |
+| 2 | 1.000 every run | invisible |
+| 3 | 1.219 – 1.342 | invisible |
+| 4 | 1.598 – 1.770, and 1.480 on a separate run | **straddles the threshold** |
+| 5 | 2.121 – 2.301 | detected |
+| 6 | 2.635 – 2.779 | detected |
+| 8 | 3.490 – 3.717 | detected |
+| 128 | 4.07 | detected |
 
-`F` is 2 MiB because that table is the only reason to choose a value. At 8 MiB a container retaining four bytes per row — an `array("I")` of row numbers — passed at 1.20 while growing perfectly linearly. At 2 MiB it fails at 1.78. Six repeated bounded runs produced a ratio of exactly 1.000 at every floor down to 0.25 MiB, so the tightening costs no false failures; there was no reason to leave it at 8 beyond the number having been written down first.
+Every rate was measured, including the ones that only confirm the boundary; none is interpolated. Each row is five repeated three-subprocess runs, because a single run does not establish where a boundary sits: four bytes per row read 1.480 on one earlier run and 1.598–1.770 across the five, which is the difference between a rate that is detected and a rate that is *usually* detected.
 
-Below four bytes per row the binding constraint is **not** the floor but measurement resolution: one and two bytes per row register `W1 = W2 = 0.00 MiB`, because a megabyte or two of growth against an eighteen-megabyte baseline does not move `ru_maxrss` at all. No choice of `F` detects that, and the specification SHALL NOT claim otherwise.
+`F` is 2 MiB because that table is the only reason to choose a value. At 8 MiB a container retaining four bytes per row — an `array("I")` of row numbers — passed at 1.20 while growing perfectly linearly. Six repeated bounded runs produced a ratio of exactly 1.000 at every floor down to 0.25 MiB, so the tightening costs no false failures; there was no reason to leave it at 8 beyond the number having been written down first.
+
+Detection SHALL be described as **reliable from five retained bytes per row**, not from four. Four is the boundary and has been observed on both sides of the threshold; describing a straddling rate as detected would claim a guarantee the measurements do not support.
+
+At three bytes per row and below the binding constraint is **not** the floor but measurement resolution: one and two bytes per row register `W1 = W2 = 0.00 MiB`, because a megabyte or two of growth against an eighteen-megabyte baseline does not move `ru_maxrss` at all, and three moves it 0.25 MiB. No choice of `F` detects that, and the specification SHALL NOT claim otherwise.
 
 That residual SHALL be stated rather than argued away. An implementation retaining two bytes per row holds 4 MiB at the largest release this platform has measured, which the 900 MiB budget absorbs without noticing; and it is not the defect this check exists to find. What the check detects, and what the platform's failure mode actually looks like, is **record retention**: a `set` of key tuples measured 28.9 MiB at 250,000 rows and failed at 3.55, and a list of per-row dicts measured 61.2 MiB and failed at 3.74. The check is a detector of retained records, not of all linear growth, and describing it as the latter would be the same overclaim this change has already had to withdraw twice.
 
 The benchmark SHALL apply both checks and SHALL fail if either fails:
 
-1. **Absolute.** A peak at 1,000,000 rows SHALL be under 900 MiB, measured from the **cgroup**. This supersedes the issue body's 1 GiB because the scheduler's measured 419 MiB peak shares the same 4 GiB container at a parallelism of four.
+1. **Absolute.** A peak at 1,000,000 rows SHALL be under 900 MiB, measured from the **cgroup**. This supersedes the issue body's 1 GiB because the scheduler 419 MiB container peak with no task running shares the same 4 GiB container at a parallelism of four.
 
    The absolute check SHALL NOT use the `rusage` figures the ratio is built from. Issue #43 D5 makes the cgroup the authority the limit is enforced against, it is what the OOM killer reads, and this change states in its own text that the two sources are incomparable — so reporting a `rusage` number against a cgroup-derived budget would be the same defect the source-agreement rule exists to prevent, committed one paragraph later.
 
@@ -371,7 +377,7 @@ The threshold of 1.5 follows from what each implementation shape produces. Rows 
 
 A single absolute figure SHALL NOT be treated as evidence of boundedness. An implementation retaining every row can pass one absolute on a large enough machine and fail at the next order of magnitude with no warning.
 
-The guard value also bounds what the scaling check can detect, and that limit is recorded in the measured table above rather than derived from the threshold: detection begins at four retained bytes per row, and one or two bytes per row are invisible to `ru_maxrss` at these sizes regardless of `F`. The arithmetic bound is looser than the measured one — solving `(4W + F) / (W + F) = 1.5` with `F` = 2 MiB gives a 0.4 MiB working set, about 1.7 bytes per row at 250,000 — so the measurement, not the algebra, is what the specification states.
+The guard value also bounds what the scaling check can detect, and that limit is recorded in the measured table above rather than derived from the threshold: detection is reliable from five retained bytes per row, four straddles the threshold across repeats, and three or fewer are invisible to `ru_maxrss` at these sizes regardless of `F`. The arithmetic bound is looser than the measured one — solving `(4W + F) / (W + F) = 1.5` with `F` = 2 MiB gives a 0.4 MiB working set, about 1.7 bytes per row at 250,000 — so the measurement, not the algebra, is what the specification states.
 
 #### Scenario: A bounded implementation passes both checks
 - **GIVEN** a boundary that retains no row after writing it, in an isolated cgroup
@@ -385,6 +391,13 @@ The guard value also bounds what the scaling check can detect, and that limit is
 - **THEN** it reports the check as indeterminate and names why
 - **THEN** it does not substitute a `rusage` figure
 - **THEN** the indeterminate result is not reported as a pass
+
+#### Scenario: The linearity requirement is answered by two things, not one
+- **GIVEN** issue #43 D5's requirement that memory not grow linearly with row count
+- **WHEN** the evidence for it is assembled
+- **THEN** the structural half comes from the accepted `bounded-release-processing` capability — a reader lead bounded by a constant and identical across two fixture lengths, and carriers retaining at most a hundred entries — which are checks on shape with no measurement floor
+- **THEN** this change's benchmark supplies the budget half, and is described as evidence rather than proof
+- **THEN** no document in this change claims the benchmark alone establishes that memory does not grow linearly
 
 #### Scenario: A linear implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
