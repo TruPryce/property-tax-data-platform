@@ -33,9 +33,14 @@ Falling back would return a figure from a source the caller did not ask for, und
 - **THEN** it does not return a `rusage` sample under a request for a cgroup one
 
 #### Scenario: The preference applies when no source is named
-- **GIVEN** the same host
+- **GIVEN** a host whose cgroup file *is* readable
 - **WHEN** `read_peak_rss()` is called naming nothing
 - **THEN** it returns a `cgroup_v2` sample
+
+#### Scenario: The fallback applies where no cgroup file exists
+- **GIVEN** a host with no readable cgroup file
+- **WHEN** `read_peak_rss()` is called naming nothing
+- **THEN** it returns a `rusage` sample, which the preference permits because no source was named
 
 Every reported measurement SHALL name its source. The cgroup is the authority the container limit is enforced against; `ru_maxrss` is a per-process high-water mark that does not account for unreaped children or sibling processes. Two numbers from different sources are not comparable, and a bare integer hides which one it is.
 
@@ -151,19 +156,21 @@ The generator SHALL retain no accumulated state across rows, so the instrument d
 
 ### Requirement: Prove boundedness by shape, not by a single number
 
-The acceptance benchmark SHALL take **three** peak-RSS measurements, each in its own subprocess, and SHALL evaluate two independent checks against them.
+The acceptance benchmark SHALL evaluate two independent checks, and they do not read the same measurements.
 
-Each measurement SHALL run in a separate subprocess **and** SHALL be taken with the `rusage` source, and the benchmark SHALL fail closed if the three samples do not all report the same source.
+The **scaling** check SHALL take **three** `rusage` measurements, each in its own subprocess, and SHALL fail closed if the three samples do not all report the same source. The **absolute** check SHALL take a **fourth** measurement, from the cgroup, described under its own heading below. Four measurements in total, three of which are comparable to each other and one of which is authoritative about the limit.
+
+A figure from one group SHALL NOT be used to satisfy a check belonging to the other. That is the same incomparability this change states elsewhere, and it applies to the benchmark's own arithmetic first.
 
 A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` would therefore report one identical number, and the ratio would be exactly 1.0 for a linear implementation as readily as for a bounded one — the check would not merely be contaminated, it would pass vacuously.
 
-`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three measurements, and the benchmark SHALL NOT read the cgroup for them.
+`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
 
 This does not demote the cgroup source generally. The guard keeps preferring it, because in production the cgroup **is** the container and its number is what the OOM killer acts on. The benchmark needs comparability between three processes; the guard needs the authority a limit is enforced against. Those are different requirements and they select different sources.
 
 Requiring one source across all three is separate from choosing which. `ru_maxrss` and a cgroup figure account for different things — unreaped children and sibling processes among them — so a ratio taken across a mixed pair is arithmetic on incomparable quantities. The benchmark SHALL compare `PeakRssSample.source` across `B`, `P1`, and `P2` and SHALL fail rather than report a ratio when they differ.
 
-The three measurements are:
+The three comparative measurements are:
 
 | symbol | rows | what it measures |
 | --- | --- | --- |
@@ -196,11 +203,27 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    Because a cgroup peak is per-cgroup and sticky, the absolute measurement SHALL be taken in a cgroup containing only that run, and the benchmark SHALL **verify** that rather than assume it.
 
+   The benchmark SHALL **require** caller-provided isolation and SHALL NOT attempt to create a cgroup itself. Creating one needs delegation the benchmark cannot assume it has, and a command that silently acquires privileges to measure itself is a worse instrument than one that states its precondition.
+
+   The reproducible invocation on a systemd host is:
+
+   ```
+   systemd-run --user --scope -p MemoryAccounting=yes make benchmark-release-peak-rss
+   ```
+
+   which places the run in a fresh scope of its own. Measured on one host, the ambient shell's cgroup held six processes and a peak of 964 MB inherited from unrelated work, while the same probe inside such a scope reported three processes — its own tree — and a peak of 2.2 MB. In a container the container's own cgroup already satisfies the requirement and no wrapper is needed. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
+
    Verification SHALL read `cgroup.procs` for the cgroup named by `/proc/self/cgroup` and SHALL require that it lists only the benchmark's own process tree. A cgroup containing any other process cannot yield a peak attributable to this run, and a benchmark that assumed isolation it did not have would report a neighbour's high-water mark as its own — the same defect as the shared-cgroup ratio, arriving through the absolute check instead.
 
    Where the benchmark cannot establish or verify such a cgroup, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for.
 
    An indeterminate absolute SHALL NOT be reported as a pass, and the command SHALL exit **non-zero**. A run that could not measure the thing it exists to measure has not demonstrated the target, and an exit status a caller reads as success is how an unproven claim becomes a settled one.
+
+#### Scenario: Isolation is required of the caller, not created by the run
+- **GIVEN** a host where the benchmark is invoked without a scope or container of its own
+- **WHEN** it checks isolation
+- **THEN** it reports the absolute indeterminate and names the invocation that would provide isolation
+- **THEN** it does not create a cgroup or acquire privileges to measure itself
 
 #### Scenario: Isolation is verified rather than assumed
 - **GIVEN** a cgroup whose `cgroup.procs` lists a process outside this run
@@ -234,10 +257,11 @@ The floor also bounds what the scaling check can detect, and that limit SHALL be
 - **THEN** the indeterminate result is not reported as a pass
 
 #### Scenario: A linear implementation fails even when it fits
-- **GIVEN** a boundary that accumulates rows, whose `P2` happens to fall under 900 MiB
-- **WHEN** the benchmark takes all three measurements
+- **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
+- **WHEN** the benchmark takes its four measurements
 - **THEN** `W2` is approximately four times `W1`
 - **THEN** `scaling_ratio` exceeds 1.5 and the benchmark fails on the scaling check even though the absolute check passed
+- **THEN** the passing absolute is read from the cgroup figure and not from `P2`, which is a `rusage` measurement and settles nothing about the limit
 
 #### Scenario: Two bounded measurements a few kilobytes apart do not fail on noise
 - **GIVEN** a bounded boundary whose two working sets differ only by allocator variance

@@ -64,9 +64,9 @@ Stating that limit here is deliberate. A benchmark whose scope is overclaimed is
 
 ## Decisions and assumptions
 
-D31 through D37 are stated in the proposal. Two assumptions, both checkable at implementation time:
+D31 through D39 are stated in the proposal. Two assumptions, both checkable at implementation time:
 
-- `/sys/fs/cgroup/memory.peak` exists on cgroup v2 hosts and is absent or unreadable elsewhere, so readability is a sufficient test for which source applies. Where it is absent the `ru_maxrss` fallback is used and named.
+- A cgroup v2 host exposes `memory.peak` beneath the relative path `/proc/self/cgroup` reports, and readability of *that* path — not of the mount root, which a nested cgroup does not populate — is a sufficient test for which source applies when none is named. Where it is unreadable the `ru_maxrss` fallback is used and named; where a caller named `cgroup_v2` explicitly, an unreadable path raises instead, per D38.
 - A synthetic generator producing ninety-column rows exercises the boundary's memory behaviour representatively. It does not exercise any county's parsing, which is deliberate: this measures the boundary, and a county reader's own costs belong to that county's work.
 
 ## Unresolved decisions
@@ -81,6 +81,6 @@ The real risk is a benchmark that passes for the wrong reason — a run that nev
 
 ## Testing strategy
 
-CI tests are deterministic and bounded, never the million-row run. They cover the probe's source precedence with the cgroup path present and absent, that a sample always names its source, that the guard raises above its limit and not below, and that a raising guard surfaces as `resource_limit_exceeded` through the accepted boundary rather than as anything else.
+CI tests are deterministic and bounded, never the million-row run. They cover the probe's source precedence with the nested cgroup path present and absent, the explicit-source path including a named source that cannot be read, that a sample always names its source, that the guard raises at and above its limit and not below, including the exact-limit boundary, and that a raising guard surfaces as `resource_limit_exceeded` through the accepted boundary rather than as anything else.
 
 The generator is tested for shape at small sizes — row count, column count, envelope well-formedness — and for the property that it holds no accumulated state, so the thing measuring memory does not itself retain the release.
