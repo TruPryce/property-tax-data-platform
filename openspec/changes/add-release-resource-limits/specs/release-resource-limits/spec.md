@@ -239,7 +239,7 @@ The acceptance benchmark SHALL evaluate two independent checks, and they do not 
 
 The **scaling** check SHALL take **three** `rusage` measurements, each in its own subprocess, and SHALL fail closed unless all three report the `rusage` source specifically.
 
-Agreement alone is not sufficient. Three matching *cgroup* figures also agree, and agreeing is exactly what makes them useless here — they agree because they describe the same shared subtree rather than the three processes that read them. The check SHALL therefore require the per-process source by name, not merely that the samples match each other. The **absolute** check SHALL take a **fourth** measurement, from the cgroup, described under its own heading below. Four measurements in total, three of which are comparable to each other and one of which is authoritative about the limit.
+Agreement alone is not sufficient. Three matching *cgroup* figures also agree, and agreeing is exactly what makes them useless here — they agree because they describe the same shared subtree rather than the three processes that read them. The check SHALL therefore require the per-process source by name, not merely that the samples match each other. The **absolute** check SHALL take **two** cgroup measurements, one before the run and one after, as D42's bracket requires. **Five measurements in total**: three comparable to each other, and a pair bracketing them that is authoritative about the limit.
 
 A figure from one group SHALL NOT be used to satisfy a check belonging to the other. That is the same incomparability this change states elsewhere, and it applies to the benchmark's own arithmetic first.
 
@@ -325,7 +325,7 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    The Airflow container specifically does **not** satisfy it. The 900 MiB figure is derived from that container holding a scheduler and four concurrent task processes, so its cgroup contains siblings by construction; a peak read there is the container's, not this run's. A rule that treated any container as isolated would be contradicted by the very deployment the budget was computed from. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
 
-   Attribution SHALL be established by **bracketing** rather than inferred from the cgroup's history. The benchmark SHALL read the cgroup peak before its measurements and after them, and SHALL treat an initial reading at or above the limit as **indeterminate**: a cgroup that arrived contaminated cannot yield an attributable figure, and no property of the cgroup observable from inside changes that. Initial below and final below is a pass; initial below and final at or above is a failure.
+   Attribution SHALL NOT be claimed. The absolute check SHALL instead **bracket** the run, which bounds what the figure can be blamed on rather than establishing whose it is. The benchmark SHALL read the cgroup peak before its measurements and after them, and SHALL treat an initial reading at or above the limit as **indeterminate**: a cgroup that arrived contaminated cannot yield an attributable figure, and no property of the cgroup observable from inside changes that. Initial below and final below is a pass; initial below and final at or above is a failure.
 
    That failing verdict SHALL be described as **conservative rather than attributive**. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen, and the run would be failed for memory it did not allocate. Failing closed on a figure that may not be this run's is the safe direction to be wrong in; claiming the figure *is* this run's would not be, and the specification SHALL NOT claim it.
 
@@ -522,7 +522,7 @@ The benchmark SHALL be a `make` target rather than a `pytest` test, because issu
 
 It SHALL require no network.
 
-It SHALL report the row count, the column count, the baseline `B`, the two size peaks `P1` and `P2`, the derived working sets `W1` and `W2`, the computed `scaling_ratio`, the separate cgroup figure the absolute check used, the source of every measurement, whether the three comparative sources agreed, whether the cgroup was verified isolated, and the verdict of each of the two checks **separately** — including `indeterminate` where that is the answer.
+It SHALL report the row count, the column count, the baseline `B`, the two size peaks `P1` and `P2`, the derived working sets `W1` and `W2`, the computed `scaling_ratio`, both cgroup figures the absolute check bracketed, before and after, the source of every measurement, whether the three comparative sources agreed, whether the cgroup was verified isolated, and the verdict of each of the two checks **separately** — including `indeterminate` where that is the answer.
 
 A result that does not say what was run cannot be checked by a reader; a peak that does not name its source cannot be compared with another; and two checks reported as one verdict hide which of them actually passed.
 

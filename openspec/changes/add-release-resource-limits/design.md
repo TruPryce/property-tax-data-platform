@@ -79,11 +79,13 @@ Nothing existing changes behaviour. The guard is optional, the generator is a te
 
 The real risk is a benchmark that passes for the wrong reason — a run that never actually exercised the boundary, or one whose two sizes were too close to distinguish shapes. The plan therefore requires the benchmark to report every figure it derived a verdict from — the baseline, both size peaks, both working sets, the ratio, the separate cgroup measurement the absolute used, the source of each, whether the comparative sources agreed, whether the cgroup was verified isolated, and the two verdicts separately — so a reader can tell what was run rather than trusting that something was.
 
-### Attribution, and what an age comparison cannot settle
+### Why the absolute check claims no attribution at all
 
-Implementation first established attribution by comparing the age of the cgroup's root process, measured at 0.04 s inside a dedicated scope against 74,759 s in an ambient shell. The measurement is real and the rule built on it is not: a freshly started shell carrying a few seconds of prior work satisfies an age test while still holding a peak that is not the run's.
+Implementation first tried to establish attribution by comparing the age of the cgroup's root process, measured at 0.04 s inside a dedicated scope against 74,759 s in an ambient shell. The measurement is real and the rule built on it is not: a freshly started shell carrying a few seconds of prior work satisfies an age test while still holding a peak that is not the run's.
 
-D42 replaces it with a bracket — the cgroup peak read before the measurements and after them — which needs no claim about the cgroup's history and therefore cannot be defeated by arranging one. The cost is one extra reading; the benefit is that the verdict depends only on figures the run itself produced.
+D42 replaces it with a bracket — the cgroup peak read before the measurements and after them, bringing the benchmark to five readings in all — which needs no claim about the cgroup's history and therefore cannot be defeated by arranging one.
+
+The bracket does not establish attribution either, and does not try. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen and the run would be failed for memory it did not allocate. What the bracket gives is a **bound on what the figure can be blamed on**: a contaminated start makes any reading unusable, and a clean start with a crossed finish is a conservative failure. Failing closed on a figure that may not be ours is the safe direction to be wrong in; saying the figure *is* ours is a claim nothing here supports.
 
 Isolation is correspondingly narrowed to what membership can establish, and strengthened where it was unsound: a complete membership map, and this process among the members.
 
