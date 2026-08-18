@@ -30,7 +30,7 @@ benchmarks/release_peak_rss.py   the acceptance command behind `make release-ben
 Issue #43 D5 requires two different things, and only one of them is a number:
 
 1. peak RSS under 900 MiB at a million rows — an absolute;
-2. memory must not grow linearly with row count — a **shape**, and one this change can only partly evidence. Its benchmark catches material record retention with wide margin and cannot see retention of three bytes per row or fewer, which is a measurement-resolution floor rather than a threshold choice. No other accepted check closes that remainder: the capability's reader lead detects read-ahead, not a reader that keeps a compact summary after yielding, and its hundred-entry caps bound notices and diagnostics only. Narrowing D5 to material record retention is therefore raised as unresolved item U1 for a maintainer — see D40.
+2. memory must not grow linearly with row count — a **shape**, and one this change can only partly evidence. Its benchmark catches material record retention with wide margin and cannot see retention of three bytes per row or fewer, which is a measurement-resolution floor rather than a threshold choice. No other accepted check closes that remainder: the capability's reader lead detects read-ahead, not a reader that keeps a compact summary after yielding, and its hundred-entry caps bound notices and diagnostics only. Narrowing D5 was raised as U1 and **declined**: the maintainer decision on issue #43 keeps D5 whole, forbids row-proportional retention outright in repository-owned processors and readers, and makes the benchmark mandatory calibrated evidence rather than proof — see D40 and D41.
 
 A single absolute cannot establish the second. An implementation that retained every row could still pass at a million rows on a large enough machine, and would then fail at ten million with no warning that anything was wrong. So the benchmark runs twice, at 250,000 and 1,000,000 rows, and requires the peak to grow by far less than the fourfold row increase (D36). A bounded implementation's peak is roughly flat across the two; a linear one's quadruples.
 
@@ -50,7 +50,7 @@ The guard is the only new implementation of an accepted protocol, and it is a *c
 
 ## What this cannot show
 
-The benchmark measures one process on the machine that runs it. It does not prove behaviour under four concurrent tasks inside a 4 GiB container — the arithmetic that produced 900 MiB assumes four such tasks, and running four is a runtime exercise this change does not take. What it does establish is that one task's peak fits the per-task budget and does not scale with release size, which is the part a library can be responsible for.
+The benchmark measures one process on the machine that runs it. It does not prove behaviour under four concurrent tasks inside a 4 GiB container — the arithmetic that produced 900 MiB assumes four such tasks, and running four is a runtime exercise this change does not take. What it does establish is that one task's peak fits the per-task budget, that the ratio holds at the tested sizes, and that calibrated retention is detected — not that memory does not scale with release size, which is broader than the instrument shows.
 
 Stating that limit here is deliberate. A benchmark whose scope is overclaimed is worse than none, because it invites the conclusion that the container question is settled.
 
@@ -71,7 +71,7 @@ D31 through D39 are stated in the proposal. Two assumptions, both checkable at i
 
 ## Unresolved decisions
 
-- None.
+- None. U1 proposed narrowing issue #43 D5 to material record retention and was **declined**: the maintainer decision on that issue keeps D5 unchanged, forbids row-proportional retention in repository-owned processors and readers outright, and makes the benchmark mandatory calibrated evidence rather than proof. D40 and D41 record what this change implements against it.
 
 ## Risks and compatibility
 

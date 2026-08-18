@@ -432,6 +432,36 @@ The guard value also bounds what the scaling check can detect, and that limit is
 - **THEN** it fails closed and reports the disagreement
 - **THEN** no ratio across incomparable quantities is published
 
+### Requirement: Calibrate the scaling check's sensitivity rather than assume it
+
+A threshold that has not been shown to discriminate is a number, not a check. The benchmark SHALL therefore carry a calibration mode establishing, on the host that will run it, that the scaling check accepts a bounded implementation and rejects a known retainer.
+
+Calibration SHALL run **at least five repeated bounded-control runs** and **at least five repeated runs of an implementation retaining five bytes per row**. Every control SHALL pass and every retainer SHALL fail. Five bytes rather than four because four straddles the threshold — measured at 1.598 to 1.770 across five repeats and 1.480 on another — and a calibration anchored on a straddling rate would report sensitivity it does not have.
+
+Repeats rather than single runs, because a boundary measured once is a point estimate. This specification has already had to withdraw one detection claim derived from a single measurement.
+
+Where calibration cannot establish that sensitivity, the benchmark SHALL report **indeterminate** and SHALL exit non-zero. It SHALL NOT report a scaling verdict computed with a threshold it has just failed to validate.
+
+Calibration SHALL have its own `make` target and SHALL stay out of `make check` and the ordinary suite, for the reason the acceptance run does: it allocates at acceptance scale and takes minutes.
+
+#### Scenario: Calibration establishes sensitivity before a verdict is trusted
+- **GIVEN** five bounded-control runs and five five-bytes-per-row retention runs
+- **WHEN** calibration evaluates them
+- **THEN** it requires every control to pass and every retainer to fail
+- **THEN** only then is the scaling threshold treated as validated on that host
+
+#### Scenario: A control that fails calibration is not explained away
+- **GIVEN** a calibration run in which one bounded control fails the scaling check
+- **WHEN** the benchmark reports
+- **THEN** the result is indeterminate and the exit status is non-zero
+- **THEN** no scaling verdict is published from that run
+
+#### Scenario: A retainer that passes calibration is not explained away
+- **GIVEN** a calibration run in which one five-bytes-per-row retainer passes the scaling check
+- **WHEN** the benchmark reports
+- **THEN** the result is indeterminate and the exit status is non-zero
+- **THEN** the threshold is recorded as unvalidated on that host rather than adjusted to fit
+
 ### Requirement: Make the acceptance run reproducible, offline, and self-describing
 
 The benchmark SHALL be a `make` target rather than a `pytest` test, because issue #43 D5 separates deterministic bounded CI tests from the reproducible acceptance command.
@@ -460,7 +490,7 @@ Regular CI SHALL run deterministic bounded contract tests for the probe, the gua
 
 Documentation SHALL state that the benchmark measures one process on the machine that runs it, and does **not** establish behaviour under four concurrent tasks inside a 4 GiB container, which is the arithmetic that produced the 900 MiB per-task figure.
 
-It SHALL state that what the benchmark does establish is that one task's peak fits the per-task budget and does not scale with release size.
+It SHALL state that what the benchmark does establish is that one task's peak fits the per-task budget, that it meets the ratio at the tested sizes, and that it detects calibrated retention — not that memory does not scale with release size, which is broader than the instrument can show.
 
 It SHALL state that the resource half of issue #43 D5 lands here while the boundary itself — the protocols, the lifecycle, the vocabulary, and the outcome — is owned by the `bounded-release-processing` capability and is not modified.
 
