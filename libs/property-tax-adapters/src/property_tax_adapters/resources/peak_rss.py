@@ -117,8 +117,26 @@ def resolve_cgroup_peak_path(mount: Path = CGROUP_MOUNT) -> Path | None:
         return None
     for line in reported.splitlines():
         parts = line.split(":", 2)
-        if len(parts) == 3 and parts[0] == "0":
-            return mount / parts[2].strip().lstrip("/") / "memory.peak"
+        # A cgroup v2 entry is hierarchy 0 with an **empty** controllers field.
+        # `0:cpu:/scope` is neither: a v1 controller mounted at hierarchy 0 has
+        # its own path layout, and reading `memory.peak` under it would answer
+        # from a hierarchy this probe does not understand.
+        if len(parts) != 3 or parts[0] != "0" or parts[1] != "":
+            continue
+        relative = parts[2].strip()
+        # A cgroup v2 entry is an absolute path. Anything else is malformed, and
+        # a malformed one must not resolve: an empty or relative value lands on
+        # the mount root, and a traversal lands outside it — both answering for
+        # some other cgroup under this one's name, which is the failure
+        # resolution exists to prevent, reached through the error path.
+        if not relative.startswith("/"):
+            return None
+        candidate = (mount / relative.lstrip("/") / "memory.peak").resolve()
+        try:
+            candidate.relative_to(mount.resolve())
+        except ValueError:
+            return None
+        return candidate
     return None
 
 
@@ -232,10 +250,10 @@ class PeakRssGuard(ResourceGuard):
         sample = read_peak_rss(PeakRssSource.RUSAGE)
         self.last_sample = sample
         if sample.peak_bytes >= self._limit_bytes:
-            raise PeakRssLimitExceeded(sample, self._limit_bytes)
+            raise PeakRssLimitError(sample, self._limit_bytes)
 
 
-class PeakRssLimitExceeded(Exception):  # noqa: N818 - reads with its contract-named sibling
+class PeakRssLimitError(Exception):
     """Raised by `PeakRssGuard` when the peak reaches its limit.
 
     The boundary maps any raise from a guard to `resource_limit_exceeded` and

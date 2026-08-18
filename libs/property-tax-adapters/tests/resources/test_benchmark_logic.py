@@ -81,8 +81,23 @@ def test_the_guard_value_and_threshold_are_the_accepted_ones() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_three_matching_sources_agree() -> None:
-    assert bench.sources_agree((sample(1), sample(2), sample(3))) is True
+def test_three_rusage_samples_are_comparable() -> None:
+    assert bench.samples_are_comparable((sample(1), sample(2), sample(3))) is True
+
+
+def test_three_matching_cgroup_samples_are_refused() -> None:
+    """Agreeing is what makes them useless, not what makes them comparable."""
+
+    cgroups = (
+        sample(300, PeakRssSource.CGROUP_V2),
+        sample(300, PeakRssSource.CGROUP_V2),
+        sample(300, PeakRssSource.CGROUP_V2),
+    )
+
+    assert bench.samples_are_comparable(cgroups) is False
+    verdict = bench.evaluate_scaling(cgroups)
+    assert verdict.result == bench.INDETERMINATE
+    assert "must all be rusage" in verdict.detail
 
 
 def test_a_mixed_triple_fails_closed_rather_than_reporting_a_ratio() -> None:
@@ -90,10 +105,10 @@ def test_a_mixed_triple_fails_closed_rather_than_reporting_a_ratio() -> None:
 
     mixed = (sample(1), sample(2), sample(3, PeakRssSource.CGROUP_V2))
 
-    assert bench.sources_agree(mixed) is False
+    assert bench.samples_are_comparable(mixed) is False
     verdict = bench.evaluate_scaling(mixed)
     assert verdict.result == bench.INDETERMINATE
-    assert "disagree" in verdict.detail
+    assert "must all be rusage" in verdict.detail
     assert "ratio" not in verdict.detail
 
 
@@ -315,8 +330,8 @@ def test_the_report_names_every_figure_a_verdict_came_from() -> None:
         baseline_bytes=20 * MIB,
         small_bytes=20 * MIB,
         large_bytes=21 * MIB,
-        comparative_source="rusage",
-        sources_agreed=True,
+        comparative_sources=("rusage", "rusage", "rusage"),
+        comparable=True,
         initial_cgroup_bytes=20 * MIB,
         cgroup_bytes=300 * MIB,
         isolation_verified=True,
@@ -334,8 +349,8 @@ def test_the_report_names_every_figure_a_verdict_came_from() -> None:
         "W1",
         "W2",
         "scaling_ratio",
-        "comparative source",
-        "sources agreed",
+        "measurement sources",
+        "comparable samples",
         "cgroup peak",
         "isolation verified",
     ):
@@ -352,3 +367,57 @@ def test_the_report_shows_an_indeterminate_verdict_as_such() -> None:
 
 def test_the_report_survives_an_unreadable_cgroup() -> None:
     assert "unreadable" in bench.Report(cgroup_bytes=None).render()
+
+
+# --------------------------------------------------------------------------
+# The report suppresses what the check refused
+# --------------------------------------------------------------------------
+
+
+def test_an_incomparable_run_publishes_no_ratio() -> None:
+    """A number a reader can quote is worse than none where the check declined."""
+
+    rendered = bench.Report(
+        baseline_bytes=20 * MIB, small_bytes=20 * MIB, large_bytes=90 * MIB, comparable=False
+    ).render()
+
+    assert "not computed" in rendered
+    assert "incomparable" in rendered
+    for forbidden in ("1.000", "3.5", "4.0"):
+        assert f"scaling_ratio        {forbidden}" not in rendered
+
+
+def test_a_comparable_run_publishes_its_ratio() -> None:
+    rendered = bench.Report(
+        baseline_bytes=0, small_bytes=0, large_bytes=0, comparable=True
+    ).render()
+
+    assert "1.000" in rendered
+
+
+# --------------------------------------------------------------------------
+# Identity, and per-measurement sources
+# --------------------------------------------------------------------------
+
+
+def test_a_pinned_cgroup_compares_device_and_inode_not_only_the_path() -> None:
+    """A cgroup can be removed and another created at the same name."""
+
+    fields = set(bench.PinnedCgroup.__dataclass_fields__)
+
+    assert fields == {"peak_path", "device", "inode"}
+
+
+def test_the_report_names_each_measurement_source_rather_than_collapsing_them() -> None:
+    """ "mixed" hides which of the three was the odd one, which is the actionable part."""
+
+    rendered = bench.Report(
+        comparative_sources=("rusage", "rusage", "cgroup_v2"), comparable=False
+    ).render()
+
+    assert "B=rusage P1=rusage P2=cgroup_v2" in rendered
+    assert "mixed" not in rendered
+
+
+def test_the_report_survives_having_no_sources_yet() -> None:
+    assert "B=none" in bench.Report().render()

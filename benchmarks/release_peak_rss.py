@@ -41,8 +41,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "libs/property-tax-
 from property_tax_adapters.resources import (  # noqa: E402
     PeakRssSample,
     PeakRssSource,
-    PeakRssSourceUnavailable,
-    read_peak_rss,
     resolve_cgroup_peak_path,
 )
 
@@ -110,14 +108,18 @@ def scaling_ratio(
     return (w2 + guard_bytes) / (w1 + guard_bytes)
 
 
-def sources_agree(samples: tuple[PeakRssSample, ...]) -> bool:
-    """All three comparative measurements must name one source.
+def samples_are_comparable(samples: tuple[PeakRssSample, ...]) -> bool:
+    """Every comparative measurement must name `rusage` specifically.
 
-    `ru_maxrss` and a cgroup figure account for different things, so a ratio
-    across a mixed pair is arithmetic on incomparable quantities.
+    Agreement alone is not enough, and this is the trap it sets: three *cgroup*
+    figures also agree, and agreeing is exactly what makes them useless — they
+    match because they describe one shared subtree rather than the three
+    processes that read them.  A ratio across a mixed pair is arithmetic on
+    incomparable quantities; a ratio across three identical shared figures is
+    arithmetic on the same quantity three times.
     """
 
-    return len({sample.source for sample in samples}) == 1
+    return all(sample.source is PeakRssSource.RUSAGE for sample in samples)
 
 
 def evaluate_scaling(
@@ -128,9 +130,11 @@ def evaluate_scaling(
 ) -> Verdict:
     """Fail closed on disagreement; otherwise compare the ratio to the threshold."""
 
-    if not sources_agree(samples):
+    if not samples_are_comparable(samples):
         named = ", ".join(sorted({sample.source.value for sample in samples}))
-        return Verdict("scaling", INDETERMINATE, f"sources disagree: {named}")
+        return Verdict(
+            "scaling", INDETERMINATE, f"comparative samples must all be rusage; got {named}"
+        )
     baseline, small, large = (sample.peak_bytes for sample in samples)
     ratio = scaling_ratio(baseline, small, large, guard_bytes)
     result = PASS if ratio <= threshold else FAIL
@@ -310,8 +314,8 @@ class Report:
     baseline_bytes: int = 0
     small_bytes: int = 0
     large_bytes: int = 0
-    comparative_source: str = ""
-    sources_agreed: bool = False
+    comparative_sources: tuple[str, ...] = ()
+    comparable: bool = False
     initial_cgroup_bytes: int | None = None
     cgroup_bytes: int | None = None
     isolation_verified: bool = False
@@ -320,7 +324,16 @@ class Report:
 
     def render(self) -> str:
         w1, w2 = working_sets(self.baseline_bytes, self.small_bytes, self.large_bytes)
-        ratio = scaling_ratio(self.baseline_bytes, self.small_bytes, self.large_bytes)
+        # Suppressed when the check refused the samples: a number a reader can
+        # quote is worse than none where the check itself declined to use it.
+        ratio = (
+            f"{scaling_ratio(self.baseline_bytes, self.small_bytes, self.large_bytes):.3f}"
+            if self.comparable
+            else "not computed (samples incomparable)"
+        )
+        # Each measurement's own source, never collapsed: "mixed" hides which
+        # of the three was the odd one, which is the only actionable part.
+        sources = self.comparative_sources or ("none", "none", "none")
         cgroup = "unreadable" if self.cgroup_bytes is None else f"{self.cgroup_bytes / MIB:.1f} MiB"
         before = (
             "unreadable"
@@ -336,9 +349,9 @@ class Report:
             f"  P2 ({self.rows:,} rows) {self.large_bytes / MIB:.2f} MiB",
             f"  W1                   {w1 / MIB:.2f} MiB",
             f"  W2                   {w2 / MIB:.2f} MiB",
-            f"  scaling_ratio        {ratio:.3f}",
-            f"  comparative source   {self.comparative_source or 'none'}",
-            f"  sources agreed       {self.sources_agreed}",
+            f"  scaling_ratio        {ratio}",
+            f"  measurement sources  B={sources[0]} P1={sources[1]} P2={sources[2]}",
+            f"  comparable samples   {self.comparable}",
             f"  cgroup peak before   {before}",
             f"  cgroup peak after    {cgroup}",
             f"  isolation verified   {self.isolation_verified} ({self.isolation_detail})",
@@ -373,62 +386,98 @@ def measure(rows: int, columns: int, retain_bytes_per_row: int = 0) -> PeakRssSa
     return PeakRssSample(peak_bytes=payload["peak_bytes"], source=PeakRssSource(payload["source"]))
 
 
-def read_cgroup_peak_bytes() -> int | None:
-    """The cgroup peak now, or `None` if it cannot be read."""
+@dataclass(frozen=True, slots=True)
+class PinnedCgroup:
+    """One cgroup identity, resolved once and answered against throughout.
 
-    try:
-        return read_peak_rss(PeakRssSource.CGROUP_V2).peak_bytes
-    except PeakRssSourceUnavailable:
+    The initial reading, the isolation check, and the final reading must all
+    describe the same cgroup.  A process can be migrated while it runs, and
+    three independent resolutions would then bracket two different cgroups and
+    report the difference between them as this run's memory.
+
+    Identity is the **filesystem object**, not the path.  A path is a name, and
+    a cgroup can be removed and another created at the same name — a scope torn
+    down and restarted carries the old name and a fresh, unrelated peak.
+    Comparing names would call that the same cgroup; comparing device and inode
+    does not.
+    """
+
+    peak_path: Path
+    device: int
+    inode: int
+
+    @property
+    def directory(self) -> Path:
+        return self.peak_path.parent
+
+    def peak_bytes(self) -> int | None:
+        try:
+            return int(self.peak_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+
+    def still_current(self) -> bool:
+        """Whether this process still sits in the very cgroup that was pinned."""
+
+        current = pin_cgroup()
+        return (
+            current is not None
+            and current.peak_path == self.peak_path
+            and current.device == self.device
+            and current.inode == self.inode
+        )
+
+
+def pin_cgroup() -> PinnedCgroup | None:
+    """Resolve the cgroup once and stat it, or report it unavailable.
+
+    `None` rather than a path that might be the mount root: an unreadable or
+    malformed `/proc/self/cgroup` makes the source unavailable, and every caller
+    here must handle that rather than dereference it.
+    """
+
+    path = resolve_cgroup_peak_path()
+    if path is None:
         return None
-
-
-def _read_cgroup_isolation() -> tuple[Isolation, PeakRssSample | None]:
-    peak_path = resolve_cgroup_peak_path()
-    cgroup_dir = peak_path.parent
     try:
-        procs = cgroup_dir.joinpath("cgroup.procs").read_text(encoding="utf-8").split()
+        stat = path.parent.stat()
     except OSError:
-        procs = None
+        return None
+    return PinnedCgroup(path, stat.st_dev, stat.st_ino)
+
+
+def read_isolation(pinned: PinnedCgroup | None) -> Isolation:
+    """Membership and subtree facts for the pinned cgroup, or an unavailable one."""
+
+    if pinned is None:
+        return Isolation(False, "the cgroup path is unavailable")
     try:
-        raw = cgroup_dir.joinpath("cgroup.stat").read_text(encoding="utf-8")
-        stat = {
-            parts[0]: int(parts[1])
-            for parts in (line.split() for line in raw.splitlines())
-            if len(parts) == 2 and parts[1].lstrip("-").isdigit()
+        listed = pinned.directory.joinpath("cgroup.procs").read_text(encoding="utf-8").split()
+    except OSError:
+        return Isolation(False, "cgroup.procs unreadable")
+
+    parents: dict[int, int] | None = {}
+    for raw in listed:
+        pid = int(raw)
+        parent = _parent_of(pid)
+        if parent is None:
+            # Incomplete rather than partial: a dropped member is how a foreign
+            # tree becomes a clean-looking single one.
+            parents = None
+            break
+        parents[pid] = parent
+
+    try:
+        raw_stat = pinned.directory.joinpath("cgroup.stat").read_text(encoding="utf-8")
+        stat: dict[str, int] | None = {
+            fields[0]: int(fields[1])
+            for fields in (line.split() for line in raw_stat.splitlines())
+            if len(fields) == 2 and fields[1].lstrip("-").isdigit()
         }
     except OSError:
         stat = None
 
-    parents: dict[int, int] | None = None
-    if procs is not None:
-        collected: dict[int, int] = {}
-        for raw in procs:
-            pid = int(raw)
-            parent = _parent_of(pid)
-            if parent is None:
-                # Incomplete rather than partial: a dropped member is how a
-                # foreign tree becomes a clean-looking single one.
-                collected = {}
-                parents = None
-                break
-            collected[pid] = parent
-        else:
-            parents = collected
-    isolation = evaluate_isolation(parents, stat, os.getpid())
-    try:
-        sample = read_peak_rss(PeakRssSource.CGROUP_V2)
-    except PeakRssSourceUnavailable:
-        sample = None
-    return isolation, sample
-
-
-def _start_ticks(pid: int) -> int | None:
-    try:
-        after_comm = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1]
-    except (OSError, IndexError):
-        return None
-    fields = after_comm.split()
-    return int(fields[19]) if len(fields) > 19 else None
+    return evaluate_isolation(parents, stat, os.getpid())
 
 
 def _parent_of(pid: int) -> int | None:
@@ -443,32 +492,37 @@ def _parent_of(pid: int) -> int | None:
 
 
 def run_acceptance(rows: int, columns: int) -> Report:
-    # Read before anything is measured: the bracket is what makes the final
-    # figure attributable without needing to know the cgroup's history.
-    initial_cgroup = read_cgroup_peak_bytes()
+    # Pinned once. Everything the absolute check reads answers against this one
+    # identity, and it is re-checked at the end.
+    pinned = pin_cgroup()
+    initial_cgroup = None if pinned is None else pinned.peak_bytes()
+
     baseline = measure(BASELINE_ROWS, columns)
     small = measure(SMALL_ROWS, columns)
     large = measure(rows, columns)
     samples = (baseline, small, large)
 
-    isolation, cgroup_sample = _read_cgroup_isolation()
+    isolation = read_isolation(pinned)
+    final_cgroup = None if pinned is None else pinned.peak_bytes()
+    if pinned is not None and not pinned.still_current():
+        isolation = Isolation(False, "the process moved to a different cgroup during the run")
+
+    comparable = samples_are_comparable(samples)
     report = Report(
         rows=rows,
         columns=columns,
         baseline_bytes=baseline.peak_bytes,
         small_bytes=small.peak_bytes,
         large_bytes=large.peak_bytes,
-        comparative_source=baseline.source.value if sources_agree(samples) else "mixed",
-        sources_agreed=sources_agree(samples),
+        comparative_sources=tuple(s.source.value for s in samples),
+        comparable=comparable,
         initial_cgroup_bytes=initial_cgroup,
-        cgroup_bytes=None if cgroup_sample is None else cgroup_sample.peak_bytes,
+        cgroup_bytes=final_cgroup,
         isolation_verified=isolation.verified,
         isolation_detail=isolation.detail,
     )
     report.verdicts = [
-        evaluate_absolute(
-            initial_cgroup, None if cgroup_sample is None else cgroup_sample.peak_bytes, isolation
-        ),
+        evaluate_absolute(initial_cgroup, final_cgroup, isolation),
         evaluate_scaling(samples),
     ]
     return report

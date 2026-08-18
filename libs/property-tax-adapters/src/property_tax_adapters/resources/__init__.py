@@ -9,7 +9,7 @@ protocols, and no release module imports this one.
 from property_tax_adapters.resources.peak_rss import (
     CGROUP_MOUNT,
     PeakRssGuard,
-    PeakRssLimitExceeded,
+    PeakRssLimitError,
     PeakRssSample,
     PeakRssSource,
     PeakRssSourceUnavailable,
@@ -20,7 +20,7 @@ from property_tax_adapters.resources.peak_rss import (
 __all__ = [
     "CGROUP_MOUNT",
     "PeakRssGuard",
-    "PeakRssLimitExceeded",
+    "PeakRssLimitError",
     "PeakRssSample",
     "PeakRssSource",
     "PeakRssSourceUnavailable",

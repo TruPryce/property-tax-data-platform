@@ -94,10 +94,9 @@ direction — as a partial signal, not as coverage.
 
 ## Two Checks, Reading Different Measurements
 
-The **scaling** check takes three `rusage` measurements — a baseline at 0 rows,
+Five measurements in all. The **scaling** check takes three `rusage` measurements — a baseline at 0 rows,
 `P1` at 250,000, `P2` at 1,000,000 — each in its own subprocess, and fails
-closed if their sources disagree. The **absolute** check takes a fourth
-measurement from the cgroup. A figure from one group never satisfies a check
+closed if their sources disagree. The **absolute** check takes two more, one cgroup reading either side of them. A figure from one group never satisfies a check
 belonging to the other.
 
 ```
@@ -165,6 +164,7 @@ contains siblings by construction and a peak read there is the container's.
 
 Isolation is **verified, never assumed**:
 
+0. the cgroup is **pinned by device and inode**, not by path, and re-checked at the end — a scope torn down and restarted carries the same name and a fresh, unrelated peak, so comparing names would call two cgroups one;
 1. the membership map must be **complete** — every pid in `cgroup.procs` has a
    readable parent, and one that does not invalidates the map rather than being
    dropped, since a dropped member is how a foreign tree becomes a
@@ -185,7 +185,9 @@ cgroup peak is read before the measurements and after them.
 | --- | --- | --- |
 | ≥ 900 MiB | any | indeterminate — the cgroup arrived contaminated |
 | < 900 MiB | < 900 MiB | pass — the run stayed inside the budget |
-| < 900 MiB | ≥ 900 MiB | fail — nothing else could have crossed it |
+| < 900 MiB | ≥ 900 MiB | fail — **conservatively**, see below |
+
+The failing verdict is **conservative rather than attributive**. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen and the run would be failed for memory it did not allocate. Failing closed on a figure that may not be ours is the safe direction to be wrong in; claiming the figure *is* ours is not something the check can support.
 
 An implementation attempt compared the age of the cgroup's root process, on the
 measurement that a dedicated scope's root starts 0.04 s before the run while an

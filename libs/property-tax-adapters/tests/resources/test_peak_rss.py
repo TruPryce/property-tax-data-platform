@@ -15,7 +15,7 @@ import pytest
 from property_tax_adapters.release import ResourceGuard, process_release
 from property_tax_adapters.resources import (
     PeakRssGuard,
-    PeakRssLimitExceeded,
+    PeakRssLimitError,
     PeakRssSample,
     PeakRssSource,
     PeakRssSourceUnavailable,
@@ -224,10 +224,10 @@ def test_the_guard_raises_at_and_above_its_limit_and_not_below() -> None:
 
     PeakRssGuard(observed + 1).check(0, 0)  # below: no raise
 
-    with pytest.raises(PeakRssLimitExceeded):
+    with pytest.raises(PeakRssLimitError):
         PeakRssGuard(observed).check(0, 0)  # exactly at the limit
 
-    with pytest.raises(PeakRssLimitExceeded):
+    with pytest.raises(PeakRssLimitError):
         PeakRssGuard(max(observed // 2, 1)).check(0, 0)  # above
 
 
@@ -239,7 +239,7 @@ def test_a_rejection_exposes_the_sample_that_caused_it() -> None:
     """Not the previous checkpoint's, which would attribute the failure wrongly."""
 
     guard = PeakRssGuard(1)
-    with pytest.raises(PeakRssLimitExceeded) as raised:
+    with pytest.raises(PeakRssLimitError) as raised:
         guard.check(0, 0)
 
     assert guard.last_sample is not None
@@ -351,3 +351,64 @@ def test_no_module_under_release_was_modified() -> None:
 
     touched = [p for p in changed if "/property_tax_adapters/release/" in p]
     assert touched == [], f"the accepted boundary was modified: {touched}"
+
+
+# --------------------------------------------------------------------------
+# A malformed cgroup entry resolves nowhere
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "reported"),
+    [
+        ("empty", "0::\n"),
+        ("relative", "0::user.slice\n"),
+        ("traversal", "0::/../../etc\n"),
+        ("no-v2-entry", "1:name=systemd:/x\n"),
+        ("blank-file", "\n"),
+    ],
+)
+def test_a_malformed_cgroup_entry_makes_the_source_unavailable(
+    label: str, reported: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry that lands on the root, or outside it, answers for another cgroup."""
+
+    probe = tmp_path / "proc-self-cgroup"
+    probe.write_text(reported, encoding="utf-8")
+    monkeypatch.setattr(peak_rss_module, "_PROC_SELF_CGROUP", probe)
+    mount = tmp_path / "cgroup"
+    mount.mkdir()
+
+    assert resolve_cgroup_peak_path(mount) is None, label
+
+    with pytest.raises(PeakRssSourceUnavailable):
+        read_peak_rss(PeakRssSource.CGROUP_V2, mount=mount)
+
+    assert read_peak_rss(mount=mount).source is PeakRssSource.RUSAGE
+
+
+@pytest.mark.parametrize(
+    ("label", "reported"),
+    [("nested", "0::/user.slice/x.scope\n"), ("namespace-root", "0::/\n")],
+)
+def test_a_well_formed_entry_resolves_inside_the_mount(
+    label: str, reported: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = tmp_path / "proc-self-cgroup"
+    probe.write_text(reported, encoding="utf-8")
+    monkeypatch.setattr(peak_rss_module, "_PROC_SELF_CGROUP", probe)
+    mount = tmp_path / "cgroup"
+    mount.mkdir()
+
+    resolved = resolve_cgroup_peak_path(mount)
+
+    assert resolved is not None, label
+    assert resolved.is_relative_to(mount.resolve())
+
+
+def test_an_unreadable_proc_file_makes_the_source_unavailable(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(peak_rss_module, "_PROC_SELF_CGROUP", tmp_path / "absent")
+
+    assert resolve_cgroup_peak_path(tmp_path / "cgroup") is None
