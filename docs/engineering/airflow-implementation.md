@@ -20,13 +20,23 @@ exceeds it is OOM-killed, and the scheduler dies with it.
 | `AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG` | 1 | no overlapping runs of the same DAG |
 
 **The scheduler's own footprint comes out of that same 4 GiB before any task runs.** Measured on the
-deployed runtime it sits at 288 MiB idle with a 400 MiB peak, so the budget is not `4096 / 4`:
+deployed runtime it sits at 288 MiB idle with a **419 MiB peak**, so the budget is not `4096 / 4`:
 
 ```text
-(4096 MiB limit - 400 MiB scheduler) / 4 concurrent tasks ≈ 900 MiB peak RSS per task
+(4096 MiB limit - 419 MiB scheduler) / 4 concurrent tasks ≈ 919 MiB per task
 ```
 
-**Budget 900 MiB peak RSS per task at the current parallelism of 4.** Four tasks each sitting on a
+That 419 MiB is the scheduler **container's** `memory.peak` read with no task running, not an
+isolated measurement of the scheduler process: a cgroup peak charges the whole subtree and only ever
+rises. It therefore bounds the scheduler's share from above rather than measuring it — the safe
+direction for a subtraction — and it can drift upward with nothing watching. **A scheduler peaking
+at 496 MiB would leave exactly 900 MiB**, which is where the margin runs out and where nothing
+currently alerts.
+
+**Budget 900 MiB peak RSS per task at the current parallelism of 4**, leaving 19 MiB of headroom
+against the 919 MiB the arithmetic allows. How that budget is measured and enforced — the probe, the
+guard, the acceptance benchmark, and its calibration — is
+[Release Resource Limits](release-resource-limits.md). Four tasks each sitting on a
 full 1 GiB would exceed the container limit and take the scheduler down with them, which is the
 failure mode where every task passes its own benchmark and the runtime still dies.
 

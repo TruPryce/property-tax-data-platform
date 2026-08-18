@@ -1,0 +1,354 @@
+"""The benchmark's decisions, tested with injected samples rather than measured.
+
+Injection is what makes these deterministic, and it is not a convenience:
+`ru_maxrss` does not reproduce the detection threshold at small sizes, so a test
+that allocated its way to a verdict would have to run at acceptance scale to
+mean anything. Task 3.3 owns producing real ratios; this owns the logic over
+them.
+
+Nothing here allocates at acceptance scale, and nothing depends on the host
+having a readable cgroup.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import sys
+
+import pytest
+from property_tax_adapters.resources import PeakRssSample, PeakRssSource
+
+_BENCHMARK = pathlib.Path(__file__).resolve().parents[4] / "benchmarks" / "release_peak_rss.py"
+_spec = importlib.util.spec_from_file_location("release_peak_rss", _BENCHMARK)
+assert _spec and _spec.loader
+bench = importlib.util.module_from_spec(_spec)
+sys.modules["release_peak_rss"] = bench
+_spec.loader.exec_module(bench)
+
+MIB = 1024 * 1024
+
+
+def sample(mib: float, source: PeakRssSource = PeakRssSource.RUSAGE) -> PeakRssSample:
+    return PeakRssSample(peak_bytes=int(mib * MIB), source=source)
+
+
+# --------------------------------------------------------------------------
+# Ratio arithmetic
+# --------------------------------------------------------------------------
+
+
+def test_working_sets_floor_a_negative_difference_at_zero() -> None:
+    """Noise can place a later peak below the baseline; that is not growth."""
+
+    assert bench.working_sets(100, 90, 120) == (0, 20)
+
+
+def test_the_guard_holds_the_quotient_at_one_when_both_sets_are_zero() -> None:
+    """The expected case for a correct boundary, not an edge."""
+
+    assert bench.scaling_ratio(50 * MIB, 50 * MIB, 50 * MIB) == 1.0
+
+
+def test_the_guard_keeps_a_tiny_denominator_from_exploding() -> None:
+    """0.02 MiB against 0.02 MiB is what a bounded boundary actually measures."""
+
+    unfloored = (0.02 + 0.0) / (0.02 + 0.0)
+    floored = bench.scaling_ratio(0, int(0.02 * MIB), int(0.02 * MIB))
+
+    assert unfloored == 1.0
+    assert floored == pytest.approx(1.0)
+    assert bench.scaling_ratio(0, 1, 4096) == pytest.approx(1.0, abs=0.01)
+
+
+def test_a_linear_working_set_approaches_the_row_ratio() -> None:
+    """Fourfold rows, fourfold retention: the ratio the threshold is set against."""
+
+    ratio = bench.scaling_ratio(0, 100 * MIB, 400 * MIB)
+
+    assert ratio == pytest.approx((400 + 2) / (100 + 2), rel=1e-6)
+    assert ratio > bench.SCALING_THRESHOLD
+
+
+def test_the_guard_value_and_threshold_are_the_accepted_ones() -> None:
+    assert bench.DEGENERATE_RATIO_GUARD_BYTES == 2 * MIB
+    assert bench.SCALING_THRESHOLD == 1.5
+    assert bench.ABSOLUTE_LIMIT_BYTES == 900 * MIB
+
+
+# --------------------------------------------------------------------------
+# Source agreement
+# --------------------------------------------------------------------------
+
+
+def test_three_matching_sources_agree() -> None:
+    assert bench.sources_agree((sample(1), sample(2), sample(3))) is True
+
+
+def test_a_mixed_triple_fails_closed_rather_than_reporting_a_ratio() -> None:
+    """A ratio across a mixed pair is arithmetic on incomparable quantities."""
+
+    mixed = (sample(1), sample(2), sample(3, PeakRssSource.CGROUP_V2))
+
+    assert bench.sources_agree(mixed) is False
+    verdict = bench.evaluate_scaling(mixed)
+    assert verdict.result == bench.INDETERMINATE
+    assert "disagree" in verdict.detail
+    assert "ratio" not in verdict.detail
+
+
+def test_a_bounded_triple_passes_the_scaling_check() -> None:
+    verdict = bench.evaluate_scaling((sample(20), sample(20), sample(20)))
+
+    assert verdict.result == bench.PASS
+
+
+def test_a_five_byte_per_row_retainer_fails_the_scaling_check() -> None:
+    """Injected samples for the calibrated rate: 250k and 1M rows at 5 bytes."""
+
+    baseline = 20.0
+    w1 = 250_000 * 5 / MIB
+    w2 = 1_000_000 * 5 / MIB
+    verdict = bench.evaluate_scaling(
+        (sample(baseline), sample(baseline + w1), sample(baseline + w2))
+    )
+
+    assert verdict.result == bench.FAIL
+
+
+# --------------------------------------------------------------------------
+# Isolation
+# --------------------------------------------------------------------------
+
+
+def test_one_complete_tree_containing_this_run_with_an_empty_subtree_is_isolated() -> None:
+    empty = {"nr_descendants": 0, "nr_dying_descendants": 0}
+
+    assert bench.evaluate_isolation({100: 1, 101: 100}, empty, own_pid=101).verified is True
+
+
+def test_a_sibling_of_the_same_run_does_not_break_isolation() -> None:
+    """A shell pipeline puts one in the cgroup; it belongs to the run."""
+
+    empty = {"nr_descendants": 0, "nr_dying_descendants": 0}
+    isolation = bench.evaluate_isolation({100: 1, 101: 100, 102: 100}, empty, own_pid=101)
+
+    assert isolation.verified is True
+
+
+def test_a_cgroup_that_does_not_contain_this_process_is_not_isolation() -> None:
+    """One tidy tree that is not ours says nothing about the figure we read."""
+
+    empty = {"nr_descendants": 0, "nr_dying_descendants": 0}
+    isolation = bench.evaluate_isolation({100: 1, 101: 100}, empty, own_pid=999)
+
+    assert isolation.verified is False
+    assert "not in the cgroup" in isolation.detail
+
+
+def test_an_incomplete_membership_map_is_refused() -> None:
+    """A dropped member is how a foreign tree becomes a clean-looking single one."""
+
+    empty = {"nr_descendants": 0, "nr_dying_descendants": 0}
+    isolation = bench.evaluate_isolation(None, empty, own_pid=101)
+
+    assert isolation.verified is False
+    assert "unreadable" in isolation.detail
+
+
+def test_two_process_trees_are_not_this_run_alone() -> None:
+    """The Airflow container's shape: a scheduler and tasks, several roots."""
+
+    empty = {"nr_descendants": 0, "nr_dying_descendants": 0}
+    isolation = bench.evaluate_isolation({100: 1, 200: 1}, empty, own_pid=100)
+
+    assert isolation.verified is False
+    assert "process trees" in isolation.detail
+
+
+@pytest.mark.parametrize(
+    "stat",
+    [
+        {"nr_descendants": 1, "nr_dying_descendants": 0},
+        {"nr_descendants": 0, "nr_dying_descendants": 2},
+    ],
+    ids=["live-descendant", "dying-descendant"],
+)
+def test_a_descendant_cgroup_breaks_isolation(stat: dict[str, int]) -> None:
+    """`memory.peak` charges descendants that `cgroup.procs` never lists."""
+
+    isolation = bench.evaluate_isolation({100: 1}, stat, own_pid=100)
+
+    assert isolation.verified is False
+    assert "nr_descendants" in isolation.detail
+
+
+def test_absent_cgroup_stat_is_not_downgraded_to_the_weaker_check() -> None:
+    """The procs-only check is the one that cannot see the case that matters."""
+
+    isolation = bench.evaluate_isolation({100: 1}, None, own_pid=100)
+
+    assert isolation.verified is False
+    assert "subtree cannot be shown empty" in isolation.detail
+
+
+def test_an_empty_cgroup_is_not_isolation() -> None:
+    assert bench.evaluate_isolation({}, {"nr_descendants": 0}, own_pid=1).verified is False
+
+
+# --------------------------------------------------------------------------
+# The absolute check, bracketed
+# --------------------------------------------------------------------------
+
+
+def isolated(verified: bool = True) -> object:
+    return bench.Isolation(verified, "test")
+
+
+def test_a_run_that_stays_under_the_limit_passes() -> None:
+    verdict = bench.evaluate_absolute(20 * MIB, 300 * MIB, isolated())
+
+    assert verdict.result == bench.PASS
+    assert "before" in verdict.detail and "after" in verdict.detail
+
+
+def test_a_run_that_crosses_the_limit_fails() -> None:
+    """Initial below and final at or above: nothing else could have crossed it."""
+
+    assert bench.evaluate_absolute(20 * MIB, 900 * MIB, isolated()).result == bench.FAIL
+    assert bench.evaluate_absolute(20 * MIB, 901 * MIB, isolated()).result == bench.FAIL
+    assert bench.evaluate_absolute(20 * MIB, 899 * MIB, isolated()).result == bench.PASS
+
+
+def test_a_cgroup_already_over_the_limit_is_indeterminate_not_a_failure() -> None:
+    """The measured ambient case: 4,566.8 MiB of unrelated earlier work.
+
+    Age cannot answer this — a fresh shell with seconds of prior work defeats it
+    — and the bracket does not need to, because a contaminated start makes any
+    reading unattributable regardless of how the cgroup came to be.
+    """
+
+    verdict = bench.evaluate_absolute(4566 * MIB, 4566 * MIB, isolated())
+
+    assert verdict.result == bench.INDETERMINATE
+    assert "before this run" in verdict.detail
+
+
+def test_the_absolute_is_indeterminate_without_isolation() -> None:
+    assert (
+        bench.evaluate_absolute(20 * MIB, 300 * MIB, isolated(False)).result == bench.INDETERMINATE
+    )
+
+
+@pytest.mark.parametrize(
+    ("initial", "final"),
+    [(None, 300 * MIB), (20 * MIB, None), (None, None)],
+    ids=["no-initial", "no-final", "neither"],
+)
+def test_an_unreadable_bracket_is_indeterminate(initial: int | None, final: int | None) -> None:
+    assert bench.evaluate_absolute(initial, final, isolated()).result == bench.INDETERMINATE
+
+
+# --------------------------------------------------------------------------
+# Calibration verdict
+# --------------------------------------------------------------------------
+
+
+def test_all_controls_passing_and_all_retainers_failing_validates_the_threshold() -> None:
+    verdict = bench.evaluate_calibration([1.0] * 5, [2.2] * 5)
+
+    assert verdict.result == bench.PASS
+    assert "controls" in verdict.detail and "retainers" in verdict.detail
+
+
+def test_a_failed_control_yields_indeterminate_and_leaves_the_threshold_unvalidated() -> None:
+    """Not resolved by adjusting the threshold, which is what a run would reach for."""
+
+    verdict = bench.evaluate_calibration([1.0, 1.0, 1.6, 1.0, 1.0], [2.2] * 5)
+
+    assert verdict.result == bench.INDETERMINATE
+    assert "unvalidated" in verdict.detail
+    assert "not adjusted" in verdict.detail
+
+
+def test_a_passed_retainer_yields_indeterminate_for_the_same_reason() -> None:
+    verdict = bench.evaluate_calibration([1.0] * 5, [2.2, 2.2, 1.4, 2.2, 2.2])
+
+    assert verdict.result == bench.INDETERMINATE
+    assert "unvalidated" in verdict.detail
+
+
+def test_too_few_repeats_is_indeterminate() -> None:
+    """A boundary measured once is a point estimate; the decision fixed five."""
+
+    assert bench.evaluate_calibration([1.0] * 4, [2.2] * 5).result == bench.INDETERMINATE
+    assert bench.evaluate_calibration([1.0] * 5, [2.2] * 4).result == bench.INDETERMINATE
+    assert bench.CALIBRATION_REPEATS == 5
+    assert bench.CALIBRATION_RETAINER_BYTES_PER_ROW == 5
+
+
+# --------------------------------------------------------------------------
+# Exit status and reporting
+# --------------------------------------------------------------------------
+
+
+def test_every_pass_exits_zero() -> None:
+    assert bench.exit_status([bench.Verdict("a", bench.PASS), bench.Verdict("b", bench.PASS)]) == 0
+
+
+@pytest.mark.parametrize("result", [bench.FAIL, bench.INDETERMINATE], ids=["fail", "indeterminate"])
+def test_anything_other_than_a_pass_exits_non_zero(result: str) -> None:
+    """An indeterminate read as success is how an unproven claim becomes settled."""
+
+    assert bench.exit_status([bench.Verdict("a", bench.PASS), bench.Verdict("b", result)]) == 1
+
+
+def test_a_verdict_refuses_an_invented_result() -> None:
+    with pytest.raises(ValueError, match="pass, fail, indeterminate"):
+        bench.Verdict("a", "probably")
+
+
+def test_the_report_names_every_figure_a_verdict_came_from() -> None:
+    report = bench.Report(
+        rows=1_000_000,
+        columns=90,
+        baseline_bytes=20 * MIB,
+        small_bytes=20 * MIB,
+        large_bytes=21 * MIB,
+        comparative_source="rusage",
+        sources_agreed=True,
+        initial_cgroup_bytes=20 * MIB,
+        cgroup_bytes=300 * MIB,
+        isolation_verified=True,
+        isolation_detail="subtree empty",
+        verdicts=[bench.Verdict("absolute", bench.PASS), bench.Verdict("scaling", bench.PASS)],
+    )
+
+    rendered = report.render()
+    for required in (
+        "rows",
+        "columns",
+        "B ",
+        "P1",
+        "P2",
+        "W1",
+        "W2",
+        "scaling_ratio",
+        "comparative source",
+        "sources agreed",
+        "cgroup peak",
+        "isolation verified",
+    ):
+        assert required in rendered, required
+    # The two verdicts appear separately rather than as one line.
+    assert "absolute" in rendered and "scaling" in rendered
+
+
+def test_the_report_shows_an_indeterminate_verdict_as_such() -> None:
+    report = bench.Report(verdicts=[bench.Verdict("absolute", bench.INDETERMINATE, "no cgroup")])
+
+    assert "indeterminate" in report.render()
+
+
+def test_the_report_survives_an_unreadable_cgroup() -> None:
+    assert "unreadable" in bench.Report(cgroup_bytes=None).render()

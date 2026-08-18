@@ -1,6 +1,7 @@
 UV_CACHE_DIR ?= .cache/uv
 UV := UV_CACHE_DIR=$(UV_CACHE_DIR) uv
 .PHONY: sync hooks format lint typecheck test docs spec secrets artifacts precommit check counties infra-check \
+	benchmark-release-peak-rss calibrate-release-peak-rss \
 	codex-image review-packet prepr prepr-no-ai codex-smoke \
 	codex-observability-fixtures codex-observability-validate codex-observability-qa \
 	runner-contract-tests countyforge-runner-check countyforge-profile-tests \
@@ -213,3 +214,28 @@ runner-contract-tests: countyforge-runner-check countyforge-github-check countyf
 	./scripts/dev-loop/test-runner-identity.sh
 	./.ai/codex/05-test-observability-export-fixtures.sh
 	./scripts/dev-loop/check-runner-identity.sh .ai
+
+# Acceptance benchmark for the bounded release boundary. Deliberately outside
+# `check` and the ordinary suite: it allocates at acceptance scale and takes
+# minutes, and issue #43 D5 separates deterministic bounded CI tests from the
+# reproducible acceptance command.
+#
+# The absolute check needs a cgroup holding only this run, and this target does
+# not wrap itself in one — the isolation a result depended on should be visible
+# in the command a reader ran. On a systemd host:
+#
+#   systemd-run --user --scope -p MemoryAccounting=yes make benchmark-release-peak-rss
+#
+# A purpose-built container holding only this run serves equally. The Airflow
+# container does not: the 900 MiB budget is derived from it holding a scheduler
+# and four tasks, so its cgroup contains siblings by construction. Without
+# isolation the absolute reports indeterminate and the command exits non-zero.
+benchmark-release-peak-rss:
+	UV_CACHE_DIR=$(UV_CACHE_DIR) uv run python benchmarks/release_peak_rss.py
+
+# Establishes that the scaling threshold still discriminates on this host:
+# five bounded controls must pass and five five-bytes-per-row retainers must
+# fail, or the result is indeterminate and the threshold is left unvalidated
+# rather than adjusted to fit. Same invocation note as above.
+calibrate-release-peak-rss:
+	UV_CACHE_DIR=$(UV_CACHE_DIR) uv run python benchmarks/release_peak_rss.py --calibrate
