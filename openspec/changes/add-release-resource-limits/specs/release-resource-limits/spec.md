@@ -392,13 +392,14 @@ The guard value also bounds what the scaling check can detect, and that limit is
 - **THEN** it does not substitute a `rusage` figure
 - **THEN** the indeterminate result is not reported as a pass
 
-#### Scenario: The linearity requirement is evidenced, not proved
-- **GIVEN** issue #43 D5's requirement that memory not grow linearly with row count
+#### Scenario: D5 is unchanged and the benchmark is calibrated evidence for it
+- **GIVEN** issue #43 D5, which the maintainer decision on that issue left **unchanged** and did not narrow
 - **WHEN** the evidence for it is assembled
-- **THEN** the benchmark establishes that material record retention is caught and that one task fits the budget
-- **THEN** retention at or below three bytes per row is invisible at any threshold, and four bytes straddles it
-- **THEN** no accepted check closes that remainder — the capability's reader lead detects read-ahead rather than retention, and its hundred-entry caps bound only notices and diagnostics
-- **THEN** no document in this change claims the benchmark proves memory does not grow linearly, and the narrowing of D5 is raised for a maintainer rather than assumed
+- **THEN** repository-owned processors and readers retain no source rows, converted records, source-native maps, or per-row key collections after staging, with any cache bounded independently of row count
+- **THEN** the benchmark supplies mandatory calibrated evidence: a peak within the budget, the ratio met at the tested sizes, and sensitivity established by the calibration requirement
+- **THEN** retention at or below three bytes per row is invisible at any threshold and four bytes straddles it, which is a limit on the instrument and **not** an approval of retention beneath it
+- **THEN** every production reader still owes structural evidence that it retains nothing row-proportional, which no accepted check supplies — the capability's reader lead detects read-ahead rather than retention after yielding, and its hundred-entry caps bound only notices and diagnostics
+- **THEN** no document in this change claims the benchmark alone proves D5 for every reader implementation
 
 #### Scenario: A materially retaining implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
