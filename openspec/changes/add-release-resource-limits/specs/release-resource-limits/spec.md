@@ -239,7 +239,11 @@ The **scaling** check SHALL take **three** `rusage` measurements, each in its ow
 
 A figure from one group SHALL NOT be used to satisfy a check belonging to the other. That is the same incomparability this change states elsewhere, and it applies to the benchmark's own arithmetic first.
 
-A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` therefore report figures that track the shared subtree rather than the reader — measured on the deployment host as 306.0, 449.5, and 454.2 MiB for siblings allocating 100, 200, and 400 MiB. The check would not merely be contaminated: the ratio computed from them is a function of read timing, which on that run gave 1.48, under the 1.5 threshold by a margin no implementation controls.
+A separate process is necessary but not sufficient, and the reason is specific. A peak is a high-water mark, so two sizes measured in one process report the larger under both names. But sibling processes share a cgroup, and the cgroup high-water mark is sticky and per-cgroup rather than per-process: on a measured host it stood at 4.88 GB from unrelated earlier work and did not move for a child that allocated 300 MiB. Three subprocesses reading `memory.peak` therefore report figures that track the shared subtree rather than the reader — measured on the deployment host as 306.0, 449.5, and 454.2 MiB for siblings allocating 100, 200, and 400 MiB. Not one of those numbers describes the process that read it, and the spread between them is a function of when each read happened rather than of what each allocated.
+
+No ratio is computed from those three figures here, and none should be: they are not `B`, `P1` and `P2`, having come from siblings allocating fixed amounts rather than from a baseline and two release sizes, so putting them through the scaling formula would be answering a question they were not measurements of. (For the record, they yield 1.031 through that formula; the 1.48 an earlier draft reported was `454.2 / 306.0`, the raw maximum over the raw minimum, which is not the quantity this specification defines.)
+
+The disqualification does not need a ratio. A source whose reading depends on when a sibling happened to be scheduled cannot produce the same answer twice on one workload, and a check built on it would pass or fail by timing. Nondeterminism disqualifies the source more surely than any single computed value would.
 
 `ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
 
@@ -264,7 +268,7 @@ W1 = max(P1 - B, 0)
 W2 = max(P2 - B, 0)
 ```
 
-The scaling ratio SHALL be computed with a fixed noise floor `F` of 8 MiB added to both terms:
+The scaling ratio SHALL be computed with a fixed degenerate-ratio guard `F` of **2 MiB** added to both terms:
 
 ```
 scaling_ratio = (W2 + F) / (W1 + F)
@@ -272,7 +276,24 @@ scaling_ratio = (W2 + F) / (W1 + F)
 
 The floor is what makes the ratio stable when both working sets are small: without it, two nearly-identical bounded measurements a few kilobytes apart can produce an arbitrarily large quotient, and the check would fail on noise rather than on growth. That case is the expected one rather than an edge. Measured on the deployment host, a boundary retaining nothing held a working set of 0.02 MiB at both 25,000 and 100,000 rows, where the unfloored quotient is `0.02 / 0.02` and means nothing.
 
-`F` is therefore a degenerate-ratio guard rather than a noise floor, and SHALL be described as one. Run-to-run variance on that host was 0.00 MiB across twelve churn repetitions and 0.20 MiB across forty allocation repetitions, so 8 MiB clears observed noise by roughly forty times and is not sized from it. What the value costs is sensitivity: solving `(4W + F) / (W + F) = 1.5` gives 1.60 MiB as the largest working set behind which a fully linear implementation stays invisible, which at 250,000 rows is 6.7 bytes retained per row. No Python container reaches that — a `set` of key tuples lands near 25 MiB at that size and fails at a ratio near 3.3 — so the blind spot is arithmetic rather than reachable, and the value stands.
+`F` is a **degenerate-ratio guard**, not a noise floor, and SHALL be called one wherever it appears. Its job is to keep the quotient defined where a correct boundary puts it — a working set measured at 0.02 MiB, where the unfloored quotient is `0.02 / 0.02` and means nothing. Run-to-run variance was 0.00 MiB across twelve churn repetitions and 0.20 MiB across forty allocation repetitions, so even 2 MiB clears observed noise tenfold and is plainly not sized from it.
+
+What the value costs is sensitivity, and that cost SHALL be stated as measured rather than derived. Sweeping an accumulator that retains a known number of bytes per row, at 250,000 and 1,000,000 rows:
+
+| retained bytes/row | `W1` | `W2` | verdict at `F` = 8 MiB | verdict at `F` = 2 MiB |
+| ---: | ---: | ---: | --- | --- |
+| 1 | 0.00 | 0.00 | passes | passes |
+| 2 | 0.00 | 0.00 | passes | passes |
+| 4 | 0.00 | 1.48 | **passes** | fails |
+| 8 | 0.00 | 4.85 | fails | fails |
+| 16 | 1.18 | 12.94 | fails | fails |
+| 128 | 27.88 | 119.68 | fails | fails |
+
+`F` is 2 MiB because that table is the only reason to choose a value. At 8 MiB a container retaining four bytes per row — an `array("I")` of row numbers — passed at 1.20 while growing perfectly linearly. At 2 MiB it fails at 1.78. Six repeated bounded runs produced a ratio of exactly 1.000 at every floor down to 0.25 MiB, so the tightening costs no false failures; there was no reason to leave it at 8 beyond the number having been written down first.
+
+Below four bytes per row the binding constraint is **not** the floor but measurement resolution: one and two bytes per row register `W1 = W2 = 0.00 MiB`, because a megabyte or two of growth against an eighteen-megabyte baseline does not move `ru_maxrss` at all. No choice of `F` detects that, and the specification SHALL NOT claim otherwise.
+
+That residual SHALL be stated rather than argued away. An implementation retaining two bytes per row holds 4 MiB at the largest release this platform has measured, which the 900 MiB budget absorbs without noticing; and it is not the defect this check exists to find. What the check detects, and what the platform's failure mode actually looks like, is **record retention**: a `set` of key tuples measured 28.9 MiB at 250,000 rows and failed at 3.55, and a list of per-row dicts measured 61.2 MiB and failed at 3.74. The check is a detector of retained records, not of all linear growth, and describing it as the latter would be the same overclaim this change has already had to withdraw twice.
 
 The benchmark SHALL apply both checks and SHALL fail if either fails:
 
@@ -350,7 +371,7 @@ The threshold of 1.5 follows from what each implementation shape produces. Rows 
 
 A single absolute figure SHALL NOT be treated as evidence of boundedness. An implementation retaining every row can pass one absolute on a large enough machine and fail at the next order of magnitude with no warning.
 
-The floor also bounds what the scaling check can detect, and that limit SHALL be stated rather than left implied. Solving `(4·W1 + F) / (W1 + F) ≤ 1.5` gives `W1 ≤ F/5`, so a genuinely linear implementation escapes the check only if its working set at 250,000 rows is under 1.6 MiB — about 6.7 bytes per row. No implementation retaining record objects can be that small, so the blind spot is unreachable by the defect the check exists to catch, but it is a blind spot and the document SHALL say so.
+The guard value also bounds what the scaling check can detect, and that limit is recorded in the measured table above rather than derived from the threshold: detection begins at four retained bytes per row, and one or two bytes per row are invisible to `ru_maxrss` at these sizes regardless of `F`. The arithmetic bound is looser than the measured one — solving `(4W + F) / (W + F) = 1.5` with `F` = 2 MiB gives a 0.4 MiB working set, about 1.7 bytes per row at 250,000 — so the measurement, not the algebra, is what the specification states.
 
 #### Scenario: A bounded implementation passes both checks
 - **GIVEN** a boundary that retains no row after writing it, in an isolated cgroup
@@ -374,7 +395,7 @@ The floor also bounds what the scaling check can detect, and that limit SHALL be
 
 #### Scenario: Two bounded measurements a few kilobytes apart do not fail on noise
 - **GIVEN** a bounded boundary whose two working sets differ only by allocator variance
-- **WHEN** the scaling ratio is computed with the 8 MiB floor added to both terms
+- **WHEN** the scaling ratio is computed with the 2 MiB degenerate-ratio guard added to both terms
 - **THEN** the ratio remains near 1.0 rather than being amplified by the small denominator
 
 #### Scenario: Each size is measured in its own process, with a per-process source
@@ -384,11 +405,11 @@ The floor also bounds what the scaling check can detect, and that limit SHALL be
 - **THEN** each is taken from `rusage`, which is per-process
 - **THEN** neither reported peak includes another size's allocations
 
-#### Scenario: A shared cgroup peak would make the check vacuous
+#### Scenario: A shared cgroup peak is nondeterministic, not merely wrong
 - **GIVEN** three subprocesses in one cgroup whose `memory.peak` is sticky and shared
 - **WHEN** all three read that file
 - **THEN** none of them reports a figure describing its own process
-- **THEN** the ratio computed from them tracks read timing rather than either implementation's working set
+- **THEN** repeating the same workload does not reproduce the same three figures, because each depends on when its reader was scheduled
 - **THEN** the benchmark SHALL NOT use the cgroup source for these measurements
 
 #### Scenario: Mixed sources are refused rather than ratioed
