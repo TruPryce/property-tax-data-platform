@@ -46,9 +46,15 @@ Falling back would return a figure from a source the caller did not ask for, und
 
 Every reported measurement SHALL name its source. The cgroup is the authority the container limit is enforced against; `ru_maxrss` is a per-process high-water mark that does not account for unreaped children or sibling processes. Two numbers from different sources are not comparable, and a bare integer hides which one it is.
 
-The cgroup path SHALL be resolved from `/proc/self/cgroup` rather than assumed to be `/sys/fs/cgroup/memory.peak`.
+The cgroup path SHALL be **resolved** by joining the cgroup mount with the relative path `/proc/self/cgroup` reports, and SHALL NOT be *assumed* to be `/sys/fs/cgroup/memory.peak`.
 
-A process in a nested cgroup — which is every process under systemd, and every container under a delegated slice — has no `memory.peak` at the mount root. On a measured host the root path was absent entirely while the file existed beneath the relative path `/proc/self/cgroup` reports. A probe hard-coding the root would silently fall back to `rusage` on exactly the hosts the cgroup source exists to serve.
+Resolving is not the same as refusing the root. A process in a cgroup namespace — which is the ordinary case inside a container — legitimately sees `/proc/self/cgroup` report `/`, and there the resolved path **is** the mount root. What must never happen is reading the root without resolving, because a process in a nested cgroup — every process under systemd, and every container under a delegated slice — has no `memory.peak` there. On a measured host the root path was absent entirely while the file existed beneath the reported relative path, and a probe hard-coding the root would silently fall back to `rusage` on exactly the hosts the cgroup source exists to serve.
+
+#### Scenario: A cgroup namespace resolves to the mount root
+- **GIVEN** a containerized process whose `/proc/self/cgroup` reports `/`
+- **WHEN** the probe resolves the cgroup path
+- **THEN** it reads `memory.peak` at the mount root, which is the correct resolution here
+- **THEN** it does not treat the root as invalid merely because it is the root
 
 #### Scenario: The cgroup file is found beneath a nested path
 - **GIVEN** a host whose `/proc/self/cgroup` reports a non-root relative path
@@ -103,11 +109,17 @@ The 900 MiB budget is **per task**, derived as `(4096 MiB − 400 MiB scheduler)
 
 The consequence is not theoretical. Measured on one host, a process whose own peak was 28.0 MiB sat in a cgroup whose sticky peak was 1,072.3 MiB; a `PeakRssGuard(900 MiB)` reading the cgroup would have rejected that task, and every other compliant task sharing the container, while a `rusage` reading accepted it correctly. A guard that rejects compliant work is worse than no guard, because it converts a healthy release into a failed one and does so more reliably the busier the container is.
 
-A caller MAY configure the guard to the cgroup source **only** where per-task cgroup isolation is established and verified by the same subtree rules the benchmark applies. That is a real deployment — one cgroup per task — and there the cgroup is both the right grain and the better measurement, since it accounts for child processes that `RUSAGE_SELF` does not.
+The guard SHALL read `rusage` and SHALL NOT offer a cgroup mode.
+
+An earlier draft admitted one for deployments giving each task its own cgroup. It is removed for three reasons, and the first is decisive. A cgroup figure is only per-task while the subtree stays empty, and the guard is called at every 100,000-row checkpoint — so honouring that condition means verifying the subtree at each checkpoint, and verifying it once at construction proves nothing, because a process may join the cgroup afterwards. A mode whose precondition cannot be held for the life of the run is a mode that silently stops being true. Second, the measurement it would add is small: `read_peak_rss` already takes the maximum of `RUSAGE_SELF` and `RUSAGE_CHILDREN`, so child processes are accounted for, which was the cgroup's main advantage here. Third, an unimplemented mode still costs a verification contract, and this change would have owned one nothing tested.
+
+`RUSAGE_SELF` still misses processes that are neither this one nor its children — an unrelated sibling in the same container — and that is correct for a per-task budget, which is exactly what those processes are not.
 
 Container-level enforcement is a **separate limit at a separate grain** and is not this guard's responsibility. The kernel already enforces the container's own ceiling, and the OOM killer acts on it; this guard exists to reject one task before that happens, not to duplicate it.
 
-The guard SHALL record the source of every sample it acts on, so a rejection can be attributed to a measurement whose grain a reader can check.
+The guard SHALL expose the most recent sample it acted on as `last_sample: PeakRssSample | None`, and SHALL retain **no history**.
+
+That is the whole carrier, and it is deliberately small. `ResourceGuard.check` returns `None`, a `ReleaseDiagnostic` has no field for a source, and D33 forbids adding boundary-visible state, so a claim that the guard "records" its source needed somewhere to record it or it was unimplementable. One attribute on the guard the caller constructed is inspectable by that caller, invisible to the boundary, and bounded by construction — where a list of every sample would grow with the release, which is the defect this whole change exists to prevent.
 
 `check` SHALL sample the peak and SHALL raise when the sample is **at or above** the configured limit. The boundary maps that raise to `resource_limit_exceeded` and rejects the release.
 
@@ -117,16 +129,17 @@ The guard SHALL record the source of every sample it acts on, so a rejection can
 - **THEN** it reads the per-process `rusage` source by default
 - **THEN** it does not reject the compliant task
 
-#### Scenario: The cgroup source is permitted only under verified per-task isolation
-- **GIVEN** a deployment giving each task its own verified cgroup
-- **WHEN** a caller configures the guard to the cgroup source
-- **THEN** the guard uses it, and the grain matches the limit
-- **THEN** the same subtree verification the benchmark requires applies before the figure is trusted
+#### Scenario: The guard offers no cgroup mode to misconfigure
+- **GIVEN** the guard's constructor
+- **WHEN** its parameters are inspected
+- **THEN** it accepts a limit and no source selection
+- **THEN** no configuration makes it read the cgroup, so no subtree precondition needs holding across checkpoints
 
-#### Scenario: A rejection names the grain it was measured at
-- **GIVEN** a guard that raises
-- **WHEN** the failure is reported
-- **THEN** the sample's source is recorded, so the grain behind the rejection is checkable
+#### Scenario: The last sample is inspectable and singular
+- **GIVEN** a guard that has been called at several checkpoints
+- **WHEN** `last_sample` is read
+- **THEN** it is the most recent `PeakRssSample`, naming its source
+- **THEN** no earlier sample is retained, so the guard's own footprint does not grow with the release
 
 The comparison is `>=` rather than `>` so that the guard and the acceptance target agree exactly. The target is a peak strictly **under** 900 MiB; a guard raising only above its limit would admit a peak of exactly 900 MiB, which the benchmark then fails. One boundary condition cannot be a pass under one rule and a failure under the other.
 

@@ -66,7 +66,7 @@ Stating that limit here is deliberate. A benchmark whose scope is overclaimed is
 
 D31 through D39 are stated in the proposal. Two assumptions, both checkable at implementation time:
 
-- A cgroup v2 host exposes `memory.peak` beneath the relative path `/proc/self/cgroup` reports, and readability of *that* path — not of the mount root, which a nested cgroup does not populate — is a sufficient test for which source applies when none is named. Where it is unreadable the `ru_maxrss` fallback is used and named; where a caller named `cgroup_v2` explicitly, an unreadable path raises instead, per D38.
+- A cgroup v2 host exposes `memory.peak` at the path resolved by joining the mount with what `/proc/self/cgroup` reports, and readability of *that* resolved path — rather than of an assumed root, which a nested cgroup does not populate, though a cgroup namespace legitimately resolves to the root itself — is a sufficient test for which source applies when none is named. Where it is unreadable the `ru_maxrss` fallback is used and named; where a caller named `cgroup_v2` explicitly, an unreadable path raises instead, per D38.
 - A synthetic generator producing ninety-column rows exercises the boundary's memory behaviour representatively. It does not exercise any county's parsing, which is deliberate: this measures the boundary, and a county reader's own costs belong to that county's work.
 
 ## Unresolved decisions
