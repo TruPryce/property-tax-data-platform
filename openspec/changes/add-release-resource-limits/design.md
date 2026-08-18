@@ -81,6 +81,6 @@ The real risk is a benchmark that passes for the wrong reason — a run that nev
 
 ## Testing strategy
 
-CI tests are deterministic and bounded, never the million-row run. They cover the probe's source precedence with the nested cgroup path present and absent, the explicit-source path including a named source that cannot be read, that a sample always names its source, that the guard raises at and above its limit and not below, including the exact-limit boundary, and that a raising guard surfaces as `resource_limit_exceeded` through the accepted boundary rather than as anything else.
+CI tests are deterministic and bounded, never the million-row run. They cover the probe's source precedence with the nested cgroup path present and absent, the explicit-source path including a named source that cannot be read, which raises the typed `PeakRssSourceUnavailable` the benchmark catches to report an indeterminate absolute, that a sample always names its source, that the guard raises at and above its limit and not below, including the exact-limit boundary, and that a raising guard surfaces as `resource_limit_exceeded` through the accepted boundary rather than as anything else.
 
 The generator is tested for shape at small sizes — row count, column count, envelope well-formedness — and for the property that it holds no accumulated state, so the thing measuring memory does not itself retain the release.

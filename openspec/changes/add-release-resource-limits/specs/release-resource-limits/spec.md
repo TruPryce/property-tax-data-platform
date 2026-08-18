@@ -22,14 +22,16 @@ A preference that cannot be overridden makes the benchmark unimplementable. Its 
 - **WHEN** `read_peak_rss()` is called naming `rusage`
 - **THEN** it returns a `rusage` sample rather than the preferred cgroup one
 
-A named source that cannot be read SHALL raise rather than fall back.
+A named source that cannot be read SHALL raise `PeakRssSourceUnavailable`, a typed exception the library declares, rather than fall back.
+
+The type is named here rather than left to the implementation because the benchmark has to catch it: a caller that must distinguish "the cgroup is unreadable" from any other error, in order to report the absolute indeterminate rather than crash, cannot do so against an exception whose type is unspecified — it would either catch too broadly and swallow real defects, or match on message text, which the privacy rules forbid and which no two implementations spell alike. The exception SHALL carry the requested `PeakRssSource` and no host path, since a path is host-local detail this boundary does not preserve.
 
 Falling back would return a figure from a source the caller did not ask for, under a call that asked for a specific one. The benchmark's whole reason for naming `rusage` is comparability across processes, so a silent cgroup substitution would produce exactly the vacuous ratio the naming exists to prevent — and it would do so with no signal at all. `rusage` is available on every Linux host, so in practice this raises only for `cgroup_v2`.
 
 #### Scenario: A named source that cannot be read fails rather than substituting
 - **GIVEN** a host with no readable cgroup file
 - **WHEN** `read_peak_rss()` is called naming `cgroup_v2`
-- **THEN** it raises, naming the source that was unavailable
+- **THEN** it raises `PeakRssSourceUnavailable`, carrying the requested source
 - **THEN** it does not return a `rusage` sample under a request for a cgroup one
 
 #### Scenario: The preference applies when no source is named
@@ -211,13 +213,21 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
    systemd-run --user --scope -p MemoryAccounting=yes make benchmark-release-peak-rss
    ```
 
-   which places the run in a fresh scope of its own. Measured on one host, the ambient shell's cgroup held six processes and a peak of 964 MB inherited from unrelated work, while the same probe inside such a scope reported three processes — its own tree — and a peak of 2.2 MB. In a container the container's own cgroup already satisfies the requirement and no wrapper is needed. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
+   which places the run in a fresh scope of its own. Measured on one host, the ambient shell's cgroup held six processes and a peak of 964 MB inherited from unrelated work, while the same probe inside such a scope reported three processes — its own tree — and a peak of 2.2 MB. A **purpose-built** container whose cgroup holds only this run may satisfy the requirement in place of the wrapper, subject to the same `cgroup.procs` verification — never by assumption, and never merely because the run is containerized.
+
+   The Airflow container specifically does **not** satisfy it. The 900 MiB figure is derived from that container holding a scheduler and four concurrent task processes, so its cgroup contains siblings by construction; a peak read there is the container's, not this run's. A rule that treated any container as isolated would be contradicted by the very deployment the budget was computed from. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
 
    Verification SHALL read `cgroup.procs` for the cgroup named by `/proc/self/cgroup` and SHALL require that it lists only the benchmark's own process tree. A cgroup containing any other process cannot yield a peak attributable to this run, and a benchmark that assumed isolation it did not have would report a neighbour's high-water mark as its own — the same defect as the shared-cgroup ratio, arriving through the absolute check instead.
 
    Where the benchmark cannot establish or verify such a cgroup, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for.
 
    An indeterminate absolute SHALL NOT be reported as a pass, and the command SHALL exit **non-zero**. A run that could not measure the thing it exists to measure has not demonstrated the target, and an exit status a caller reads as success is how an unproven claim becomes a settled one.
+
+#### Scenario: A shared container does not count as isolation
+- **GIVEN** a run inside the Airflow container, whose cgroup also holds the scheduler and sibling task processes
+- **WHEN** the benchmark verifies isolation
+- **THEN** `cgroup.procs` lists processes outside this run and the check fails
+- **THEN** the absolute is reported indeterminate rather than reporting the container's peak as this run's
 
 #### Scenario: Isolation is required of the caller, not created by the run
 - **GIVEN** a host where the benchmark is invoked without a scope or container of its own
