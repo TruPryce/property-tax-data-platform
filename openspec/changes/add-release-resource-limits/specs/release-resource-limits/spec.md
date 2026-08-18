@@ -249,7 +249,7 @@ No ratio is computed from those three figures here, and none should be: they are
 
 The disqualification does not need a ratio. A source whose reading depends on when a sibling happened to be scheduled cannot produce the same answer twice on one workload, and a check built on it would pass or fail by timing. Nondeterminism disqualifies the source more surely than any single computed value would.
 
-`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
+`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth and fifth, which the absolute check brackets with, are cgroup figures by the same reasoning inverted.
 
 This does not demote the cgroup source generally; it assigns each reader the grain its question needs. The benchmark's ratio needs comparability between three processes, so it takes `rusage`. Its absolute needs the authority the limit is enforced against, so it takes the cgroup — which is a per-task figure precisely because isolation is required and verified first. The guard needs the grain its per-task budget is expressed in, so it takes `rusage` and offers no cgroup mode at all, as the guard requirement above states.
 
@@ -263,7 +263,7 @@ The three comparative measurements are:
 | `P1` | 250,000 | baseline plus the working set at the smaller size |
 | `P2` | 1,000,000 | baseline plus the working set at the acceptance size |
 
-All three are `rusage` figures and feed the scaling ratio only. The absolute check takes its own cgroup measurement, described below.
+All three are `rusage` figures and feed the scaling ratio only. The absolute check takes its own cgroup **bracket** — a reading either side of them — described below.
 
 The working set at each size SHALL be computed by subtracting the baseline, floored at zero because measurement noise can place a peak below it:
 
