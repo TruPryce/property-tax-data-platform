@@ -5,7 +5,7 @@ Read on `main` at the time of drafting.
 `docs/engineering/airflow-implementation.md` already carries the budget and the method, and this change implements what that document describes rather than inventing it:
 
 - The scheduler container is capped at 4 GiB with `AIRFLOW__CORE__PARALLELISM=4`, and the scheduler's own measured peak is 400 MiB. `(4096 − 400) / 4 ≈ 900 MiB` per task.
-- It already gives the `ru_maxrss` probe verbatim — `max(RUSAGE_SELF, RUSAGE_CHILDREN) × 1024` — and notes that `RUSAGE_CHILDREN` accounts only for reaped children.
+- It already gives the `ru_maxrss` probe verbatim — `max(RUSAGE_SELF, RUSAGE_CHILDREN) × 1024` — and notes that `RUSAGE_CHILDREN` accounts only for reaped children. It reports the largest such child rather than a sum, measured here as 0 MiB while two 300 MiB children were alive and 308 MiB once both were reaped, so the guard is a per-process tripwire and not an authoritative measurement of a multi-process task.
 - It names the cgroup as the authority inside a container: `memory.peak` beneath the cgroup `/proc/self/cgroup` reports, cgroup v2, bytes.
 - It rejects `tracemalloc` with a measurement: 663 MiB traced against 2,079 MiB resident on the same run.
 

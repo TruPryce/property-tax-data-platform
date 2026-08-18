@@ -113,11 +113,34 @@ The guard SHALL read `rusage` and SHALL NOT offer a cgroup mode.
 
 An earlier draft admitted one for deployments giving each task its own cgroup. It is removed for three reasons, and the first is decisive. A cgroup figure is only per-task while the subtree stays empty, and the guard is called at every 100,000-row checkpoint — so honouring that condition means verifying the subtree at each checkpoint, and verifying it once at construction proves nothing, because a process may join the cgroup afterwards. A mode whose precondition cannot be held for the life of the run is a mode that silently stops being true. Second, the measurement it would add is small: `read_peak_rss` already takes the maximum of `RUSAGE_SELF` and `RUSAGE_CHILDREN`, so child processes are accounted for, which was the cgroup's main advantage here. Third, an unimplemented mode still costs a verification contract, and this change would have owned one nothing tested.
 
-`RUSAGE_SELF` still misses processes that are neither this one nor its children — an unrelated sibling in the same container — and that is correct for a per-task budget, which is exactly what those processes are not.
+What the guard therefore enforces SHALL be stated plainly rather than implied, because `RUSAGE_CHILDREN` measures less than its name suggests.
+
+On Linux it counts only children that have **terminated and been waited for**, and its `ru_maxrss` is the resident set of the *largest* such child — never a sum, and never a live one. Measured here: two children each holding 300 MiB reported `children = 0 MiB` while alive, and `308 MiB` after both were reaped — the larger of the two, not the 600 MiB they occupied together.
+
+So the guard is a **runtime tripwire for the process it runs in**, and its accounting is:
+
+| case | what the guard sees |
+| --- | --- |
+| the release boundary itself, which is single-process | complete |
+| a task with a live child | the child's memory is invisible |
+| a task with reaped children | the largest one, never the sum |
+| an unrelated sibling in the same container | invisible, which is correct — it is not this task |
+
+The first row is the case this change is for: `process_release` is a function driving a reader and a stage in one process, so `RUSAGE_SELF` is the whole of it. The guard is nonetheless **not** an authoritative measurement of a multi-process task, and SHALL NOT be described as one. The isolated-cgroup benchmark remains the authority; the guard exists to stop one process before the OOM killer does, on evidence that is complete for the shape of task this boundary defines and partial for any other.
+
+`RUSAGE_CHILDREN` stays in the maximum because it can only raise the figure and so can only make the tripwire fire sooner, which is the safe direction for a limit. It is kept as a partial signal, not as coverage.
+
+#### Scenario: The guard's accounting is partial for a multi-process task
+- **GIVEN** a task holding a live child process that allocates memory
+- **WHEN** the guard samples
+- **THEN** the child's memory does not appear in the sample
+- **THEN** the plan does not claim the guard bounds that task's total footprint
 
 Container-level enforcement is a **separate limit at a separate grain** and is not this guard's responsibility. The kernel already enforces the container's own ceiling, and the OOM killer acts on it; this guard exists to reject one task before that happens, not to duplicate it.
 
 The guard SHALL expose the most recent sample it acted on as `last_sample: PeakRssSample | None`, and SHALL retain **no history**.
+
+It SHALL be `None` before the first `check`, and SHALL be set to the sample just taken **before** that call raises. A rejection whose `last_sample` still held the previous checkpoint's figure would attribute the failure to a measurement that did not cause it, which is worse than exposing nothing: the reader would have a number, and it would be the wrong one.
 
 That is the whole carrier, and it is deliberately small. `ResourceGuard.check` returns `None`, a `ReleaseDiagnostic` has no field for a source, and D33 forbids adding boundary-visible state, so a claim that the guard "records" its source needed somewhere to record it or it was unimplementable. One attribute on the guard the caller constructed is inspectable by that caller, invisible to the boundary, and bounded by construction — where a list of every sample would grow with the release, which is the defect this whole change exists to prevent.
 
@@ -134,6 +157,12 @@ That is the whole carrier, and it is deliberately small. `ResourceGuard.check` r
 - **WHEN** its parameters are inspected
 - **THEN** it accepts a limit and no source selection
 - **THEN** no configuration makes it read the cgroup, so no subtree precondition needs holding across checkpoints
+
+#### Scenario: A rejection exposes the sample that caused it
+- **GIVEN** a guard whose next sample is at or above the limit
+- **WHEN** `check` raises
+- **THEN** `last_sample` holds the sample that triggered the raise, not the previous checkpoint's
+- **THEN** before the first `check`, `last_sample` is `None`
 
 #### Scenario: The last sample is inspectable and singular
 - **GIVEN** a guard that has been called at several checkpoints
@@ -210,7 +239,7 @@ A separate process is necessary but not sufficient, and the reason is specific. 
 
 `ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
 
-This does not demote the cgroup source generally; it assigns each reader the grain its question needs. The benchmark's ratio needs comparability between three processes, so it takes `rusage`. Its absolute needs the authority the limit is enforced against, so it takes the cgroup — which is a per-task figure precisely because isolation is required and verified first. The guard needs the grain its per-task budget is expressed in, so it takes `rusage` by default and the cgroup only where per-task cgroup isolation exists, as the guard requirement above states.
+This does not demote the cgroup source generally; it assigns each reader the grain its question needs. The benchmark's ratio needs comparability between three processes, so it takes `rusage`. Its absolute needs the authority the limit is enforced against, so it takes the cgroup — which is a per-task figure precisely because isolation is required and verified first. The guard needs the grain its per-task budget is expressed in, so it takes `rusage` and offers no cgroup mode at all, as the guard requirement above states.
 
 Requiring one source across all three is separate from choosing which. `ru_maxrss` and a cgroup figure account for different things — unreaped children and sibling processes among them — so a ratio taken across a mixed pair is arithmetic on incomparable quantities. The benchmark SHALL compare `PeakRssSample.source` across `B`, `P1`, and `P2` and SHALL fail rather than report a ratio when they differ.
 
