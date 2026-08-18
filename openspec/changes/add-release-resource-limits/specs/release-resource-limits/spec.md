@@ -111,7 +111,7 @@ The consequence is not theoretical. Measured on one host, a process whose own pe
 
 The guard SHALL read `rusage` and SHALL NOT offer a cgroup mode.
 
-An earlier draft admitted one for deployments giving each task its own cgroup. It is removed for three reasons, and the first is decisive. A cgroup figure is only per-task while the subtree stays empty, and the guard is called at every 100,000-row checkpoint — so honouring that condition means verifying the subtree at each checkpoint, and verifying it once at construction proves nothing, because a process may join the cgroup afterwards. A mode whose precondition cannot be held for the life of the run is a mode that silently stops being true. Second, the measurement it would add is small: `read_peak_rss` already takes the maximum of `RUSAGE_SELF` and `RUSAGE_CHILDREN`, so child processes are accounted for, which was the cgroup's main advantage here. Third, an unimplemented mode still costs a verification contract, and this change would have owned one nothing tested.
+An earlier draft admitted one for deployments giving each task its own cgroup. It is removed for two reasons, and the first is decisive. A cgroup figure is only per-task while the subtree stays empty, and the guard is called at every 100,000-row checkpoint — so honouring that condition means verifying the subtree at each checkpoint, and verifying it once at construction proves nothing, because a process may join the cgroup afterwards. A mode whose precondition cannot be held for the life of the run is a mode that silently stops being true. Second, an unimplemented mode still costs a verification contract, and this change would have owned one nothing tested.
 
 What the guard therefore enforces SHALL be stated plainly rather than implied, because `RUSAGE_CHILDREN` measures less than its name suggests.
 
@@ -121,20 +121,24 @@ So the guard is a **runtime tripwire for the process it runs in**, and its accou
 
 | case | what the guard sees |
 | --- | --- |
-| the release boundary itself, which is single-process | complete |
-| a task with a live child | the child's memory is invisible |
-| a task with reaped children | the largest one, never the sum |
+| memory held by the process the guard runs in | covered |
+| a live child of that process | invisible |
+| reaped children | the largest one, never the sum |
 | an unrelated sibling in the same container | invisible, which is correct — it is not this task |
 
-The first row is the case this change is for: `process_release` is a function driving a reader and a stage in one process, so `RUSAGE_SELF` is the whole of it. The guard is nonetheless **not** an authoritative measurement of a multi-process task, and SHALL NOT be described as one. The isolated-cgroup benchmark remains the authority; the guard exists to stop one process before the OOM killer does, on evidence that is complete for the shape of task this boundary defines and partial for any other.
+The guard's coverage SHALL be described as **the current process, plus a partial signal for reaped children**, and SHALL NOT be described as complete for anything.
+
+There is no single-process guarantee to appeal to. `PreparedReader` and `ReleaseStage` are protocols the caller supplies, and nothing in them or in `process_release` forbids an implementation from spawning a subprocess — a decoder, an extractor, a database client. `process_release` being synchronous says only that it does not return until the work is done, not that the work happened in one process. A county reader that shells out is a conforming reader, and its child's memory is exactly what the guard cannot see.
+
+The isolated-cgroup benchmark remains the authority, and it is authoritative *because* a cgroup charges the whole subtree — which is the property the guard gives up by measuring per-process. The guard exists to stop this process before the OOM killer does, on partial evidence, which is worth having and is not worth overstating.
 
 `RUSAGE_CHILDREN` stays in the maximum because it can only raise the figure and so can only make the tripwire fire sooner, which is the safe direction for a limit. It is kept as a partial signal, not as coverage.
 
-#### Scenario: The guard's accounting is partial for a multi-process task
-- **GIVEN** a task holding a live child process that allocates memory
-- **WHEN** the guard samples
-- **THEN** the child's memory does not appear in the sample
-- **THEN** the plan does not claim the guard bounds that task's total footprint
+#### Scenario: The guard's accounting is partial whenever a collaborator forks
+- **GIVEN** a conforming reader or stage that spawns a subprocess to do its work
+- **WHEN** the guard samples while that subprocess is alive
+- **THEN** the subprocess's memory does not appear in the sample
+- **THEN** the plan does not claim the guard bounds the task's total footprint, and does not assume the boundary is single-process
 
 Container-level enforcement is a **separate limit at a separate grain** and is not this guard's responsibility. The kernel already enforces the container's own ceiling, and the OOM killer acts on it; this guard exists to reject one task before that happens, not to duplicate it.
 
