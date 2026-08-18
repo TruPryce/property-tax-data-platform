@@ -9,7 +9,7 @@ The library SHALL provide `read_peak_rss()` returning a frozen `PeakRssSample` w
 | `peak_bytes` | `int` | not negative |
 | `source` | `PeakRssSource` | a `StrEnum` of exactly `cgroup_v2` and `rusage` |
 
-The source precedence SHALL be: cgroup v2 `/sys/fs/cgroup/memory.peak` when it is readable, reported as `cgroup_v2`; otherwise `resource.getrusage`, taking the maximum of `RUSAGE_SELF` and `RUSAGE_CHILDREN` and multiplying by 1024 because `ru_maxrss` is KiB on Linux, reported as `rusage`.
+The source precedence SHALL be: the cgroup v2 `memory.peak` resolved from the relative path `/proc/self/cgroup` reports when it is readable, reported as `cgroup_v2`; otherwise `resource.getrusage`, taking the maximum of `RUSAGE_SELF` and `RUSAGE_CHILDREN` and multiplying by 1024 because `ru_maxrss` is KiB on Linux, reported as `rusage`.
 
 `tracemalloc` SHALL NOT be a source. One measured run recorded 663 MiB traced against 2,079 MiB resident — a factor of three — and the OOM killer reads resident set size, so a traced figure can sit comfortably under budget while the task is killed.
 
@@ -57,7 +57,7 @@ A process in a nested cgroup — which is every process under systemd, and every
 - **THEN** it reports `cgroup_v2` rather than falling back
 
 #### Scenario: The cgroup is preferred where it exists
-- **GIVEN** a host where `/sys/fs/cgroup/memory.peak` is readable
+- **GIVEN** a host where the resolved cgroup `memory.peak` is readable
 - **WHEN** `read_peak_rss()` is called
 - **THEN** the sample's source is `cgroup_v2`
 - **THEN** `peak_bytes` is the value that file reports
@@ -97,7 +97,36 @@ That constraint is also the correct architecture rather than an obstacle worked 
 
 The library SHALL provide `PeakRssGuard`, implementing the `ResourceGuard` protocol that the `bounded-release-processing` capability declares, taking a limit in bytes and implementing `check(physical_rows_processed: int, staged_record_count: int) -> None`.
 
+`PeakRssGuard` SHALL measure at the grain its limit is expressed in, and SHALL default to the per-process `rusage` source rather than to the probe's cgroup preference.
+
+The 900 MiB budget is **per task**, derived as `(4096 MiB − 400 MiB scheduler) / 4 tasks`. That arithmetic describes a container holding a scheduler and four concurrent tasks, so in the deployment the budget came from, the cgroup measures the container and the limit measures one task inside it. They are different grains, and a guard reading the cgroup against a per-task limit compares the wrong pair.
+
+The consequence is not theoretical. Measured on one host, a process whose own peak was 28.0 MiB sat in a cgroup whose sticky peak was 1,072.3 MiB; a `PeakRssGuard(900 MiB)` reading the cgroup would have rejected that task, and every other compliant task sharing the container, while a `rusage` reading accepted it correctly. A guard that rejects compliant work is worse than no guard, because it converts a healthy release into a failed one and does so more reliably the busier the container is.
+
+A caller MAY configure the guard to the cgroup source **only** where per-task cgroup isolation is established and verified by the same subtree rules the benchmark applies. That is a real deployment — one cgroup per task — and there the cgroup is both the right grain and the better measurement, since it accounts for child processes that `RUSAGE_SELF` does not.
+
+Container-level enforcement is a **separate limit at a separate grain** and is not this guard's responsibility. The kernel already enforces the container's own ceiling, and the OOM killer acts on it; this guard exists to reject one task before that happens, not to duplicate it.
+
+The guard SHALL record the source of every sample it acts on, so a rejection can be attributed to a measurement whose grain a reader can check.
+
 `check` SHALL sample the peak and SHALL raise when the sample is **at or above** the configured limit. The boundary maps that raise to `resource_limit_exceeded` and rejects the release.
+
+#### Scenario: The default guard measures one task, not its container
+- **GIVEN** a task whose own peak is well under the limit, in a shared container whose cgroup peak exceeds it
+- **WHEN** `PeakRssGuard` samples at a checkpoint
+- **THEN** it reads the per-process `rusage` source by default
+- **THEN** it does not reject the compliant task
+
+#### Scenario: The cgroup source is permitted only under verified per-task isolation
+- **GIVEN** a deployment giving each task its own verified cgroup
+- **WHEN** a caller configures the guard to the cgroup source
+- **THEN** the guard uses it, and the grain matches the limit
+- **THEN** the same subtree verification the benchmark requires applies before the figure is trusted
+
+#### Scenario: A rejection names the grain it was measured at
+- **GIVEN** a guard that raises
+- **WHEN** the failure is reported
+- **THEN** the sample's source is recorded, so the grain behind the rejection is checkable
 
 The comparison is `>=` rather than `>` so that the guard and the acceptance target agree exactly. The target is a peak strictly **under** 900 MiB; a guard raising only above its limit would admit a peak of exactly 900 MiB, which the benchmark then fails. One boundary condition cannot be a pass under one rule and a failure under the other.
 
@@ -168,7 +197,7 @@ A separate process is necessary but not sufficient, and the reason is specific. 
 
 `ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
 
-This does not demote the cgroup source generally. The guard keeps preferring it, because in production the cgroup **is** the container and its number is what the OOM killer acts on. The benchmark needs comparability between three processes; the guard needs the authority a limit is enforced against. Those are different requirements and they select different sources.
+This does not demote the cgroup source generally; it assigns each reader the grain its question needs. The benchmark's ratio needs comparability between three processes, so it takes `rusage`. Its absolute needs the authority the limit is enforced against, so it takes the cgroup — which is a per-task figure precisely because isolation is required and verified first. The guard needs the grain its per-task budget is expressed in, so it takes `rusage` by default and the cgroup only where per-task cgroup isolation exists, as the guard requirement above states.
 
 Requiring one source across all three is separate from choosing which. `ru_maxrss` and a cgroup figure account for different things — unreaped children and sibling processes among them — so a ratio taken across a mixed pair is arithmetic on incomparable quantities. The benchmark SHALL compare `PeakRssSample.source` across `B`, `P1`, and `P2` and SHALL fail rather than report a ratio when they differ.
 
@@ -217,7 +246,18 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    The Airflow container specifically does **not** satisfy it. The 900 MiB figure is derived from that container holding a scheduler and four concurrent task processes, so its cgroup contains siblings by construction; a peak read there is the container's, not this run's. A rule that treated any container as isolated would be contradicted by the very deployment the budget was computed from. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
 
-   Verification SHALL read `cgroup.procs` for the cgroup named by `/proc/self/cgroup` and SHALL require that it lists only the benchmark's own process tree. A cgroup containing any other process cannot yield a peak attributable to this run, and a benchmark that assumed isolation it did not have would report a neighbour's high-water mark as its own — the same defect as the shared-cgroup ratio, arriving through the absolute check instead.
+   Verification SHALL check the **whole subtree**, not the one cgroup's direct membership.
+
+   `cgroup.procs` lists only processes attached directly to that cgroup, while `memory.peak` charges the cgroup **and all of its descendants**. A foreign process in a child cgroup therefore raises the peak while appearing nowhere in `cgroup.procs`, so a check reading only that file would certify isolation it does not have — the same defect as the shared-cgroup ratio, arriving through the absolute check and through the file that was supposed to prevent it.
+
+   Verification SHALL therefore require, for the cgroup named by `/proc/self/cgroup`:
+
+   1. `cgroup.procs` lists only this run's own process tree, and
+   2. `cgroup.stat` reports `nr_descendants 0` **and** `nr_dying_descendants 0`.
+
+   A dying descendant is included because a cgroup being torn down can still hold charges against the peak, so a non-zero count leaves the figure unattributable in exactly the way a live descendant would. Measured on one host, a fresh `systemd-run --user --scope` reported `nr_descendants 0`, `nr_dying_descendants 0`, and three directly-listed processes — its own tree — so the rule is satisfiable by the invocation this specification recommends, and is not a bar nothing can clear.
+
+   Where a host does not expose `cgroup.stat`, the subtree cannot be shown empty and the absolute is indeterminate; the benchmark SHALL NOT fall back to the weaker `cgroup.procs`-only check, which is the check that fails to see the case that matters.
 
    Where the benchmark cannot establish or verify such a cgroup, it SHALL report the absolute check as **indeterminate**, naming why, and SHALL NOT substitute a source that was not asked for.
 
@@ -239,6 +279,17 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 - **GIVEN** a cgroup whose `cgroup.procs` lists a process outside this run
 - **WHEN** the benchmark checks isolation before the absolute measurement
 - **THEN** it treats the absolute as indeterminate rather than reporting a neighbour's peak
+
+#### Scenario: A foreign process in a child cgroup is caught
+- **GIVEN** a cgroup whose own `cgroup.procs` lists only this run, but which has a descendant cgroup holding another process
+- **WHEN** the benchmark verifies isolation
+- **THEN** `cgroup.stat` reports a non-zero `nr_descendants` and the check fails
+- **THEN** the absolute is indeterminate, rather than reporting a peak that charges the descendant's memory
+
+#### Scenario: A cgroup being torn down still blocks attribution
+- **GIVEN** a cgroup reporting `nr_dying_descendants` above zero
+- **WHEN** the benchmark verifies isolation
+- **THEN** the check fails, because a dying cgroup can still hold charges against the peak
 
 #### Scenario: An indeterminate absolute fails the command
 - **GIVEN** a run that could not establish an isolated cgroup

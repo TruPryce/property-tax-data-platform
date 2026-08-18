@@ -6,7 +6,7 @@ Read on `main` at the time of drafting.
 
 - The scheduler container is capped at 4 GiB with `AIRFLOW__CORE__PARALLELISM=4`, and the scheduler's own measured peak is 400 MiB. `(4096 − 400) / 4 ≈ 900 MiB` per task.
 - It already gives the `ru_maxrss` probe verbatim — `max(RUSAGE_SELF, RUSAGE_CHILDREN) × 1024` — and notes that `RUSAGE_CHILDREN` accounts only for reaped children.
-- It names the cgroup as the authority inside a container: `/sys/fs/cgroup/memory.peak`, cgroup v2, bytes.
+- It names the cgroup as the authority inside a container: `memory.peak` beneath the cgroup `/proc/self/cgroup` reports, cgroup v2, bytes.
 - It rejects `tracemalloc` with a measurement: 663 MiB traced against 2,079 MiB resident on the same run.
 
 The `bounded-release-processing` capability, introduced by the now-archived `add-bounded-release-processing` change and implemented on `main`, declares the seam this change fills: a `ResourceGuard` with `check(physical_rows_processed: int, staged_record_count: int) -> None`, called after the stage is entered, at every 100,000-row boundary, and once at end-of-input, with a raise mapping to `resource_limit_exceeded`. It states in as many words that what is measured belongs to a second change.
