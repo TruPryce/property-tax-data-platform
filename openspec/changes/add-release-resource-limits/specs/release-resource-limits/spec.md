@@ -392,14 +392,15 @@ The guard value also bounds what the scaling check can detect, and that limit is
 - **THEN** it does not substitute a `rusage` figure
 - **THEN** the indeterminate result is not reported as a pass
 
-#### Scenario: The linearity requirement is answered by two things, not one
+#### Scenario: The linearity requirement is evidenced, not proved
 - **GIVEN** issue #43 D5's requirement that memory not grow linearly with row count
 - **WHEN** the evidence for it is assembled
-- **THEN** the structural half comes from the accepted `bounded-release-processing` capability — a reader lead bounded by a constant and identical across two fixture lengths, and carriers retaining at most a hundred entries — which are checks on shape with no measurement floor
-- **THEN** this change's benchmark supplies the budget half, and is described as evidence rather than proof
-- **THEN** no document in this change claims the benchmark alone establishes that memory does not grow linearly
+- **THEN** the benchmark establishes that material record retention is caught and that one task fits the budget
+- **THEN** retention at or below three bytes per row is invisible at any threshold, and four bytes straddles it
+- **THEN** no accepted check closes that remainder — the capability's reader lead detects read-ahead rather than retention, and its hundred-entry caps bound only notices and diagnostics
+- **THEN** no document in this change claims the benchmark proves memory does not grow linearly, and the narrowing of D5 is raised for a maintainer rather than assumed
 
-#### Scenario: A linear implementation fails even when it fits
+#### Scenario: A materially retaining implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
 - **WHEN** the benchmark takes its four measurements
 - **THEN** `W2` is approximately four times `W1`
