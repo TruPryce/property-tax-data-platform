@@ -39,7 +39,10 @@ from property_tax_application.bronze import (
 
 __all__ = [
     "ARTIFACT_PREFIX",
+    "MAX_SINGLE_COPY_BYTES",
+    "MissingArtifactError",
     "MINIMUM_PART_BYTES",
+    "MULTIPART_COPY_PART_BYTES",
     "RELEASE_PREFIX",
     "STAGING_PREFIX",
     "S3ArtifactSink",
@@ -58,6 +61,15 @@ __all__ = [
 #: moment to discover it.
 MINIMUM_PART_BYTES = 5 * 1024 * 1024
 
+#: `CopyObject` handles a single object up to 5 GB.  Acquisition permits more,
+#: so anything past this is finalized with a ranged multipart copy instead —
+#: the decimal reading of AWS's documented limit, which is the conservative one.
+MAX_SINGLE_COPY_BYTES = 5 * 1000**3
+
+#: Each ranged copy part.  Comfortably inside the 5 GB per-part ceiling and far
+#: above the 5 MiB floor, so neither bound is close to a concern.
+MULTIPART_COPY_PART_BYTES = 512 * 1024 * 1024
+
 #: Bytes in flight, named by attempt.  Nothing durable is ever read from here.
 STAGING_PREFIX = "bronze/staging"
 #: Bytes at rest, named by their own checksum.
@@ -66,6 +78,15 @@ ARTIFACT_PREFIX = "bronze/artifacts"
 RELEASE_PREFIX = "bronze/releases"
 
 _PRECONDITION_CODES = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
+
+
+class MissingArtifactError(Exception):
+    """A reference was asked for an artifact that is not stored.
+
+    Refused rather than written, because a reference is what divergence counts:
+    a dangling one reports bytes that cannot be fetched as stored, and makes a
+    genuinely new checksum look already present.
+    """
 
 
 class TruncatedListingError(Exception):
@@ -83,6 +104,8 @@ class S3Client(Protocol):
     """The subset of the S3 API this module calls."""
 
     def create_multipart_upload(self, **kwargs: Any) -> Any: ...
+    def upload_part_copy(self, **kwargs: Any) -> Any: ...
+    def head_object(self, **kwargs: Any) -> Any: ...
     def upload_part(self, **kwargs: Any) -> Any: ...
     def complete_multipart_upload(self, **kwargs: Any) -> Any: ...
     def abort_multipart_upload(self, **kwargs: Any) -> Any: ...
@@ -153,6 +176,7 @@ class S3ArtifactSink:
         "_part_bytes",
         "_staging_key",
         "_upload_id",
+        "_written",
     )
 
     def __init__(
@@ -180,6 +204,7 @@ class S3ArtifactSink:
         self._parts: list[dict[str, object]] = []
         self._upload_id: str | None = None
         self._digest = hashlib.sha256()
+        self._written = 0
 
     @property
     def sha256(self) -> str:
@@ -203,6 +228,7 @@ class S3ArtifactSink:
 
     def write(self, chunk: bytes) -> None:
         self._digest.update(chunk)
+        self._written += len(chunk)
         self._buffer += chunk
         while len(self._buffer) >= self._part_bytes:
             self._flush(self._part_bytes)
@@ -242,17 +268,62 @@ class S3ArtifactSink:
 
         final_key = f"{self._artifact_prefix}/{self.sha256}"
         try:
-            self._client.copy_object(
-                Bucket=self._bucket,
-                Key=final_key,
-                CopySource={"Bucket": self._bucket, "Key": self._staging_key},
-                IfNoneMatch="*",
-            )
+            if self._written <= MAX_SINGLE_COPY_BYTES:
+                self._client.copy_object(
+                    Bucket=self._bucket,
+                    Key=final_key,
+                    CopySource={"Bucket": self._bucket, "Key": self._staging_key},
+                    IfNoneMatch="*",
+                )
+            else:
+                self._copy_in_parts(final_key)
         except Exception as error:
             if not _is_precondition_failure(error):
                 raise
         self._client.delete_object(Bucket=self._bucket, Key=self._staging_key)
         return f"s3://{self._bucket}/{final_key}"
+
+    def _copy_in_parts(self, final_key: str) -> None:
+        """Finalize an object too large for a single copy.
+
+        `CopyObject` tops out at 5 GB while acquisition permits considerably
+        more, so an artifact between the two limits would have failed at the
+        last step of a successful transfer.  `UploadPartCopy` takes a byte range
+        per part, and the source is already in S3, so nothing crosses the
+        network twice either way.
+        """
+
+        created = self._client.create_multipart_upload(Bucket=self._bucket, Key=final_key)
+        upload_id = created["UploadId"]
+        try:
+            parts: list[dict[str, object]] = []
+            start = 0
+            while start < self._written:
+                end = min(start + MULTIPART_COPY_PART_BYTES, self._written) - 1
+                number = len(parts) + 1
+                response = self._client.upload_part_copy(
+                    Bucket=self._bucket,
+                    Key=final_key,
+                    UploadId=upload_id,
+                    PartNumber=number,
+                    CopySource={"Bucket": self._bucket, "Key": self._staging_key},
+                    CopySourceRange=f"bytes={start}-{end}",
+                )
+                parts.append({"ETag": response["CopyPartResult"]["ETag"], "PartNumber": number})
+                start = end + 1
+            self._client.complete_multipart_upload(
+                Bucket=self._bucket,
+                Key=final_key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+                IfNoneMatch="*",
+            )
+        except Exception:
+            # A failed ranged copy must not leave its own upload behind.
+            self._client.abort_multipart_upload(
+                Bucket=self._bucket, Key=final_key, UploadId=upload_id
+            )
+            raise
 
     def abort(self) -> None:
         """Discard everything, so no object and no orphaned parts survive.
@@ -268,11 +339,11 @@ class S3ArtifactSink:
             )
             self._upload_id = None
         # The completed staging object survives a failure between commit's two
-        # steps, and it is not durable state anyone reads.
-        try:
-            self._client.delete_object(Bucket=self._bucket, Key=self._staging_key)
-        except Exception:  # noqa: BLE001 - cleanup of a key that may never have existed
-            pass
+        # steps.  A delete that fails is not swallowed: the acquisition boundary
+        # reports a failed cleanup as its own fact, and suppressing it here
+        # would tell a caller the sink was clean when an object remains.
+        # Deleting a key that never existed is not a failure in S3.
+        self._client.delete_object(Bucket=self._bucket, Key=self._staging_key)
 
 
 class S3BronzeStore:
@@ -298,11 +369,16 @@ class S3BronzeStore:
         """
 
         referenced = self.referenced_checksums(partition)
-        if sha256 in referenced:
-            return BronzeConflict.IDENTICAL
-        if referenced:
+        if not referenced:
+            return BronzeConflict.NEW
+        # More than one artifact under one release identity is divergence, and
+        # it stays divergence once recorded.  Asking whether *this* checksum is
+        # among them answers a different question: an earlier version answered
+        # that one and reported IDENTICAL for both sides of a known conflict,
+        # so the divergence vanished the moment it was stored.
+        if len(referenced) > 1:
             return BronzeConflict.DIVERGED
-        return BronzeConflict.NEW
+        return BronzeConflict.IDENTICAL if sha256 in referenced else BronzeConflict.DIVERGED
 
     def referenced_checksums(self, partition: ReleasePartition) -> set[str]:
         """Every artifact checksum this release partition points at."""
@@ -329,6 +405,42 @@ class S3BronzeStore:
                     f"listing of {prefix} was truncated without a continuation token"
                 )
 
+    def _reference_body(self, partition: ReleasePartition, sha256: str) -> bytes:
+        """The one rendering of a reference, whichever entry point writes it.
+
+        Two renderings would be worse than either: the key is immutable, so the
+        first writer's body is the one that survives, and a reader would get a
+        different shape depending on which call happened to win a race it cannot
+        see.
+        """
+
+        return json.dumps(
+            {
+                "artifact_sha256": sha256,
+                "artifact_locator": f"s3://{self._bucket}/{artifact_key(sha256)}",
+                "jurisdiction_code": partition.jurisdiction_code,
+                "tax_year": partition.tax_year,
+                "release_kind": partition.release_kind,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _require_artifact(self, sha256: str) -> None:
+        """Refuse to reference bytes that are not there.
+
+        A reference is what `classify` counts, so a dangling one reports an
+        artifact that cannot be fetched as though it were stored — and worse,
+        makes a genuinely new checksum look already present.
+        """
+
+        try:
+            self._client.head_object(Bucket=self._bucket, Key=artifact_key(sha256))
+        except Exception as error:
+            raise MissingArtifactError(
+                f"no artifact is stored for {sha256}, so it cannot be referenced"
+            ) from error
+
     def record(self, manifest: ReleaseManifest) -> str:
         """Persist the manifest and one reference per partition, immutably.
 
@@ -339,23 +451,14 @@ class S3BronzeStore:
         """
 
         sha256 = manifest.artifact.sha256
+        self._require_artifact(sha256)
         self._put_if_absent(
             manifest_key(sha256), serialize_manifest(manifest).encode("utf-8"), "application/json"
         )
         for partition in manifest.partitions:
             self._put_if_absent(
                 partition_ref_key(partition, sha256),
-                json.dumps(
-                    {
-                        "artifact_sha256": sha256,
-                        "artifact_locator": manifest.artifact.locator,
-                        "jurisdiction_code": partition.jurisdiction_code,
-                        "tax_year": partition.tax_year,
-                        "release_kind": partition.release_kind,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8"),
+                self._reference_body(partition, sha256),
                 "application/json",
             )
         return f"s3://{self._bucket}/{manifest_key(sha256)}"
@@ -367,21 +470,9 @@ class S3BronzeStore:
         release noticed later does not change what was acquired.
         """
 
+        self._require_artifact(sha256)
         key = partition_ref_key(partition, sha256)
-        self._put_if_absent(
-            key,
-            json.dumps(
-                {
-                    "artifact_sha256": sha256,
-                    "jurisdiction_code": partition.jurisdiction_code,
-                    "tax_year": partition.tax_year,
-                    "release_kind": partition.release_kind,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            "application/json",
-        )
+        self._put_if_absent(key, self._reference_body(partition, sha256), "application/json")
         return f"s3://{self._bucket}/{key}"
 
     def _put_if_absent(self, key: str, body: bytes, content_type: str) -> None:

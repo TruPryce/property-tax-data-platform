@@ -72,9 +72,12 @@ class FakeS3:
         Key: str,
         UploadId: str,
         MultipartUpload: dict[str, Any],
+        IfNoneMatch: str | None = None,
     ) -> dict[str, Any]:
         if self.fail_on_complete:
             raise S3Error("InternalError")
+        if IfNoneMatch == "*" and Key in self.objects:
+            raise S3Error("PreconditionFailed")
         upload = self.uploads[UploadId]
         ordered = sorted(part["PartNumber"] for part in MultipartUpload["Parts"])
         self.objects[Key] = b"".join(upload.parts[number] for number in ordered)
@@ -116,6 +119,26 @@ class FakeS3:
             raise S3Error("PreconditionFailed")
         self.objects[Key] = self.objects[CopySource["Key"]]
         return {}
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        if Key not in self.objects:
+            raise S3Error("404")
+        return {"ContentLength": len(self.objects[Key])}
+
+    def upload_part_copy(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        UploadId: str,
+        PartNumber: int,
+        CopySource: dict[str, str],
+        CopySourceRange: str,
+    ) -> dict[str, Any]:
+        span = CopySourceRange.removeprefix("bytes=")
+        start, end = (int(value) for value in span.split("-"))
+        self.uploads[UploadId].parts[PartNumber] = self.objects[CopySource["Key"]][start : end + 1]
+        return {"CopyPartResult": {"ETag": f'"copy-{PartNumber}"'}}
 
     def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         self.objects.pop(Key, None)

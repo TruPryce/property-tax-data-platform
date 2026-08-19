@@ -83,17 +83,7 @@ def test_conditional_write_is_a_real_parameter_of_put_object(client) -> None:  #
     """`IfNoneMatch` is what makes a record immutable; the model must accept it."""
 
     stubber = Stubber(client)
-    stubber.add_response(
-        "put_object",
-        {},
-        {
-            "Bucket": BUCKET,
-            "Key": ANY,
-            "Body": ANY,
-            "ContentType": "application/json",
-            "IfNoneMatch": "*",
-        },
-    )
+    stubber.add_response("head_object", {"ContentLength": 14}, {"Bucket": BUCKET, "Key": ANY})
     stubber.add_response(
         "put_object",
         {},
@@ -108,10 +98,83 @@ def test_conditional_write_is_a_real_parameter_of_put_object(client) -> None:  #
 
     with stubber:
         S3BronzeStore(client, BUCKET).reference_partition(PARTITION, DIGEST)
-        stubber.add_client_error("put_object", service_error_code="PreconditionFailed")
-        # An already-present record is refused by S3 and tolerated here, which
-        # is the behaviour immutability depends on.
+        stubber.assert_no_pending_responses()
+
+
+def test_the_existence_check_matches_the_service_model(client) -> None:  # noqa: ANN001
+    """A reference is refused unless the artifact is really there."""
+
+    from property_tax_adapters.objectstore import MissingArtifactError
+
+    stubber = Stubber(client)
+    stubber.add_client_error("head_object", service_error_code="404", http_status_code=404)
+
+    with stubber, pytest.raises(MissingArtifactError):
         S3BronzeStore(client, BUCKET).reference_partition(PARTITION, DIGEST)
+
+
+def test_the_ranged_copy_calls_match_the_service_model(client) -> None:  # noqa: ANN001
+    """`UploadPartCopy` with `CopySourceRange` is how an object past 5 GB finalizes."""
+
+    import property_tax_adapters.objectstore.s3 as module
+
+    stubber = Stubber(client)
+    stubber.add_response(
+        "create_multipart_upload", {"UploadId": "staging-1"}, {"Bucket": BUCKET, "Key": ANY}
+    )
+    stubber.add_response(
+        "upload_part",
+        {"ETag": '"etag-1"'},
+        {"Bucket": BUCKET, "Key": ANY, "PartNumber": 1, "UploadId": "staging-1", "Body": PAYLOAD},
+    )
+    stubber.add_response(
+        "complete_multipart_upload",
+        {},
+        {
+            "Bucket": BUCKET,
+            "Key": ANY,
+            "UploadId": "staging-1",
+            "MultipartUpload": {"Parts": [{"ETag": '"etag-1"', "PartNumber": 1}]},
+        },
+    )
+    stubber.add_response(
+        "create_multipart_upload", {"UploadId": "copy-1"}, {"Bucket": BUCKET, "Key": ANY}
+    )
+    stubber.add_response(
+        "upload_part_copy",
+        {"CopyPartResult": {"ETag": '"copy-1"'}},
+        {
+            "Bucket": BUCKET,
+            "Key": ANY,
+            "UploadId": "copy-1",
+            "PartNumber": 1,
+            "CopySource": ANY,
+            "CopySourceRange": f"bytes=0-{len(PAYLOAD) - 1}",
+        },
+    )
+    stubber.add_response(
+        "complete_multipart_upload",
+        {},
+        {
+            "Bucket": BUCKET,
+            "Key": ANY,
+            "UploadId": "copy-1",
+            "MultipartUpload": {"Parts": [{"ETag": '"copy-1"', "PartNumber": 1}]},
+            "IfNoneMatch": "*",
+        },
+    )
+    stubber.add_response("delete_object", {}, {"Bucket": BUCKET, "Key": ANY})
+
+    original = module.MAX_SINGLE_COPY_BYTES
+    try:
+        module.MAX_SINGLE_COPY_BYTES = 1
+        with stubber:
+            with S3ArtifactSink(client, BUCKET) as sink:
+                sink.write(PAYLOAD)
+                sink.commit()
+            stubber.assert_no_pending_responses()
+    finally:
+        module.MAX_SINGLE_COPY_BYTES = original
 
 
 def test_the_listing_call_matches_the_service_model(client) -> None:  # noqa: ANN001
@@ -177,6 +240,7 @@ def test_a_real_client_error_is_recognised_as_a_precondition_failure(client) -> 
     """The tolerated path keys off botocore's error shape, not a string match."""
 
     stubber = Stubber(client)
+    stubber.add_response("head_object", {"ContentLength": 14}, {"Bucket": BUCKET, "Key": ANY})
     stubber.add_client_error(
         "put_object", service_error_code="PreconditionFailed", http_status_code=412
     )
@@ -192,6 +256,7 @@ def test_an_unrelated_client_error_still_propagates(client) -> None:  # noqa: AN
     from botocore.exceptions import ClientError
 
     stubber = Stubber(client)
+    stubber.add_response("head_object", {"ContentLength": 14}, {"Bucket": BUCKET, "Key": ANY})
     stubber.add_client_error("put_object", service_error_code="AccessDenied", http_status_code=403)
 
     with stubber, pytest.raises(ClientError):

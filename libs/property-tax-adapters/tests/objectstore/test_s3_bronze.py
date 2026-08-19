@@ -16,6 +16,7 @@ from acquisition.fixture_server import Route, base_url, serving
 from property_tax_adapters.acquisition import acquire_artifact
 from property_tax_adapters.objectstore import (
     MINIMUM_PART_BYTES,
+    MissingArtifactError,
     S3ArtifactSink,
     S3BronzeStore,
     TruncatedListingError,
@@ -40,7 +41,7 @@ from property_tax_application.bronze import (
     StoredArtifact,
 )
 
-from objectstore.fake_s3 import FakeS3
+from objectstore.fake_s3 import FakeS3, S3Error
 
 BUCKET = "bronze-test"
 BODY = b"account|value\n" + b"".join(f"{n:08d}|{n * 3}\n".encode() for n in range(60_000))
@@ -573,15 +574,122 @@ def test_two_writers_that_both_saw_nothing_do_not_contradict_each_other() -> Non
 
 
 def test_classification_pages_through_a_long_listing() -> None:
-    """A listing that stopped early would miss the divergent artifact."""
+    """A listing that stopped early would miss references beyond the first page.
+
+    Seven references is already divergence, so what this checks is that every
+    page is read: a caller that stopped after two would see one reference and
+    report IDENTICAL for a release with seven different artifacts.
+    """
 
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
     for index in range(7):
         client.objects[partition_ref_key(DALLAS_PARTITION, f"{index:064x}")] = b"{}"
 
-    assert store.classify(DALLAS_PARTITION, f"{6:064x}") is BronzeConflict.IDENTICAL
-    assert store.classify(DALLAS_PARTITION, "f" * 64) is BronzeConflict.DIVERGED
+    assert store.referenced_checksums(DALLAS_PARTITION) == {f"{i:064x}" for i in range(7)}
+    assert store.classify(DALLAS_PARTITION, f"{6:064x}") is BronzeConflict.DIVERGED
+
+
+def test_a_known_checksum_stays_divergent_once_a_second_one_exists() -> None:
+    """Divergence is a property of the release, not of the checksum being asked about.
+
+    An earlier version asked whether *this* checksum was among those referenced,
+    so with two artifacts recorded both sides of a known conflict reported
+    IDENTICAL and the divergence vanished the moment it was stored.
+    """
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    first, second = "a" * 64, "b" * 64
+    for digest in (first, second):
+        client.objects[partition_ref_key(DALLAS_PARTITION, digest)] = b"{}"
+
+    assert store.classify(DALLAS_PARTITION, first) is BronzeConflict.DIVERGED
+    assert store.classify(DALLAS_PARTITION, second) is BronzeConflict.DIVERGED
+    assert store.classify(DALLAS_PARTITION, "c" * 64) is BronzeConflict.DIVERGED
+
+
+def test_a_single_matching_reference_is_identical() -> None:
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    client.objects[partition_ref_key(DALLAS_PARTITION, DIGEST)] = b"{}"
+
+    assert store.classify(DALLAS_PARTITION, DIGEST) is BronzeConflict.IDENTICAL
+    assert store.classify(DALLAS_PARTITION, "c" * 64) is BronzeConflict.DIVERGED
+
+
+def test_a_reference_to_absent_bytes_is_refused() -> None:
+    """A dangling reference makes a genuinely new checksum look already present."""
+
+    store = S3BronzeStore(FakeS3(), BUCKET)
+
+    with pytest.raises(MissingArtifactError):
+        store.reference_partition(DALLAS_PARTITION, "c" * 64)
+
+
+def test_both_entry_points_write_one_reference_body() -> None:
+    """The key is immutable, so two renderings would let a race decide the shape."""
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    acquired = acquired_artifact(client)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        )
+    )
+    from_record = client.objects[partition_ref_key(DALLAS_PARTITION, DIGEST)]
+
+    other = ReleasePartition(jurisdiction_code="tx-dallas", tax_year=2027, release_kind="certified")
+    store.reference_partition(other, DIGEST)
+    from_reference = client.objects[partition_ref_key(other, DIGEST)]
+
+    assert set(json.loads(from_record)) == set(json.loads(from_reference))
+    assert json.loads(from_reference)["artifact_locator"].endswith(artifact_key(DIGEST))
+
+
+def test_a_large_artifact_is_finalized_with_a_ranged_copy() -> None:
+    """CopyObject stops at 5 GB while acquisition permits more.
+
+    Driven with a lowered threshold rather than five gigabytes of memory: the
+    branch is what needs proving, and the byte count is what selects it.
+    """
+
+    import property_tax_adapters.objectstore.s3 as module
+
+    client = FakeS3()
+    payload = b"x" * 40_000
+    original_max, original_part = module.MAX_SINGLE_COPY_BYTES, module.MULTIPART_COPY_PART_BYTES
+    try:
+        module.MAX_SINGLE_COPY_BYTES = 10_000
+        module.MULTIPART_COPY_PART_BYTES = 15_000
+        with S3ArtifactSink(client, BUCKET) as opened:
+            opened.write(payload)
+            locator = opened.commit()
+    finally:
+        module.MAX_SINGLE_COPY_BYTES, module.MULTIPART_COPY_PART_BYTES = original_max, original_part
+
+    digest = hashlib.sha256(payload).hexdigest()
+    assert locator.endswith(artifact_key(digest))
+    assert client.objects[artifact_key(digest)] == payload, "the ranged copy lost bytes"
+    copied = [u for u in client.uploads.values() if u.key == artifact_key(digest)]
+    assert copied and len(copied[0].parts) == 3, "the copy was not ranged"
+
+
+def test_a_failed_cleanup_is_not_swallowed() -> None:
+    """The boundary reports a failed cleanup; suppressing it here would hide that."""
+
+    class RefusesDelete(FakeS3):
+        def delete_object(self, **kwargs: object) -> dict:  # type: ignore[override]
+            raise S3Error("AccessDenied")
+
+    client = RefusesDelete()
+    with serving({"/roll.txt": Route(status=404)}) as server:
+        with pytest.raises(AcquisitionError) as raised:
+            acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink(client), policy=policy())
+
+    assert raised.value.cleanup_failed is True
+    assert any("partial artifact may remain" in note for note in raised.value.__notes__)
 
 
 def test_a_truncated_listing_without_a_token_fails_closed() -> None:
