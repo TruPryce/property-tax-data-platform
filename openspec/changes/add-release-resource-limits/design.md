@@ -64,9 +64,9 @@ Stating that limit here is deliberate. A benchmark whose scope is overclaimed is
 
 ## Decisions and assumptions
 
-D31 through D41 are stated in the proposal. Two assumptions, both checkable at implementation time:
+D31 through D43 are stated in the proposal. Two assumptions, both checkable at implementation time:
 
-- A cgroup v2 host exposes `memory.peak` at the path resolved by joining the mount with what `/proc/self/cgroup` reports, and readability of *that* resolved path — rather than of an assumed root, which a nested cgroup does not populate, though a cgroup namespace legitimately resolves to the root itself — is a sufficient test for which source applies when none is named. Where it is unreadable the `ru_maxrss` fallback is used and named; where a caller named `cgroup_v2` explicitly, an unreadable path raises instead, per D38.
+- A cgroup v2 host exposes `memory.peak` at the path resolved by joining the mount with what `/proc/self/cgroup` reports. Per D43 an unreadable or malformed entry — empty, relative, or containing a traversal — makes the source **unavailable** rather than resolving anywhere, since a resolved path that escaped the mount would answer for a different cgroup entirely. Readability of *that* resolved path — rather than of an assumed root, which a nested cgroup does not populate, though a cgroup namespace legitimately resolves to the root itself — is a sufficient test for which source applies when none is named. Where it is unreadable the `ru_maxrss` fallback is used and named; where a caller named `cgroup_v2` explicitly, an unreadable path raises instead, per D38.
 - A synthetic generator producing ninety-column rows exercises the boundary's memory behaviour representatively. It does not exercise any county's parsing, which is deliberate: this measures the boundary, and a county reader's own costs belong to that county's work.
 
 ## Unresolved decisions
@@ -77,7 +77,17 @@ D31 through D41 are stated in the proposal. Two assumptions, both checkable at i
 
 Nothing existing changes behaviour. The guard is optional, the generator is a test fixture, and the benchmark is a separate target.
 
-The real risk is a benchmark that passes for the wrong reason — a run that never actually exercised the boundary, or one whose two sizes were too close to distinguish shapes. The plan therefore requires the benchmark to report every figure it derived a verdict from — the baseline, both size peaks, both working sets, the ratio, the separate cgroup measurement the absolute used, the source of each, whether the comparative sources agreed, whether the cgroup was verified isolated, and the two verdicts separately — so a reader can tell what was run rather than trusting that something was.
+The real risk is a benchmark that passes for the wrong reason — a run that never actually exercised the boundary, or one whose two sizes were too close to distinguish shapes. The plan therefore requires the benchmark to report every figure it derived a verdict from — the baseline, both size peaks, both working sets, the ratio, both cgroup measurements the absolute bracketed with, the source of each, whether the comparative sources agreed, whether the cgroup was verified isolated, and the two verdicts separately — so a reader can tell what was run rather than trusting that something was.
+
+### Why the absolute check claims no attribution at all
+
+Implementation first tried to establish attribution by comparing the age of the cgroup's root process, measured at 0.04 s inside a dedicated scope against 74,759 s in an ambient shell. The measurement is real and the rule built on it is not: a freshly started shell carrying a few seconds of prior work satisfies an age test while still holding a peak that is not the run's.
+
+D42 replaces it with a bracket — the cgroup peak read before the measurements and after them, bringing the benchmark to five readings in all — which needs no claim about the cgroup's history and therefore cannot be defeated by arranging one.
+
+The bracket does not establish attribution either, and does not try. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen and the run would be failed for memory it did not allocate. What the bracket gives is a **bound on what the figure can be blamed on**: a contaminated start makes any reading unusable, and a clean start with a crossed finish is a conservative failure. Failing closed on a figure that may not be ours is the safe direction to be wrong in; saying the figure *is* ours is a claim nothing here supports.
+
+Isolation is correspondingly narrowed to what membership can establish, and strengthened where it was unsound: a complete membership map, and this process among the members.
 
 ## Testing strategy
 

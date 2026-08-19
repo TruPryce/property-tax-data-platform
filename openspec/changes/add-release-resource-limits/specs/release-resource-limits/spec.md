@@ -48,6 +48,8 @@ Every reported measurement SHALL name its source. The cgroup is the authority th
 
 The cgroup path SHALL be **resolved** by joining the cgroup mount with the relative path `/proc/self/cgroup` reports, and SHALL NOT be *assumed* to be `/sys/fs/cgroup/memory.peak`.
 
+Where that file is unreadable or carries no cgroup v2 entry, the cgroup source SHALL be **unavailable** — never the mount root. Falling back to the root would read another cgroup's figure under the name of this one, which is the failure the resolution rule exists to prevent, reached through the error path. A caller naming `cgroup_v2` therefore receives `PeakRssSourceUnavailable`, and a caller naming nothing receives the documented `rusage` fallback, which is the only case a fallback was ever for.
+
 Resolving is not the same as refusing the root. A process in a cgroup namespace — which is the ordinary case inside a container — legitimately sees `/proc/self/cgroup` report `/`, and there the resolved path **is** the mount root. What must never happen is reading the root without resolving, because a process in a nested cgroup — every process under systemd, and every container under a delegated slice — has no `memory.peak` there. On a measured host the root path was absent entirely while the file existed beneath the reported relative path, and a probe hard-coding the root would silently fall back to `rusage` on exactly the hosts the cgroup source exists to serve.
 
 #### Scenario: A cgroup namespace resolves to the mount root
@@ -235,7 +237,9 @@ The generator SHALL retain no accumulated state across rows, so the instrument d
 
 The acceptance benchmark SHALL evaluate two independent checks, and they do not read the same measurements.
 
-The **scaling** check SHALL take **three** `rusage` measurements, each in its own subprocess, and SHALL fail closed if the three samples do not all report the same source. The **absolute** check SHALL take a **fourth** measurement, from the cgroup, described under its own heading below. Four measurements in total, three of which are comparable to each other and one of which is authoritative about the limit.
+The **scaling** check SHALL take **three** `rusage` measurements, each in its own subprocess, and SHALL fail closed unless all three report the `rusage` source specifically.
+
+Agreement alone is not sufficient. Three matching *cgroup* figures also agree, and agreeing is exactly what makes them useless here — they agree because they describe the same shared subtree rather than the three processes that read them. The check SHALL therefore require the per-process source by name, not merely that the samples match each other. The **absolute** check SHALL take **two** cgroup measurements, one before the run and one after, as D42's bracket requires. **Five measurements in total**: three comparable to each other, and a pair bracketing them that is authoritative about the limit.
 
 A figure from one group SHALL NOT be used to satisfy a check belonging to the other. That is the same incomparability this change states elsewhere, and it applies to the benchmark's own arithmetic first.
 
@@ -245,7 +249,7 @@ No ratio is computed from those three figures here, and none should be: they are
 
 The disqualification does not need a ratio. A source whose reading depends on when a sibling happened to be scheduled cannot produce the same answer twice on one workload, and a check built on it would pass or fail by timing. Nondeterminism disqualifies the source more surely than any single computed value would.
 
-`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth, which the absolute check reads, is a cgroup figure by the same reasoning inverted.
+`ru_maxrss` under `RUSAGE_SELF` is genuinely per-process: on the same host the 300 MiB child reported 314.6 MiB against a sibling's 17.0 MiB. It is therefore the only source of the three comparative measurements, and the benchmark SHALL NOT read the cgroup for them. The fourth and fifth, which the absolute check brackets with, are cgroup figures by the same reasoning inverted.
 
 This does not demote the cgroup source generally; it assigns each reader the grain its question needs. The benchmark's ratio needs comparability between three processes, so it takes `rusage`. Its absolute needs the authority the limit is enforced against, so it takes the cgroup — which is a per-task figure precisely because isolation is required and verified first. The guard needs the grain its per-task budget is expressed in, so it takes `rusage` and offers no cgroup mode at all, as the guard requirement above states.
 
@@ -259,7 +263,7 @@ The three comparative measurements are:
 | `P1` | 250,000 | baseline plus the working set at the smaller size |
 | `P2` | 1,000,000 | baseline plus the working set at the acceptance size |
 
-All three are `rusage` figures and feed the scaling ratio only. The absolute check takes its own cgroup measurement, described below.
+All three are `rusage` figures and feed the scaling ratio only. The absolute check takes its own cgroup **bracket** — a reading either side of them — described below.
 
 The working set at each size SHALL be computed by subtracting the baseline, floored at zero because measurement noise can place a peak below it:
 
@@ -321,6 +325,16 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 
    The Airflow container specifically does **not** satisfy it. The 900 MiB figure is derived from that container holding a scheduler and four concurrent task processes, so its cgroup contains siblings by construction; a peak read there is the container's, not this run's. A rule that treated any container as isolated would be contradicted by the very deployment the budget was computed from. The `make` target SHALL document this invocation, and SHALL NOT wrap itself in it, so that the isolation a result depended on is visible in the command a reader ran.
 
+   Attribution SHALL NOT be claimed. The absolute check SHALL instead **bracket** the run, which bounds what the figure can be blamed on rather than establishing whose it is. The benchmark SHALL read the cgroup peak before its measurements and after them, and SHALL treat an initial reading at or above the limit as **indeterminate**: a cgroup that arrived contaminated cannot yield an attributable figure, and no property of the cgroup observable from inside changes that. Initial below and final below is a pass; initial below and final at or above is a failure.
+
+   That failing verdict SHALL be described as **conservative rather than attributive**. Isolation is verified at the end rather than continuously, so a process that joined the cgroup and left between the two readings would go unseen, and the run would be failed for memory it did not allocate. Failing closed on a figure that may not be this run's is the safe direction to be wrong in; claiming the figure *is* this run's would not be, and the specification SHALL NOT claim it.
+
+   A rule comparing the age of the cgroup's root process SHALL NOT be used for this. It appears to establish that the cgroup was created for the run and does not: a freshly started shell carrying a few seconds of prior work satisfies it.
+
+   The initial reading, the isolation check, and the final reading SHALL be taken against **one pinned cgroup identity**, resolved once and re-verified at the end. A process can be migrated between cgroups while it runs, and three independent resolutions would then bracket two different cgroups and report the difference as this run's memory. Where the identity changed, the absolute SHALL be **indeterminate**.
+
+   Verification SHALL require a **complete** membership map: every pid listed in `cgroup.procs` must have a readable parent, and one that does not invalidates the map rather than being omitted from it, because an omitted member is how a foreign tree becomes a clean-looking single one. It SHALL also require the benchmark's own process to be a member, since one tidy tree that is not this run says nothing about the figure being read.
+
    Verification SHALL check the **whole subtree**, not the one cgroup's direct membership.
 
    `cgroup.procs` lists only processes attached directly to that cgroup, while `memory.peak` charges the cgroup **and all of its descendants**. A foreign process in a child cgroup therefore raises the peak while appearing nowhere in `cgroup.procs`, so a check reading only that file would certify isolation it does not have — the same defect as the shared-cgroup ratio, arriving through the absolute check and through the file that was supposed to prevent it.
@@ -349,6 +363,29 @@ The benchmark SHALL apply both checks and SHALL fail if either fails:
 - **WHEN** it checks isolation
 - **THEN** it reports the absolute indeterminate and names the invocation that would provide isolation
 - **THEN** it does not create a cgroup or acquire privileges to measure itself
+
+#### Scenario: A contaminated cgroup yields an indeterminate absolute
+- **GIVEN** a cgroup whose peak already stands at or above the limit before the run begins
+- **WHEN** the benchmark brackets its measurements
+- **THEN** the absolute is indeterminate, because no reading from that cgroup is attributable
+- **THEN** the verdict does not depend on how old the cgroup or its root process is
+
+#### Scenario: A member whose parent cannot be read invalidates the map
+- **GIVEN** a `cgroup.procs` listing a pid whose parent is unreadable
+- **WHEN** isolation is verified
+- **THEN** the map is treated as incomplete rather than the member omitted
+- **THEN** isolation is not established
+
+#### Scenario: A cgroup that does not contain this process is not isolation
+- **GIVEN** a cgroup holding a single complete tree that this process is not part of
+- **WHEN** isolation is verified
+- **THEN** isolation is not established, because nothing ties that figure to this run
+
+#### Scenario: An unreadable /proc/self/cgroup makes the source unavailable
+- **GIVEN** a host where `/proc/self/cgroup` cannot be read
+- **WHEN** `read_peak_rss` is called naming `cgroup_v2`
+- **THEN** it raises `PeakRssSourceUnavailable` rather than reading the mount root
+- **THEN** a call naming no source returns the `rusage` fallback
 
 #### Scenario: Isolation is verified rather than assumed
 - **GIVEN** a cgroup whose `cgroup.procs` lists a process outside this run
@@ -403,7 +440,7 @@ The guard value also bounds what the scaling check can detect, and that limit is
 
 #### Scenario: A materially retaining implementation fails even when it fits
 - **GIVEN** a boundary that accumulates rows, whose **cgroup** peak at 1,000,000 rows happens to fall under 900 MiB
-- **WHEN** the benchmark takes its four measurements
+- **WHEN** the benchmark takes its five measurements
 - **THEN** `W2` is approximately four times `W1`
 - **THEN** `scaling_ratio` exceeds 1.5 and the benchmark fails on the scaling check even though the absolute check passed
 - **THEN** the passing absolute is read from the cgroup figure and not from `P2`, which is a `rusage` measurement and settles nothing about the limit
@@ -426,6 +463,22 @@ The guard value also bounds what the scaling check can detect, and that limit is
 - **THEN** none of them reports a figure describing its own process
 - **THEN** repeating the same workload does not reproduce the same three figures, because each depends on when its reader was scheduled
 - **THEN** the benchmark SHALL NOT use the cgroup source for these measurements
+
+#### Scenario: Three matching cgroup samples are refused as well
+- **GIVEN** three samples that agree with each other and all name `cgroup_v2`
+- **WHEN** the scaling check evaluates them
+- **THEN** it is indeterminate, because agreement between shared-subtree figures is what makes them useless rather than what makes them comparable
+
+#### Scenario: An incomparable set publishes no ratio
+- **GIVEN** a set of samples the scaling check refused
+- **WHEN** the run reports
+- **THEN** no scaling ratio is printed for them, since a number a reader can quote is worse than none where the check itself declined to use it
+
+#### Scenario: The bracket is taken against one pinned cgroup
+- **GIVEN** a run whose process is migrated to a different cgroup partway through
+- **WHEN** the final reading is taken
+- **THEN** the identity is found to differ from the pinned one and the absolute is indeterminate
+- **THEN** two different cgroups are not bracketed against each other
 
 #### Scenario: Mixed sources are refused rather than ratioed
 - **GIVEN** three samples of which at least one names a different source
@@ -469,7 +522,7 @@ The benchmark SHALL be a `make` target rather than a `pytest` test, because issu
 
 It SHALL require no network.
 
-It SHALL report the row count, the column count, the baseline `B`, the two size peaks `P1` and `P2`, the derived working sets `W1` and `W2`, the computed `scaling_ratio`, the separate cgroup figure the absolute check used, the source of every measurement, whether the three comparative sources agreed, whether the cgroup was verified isolated, and the verdict of each of the two checks **separately** — including `indeterminate` where that is the answer.
+It SHALL report the row count, the column count, the baseline `B`, the two size peaks `P1` and `P2`, the derived working sets `W1` and `W2`, the computed `scaling_ratio`, both cgroup figures the absolute check bracketed, before and after, the source of every measurement, whether the three comparative sources agreed, whether the cgroup was verified isolated, and the verdict of each of the two checks **separately** — including `indeterminate` where that is the answer.
 
 A result that does not say what was run cannot be checked by a reader; a peak that does not name its source cannot be compared with another; and two checks reported as one verdict hide which of them actually passed.
 
