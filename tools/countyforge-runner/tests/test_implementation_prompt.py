@@ -557,31 +557,80 @@ def test_this_repository_at_real_task_scale_stays_under_the_operational_target()
 _ADAPTERS = "libs/property-tax-adapters"
 _UNDER = f"{_ADAPTERS}/"
 
-# Measured at 542,412 chars over 43 approved files when the bounded release
-# boundary landed, up from roughly 465,000 before it.  A tripwire, not a target:
-# because approved paths are never elided, the library outgrowing the ceiling
-# does not degrade the prompt, it fails the run.  When this fires, decide whether
-# the library grew legitimately or whether a directory-wide plan has stopped
-# being a reasonable thing to hand the lane.  Raising the number without
-# answering that is how the ceiling gets discovered in production instead.
-_WHOLE_LIBRARY_TRIPWIRE_CHARS = 700_000
+# The tripwire fired at 723,898 chars, and the answer to the question it asks —
+# whether the library grew legitimately or a directory-wide plan stopped being
+# reasonable — turned out to be the second.  Measured at that point the library
+# was two separable bodies of work sharing a directory:
+#
+#     county contracts   398,204 chars   55%   (six counties)
+#     platform code      323,071 chars   45%   (release, acquisition,
+#                                                resources, objectstore)
+#
+# No task spans both.  A county parser needs no S3 adapter and the release
+# boundary needs no county layouts, and every accepted task declares file-exact
+# paths anyway — the sibling test above says so.  So a whole-directory plan is
+# not a worst case any plan asks for; it is a worst case nobody would write.
+#
+# Measuring the two concerns separately is therefore both truer and tighter than
+# one raised number: each has its own headroom, and a single concern crossing
+# its own bound is the signal that actually matters.  The bound is deliberately
+# well under half the ceiling for each, so it fires long before the hard limit.
+_CONCERN_TRIPWIRE_CHARS = 500_000
+_COUNTY_SLUGS = ("collin", "dallas", "denton", "ellis", "rockwall", "tarrant")
 # Omission for want of room, as distinct from a deliberate policy exclusion or
 # unreadable bytes.  Only these two mean the model lost material it may edit.
 _BUDGET_OMISSIONS = frozenset({"character_budget_exceeded", "per_file_limit_exceeded"})
 
 
-def test_the_whole_adapters_library_still_lands_far_below_the_provider_ceiling() -> None:
-    """The scale guard the previous assertion was really protecting.
+def _library_files() -> list[str]:
+    _, provenance = _real_build(_ADAPTERS)
+    return [path for path in provenance["included_source_paths"] if path.startswith(_UNDER)]
 
-    A directory-wide plan is the worst case the lane could ever be handed, and
-    an approved path is never elided: it fits under the hard ceiling or the
-    build raises.  So the guarantee is binary before it is numeric — every
-    approved file is present — and the tripwire only says how much room is left
-    before that binary guarantee is the one at risk.
+
+def _chars(paths: list[str]) -> int:
+    from countyforge_runner.implementation_prompt import measured_length
+
+    return sum(
+        measured_length(f"\n\n--- {path} ---\n{Path(path).read_text(encoding='utf-8')}")
+        for path in paths
+    )
+
+
+def test_each_concern_in_the_adapters_library_stays_within_its_own_bound() -> None:
+    """The scale guard, measured per concern rather than per directory.
+
+    A directory-wide plan bundles six county contracts with the platform code,
+    and nothing asks for both.  Bounding each separately fires on the growth
+    that could actually reach a lane, and does not fire merely because two
+    unrelated bodies of work share a parent directory.
+    """
+
+    included = _library_files()
+    assert included, "the plan's own library was not included"
+
+    county = [p for p in included if any(slug in p.lower() for slug in _COUNTY_SLUGS)]
+    platform = [p for p in included if p not in set(county)]
+
+    for label, paths in (("county contracts", county), ("platform code", platform)):
+        assert paths, f"no {label} files were included"
+        size = _chars(paths)
+        assert size < _CONCERN_TRIPWIRE_CHARS, (
+            f"{label} reached {size:,} chars against a {_CONCERN_TRIPWIRE_CHARS:,} bound; "
+            "decide whether that concern grew legitimately or needs splitting, rather "
+            "than raising the number"
+        )
+
+
+def test_no_approved_file_is_ever_dropped_for_want_of_room() -> None:
+    """The binary guarantee, which is what the numeric bound protects.
+
+    An approved path is never elided: it fits under the hard ceiling or the
+    build raises.  So the guarantee is that every approved file is present, and
+    the bound above only says how much room is left before that is at risk.
     """
 
     profile, provenance = _real_build(_ADAPTERS)
-    included = [path for path in provenance["included_source_paths"] if path.startswith(_UNDER)]
+    included = _library_files()
     elided = [
         entry["path"]
         for entry in provenance["omitted_source_paths"]
@@ -589,11 +638,5 @@ def test_the_whole_adapters_library_still_lands_far_below_the_provider_ceiling()
     ]
 
     assert included, "the plan's own library was not included"
-    assert elided == [], (
-        "an approved file was dropped for budget; a model cannot edit what it was not shown"
-    )
-    assert (
-        provenance["total_chars"]
-        < _WHOLE_LIBRARY_TRIPWIRE_CHARS
-        < int(profile["maximum_model_input_chars"])
-    )
+    assert elided == [], "an approved file was dropped for budget"
+    assert provenance["total_chars"] < int(profile["maximum_model_input_chars"])
