@@ -18,8 +18,10 @@ from property_tax_adapters.objectstore import (
     MINIMUM_PART_BYTES,
     S3ArtifactSink,
     S3BronzeStore,
+    TruncatedListingError,
+    artifact_key,
     manifest_key,
-    object_key,
+    partition_ref_key,
     serialize_manifest,
 )
 from property_tax_application.acquisition import (
@@ -38,12 +40,15 @@ from property_tax_application.bronze import (
     StoredArtifact,
 )
 
-from objectstore.fake_s3 import FakeS3, S3Error
+from objectstore.fake_s3 import FakeS3
 
 BUCKET = "bronze-test"
 BODY = b"account|value\n" + b"".join(f"{n:08d}|{n * 3}\n".encode() for n in range(60_000))
 DIGEST = hashlib.sha256(BODY).hexdigest()
-DALLAS = (ReleasePartition(jurisdiction_code="tx-dallas", tax_year=2026, release_kind="certified"),)
+DALLAS_PARTITION = ReleasePartition(
+    jurisdiction_code="tx-dallas", tax_year=2026, release_kind="certified"
+)
+DALLAS = (DALLAS_PARTITION,)
 
 
 def policy() -> AcquisitionPolicy:
@@ -55,16 +60,22 @@ def policy() -> AcquisitionPolicy:
     )
 
 
-def sink(client: FakeS3, key: str = "bronze/artifact") -> S3ArtifactSink:
-    return S3ArtifactSink(client, BUCKET, key)
+def sink(client: FakeS3) -> S3ArtifactSink:
+    """No destination is chosen here: the sink names the object by its content."""
+
+    return S3ArtifactSink(client, BUCKET)
+
+
+def artifact_bytes(client: FakeS3, digest: str) -> bytes:
+    return client.objects[artifact_key(digest)]
 
 
 # --------------------------------------------------------------------------
-# Streaming into S3
+# Streaming, and the destination the sink chooses
 # --------------------------------------------------------------------------
 
 
-def test_an_artifact_streams_into_s3_and_commits_to_a_locator() -> None:
+def test_an_artifact_streams_into_s3_and_commits_to_its_content_address() -> None:
     client = FakeS3()
     with serving({"/roll.txt": Route(body=BODY)}) as server:
         acquired = acquire_artifact(
@@ -72,8 +83,55 @@ def test_an_artifact_streams_into_s3_and_commits_to_a_locator() -> None:
         )
 
     assert acquired.sha256 == DIGEST
-    assert acquired.locator == f"s3://{BUCKET}/bronze/artifact"
-    assert client.objects["bronze/artifact"] == BODY
+    assert acquired.locator == f"s3://{BUCKET}/{artifact_key(DIGEST)}"
+    assert artifact_bytes(client, DIGEST) == BODY
+
+
+def test_two_different_artifacts_cannot_overwrite_one_another() -> None:
+    """The defect a caller-chosen key made possible, stated as its own case.
+
+    An earlier design took the destination from the caller, so two acquisitions
+    could name the same key and the second silently replaced bytes the first
+    manifest still pointed at. Naming an object by its content makes that
+    unrepresentable rather than merely discouraged.
+    """
+
+    client = FakeS3()
+    payloads = (b"first release bytes", b"second release bytes")
+    locators = []
+    for payload in payloads:
+        with sink(client) as opened:
+            opened.write(payload)
+            locators.append(opened.commit())
+
+    assert len(set(locators)) == 2, "two different artifacts shared one locator"
+    for payload in payloads:
+        digest = hashlib.sha256(payload).hexdigest()
+        assert artifact_bytes(client, digest) == payload, f"{payload!r} was overwritten"
+
+
+def test_the_same_bytes_twice_land_on_one_object() -> None:
+    """Content-addressing means a repeat acquisition is not a second artifact."""
+
+    client = FakeS3()
+    for _ in range(2):
+        with sink(client) as opened:
+            opened.write(b"identical")
+            locator = opened.commit()
+
+    digest = hashlib.sha256(b"identical").hexdigest()
+    assert locator == f"s3://{BUCKET}/{artifact_key(digest)}"
+    assert [k for k in client.objects if k.startswith("bronze/artifacts/")] == [
+        artifact_key(digest)
+    ]
+
+
+def test_no_staging_object_survives_a_commit() -> None:
+    client = FakeS3()
+    with serving({"/roll.txt": Route(body=BODY)}) as server:
+        acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink(client), policy=policy())
+
+    assert client.staging_objects == []
 
 
 def test_the_object_arrives_in_parts_rather_than_one_body() -> None:
@@ -86,15 +144,14 @@ def test_the_object_arrives_in_parts_rather_than_one_body() -> None:
 
     upload = next(iter(client.uploads.values()))
     assert len(upload.parts) > 1, "the artifact was uploaded as a single part"
-    assert client.objects["bronze/artifact"] == big
+    assert artifact_bytes(client, hashlib.sha256(big).hexdigest()) == big
 
 
 def test_no_part_below_the_minimum_is_sent_except_the_last() -> None:
     """S3 rejects an undersized non-final part at completion, not at write."""
 
-    big = BODY * 12
     client = FakeS3()
-    with serving({"/roll.txt": Route(body=big)}) as server:
+    with serving({"/roll.txt": Route(body=BODY * 12)}) as server:
         acquire_artifact(url=f"{base_url(server)}/roll.txt", sink=sink(client), policy=policy())
 
     upload = next(iter(client.uploads.values()))
@@ -113,12 +170,23 @@ def test_an_empty_artifact_still_becomes_an_object() -> None:
         )
 
     assert acquired.byte_count == 0
-    assert client.objects["bronze/artifact"] == b""
+    assert artifact_bytes(client, hashlib.sha256(b"").hexdigest()) == b""
+
+
+def test_the_sink_hashes_what_it_writes() -> None:
+    """It must, because only it can name the destination after the last byte."""
+
+    client = FakeS3()
+    with sink(client) as opened:
+        opened.write(b"abc")
+        opened.write(b"def")
+        assert opened.sha256 == hashlib.sha256(b"abcdef").hexdigest()
+        opened.commit()
 
 
 def test_a_part_size_below_the_s3_minimum_is_refused_at_construction() -> None:
     with pytest.raises(ValueError, match="at least"):
-        S3ArtifactSink(FakeS3(), BUCKET, "k", part_bytes=1024)
+        S3ArtifactSink(FakeS3(), BUCKET, part_bytes=1024)
 
 
 # --------------------------------------------------------------------------
@@ -127,8 +195,6 @@ def test_a_part_size_below_the_s3_minimum_is_refused_at_construction() -> None:
 
 
 def test_a_failed_transfer_leaves_no_object_and_no_orphaned_parts() -> None:
-    """The upload is aborted, so nothing accrues storage and nothing is visible."""
-
     client = FakeS3()
     route = Route(body=BODY, declared_length=len(BODY), send_bytes=len(BODY) // 3)
     with serving({"/roll.txt": route}) as server:
@@ -137,6 +203,7 @@ def test_a_failed_transfer_leaves_no_object_and_no_orphaned_parts() -> None:
 
     assert raised.value.failure is AcquisitionFailure.TRUNCATED_ARTIFACT
     assert client.objects == {}, "a partial object was exposed"
+    assert client.staging_objects == []
     assert client.orphaned_parts == 0
     assert all(upload.aborted for upload in client.uploads.values())
 
@@ -169,7 +236,66 @@ def test_a_checksum_mismatch_discards_the_upload() -> None:
 def test_abort_is_safe_when_the_upload_never_started() -> None:
     """A caller should not have to know which failures created an upload."""
 
-    S3ArtifactSink(FakeS3(), BUCKET, "k").abort()
+    S3ArtifactSink(FakeS3(), BUCKET).abort()
+
+
+# --------------------------------------------------------------------------
+# Artifact identity does not depend on any partition
+# --------------------------------------------------------------------------
+
+
+def test_the_artifact_key_names_the_checksum_and_nothing_else() -> None:
+    """A key derived from a partition would make identity depend on which
+    release happened to be noticed first."""
+
+    assert artifact_key(DIGEST) == f"bronze/artifacts/{DIGEST}"
+    for partition in DALLAS_PARTITION.jurisdiction_code, str(DALLAS_PARTITION.tax_year):
+        assert partition not in artifact_key(DIGEST)
+
+
+def test_one_artifact_serves_several_partitions_without_duplicating_bytes() -> None:
+    """A measured Collin archive carries current and certified for two years."""
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    partitions = (
+        ReleasePartition(jurisdiction_code="tx-collin", tax_year=2025, release_kind="certified"),
+        ReleasePartition(jurisdiction_code="tx-collin", tax_year=2026, release_kind="current"),
+    )
+    acquired = acquired_artifact(client)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired, partitions=partitions, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        )
+    )
+
+    stored = [
+        k for k in client.objects if k.startswith("bronze/artifacts/") and not k.endswith(".json")
+    ]
+    assert stored == [artifact_key(DIGEST)], "the bytes were duplicated per partition"
+    for partition in partitions:
+        assert partition_ref_key(partition, DIGEST) in client.objects
+
+
+def test_a_partition_discovered_later_attaches_without_editing_the_manifest() -> None:
+    """A release noticed afterwards does not change what was acquired."""
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    acquired = acquired_artifact(client)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        )
+    )
+    before = client.objects[manifest_key(DIGEST)]
+
+    late = ReleasePartition(jurisdiction_code="tx-dallas", tax_year=2027, release_kind="current")
+    store.reference_partition(late, DIGEST)
+
+    assert client.objects[manifest_key(DIGEST)] == before, "the manifest was edited"
+    assert partition_ref_key(late, DIGEST) in client.objects
+    assert store.classify(late, DIGEST) is BronzeConflict.IDENTICAL
 
 
 # --------------------------------------------------------------------------
@@ -177,7 +303,7 @@ def test_abort_is_safe_when_the_upload_never_started() -> None:
 # --------------------------------------------------------------------------
 
 
-def acquired_artifact(client: FakeS3, body: bytes = BODY) -> object:
+def acquired_artifact(client: FakeS3, body: bytes = BODY):  # noqa: ANN201 - the boundary's type
     with serving({"/roll.txt": Route(body=body, headers={"Content-Type": "text/plain"})}) as server:
         return acquire_artifact(
             url=f"{base_url(server)}/roll.txt", sink=sink(client), policy=policy()
@@ -196,31 +322,37 @@ def test_a_manifest_records_what_the_acquisition_established() -> None:
     assert manifest.artifact.sha256 == DIGEST
     assert manifest.artifact.byte_count == len(BODY)
     assert manifest.artifact.media_type == "text/plain"
-    assert manifest.artifact.locator == acquired.locator  # type: ignore[attr-defined]
+    assert manifest.artifact.locator == acquired.locator
     assert manifest.acquired_at == stamp
     assert manifest.manifest_version == BRONZE_MANIFEST_VERSION
+
+
+def test_a_manifest_stores_no_conflict_verdict() -> None:
+    """A stored verdict is a claim about what else existed when a writer looked."""
+
+    assert "conflict" not in ReleaseManifest.__dataclass_fields__
 
 
 def test_the_store_records_a_manifest_beside_its_artifact() -> None:
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
     acquired = acquired_artifact(client)
-    manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+
+    locator = store.record(
+        ReleaseManifest.from_acquisition(
+            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        )
     )
 
-    locator = store.record(manifest)
-
-    key = manifest_key(DALLAS, DIGEST)
+    key = manifest_key(DIGEST)
     assert locator == f"s3://{BUCKET}/{key}"
-    assert key.startswith(object_key(DALLAS, DIGEST))
-    payload = json.loads(client.objects[key])
-    assert payload["artifact"]["sha256"] == DIGEST
+    assert json.loads(client.objects[key])["artifact"]["sha256"] == DIGEST
     assert client.content_types[key] == "application/json"
 
 
-def test_a_recorded_manifest_is_never_overwritten() -> None:
-    """Bronze keeps what it was given; a correction is a new version."""
+def test_a_second_writer_does_not_replace_a_recorded_manifest() -> None:
+    """Both writers succeed and the first record survives, because both describe
+    the same artifact — but neither overwrote the other."""
 
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
@@ -229,16 +361,18 @@ def test_a_recorded_manifest_is_never_overwritten() -> None:
         acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
     )
     store.record(manifest)
+    first = client.objects[manifest_key(DIGEST)]
 
-    with pytest.raises(S3Error) as raised:
-        store.record(manifest)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired, partitions=DALLAS, acquired_at=datetime(2026, 9, 1, tzinfo=UTC)
+        )
+    )
 
-    assert raised.value.code == "PreconditionFailed"
+    assert client.objects[manifest_key(DIGEST)] == first, "a recorded manifest was replaced"
 
 
 def test_the_serialized_manifest_is_stable_across_runs() -> None:
-    """Two renderings of one manifest must not differ by key order."""
-
     client = FakeS3()
     acquired = acquired_artifact(client)
     manifest = ReleaseManifest.from_acquisition(
@@ -247,6 +381,21 @@ def test_the_serialized_manifest_is_stable_across_runs() -> None:
 
     assert serialize_manifest(manifest) == serialize_manifest(manifest)
     assert json.loads(serialize_manifest(manifest))["manifest_version"] == 1
+
+
+def test_partition_order_does_not_change_the_serialized_bytes() -> None:
+    """Two orderings of one set of partitions are one manifest, not two."""
+
+    client = FakeS3()
+    acquired = acquired_artifact(client)
+    a = ReleasePartition(jurisdiction_code="tx-collin", tax_year=2025, release_kind="certified")
+    b = ReleasePartition(jurisdiction_code="tx-collin", tax_year=2026, release_kind="current")
+    stamp = datetime(2026, 8, 19, tzinfo=UTC)
+
+    forward = ReleaseManifest.from_acquisition(acquired, partitions=(a, b), acquired_at=stamp)
+    reverse = ReleaseManifest.from_acquisition(acquired, partitions=(b, a), acquired_at=stamp)
+
+    assert serialize_manifest(forward) == serialize_manifest(reverse)
 
 
 def test_a_manifest_carries_no_credential_from_a_signed_url() -> None:
@@ -262,29 +411,22 @@ def test_a_manifest_carries_no_credential_from_a_signed_url() -> None:
     )
 
     rendered = serialize_manifest(manifest)
-    assert "SECRET-SIG" not in rendered
-    assert "signature=" not in rendered
+    assert "SECRET-SIG" not in rendered and "signature=" not in rendered
 
 
 def test_a_manifest_refuses_an_unsanitized_source_url() -> None:
     """Restated here because a manifest may be built without the boundary."""
 
     with pytest.raises(ValueError, match="must be sanitized"):
-        ReleaseManifest(
-            partitions=DALLAS,
-            artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
-            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
-            source_url="https://cad.example.gov/roll.zip?token=SECRET",
-            response=ResponseMetadata(status=200),
-        )
+        build_manifest(datetime(2026, 8, 19, tzinfo=UTC), source_url="https://c.gov/r.zip?t=SECRET")
 
 
-def build_manifest(stamp: datetime) -> ReleaseManifest:
+def build_manifest(stamp: datetime, source_url: str = "https://cad.example.gov/roll.zip"):  # noqa: ANN201
     return ReleaseManifest(
         partitions=DALLAS,
         artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
         acquired_at=stamp,
-        source_url="https://cad.example.gov/roll.zip",
+        source_url=source_url,
         response=ResponseMetadata(status=200),
     )
 
@@ -297,111 +439,14 @@ def test_a_naive_acquisition_instant_is_refused() -> None:
 
 
 def test_an_aware_instant_in_any_zone_is_accepted_and_normalized() -> None:
-    """Awareness makes the instant unambiguous; the zone it is written in does not.
+    """Awareness makes the instant unambiguous; the zone it is written in does not."""
 
-    Rejecting a well-defined time for being expressed in the wrong words would
-    be strictness without a reason, and serialization normalizes to UTC.
-    """
-
-    elsewhere = timezone(timedelta(hours=-5))
-    stamp = datetime(2026, 8, 19, 7, 0, tzinfo=elsewhere)
+    stamp = datetime(2026, 8, 19, 7, 0, tzinfo=timezone(timedelta(hours=-5)))
 
     manifest = build_manifest(stamp)
 
     assert manifest.acquired_at == stamp
     assert json.loads(serialize_manifest(manifest))["acquired_at"] == "2026-08-19T12:00:00+00:00"
-
-
-# --------------------------------------------------------------------------
-# Conflicting content
-# --------------------------------------------------------------------------
-
-
-def test_a_first_acquisition_is_new() -> None:
-    store = S3BronzeStore(FakeS3(), BUCKET)
-
-    assert store.classify(DALLAS, DIGEST) is BronzeConflict.NEW
-
-
-def test_the_same_bytes_twice_are_identical_not_a_conflict() -> None:
-    client = FakeS3()
-    store = S3BronzeStore(client, BUCKET)
-    acquired = acquired_artifact(client)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
-        )
-    )
-
-    assert store.classify(DALLAS, DIGEST) is BronzeConflict.IDENTICAL
-
-
-def test_different_bytes_under_one_identity_diverge_and_both_survive() -> None:
-    """The mutable-source-slot case: Dallas republishes one CURRENT filename."""
-
-    client = FakeS3()
-    store = S3BronzeStore(client, BUCKET)
-    first = acquired_artifact(client)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            first, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
-        )
-    )
-
-    other_body = BODY + b"99999999|1\n"
-    other_digest = hashlib.sha256(other_body).hexdigest()
-
-    assert store.classify(DALLAS, other_digest) is BronzeConflict.DIVERGED
-
-    second = acquired_artifact(client, body=other_body)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            second,
-            partitions=DALLAS,
-            acquired_at=datetime(2026, 8, 20, tzinfo=UTC),
-            conflict=BronzeConflict.DIVERGED,
-        )
-    )
-
-    assert manifest_key(DALLAS, DIGEST) in client.objects
-    assert manifest_key(DALLAS, other_digest) in client.objects, "prior Bronze content was replaced"
-
-
-def test_classification_pages_through_a_long_listing() -> None:
-    """A truncated listing that stopped early would miss the divergent version."""
-
-    client = FakeS3()
-    store = S3BronzeStore(client, BUCKET)
-    for index in range(7):
-        client.objects[manifest_key(DALLAS, f"{index:064x}")] = b"{}"
-
-    assert store.classify(DALLAS, f"{6:064x}") is BronzeConflict.IDENTICAL
-    assert store.classify(DALLAS, "f" * 64) is BronzeConflict.DIVERGED
-
-
-# --------------------------------------------------------------------------
-# One artifact, several logical releases
-# --------------------------------------------------------------------------
-
-
-def test_one_artifact_supports_several_release_partitions() -> None:
-    """A measured Collin archive carries current and certified for two years."""
-
-    client = FakeS3()
-    acquired = acquired_artifact(client)
-    partitions = (
-        ReleasePartition(jurisdiction_code="tx-collin", tax_year=2025, release_kind="certified"),
-        ReleasePartition(jurisdiction_code="tx-collin", tax_year=2026, release_kind="current"),
-    )
-
-    manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=partitions, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
-    )
-
-    assert len(manifest.partitions) == 2
-    assert manifest.artifact.sha256 == DIGEST, "the bytes were duplicated per partition"
-    payload = json.loads(serialize_manifest(manifest))
-    assert len(payload["partitions"]) == 2
 
 
 def test_a_manifest_needs_at_least_one_partition() -> None:
@@ -426,10 +471,6 @@ def test_repeated_partitions_are_refused() -> None:
         )
 
 
-def test_the_store_conforms_to_the_application_port() -> None:
-    assert isinstance(S3BronzeStore(FakeS3(), BUCKET), BronzeStore)
-
-
 def test_a_redirect_chain_reaches_the_manifest_sanitized() -> None:
     client = FakeS3()
     routes = {
@@ -447,3 +488,113 @@ def test_a_redirect_chain_reaches_the_manifest_sanitized() -> None:
     assert len(manifest.redirects) == 1
     assert all(isinstance(hop, RedirectHop) for hop in manifest.redirects)
     assert "SECRET" not in serialize_manifest(manifest)
+
+
+# --------------------------------------------------------------------------
+# Divergence, derived rather than stored
+# --------------------------------------------------------------------------
+
+
+def test_a_first_acquisition_is_new() -> None:
+    assert S3BronzeStore(FakeS3(), BUCKET).classify(DALLAS_PARTITION, DIGEST) is BronzeConflict.NEW
+
+
+def test_the_same_bytes_twice_are_identical_not_a_conflict() -> None:
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired_artifact(client),
+            partitions=DALLAS,
+            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+        )
+    )
+
+    assert store.classify(DALLAS_PARTITION, DIGEST) is BronzeConflict.IDENTICAL
+
+
+def test_different_bytes_under_one_identity_diverge_and_both_survive() -> None:
+    """The mutable-source-slot case: Dallas republishes one CURRENT filename."""
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired_artifact(client),
+            partitions=DALLAS,
+            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+        )
+    )
+
+    other_body = BODY + b"99999999|1\n"
+    other_digest = hashlib.sha256(other_body).hexdigest()
+    assert store.classify(DALLAS_PARTITION, other_digest) is BronzeConflict.DIVERGED
+
+    store.record(
+        ReleaseManifest.from_acquisition(
+            acquired_artifact(client, body=other_body),
+            partitions=DALLAS,
+            acquired_at=datetime(2026, 8, 20, tzinfo=UTC),
+        )
+    )
+
+    assert artifact_bytes(client, DIGEST) == BODY, "prior Bronze content was replaced"
+    assert artifact_bytes(client, other_digest) == other_body
+    assert manifest_key(DIGEST) in client.objects and manifest_key(other_digest) in client.objects
+
+
+def test_two_writers_that_both_saw_nothing_do_not_contradict_each_other() -> None:
+    """Both classify NEW, both write, and the durable state is still coherent.
+
+    Nothing is overwritten, and asking afterwards reports divergence — which is
+    the answer, rather than whichever verdict one writer happened to persist.
+    """
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    other_body = BODY + b"racing\n"
+    other_digest = hashlib.sha256(other_body).hexdigest()
+
+    assert store.classify(DALLAS_PARTITION, DIGEST) is BronzeConflict.NEW
+    assert store.classify(DALLAS_PARTITION, other_digest) is BronzeConflict.NEW
+
+    for body in (BODY, other_body):
+        store.record(
+            ReleaseManifest.from_acquisition(
+                acquired_artifact(client, body=body),
+                partitions=DALLAS,
+                acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+            )
+        )
+
+    assert store.classify(DALLAS_PARTITION, "f" * 64) is BronzeConflict.DIVERGED
+    assert artifact_bytes(client, DIGEST) == BODY
+    assert artifact_bytes(client, other_digest) == other_body
+
+
+def test_classification_pages_through_a_long_listing() -> None:
+    """A listing that stopped early would miss the divergent artifact."""
+
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    for index in range(7):
+        client.objects[partition_ref_key(DALLAS_PARTITION, f"{index:064x}")] = b"{}"
+
+    assert store.classify(DALLAS_PARTITION, f"{6:064x}") is BronzeConflict.IDENTICAL
+    assert store.classify(DALLAS_PARTITION, "f" * 64) is BronzeConflict.DIVERGED
+
+
+def test_a_truncated_listing_without_a_token_fails_closed() -> None:
+    """Returning what arrived would report "nothing there" for "I could not look"."""
+
+    client = FakeS3(truncate_without_token=True)
+    store = S3BronzeStore(client, BUCKET)
+    for index in range(7):
+        client.objects[partition_ref_key(DALLAS_PARTITION, f"{index:064x}")] = b"{}"
+
+    with pytest.raises(TruncatedListingError):
+        store.classify(DALLAS_PARTITION, "f" * 64)
+
+
+def test_the_store_conforms_to_the_application_port() -> None:
+    assert isinstance(S3BronzeStore(FakeS3(), BUCKET), BronzeStore)

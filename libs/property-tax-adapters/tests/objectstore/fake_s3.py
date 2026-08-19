@@ -40,6 +40,8 @@ class FakeS3:
     _next_upload: int = 0
     fail_on_part: int | None = None
     fail_on_complete: bool = False
+    page_size: int = 2
+    truncate_without_token: bool = False
 
     # -- multipart ---------------------------------------------------------
 
@@ -102,6 +104,24 @@ class FakeS3:
             self.content_types[Key] = ContentType
         return {}
 
+    def copy_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        CopySource: dict[str, str],
+        IfNoneMatch: str | None = None,
+    ) -> dict[str, Any]:
+        if IfNoneMatch == "*" and Key in self.objects:
+            raise S3Error("PreconditionFailed")
+        self.objects[Key] = self.objects[CopySource["Key"]]
+        return {}
+
+    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        self.objects.pop(Key, None)
+        self.content_types.pop(Key, None)
+        return {}
+
     def list_objects_v2(
         self,
         *,
@@ -113,12 +133,15 @@ class FakeS3:
         # Paginate at two, so the continuation path is exercised rather than
         # assumed: a listing that never truncates hides a whole branch.
         start = int(ContinuationToken or 0)
-        window = keys[start : start + 2]
-        truncated = start + 2 < len(keys)
+        window = keys[start : start + self.page_size]
+        truncated = start + self.page_size < len(keys)
         page: dict[str, Any] = {"Contents": [{"Key": key} for key in window]}
         if truncated:
             page["IsTruncated"] = True
-            page["NextContinuationToken"] = str(start + 2)
+            # A server that truncates without saying where to continue is the
+            # case a caller must not paper over, so it is reproducible here.
+            if not self.truncate_without_token:
+                page["NextContinuationToken"] = str(start + self.page_size)
         return page
 
     # -- what a test asks about -------------------------------------------
@@ -126,3 +149,7 @@ class FakeS3:
     @property
     def orphaned_parts(self) -> int:
         return sum(len(u.parts) for u in self.uploads.values() if not u.completed)
+
+    @property
+    def staging_objects(self) -> list[str]:
+        return sorted(key for key in self.objects if key.startswith("bronze/staging/"))

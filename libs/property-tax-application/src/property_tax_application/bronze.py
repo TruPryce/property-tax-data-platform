@@ -48,11 +48,16 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class BronzeConflict(StrEnum):
-    """What a store found when asked to record an artifact.
+    """What a store finds when asked about a release identity and a checksum.
 
-    Three outcomes and no fourth, because the interesting case is the middle
-    one: the same release identity arriving with different bytes is not an
-    error to retry and not a duplicate to ignore.
+    Three outcomes and no fourth, because the interesting case is the last one:
+    the same release identity arriving with different bytes is not an error to
+    retry and not a duplicate to ignore.
+
+    Derived at read time and never stored on a manifest.  A stored verdict is a
+    claim about what else existed when some writer looked, and two writers can
+    both look, both see nothing, and both write — so the only honest answer is
+    computed from what durably exists when the question is asked.
     """
 
     #: No artifact was stored for this release identity before.
@@ -149,7 +154,6 @@ class ReleaseManifest:
     source_url: str
     response: ResponseMetadata
     redirects: tuple[RedirectHop, ...] = ()
-    conflict: BronzeConflict = BronzeConflict.NEW
     manifest_version: int = BRONZE_MANIFEST_VERSION
     tool_versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -177,8 +181,6 @@ class ReleaseManifest:
             isinstance(hop, RedirectHop) for hop in self.redirects
         ):
             raise ValueError("redirects must be a tuple of RedirectHop")
-        if not isinstance(self.conflict, BronzeConflict):
-            raise ValueError("conflict must be a BronzeConflict")
         if (
             isinstance(self.manifest_version, bool)
             or not isinstance(self.manifest_version, int)
@@ -209,7 +211,6 @@ class ReleaseManifest:
         *,
         partitions: tuple[ReleasePartition, ...],
         acquired_at: datetime,
-        conflict: BronzeConflict = BronzeConflict.NEW,
         tool_versions: Mapping[str, str] | None = None,
     ) -> ReleaseManifest:
         """Build a manifest from what the acquisition boundary established.
@@ -232,7 +233,6 @@ class ReleaseManifest:
             source_url=acquired.final_url,
             response=acquired.response,
             redirects=acquired.redirects,
-            conflict=conflict,
             tool_versions=dict(tool_versions or {}),
         )
 
@@ -246,19 +246,28 @@ class BronzeStore(Protocol):
     was stored before, and records it.
     """
 
-    def classify(self, partitions: tuple[ReleasePartition, ...], sha256: str) -> BronzeConflict:
-        """Judge this identity and checksum against what is already stored.
+    def classify(self, partition: ReleasePartition, sha256: str) -> BronzeConflict:
+        """Judge this checksum against every artifact the partition references.
 
-        Called before the manifest is written, so a diverged release can be
-        flagged rather than discovered afterwards.
+        A read-time query over durable state, not a verdict to be persisted.
+        One partition rather than a tuple, because divergence is a property of a
+        single release identity and an artifact may serve several.
         """
         ...
 
     def record(self, manifest: ReleaseManifest) -> str:
-        """Persist the manifest immutably and return its locator.
+        """Persist the manifest and its partition references, and return its locator.
 
-        SHALL NOT overwrite a manifest already recorded for this artifact
-        version.  Bronze keeps what it was given; a correction is a new version,
-        not an edit.
+        SHALL NOT overwrite anything already recorded.  Bronze keeps what it was
+        given; a correction is a new artifact version, not an edit.
+        """
+        ...
+
+    def reference_partition(self, partition: ReleasePartition, sha256: str) -> str:
+        """Attach a partition discovered after acquisition to an existing artifact.
+
+        Separate from `record` because a release noticed later does not change
+        what was acquired, and the manifest describing that acquisition is
+        immutable.
         """
         ...
