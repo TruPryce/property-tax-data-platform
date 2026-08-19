@@ -3,8 +3,9 @@
 The memory half of issue #43 decision D5: a per-task budget, a probe that names
 its source, a guard that rejects before the OOM killer acts, and an acceptance
 benchmark that must calibrate itself before its verdict counts. The
-[OpenSpec delta](../../openspec/changes/add-release-resource-limits/specs/release-resource-limits/spec.md)
-is the normative contract until this change is archived and the capability is promoted.
+[OpenSpec capability](../../openspec/specs/release-resource-limits/spec.md) is the normative
+contract; the change that introduced it is
+[archived](../../openspec/changes/archive/2026-08-19-add-release-resource-limits/proposal.md).
 
 The boundary this measures — the protocols, the lifecycle, the vocabulary, and
 the outcome — belongs to the
