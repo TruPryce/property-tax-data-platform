@@ -16,6 +16,7 @@ from acquisition.fixture_server import Route, base_url, serving
 from property_tax_adapters.acquisition import acquire_artifact
 from property_tax_adapters.objectstore import (
     MINIMUM_PART_BYTES,
+    ArtifactMismatchError,
     MissingArtifactError,
     S3ArtifactSink,
     S3BronzeStore,
@@ -706,3 +707,172 @@ def test_a_truncated_listing_without_a_token_fails_closed() -> None:
 
 def test_the_store_conforms_to_the_application_port() -> None:
     assert isinstance(S3BronzeStore(FakeS3(), BUCKET), BronzeStore)
+
+
+# --------------------------------------------------------------------------
+# A manifest must describe the object it is keyed by
+# --------------------------------------------------------------------------
+
+
+def stored_manifest(**overrides) -> ReleaseManifest:  # noqa: ANN003
+    artifact = StoredArtifact(
+        **{
+            "locator": f"s3://{BUCKET}/{artifact_key(DIGEST)}",
+            "sha256": DIGEST,
+            "byte_count": len(BODY),
+            **overrides,
+        }
+    )
+    return ReleaseManifest(
+        partitions=DALLAS,
+        artifact=artifact,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+        source_url="https://cad.example.gov/roll.zip",
+        response=ResponseMetadata(status=200),
+    )
+
+
+def test_a_manifest_naming_another_bucket_is_refused() -> None:
+    """A durable record pointing somewhere other than what it describes."""
+
+    client = FakeS3()
+    acquired_artifact(client)
+    store = S3BronzeStore(client, BUCKET)
+
+    with pytest.raises(ArtifactMismatchError, match="names"):
+        store.record(stored_manifest(locator=f"s3://other-bucket/{artifact_key(DIGEST)}"))
+
+    assert manifest_key(DIGEST) not in client.objects
+
+
+def test_a_manifest_naming_another_key_is_refused() -> None:
+    client = FakeS3()
+    acquired_artifact(client)
+    store = S3BronzeStore(client, BUCKET)
+
+    with pytest.raises(ArtifactMismatchError, match="names"):
+        store.record(stored_manifest(locator=f"s3://{BUCKET}/bronze/artifacts/{'c' * 64}"))
+
+
+def test_a_manifest_disagreeing_about_length_is_refused() -> None:
+    """The stored object's own length is the arbiter, not the manifest's claim."""
+
+    client = FakeS3()
+    acquired_artifact(client)
+    store = S3BronzeStore(client, BUCKET)
+
+    with pytest.raises(ArtifactMismatchError, match="bytes while the stored"):
+        store.record(stored_manifest(byte_count=len(BODY) + 1))
+
+    assert manifest_key(DIGEST) not in client.objects
+
+
+def test_a_manifest_that_agrees_is_recorded() -> None:
+    client = FakeS3()
+    acquired_artifact(client)
+
+    S3BronzeStore(client, BUCKET).record(stored_manifest())
+
+    assert manifest_key(DIGEST) in client.objects
+
+
+# --------------------------------------------------------------------------
+# Only a genuine absence is a missing artifact
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "SlowDown", "InternalError", "RequestTimeout"])
+def test_an_operational_head_failure_is_not_reported_as_missing(code: str) -> None:
+    """ "These bytes do not exist" is a claim about the world.
+
+    Made from a fact about this caller — a denial, a throttle — it is false, and
+    the caller would go on to store something under a checksum it never checked.
+    """
+
+    class Refuses(FakeS3):
+        def head_object(self, **kwargs: object) -> dict:  # type: ignore[override]
+            raise S3Error(code)
+
+    store = S3BronzeStore(Refuses(), BUCKET)
+
+    with pytest.raises(S3Error) as raised:
+        store.reference_partition(DALLAS_PARTITION, DIGEST)
+
+    assert raised.value.code == code
+
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+def test_a_genuine_absence_is_reported_as_missing(code: str) -> None:
+    class Absent(FakeS3):
+        def head_object(self, **kwargs: object) -> dict:  # type: ignore[override]
+            raise S3Error(code)
+
+    with pytest.raises(MissingArtifactError):
+        S3BronzeStore(Absent(), BUCKET).reference_partition(DALLAS_PARTITION, DIGEST)
+
+
+# --------------------------------------------------------------------------
+# A ranged copy that cannot clean itself up says so
+# --------------------------------------------------------------------------
+
+
+def test_a_ranged_copy_whose_own_abort_fails_is_still_reported(tmp_path) -> None:  # noqa: ANN001
+    """The state survives on the sink so the outer abort can try again.
+
+    Holding the upload id in a local and aborting inside the copy's own `except`
+    loses it exactly when both fail — the parts stay and nothing reports it.
+    """
+
+    import property_tax_adapters.objectstore.s3 as module
+
+    class BreaksCopyAndItsCleanup(FakeS3):
+        aborts_refused = 0
+
+        def complete_multipart_upload(self, **kwargs: object) -> dict:  # type: ignore[override]
+            if str(kwargs.get("Key", "")).startswith("bronze/artifacts/"):
+                raise S3Error("InternalError")
+            return super().complete_multipart_upload(**kwargs)  # type: ignore[arg-type]
+
+        def abort_multipart_upload(self, **kwargs: object) -> dict:  # type: ignore[override]
+            if str(kwargs.get("Key", "")).startswith("bronze/artifacts/"):
+                type(self).aborts_refused += 1
+                if type(self).aborts_refused == 1:
+                    raise S3Error("InternalError")
+            return super().abort_multipart_upload(**kwargs)  # type: ignore[arg-type]
+
+    BreaksCopyAndItsCleanup.aborts_refused = 0
+    client = BreaksCopyAndItsCleanup()
+    original = module.MAX_SINGLE_COPY_BYTES
+    try:
+        module.MAX_SINGLE_COPY_BYTES = 1
+        sink_under_test = S3ArtifactSink(client, BUCKET)
+        with pytest.raises(S3Error):
+            with sink_under_test as opened:
+                opened.write(b"payload")
+                opened.commit()
+        # The first abort was refused; the retained state lets this one reach it.
+        sink_under_test.abort()
+    finally:
+        module.MAX_SINGLE_COPY_BYTES = original
+
+    assert BreaksCopyAndItsCleanup.aborts_refused == 2, "the outer abort never retried"
+    assert client.orphaned_parts == 0, "parts survived a cleanup that reported success"
+
+
+def test_a_successful_ranged_copy_leaves_no_upload_to_abort() -> None:
+    import property_tax_adapters.objectstore.s3 as module
+
+    client = FakeS3()
+    original = module.MAX_SINGLE_COPY_BYTES
+    try:
+        module.MAX_SINGLE_COPY_BYTES = 1
+        sink_under_test = S3ArtifactSink(client, BUCKET)
+        with sink_under_test as opened:
+            opened.write(b"payload")
+            opened.commit()
+        sink_under_test.abort()
+    finally:
+        module.MAX_SINGLE_COPY_BYTES = original
+
+    assert client.orphaned_parts == 0
+    assert client.objects[artifact_key(hashlib.sha256(b"payload").hexdigest())] == b"payload"

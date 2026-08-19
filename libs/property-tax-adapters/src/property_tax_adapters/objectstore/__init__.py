@@ -7,6 +7,7 @@ from property_tax_adapters.objectstore.s3 import (
     MULTIPART_COPY_PART_BYTES,
     RELEASE_PREFIX,
     STAGING_PREFIX,
+    ArtifactMismatchError,
     MissingArtifactError,
     S3ArtifactSink,
     S3BronzeStore,
@@ -21,6 +22,7 @@ from property_tax_adapters.objectstore.s3 import (
 
 __all__ = [
     "ARTIFACT_PREFIX",
+    "ArtifactMismatchError",
     "MAX_SINGLE_COPY_BYTES",
     "MINIMUM_PART_BYTES",
     "MissingArtifactError",

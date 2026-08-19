@@ -35,10 +35,12 @@ from property_tax_application.bronze import (
     BronzeConflict,
     ReleaseManifest,
     ReleasePartition,
+    StoredArtifact,
 )
 
 __all__ = [
     "ARTIFACT_PREFIX",
+    "ArtifactMismatchError",
     "MAX_SINGLE_COPY_BYTES",
     "MissingArtifactError",
     "MINIMUM_PART_BYTES",
@@ -78,6 +80,18 @@ ARTIFACT_PREFIX = "bronze/artifacts"
 RELEASE_PREFIX = "bronze/releases"
 
 _PRECONDITION_CODES = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
+#: What S3 says when an object genuinely is not there.  `HeadObject` answers
+#: with a bare 404 and no code, which is why the status is checked too.
+_ABSENT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+class ArtifactMismatchError(Exception):
+    """A manifest describes an object other than the one it is keyed by.
+
+    Refused rather than recorded: a manifest is immutable and durable, so one
+    naming a different bucket, key, or length would be a permanent record
+    pointing at something it does not describe.
+    """
 
 
 class MissingArtifactError(Exception):
@@ -145,13 +159,29 @@ def partition_ref_key(partition: ReleasePartition, sha256: str) -> str:
     return f"{partition_prefix(partition)}{sha256}.ref.json"
 
 
-def _is_precondition_failure(error: BaseException) -> bool:
+def _error_code(error: BaseException) -> str | None:
     code = getattr(error, "code", None)
     if code is None:
         response = getattr(error, "response", None)
         if isinstance(response, dict):
             code = response.get("Error", {}).get("Code")
-    return code in _PRECONDITION_CODES
+    return None if code is None else str(code)
+
+
+def _is_absent(error: BaseException) -> bool:
+    """True only for a genuine absence, never for a denial or a throttle."""
+
+    if _error_code(error) in _ABSENT_CODES:
+        return True
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return bool(status == 404)
+    return False
+
+
+def _is_precondition_failure(error: BaseException) -> bool:
+    return _error_code(error) in _PRECONDITION_CODES
 
 
 class S3ArtifactSink:
@@ -170,6 +200,7 @@ class S3ArtifactSink:
         "_artifact_prefix",
         "_buffer",
         "_bucket",
+        "_copy_upload",
         "_client",
         "_digest",
         "_parts",
@@ -205,6 +236,7 @@ class S3ArtifactSink:
         self._upload_id: str | None = None
         self._digest = hashlib.sha256()
         self._written = 0
+        self._copy_upload: tuple[str, str] | None = None
 
     @property
     def sha256(self) -> str:
@@ -294,6 +326,11 @@ class S3ArtifactSink:
         """
 
         created = self._client.create_multipart_upload(Bucket=self._bucket, Key=final_key)
+        # Recorded on the sink before anything can fail.  Holding the id in a
+        # local and aborting inside this method's own `except` loses it when
+        # that abort itself fails: the parts stay, and `abort` has nothing left
+        # to retry or to report.
+        self._copy_upload = (final_key, created["UploadId"])
         upload_id = created["UploadId"]
         try:
             parts: list[dict[str, object]] = []
@@ -319,11 +356,15 @@ class S3ArtifactSink:
                 IfNoneMatch="*",
             )
         except Exception:
-            # A failed ranged copy must not leave its own upload behind.
+            # A failed ranged copy must not leave its own upload behind, and if
+            # this attempt at that also fails the state survives on the sink so
+            # `abort` can try again and report a cleanup that did not happen.
             self._client.abort_multipart_upload(
                 Bucket=self._bucket, Key=final_key, UploadId=upload_id
             )
+            self._copy_upload = None
             raise
+        self._copy_upload = None
 
     def abort(self) -> None:
         """Discard everything, so no object and no orphaned parts survive.
@@ -338,6 +379,13 @@ class S3ArtifactSink:
                 Bucket=self._bucket, Key=self._staging_key, UploadId=self._upload_id
             )
             self._upload_id = None
+        if self._copy_upload is not None:
+            # The destination upload of a ranged copy that neither completed nor
+            # managed to abort itself.  Its id survives on the sink precisely so
+            # this can reach it, and a failure here propagates like any other.
+            key, upload_id = self._copy_upload
+            self._copy_upload = None
+            self._client.abort_multipart_upload(Bucket=self._bucket, Key=key, UploadId=upload_id)
         # The completed staging object survives a failure between commit's two
         # steps.  A delete that fails is not swallowed: the acquisition boundary
         # reports a failed cleanup as its own fact, and suppressing it here
@@ -426,20 +474,47 @@ class S3BronzeStore:
             separators=(",", ":"),
         ).encode("utf-8")
 
-    def _require_artifact(self, sha256: str) -> None:
-        """Refuse to reference bytes that are not there.
+    def _require_artifact(self, manifest_artifact: StoredArtifact | None, sha256: str) -> None:
+        """Refuse to reference bytes that are not there, or that disagree.
 
         A reference is what `classify` counts, so a dangling one reports an
         artifact that cannot be fetched as though it were stored — and worse,
         makes a genuinely new checksum look already present.
+
+        Only a genuine absence is a missing artifact.  An earlier version turned
+        every `HeadObject` failure into one, so a denied permission or a
+        throttled request said "these bytes do not exist" — which is a claim
+        about the world made from a fact about this caller, and the caller would
+        then have gone on to store something under it.
         """
 
+        head = None
         try:
-            self._client.head_object(Bucket=self._bucket, Key=artifact_key(sha256))
+            head = self._client.head_object(Bucket=self._bucket, Key=artifact_key(sha256))
         except Exception as error:
+            if not _is_absent(error):
+                raise
             raise MissingArtifactError(
                 f"no artifact is stored for {sha256}, so it cannot be referenced"
             ) from error
+
+        if manifest_artifact is None:
+            return
+        # The manifest describes an object; this is where the two are made to
+        # agree.  A manifest naming a different bucket, key, or length would be
+        # a durable record pointing at something other than what it describes.
+        canonical = f"s3://{self._bucket}/{artifact_key(sha256)}"
+        if manifest_artifact.locator != canonical:
+            raise ArtifactMismatchError(
+                f"the manifest names {manifest_artifact.locator} while the artifact for this "
+                f"checksum is at {canonical}"
+            )
+        stored_length = head.get("ContentLength")
+        if stored_length is not None and stored_length != manifest_artifact.byte_count:
+            raise ArtifactMismatchError(
+                f"the manifest records {manifest_artifact.byte_count} bytes while the stored "
+                f"object holds {stored_length}"
+            )
 
     def record(self, manifest: ReleaseManifest) -> str:
         """Persist the manifest and one reference per partition, immutably.
@@ -451,7 +526,7 @@ class S3BronzeStore:
         """
 
         sha256 = manifest.artifact.sha256
-        self._require_artifact(sha256)
+        self._require_artifact(manifest.artifact, sha256)
         self._put_if_absent(
             manifest_key(sha256), serialize_manifest(manifest).encode("utf-8"), "application/json"
         )
@@ -470,7 +545,7 @@ class S3BronzeStore:
         release noticed later does not change what was acquired.
         """
 
-        self._require_artifact(sha256)
+        self._require_artifact(None, sha256)
         key = partition_ref_key(partition, sha256)
         self._put_if_absent(key, self._reference_body(partition, sha256), "application/json")
         return f"s3://{self._bucket}/{key}"
