@@ -7,6 +7,7 @@ structure can be constructed.
 
 from __future__ import annotations
 
+import inspect
 import io
 import os
 import random
@@ -999,20 +1000,30 @@ def test_a_lying_entry_count_is_caught_by_the_recount() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_handle_cannot_be_assembled_by_hand() -> None:
-    """Possession is evidence only if the evidence cannot be manufactured.
+def test_a_handle_produces_its_evidence_rather_than_accepting_it() -> None:
+    """Two attempts at this were wrong before the third.
 
-    The handle took an inspection and a `ZipFile` and believed both, so an
-    empty inspection over an unjudged archive was a complete bypass of every
-    whole-archive rule.
+    First the handle took an inspection and believed it, so a forged one
+    bypassed every whole-archive rule. Then it demanded a module-private token,
+    which is a convention rather than a boundary — one import and the same
+    forgery worked. There is nothing to supply now: the inspection is computed
+    from the archive, so a hand-built handle is a slower way of asking the same
+    question rather than a way around it.
     """
 
-    with pytest.raises(TypeError, match="open_archive"):
-        VerifiedArchive(
-            inspection=ArchiveInspection(members=(), expanded_bytes=0, compressed_bytes=0),
-            policy=policy(),
-            _archive=zipfile.ZipFile(build({"roll.txt": ROW})),
-        )
+    handle = VerifiedArchive(policy=policy(), _archive=zipfile.ZipFile(build({"roll.txt": ROW})))
+
+    assert [member.name for member in handle.inspection.members] == ["roll.txt"]
+    assert "inspection" not in {
+        parameter.name for parameter in inspect.signature(VerifiedArchive).parameters.values()
+    }
+
+
+def test_no_construction_token_exists_to_import() -> None:
+    """A leading underscore is a convention, and conventions are importable."""
+
+    sentinels = [name for name, value in vars(zip_inspection).items() if type(value) is object]
+    assert sentinels == [], f"a caller could import {sentinels} and hand it back"
 
 
 @pytest.mark.parametrize(
@@ -1024,29 +1035,28 @@ def test_a_handle_cannot_be_assembled_by_hand() -> None:
         ("a traversal sibling", {"roll.txt": ROW, "../escape.txt": ROW}, {}),
     ],
 )
-def test_forging_a_handle_would_have_bypassed_whole_archive_rules(
+def test_both_ways_in_reach_the_same_verdict(
     label: str, members: dict[str, bytes], overrides: dict
 ) -> None:
-    """What forgery bought, recorded so the guard is not mistaken for ceremony.
+    """Every rule here is about the archive, so it has nowhere else to run.
 
     The per-member checks on the way out re-apply the rules that are *about a
-    member*. Every rule listed here is about the archive, and has nowhere else
-    to run — which is why the constructor is the place to stop it.
+    member*, which is why they were no substitute when the handle could be
+    forged. Now both entry points judge the whole archive, and the test is that
+    they agree rather than that one of them refuses.
     """
 
     archive = build(members)
     pol = policy(**overrides)
 
-    with pytest.raises(UnsafeArchiveError):
+    with pytest.raises(UnsafeArchiveError) as inspected:
         inspect_zip(archive, pol)
 
     archive.seek(0)
-    with pytest.raises(TypeError, match="open_archive"):
-        VerifiedArchive(
-            inspection=ArchiveInspection(members=(), expanded_bytes=0, compressed_bytes=0),
-            policy=pol,
-            _archive=zipfile.ZipFile(archive),
-        )
+    with pytest.raises(UnsafeArchiveError) as constructed:
+        VerifiedArchive(policy=pol, _archive=zipfile.ZipFile(archive))
+
+    assert constructed.value.violation is inspected.value.violation
 
 
 def test_a_symlink_wearing_a_trailing_slash_is_still_a_symlink() -> None:
@@ -1179,3 +1189,53 @@ def test_the_directory_notion_matches_the_library_on_every_admitted_name() -> No
     for name in ("roll.txt", "nested/", "nested/roll.txt", "a/b/c.csv"):
         info = zipfile.ZipInfo(name)
         assert zip_inspection._claims_directory(info) is info.is_dir(), name
+
+
+@pytest.mark.parametrize(
+    ("label", "method", "expected_encoding"),
+    [("stored", zipfile.ZIP_STORED, 0), ("deflated", zipfile.ZIP_DEFLATED, 2)],
+)
+def test_an_empty_directory_entry_is_admitted_however_it_is_encoded(
+    label: str, method: int, expected_encoding: int
+) -> None:
+    """Compressed size is the encoding of nothing, which is not always nothing.
+
+    Measured for an empty entry: 0 bytes stored, 2 deflated, 14 bzip2, 19 lzma.
+    Reading emptiness off that field refused archives every writer produces —
+    `zipfile` itself emits the two-byte form, so the rule rejected valid input
+    while reporting that a directory "carries 0 bytes", which was the tell.
+    """
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        directory = zipfile.ZipInfo("nested/")
+        directory.compress_type = method
+        archive.writestr(directory, b"")
+        info = zipfile.ZipInfo("nested/roll.txt")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, rows(200))
+    buf.seek(0)
+
+    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as parsed:
+        entry = parsed.getinfo("nested/")
+        assert (entry.file_size, entry.compress_size) == (0, expected_encoding)
+
+    assert [m.name for m in inspect_zip(buf, policy()).members] == ["nested/roll.txt"]
+
+
+def test_a_directory_used_to_park_bytes_is_refused() -> None:
+    """Nothing expands them and nothing counts them, so bound what may sit there."""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        directory = zipfile.ZipInfo("nested/")
+        directory.compress_type = zipfile.ZIP_STORED
+        archive.writestr(directory, b"")
+    data = bytearray(buf.getvalue())
+    struct.pack_into("<I", data, data.rindex(b"PK\x01\x02") + 20, 4096)
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        inspect_zip(io.BytesIO(bytes(data)), policy())
+
+    assert raised.value.violation is ArchiveViolation.UNSUPPORTED_MEMBER_TYPE
+    assert "4096 compressed bytes" in raised.value.detail

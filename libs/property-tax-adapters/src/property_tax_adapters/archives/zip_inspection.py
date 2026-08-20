@@ -44,7 +44,7 @@ import tempfile
 import zipfile
 import zlib
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO
 
@@ -68,6 +68,10 @@ _CHUNK_BYTES = 1024 * 1024
 _S_IFMT = 0o170000
 _S_IFREG = 0o100000
 _S_IFDIR = 0o040000
+
+#: An empty member's compressed encoding, with room above what any method on
+#: the allowlist emits.  Measured: 0 stored, 2 deflated, 14 bzip2, 19 lzma.
+_MAX_DIRECTORY_ENCODING_BYTES = 64
 
 #: Bit 0 of the general-purpose flags marks a member as encrypted.
 _FLAG_ENCRYPTED = 0x1
@@ -170,11 +174,23 @@ def _check_directory_is_empty(info: zipfile.ZipInfo) -> None:
     1 MB expansion ceiling, with the archive reporting 240 bytes expanded.
     """
 
-    if info.file_size or info.compress_size:
+    if info.file_size:
         _refuse(
             ArchiveViolation.UNSUPPORTED_MEMBER_TYPE,
             info.filename,
-            f"directory entry carries {info.file_size} bytes",
+            f"directory entry declares {info.file_size} bytes of content",
+        )
+    # Compressed size is the *encoding* of nothing, which is not always nothing.
+    # Measured for an empty entry: 0 bytes stored, 2 deflated, 14 bzip2, 19
+    # lzma. Reading emptiness off this field refused archives every writer
+    # produces — `zipfile` itself emits the 2-byte form. What it is worth
+    # bounding is a directory used as a place to park bytes, since nothing
+    # expands them and nothing counts them.
+    if info.compress_size > _MAX_DIRECTORY_ENCODING_BYTES:
+        _refuse(
+            ArchiveViolation.UNSUPPORTED_MEMBER_TYPE,
+            info.filename,
+            f"directory entry stores {info.compress_size} compressed bytes",
         )
 
 
@@ -406,46 +422,39 @@ def inspect_zip(
         return _judge(infos, policy)
 
 
-#: Held by this module alone, so `open_archive` is the only way to build the
-#: evidence.  Without it the handle is a public dataclass, and a dataclass a
-#: caller can fill in is a claim rather than a proof.
-_JUDGED = object()
-
-
 @dataclass(frozen=True, slots=True)
 class VerifiedArchive:
-    """An open archive that a whole-archive judgement already passed.
+    """An open archive that a whole-archive judgement has passed.
 
-    Only `open_archive` constructs one, and it does so only after inspection
-    returned, so possession is the evidence. Extraction takes this rather than a
-    source for exactly that reason: there is no argument a caller can pass that
-    skips the judgement, instead of a check that has to be remembered at every
-    entry point.
+    Extraction takes this rather than a source, so there is no argument a caller
+    can pass that skips the judgement instead of a check that has to be
+    remembered at every entry point.
 
-    Which is only true if the handle cannot be assembled by hand. It could be:
-    the constructor took an inspection and a `ZipFile` and believed both.
-    Measured against a forged one — an empty inspection over an unjudged
-    archive — it served a ratio-1,027 bomb, an archive of twenty members under
-    a limit of four, an expansion past its ceiling, and the clean member beside
-    a traversal sibling. That last one is the bypass this class was introduced
-    to close, reopened by the class itself.
+    Which is only worth something if the handle cannot be manufactured. The
+    first attempt took an inspection and believed it, and a forged one served a
+    ratio-1,027 bomb, twenty members under a limit of four, and the clean member
+    beside a traversal sibling. The second attempt demanded a module-private
+    token, which is a convention rather than a boundary: one import of `_JUDGED`
+    and the same forgery worked.
 
-    The per-member checks that run on the way out are not a substitute. They
-    re-apply the rules that are *about a member*; the rules a forgery evades are
-    the ones about the archive, and those have nowhere else to run.
+    So the handle no longer accepts evidence — it produces it. `inspection` is
+    computed here from the archive itself, which leaves nothing to supply and
+    nothing to guess. Constructing one directly is not a bypass but a slower way
+    of asking the same question, and it answers honestly.
+
+    What a directly constructed handle does skip is the preflight, which bounds
+    a central directory before it is parsed. That is not a rule about the
+    archive; it is a bound on an allocation, and a caller holding an open
+    `ZipFile` has already performed it. `open_archive` is the path that has the
+    chance to refuse first, which is why it is the one to reach for.
     """
 
-    inspection: ArchiveInspection
     policy: ArchivePolicy
     _archive: zipfile.ZipFile
-    _judged: object = None
+    inspection: ArchiveInspection = field(init=False)
 
     def __post_init__(self) -> None:
-        if self._judged is not _JUDGED:
-            raise TypeError(
-                "VerifiedArchive is produced by open_archive, which is what makes "
-                "holding one evidence that the archive was judged"
-            )
+        object.__setattr__(self, "inspection", _judge(self._archive.infolist(), self.policy))
 
     def _member(self, member: str) -> zipfile.ZipInfo:
         try:
@@ -552,7 +561,4 @@ def open_archive(
                 ArchiveViolation.UNREADABLE_ARCHIVE, "", type(error).__name__
             ) from error
         with archive:
-            inspection = _judge(archive.infolist(), policy)
-            yield VerifiedArchive(
-                inspection=inspection, policy=policy, _archive=archive, _judged=_JUDGED
-            )
+            yield VerifiedArchive(policy=policy, _archive=archive)
