@@ -5,6 +5,7 @@ description = "Outbound source and persistence adapters for the Property Tax Dat
 license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "boto3>=1.35,<2",
     "property-tax-application",
     "property-tax-domain",
 ]
