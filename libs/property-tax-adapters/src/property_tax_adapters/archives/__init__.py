@@ -1,9 +1,9 @@
 """Archive inspection and bounded extraction."""
 
 from property_tax_adapters.archives.zip_inspection import (
-    extract_member,
+    VerifiedArchive,
     inspect_zip,
-    iter_member_chunks,
+    open_archive,
 )
 
-__all__ = ["extract_member", "inspect_zip", "iter_member_chunks"]
+__all__ = ["VerifiedArchive", "inspect_zip", "open_archive"]
