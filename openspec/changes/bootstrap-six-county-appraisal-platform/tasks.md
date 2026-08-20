@@ -21,7 +21,7 @@
 
 - [x] 3.1 Implement streaming HTTP acquisition with remote metadata, SHA-256 calculation, and partial-object cleanup
 - [x] 3.2 Implement the Amazon S3 Bronze adapter behind the S3-compatible port and persist immutable release manifests
-- [ ] 3.3 Implement archive inspection and extraction limits for traversal, expansion, compression ratio, members, and media types
+- [x] 3.3 Implement archive inspection and extraction limits for traversal, expansion, compression ratio, members, and media types
 - [ ] 3.4 Create PostgreSQL release-manifest, Silver canonical, diagnostic, quality-result, and publication metadata migrations
 - [ ] 3.5 Implement bounded batch parsing and PostgreSQL COPY-to-staging plus set-based idempotent merges
 - [ ] 3.6 Add containerized object-store and PostgreSQL integration tests for retry, conflict, quarantine, and rollback behavior
