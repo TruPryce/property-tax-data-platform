@@ -992,3 +992,190 @@ def test_a_lying_entry_count_is_caught_by_the_recount() -> None:
 
     assert raised.value.violation is ArchiveViolation.TOO_MANY_MEMBERS
     assert "13 entries" in raised.value.detail
+
+
+# --------------------------------------------------------------------------
+# Two more bypasses, found by probing the handle itself
+# --------------------------------------------------------------------------
+
+
+def test_a_handle_cannot_be_assembled_by_hand() -> None:
+    """Possession is evidence only if the evidence cannot be manufactured.
+
+    The handle took an inspection and a `ZipFile` and believed both, so an
+    empty inspection over an unjudged archive was a complete bypass of every
+    whole-archive rule.
+    """
+
+    with pytest.raises(TypeError, match="open_archive"):
+        VerifiedArchive(
+            inspection=ArchiveInspection(members=(), expanded_bytes=0, compressed_bytes=0),
+            policy=policy(),
+            _archive=zipfile.ZipFile(build({"roll.txt": ROW})),
+        )
+
+
+@pytest.mark.parametrize(
+    ("label", "members", "overrides"),
+    [
+        ("ratio", {"roll.txt": b"\0" * 4_000_000}, {}),
+        ("member count", {f"m{index}.txt": ROW for index in range(20)}, {"max_members": 4}),
+        ("aggregate expansion", {"roll.txt": rows(4_000)}, {"max_expanded_bytes": 10_000}),
+        ("a traversal sibling", {"roll.txt": ROW, "../escape.txt": ROW}, {}),
+    ],
+)
+def test_forging_a_handle_would_have_bypassed_whole_archive_rules(
+    label: str, members: dict[str, bytes], overrides: dict
+) -> None:
+    """What forgery bought, recorded so the guard is not mistaken for ceremony.
+
+    The per-member checks on the way out re-apply the rules that are *about a
+    member*. Every rule listed here is about the archive, and has nowhere else
+    to run — which is why the constructor is the place to stop it.
+    """
+
+    archive = build(members)
+    pol = policy(**overrides)
+
+    with pytest.raises(UnsafeArchiveError):
+        inspect_zip(archive, pol)
+
+    archive.seek(0)
+    with pytest.raises(TypeError, match="open_archive"):
+        VerifiedArchive(
+            inspection=ArchiveInspection(members=(), expanded_bytes=0, compressed_bytes=0),
+            policy=pol,
+            _archive=zipfile.ZipFile(archive),
+        )
+
+
+def test_a_symlink_wearing_a_trailing_slash_is_still_a_symlink() -> None:
+    """`is_dir()` tests the last character of the name and nothing else.
+
+    Treating that as a fact let an entry opt out of the type check by appending
+    one byte. Measured: a symlink named `evil/` holding `../../../etc/passwd`
+    passed inspection untouched.
+    """
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        info = zipfile.ZipInfo("evil/")
+        info.external_attr = 0o120777 << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, b"../../../etc/passwd")
+    buf.seek(0)
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        inspect_zip(buf, policy())
+
+    assert raised.value.violation is ArchiveViolation.UNSUPPORTED_MEMBER_TYPE
+    assert raised.value.member == "evil/"
+
+
+def test_a_directory_entry_carrying_bytes_is_not_a_directory() -> None:
+    """The rule that was missing rather than wrong.
+
+    A directory entry was skipped before every size, ratio, and media-type
+    check, and its bytes were left out of the archive's expansion total — so a
+    bomb only had to end its name with a slash. Measured: an 8 MB zero-filled
+    `data/` entry passed a 1 MB expansion ceiling while the archive reported
+    240 bytes expanded.
+    """
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        bomb = zipfile.ZipInfo("data/")
+        bomb.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(bomb, b"\0" * 8_000_000)
+        info = zipfile.ZipInfo("roll.txt")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, rows(30))
+    buf.seek(0)
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        inspect_zip(buf, policy(max_expanded_bytes=1_000_000, max_member_bytes=1_000_000))
+
+    assert raised.value.violation is ArchiveViolation.UNSUPPORTED_MEMBER_TYPE
+    assert raised.value.member == "data/"
+    assert "8000000 bytes" in raised.value.detail
+
+
+def test_a_prohibited_suffix_wearing_a_trailing_slash_is_refused() -> None:
+    """The media-type allowlist was skipped for anything calling itself a directory."""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        info = zipfile.ZipInfo("payload.exe/")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, b"MZ" + b"\x90" * 4_000)
+    buf.seek(0)
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        inspect_zip(buf, policy())
+
+    assert raised.value.violation is ArchiveViolation.UNSUPPORTED_MEMBER_TYPE
+
+
+@pytest.mark.parametrize(
+    ("label", "attr"),
+    [("no type bits", 0), ("directory type bits", 0o040755 << 16)],
+)
+def test_a_genuine_directory_entry_is_still_admitted(label: str, attr: int) -> None:
+    """The fix must not refuse the entries every archive writer produces."""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        directory = zipfile.ZipInfo("nested/")
+        directory.external_attr = attr
+        archive.writestr(directory, b"")
+        info = zipfile.ZipInfo("nested/roll.txt")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        archive.writestr(info, rows(200))
+    buf.seek(0)
+
+    result = inspect_zip(buf, policy())
+
+    assert [member.name for member in result.members] == ["nested/roll.txt"]
+
+
+def test_a_directory_entry_with_file_type_bits_is_refused() -> None:
+    """A name ending in `/` and type bits saying regular file disagree."""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        info = zipfile.ZipInfo("nested/")
+        info.external_attr = 0o100644 << 16
+        archive.writestr(info, b"")
+    buf.seek(0)
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        inspect_zip(buf, policy())
+
+    assert raised.value.violation is ArchiveViolation.UNSUPPORTED_MEMBER_TYPE
+    assert raised.value.detail == "not a directory"
+
+
+@pytest.mark.parametrize("name", ["evil\\", "a\\b.txt", "nested\\roll.txt"])
+def test_a_backslash_in_a_member_name_is_refused(name: str) -> None:
+    """Removing a disagreement rather than resolving it in one of two places.
+
+    The format requires forward slashes, so a backslash is malformed rather
+    than ambiguous. Leaving it ambiguous lets the platform decide: measured on
+    CPython 3.12, `ZipInfo.is_dir()` treats a trailing backslash as a directory
+    wherever `os.path.altsep` is set, so `evil\\` is a directory on Windows and
+    a member here. Two notions of "directory" that agree on the test machine and
+    diverge in production is the shape of defect this keeps producing.
+    """
+
+    with pytest.raises(UnsafeArchiveError) as raised:
+        zip_inspection._check_path(name)
+
+    assert raised.value.violation is ArchiveViolation.PATH_TRAVERSAL
+
+
+def test_the_directory_notion_matches_the_library_on_every_admitted_name() -> None:
+    """For everything that survives the path check, the two agree by construction."""
+
+    for name in ("roll.txt", "nested/", "nested/roll.txt", "a/b/c.csv"):
+        info = zipfile.ZipInfo(name)
+        assert zip_inspection._claims_directory(info) is info.is_dir(), name

@@ -67,6 +67,7 @@ _CHUNK_BYTES = 1024 * 1024
 #: an extraction reaches outside the tree that was checked.
 _S_IFMT = 0o170000
 _S_IFREG = 0o100000
+_S_IFDIR = 0o040000
 
 #: Bit 0 of the general-purpose flags marks a member as encrypted.
 _FLAG_ENCRYPTED = 0x1
@@ -110,21 +111,70 @@ def _check_path(name: str) -> None:
     parts = PurePosixPath(name.replace("\\", "/")).parts
     if any(part == ".." for part in parts):
         _refuse(ArchiveViolation.PATH_TRAVERSAL, name, "parent-directory segment")
+    # The format requires forward slashes, so a backslash is malformed rather
+    # than ambiguous — and leaving it ambiguous makes the platform decide.
+    # `ZipInfo.is_dir()` treats a trailing backslash as a directory wherever
+    # `os.path.altsep` is set, so the same archive would be read one way here
+    # and another way on Windows. Refusing the character removes the
+    # disagreement instead of resolving it in one of the two places.
+    if "\\" in name:
+        _refuse(ArchiveViolation.PATH_TRAVERSAL, name, "backslash path separator")
+
+
+def _claims_directory(info: zipfile.ZipInfo) -> bool:
+    """Whether the entry *says* it is a directory, which is all a name can say.
+
+    `zipfile.ZipInfo.is_dir()` is a test on the end of the name and nothing
+    more. Treating it as a fact is what let an entry opt out of every rule by
+    appending one byte.
+
+    A forward slash is the only separator this asks about, because `_check_path`
+    has already refused every name carrying a backslash. That matters: `is_dir()`
+    also honours a trailing backslash wherever `os.path.altsep` is set, so
+    without that refusal this notion of a directory and `zipfile`'s would agree
+    on Linux and diverge on Windows.
+    """
+
+    return info.filename.endswith("/")
 
 
 def _check_type(info: zipfile.ZipInfo) -> None:
-    if info.is_dir():
-        return
+    """Judge the type bits of every entry, directories included.
+
+    Exempting directories from this check exempted anything willing to call
+    itself one. Measured: a symlink named `evil/` carrying `../../../etc/passwd`
+    passed inspection untouched, because the check returned before it looked.
+    """
+
+    directory = _claims_directory(info)
     file_type = (info.external_attr >> 16) & _S_IFMT
     # The type bits, not the mode.  A DOS-created entry reports zero, and an
     # entry written with a permission mode alone — 0o600, which is what
     # `writestr` sets — also carries no type bits.  Neither says "not a regular
     # file"; only type bits that are present and something else do.
-    if file_type and file_type != _S_IFREG:
+    if file_type and file_type != (_S_IFDIR if directory else _S_IFREG):
         _refuse(
             ArchiveViolation.UNSUPPORTED_MEMBER_TYPE,
             info.filename,
-            "not a regular file",
+            "not a directory" if directory else "not a regular file",
+        )
+
+
+def _check_directory_is_empty(info: zipfile.ZipInfo) -> None:
+    """A directory holds no bytes, so an entry holding bytes is not one.
+
+    This is the rule that was missing rather than wrong. A directory entry was
+    skipped before any size, ratio, or media-type check and its bytes were left
+    out of the archive's expansion total — so a bomb only had to end its name
+    with a slash. Measured: an 8 MB zero-filled `data/` entry passed a
+    1 MB expansion ceiling, with the archive reporting 240 bytes expanded.
+    """
+
+    if info.file_size or info.compress_size:
+        _refuse(
+            ArchiveViolation.UNSUPPORTED_MEMBER_TYPE,
+            info.filename,
+            f"directory entry carries {info.file_size} bytes",
         )
 
 
@@ -295,7 +345,8 @@ def _judge(infos: list[zipfile.ZipInfo], policy: ArchivePolicy) -> ArchiveInspec
     for info in infos:
         _check_path(info.filename)
         _check_type(info)
-        if info.is_dir():
+        if _claims_directory(info):
+            _check_directory_is_empty(info)
             continue
         _check_media_type(info.filename, policy)
         _check_readable(info, policy)
@@ -355,6 +406,12 @@ def inspect_zip(
         return _judge(infos, policy)
 
 
+#: Held by this module alone, so `open_archive` is the only way to build the
+#: evidence.  Without it the handle is a public dataclass, and a dataclass a
+#: caller can fill in is a claim rather than a proof.
+_JUDGED = object()
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedArchive:
     """An open archive that a whole-archive judgement already passed.
@@ -364,11 +421,31 @@ class VerifiedArchive:
     source for exactly that reason: there is no argument a caller can pass that
     skips the judgement, instead of a check that has to be remembered at every
     entry point.
+
+    Which is only true if the handle cannot be assembled by hand. It could be:
+    the constructor took an inspection and a `ZipFile` and believed both.
+    Measured against a forged one — an empty inspection over an unjudged
+    archive — it served a ratio-1,027 bomb, an archive of twenty members under
+    a limit of four, an expansion past its ceiling, and the clean member beside
+    a traversal sibling. That last one is the bypass this class was introduced
+    to close, reopened by the class itself.
+
+    The per-member checks that run on the way out are not a substitute. They
+    re-apply the rules that are *about a member*; the rules a forgery evades are
+    the ones about the archive, and those have nowhere else to run.
     """
 
     inspection: ArchiveInspection
     policy: ArchivePolicy
     _archive: zipfile.ZipFile
+    _judged: object = None
+
+    def __post_init__(self) -> None:
+        if self._judged is not _JUDGED:
+            raise TypeError(
+                "VerifiedArchive is produced by open_archive, which is what makes "
+                "holding one evidence that the archive was judged"
+            )
 
     def _member(self, member: str) -> zipfile.ZipInfo:
         try:
@@ -377,7 +454,7 @@ class VerifiedArchive:
             raise UnsafeArchiveError(
                 ArchiveViolation.UNREADABLE_ARCHIVE, member, "no such member"
             ) from error
-        if info.is_dir():
+        if _claims_directory(info):
             _refuse(ArchiveViolation.UNSUPPORTED_MEMBER_TYPE, member, "member is a directory")
         # Re-applied against the entry this call resolved, so the rules hold
         # against what is about to be read rather than against a name that
@@ -476,4 +553,6 @@ def open_archive(
             ) from error
         with archive:
             inspection = _judge(archive.infolist(), policy)
-            yield VerifiedArchive(inspection=inspection, policy=policy, _archive=archive)
+            yield VerifiedArchive(
+                inspection=inspection, policy=policy, _archive=archive, _judged=_JUDGED
+            )
