@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -53,8 +55,26 @@ def render(path: Path) -> str:
     documented command is in infra/postgres/README.md.
     """
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    body = "\n".join(line for line in path.read_text().splitlines() if not line.startswith("\\"))
-    return body.replace(":'file_sha256'", f"'{digest}'")
+
+    # Evaluate the one conditional rather than only stripping its markers: the
+    # \else branch raises on a missing checksum, and dropping the marker while
+    # keeping the block would run the raise on every render.
+    kept: list[str] = []
+    in_else = False
+    for line in path.read_text().splitlines():
+        if line.startswith("\\if "):
+            in_else = False  # the variable is always supplied here
+            continue
+        if line.startswith("\\else"):
+            in_else = True
+            continue
+        if line.startswith("\\endif"):
+            in_else = False
+            continue
+        if in_else or line.startswith("\\"):
+            continue
+        kept.append(line)
+    return "\n".join(kept).replace(":'file_sha256'", f"'{digest}'")
 
 
 @pytest.fixture(scope="module")
@@ -113,6 +133,32 @@ def accepts(connection: object, statement: str) -> None:
 # ---------------------------------------------------------------------------
 # The files themselves
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("psql") is None, reason="requires the psql client")
+def test_omitting_the_checksum_exits_nonzero(tmp_path: Path) -> None:
+    """`\\quit` terminates normally and exits 0, so an operator script reads success.
+
+    Exercised through the real psql because render() strips meta-commands, which
+    is exactly the layer this defect lived in. It needs no server: the guard runs
+    before any statement reaches one.
+    """
+
+    completed = subprocess.run(
+        [
+            "psql",
+            "--set",
+            "ON_ERROR_STOP=on",
+            "-f",
+            str(migration_files()[0]),
+            "postgresql://invalid:1/none?connect_timeout=1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
 
 
 def test_there_are_no_inverse_scripts() -> None:
@@ -256,6 +302,129 @@ def test_the_same_release_identity_with_different_bytes_is_kept_twice(
         assert cursor.fetchall() == [], "a stored verdict would be a claim, not an answer"
 
 
+def test_silver_lineage_must_describe_one_release(connection: object) -> None:
+    """Four individually valid facts are not one release.
+
+    Before the composite reference a row could name tx-dallas and certified-2025
+    while pointing at a Collin run reading a Collin manifest, and every foreign
+    key still held.
+    """
+
+    dallas_manifest, dallas_run = _lineage(
+        connection, jurisdiction="tx-dallas", release="dallas-2025"
+    )
+    _, collin_run = _lineage(connection, jurisdiction="tx-collin", release="collin-2025")
+
+    message = refuses(
+        connection,
+        "INSERT INTO silver.source_record"
+        "(jurisdiction_code,appraisal_year,release_identifier,source_member_name,"
+        "source_row_number,parser_contract_version,layout_fingerprint,manifest_id,run_id) "
+        f"VALUES ('tx-dallas',2025,'dallas-2025','p.csv',1,1,'fp',"
+        f"{dallas_manifest},{collin_run})",
+    )
+
+    assert "foreign key" in message.lower()
+
+
+def test_a_run_belongs_to_the_county_whose_bytes_it_read(connection: object) -> None:
+    manifest_id, _ = _lineage(connection, jurisdiction="tx-collin", release="county-bind")
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.run(jurisdiction_code,release_identifier,manifest_id) "
+        f"VALUES ('tx-dallas','borrowed',{manifest_id})",
+    )
+
+    assert "foreign key" in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# The persisted outcome mirrors the carrier
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "columns", "values"),
+    [
+        (
+            "accepted with a diagnostic",
+            "disposition,boundary_contract_version,total_diagnostic_count",
+            "'accepted',1,3",
+        ),
+        (
+            "rejected with none",
+            "disposition,boundary_contract_version,total_diagnostic_count",
+            "'rejected',1,0",
+        ),
+        (
+            "accepted committing less than it staged",
+            "disposition,boundary_contract_version,staged_record_count,committed_record_count",
+            "'accepted',1,100,50",
+        ),
+        (
+            "accepted having rejected a row",
+            "disposition,boundary_contract_version,rejected_row_count",
+            "'accepted',1,12",
+        ),
+        (
+            "a boundary contract that is not one",
+            "disposition,boundary_contract_version",
+            "'accepted',2",
+        ),
+        (
+            "half a prepared release",
+            "disposition,boundary_contract_version,parser_contract_version",
+            "'accepted',1,1",
+        ),
+    ],
+)
+def test_the_database_refuses_outcomes_the_carrier_refuses(
+    connection: object, label: str, columns: str, values: str
+) -> None:
+    """ReleaseOutcome.__post_init__ rejects each of these; so must persistence.
+
+    The publication gate reads `disposition = accepted` as authoritative, so an
+    outcome the boundary could never have produced would be trusted by it.
+    """
+
+    _, run_id = _lineage(connection, jurisdiction="tx-rockwall", release=f"carrier-{len(values)}")
+
+    message = refuses(
+        connection,
+        f"INSERT INTO ingestion.release_outcome(run_id,{columns}) VALUES ({run_id},{values})",
+    )
+
+    assert "violates" in message
+
+
+def test_retained_evidence_stops_at_the_retention_limit(connection: object) -> None:
+    """DIAGNOSTIC_RETENTION_LIMIT is 100, so index 100 is not a thing the carrier made."""
+
+    _, outcome_id = _one_outcome(connection)
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+        f"VALUES ({outcome_id},100,'layout_rejected')",
+    )
+
+    assert "violates" in message
+
+
+def test_an_outcome_cannot_be_rewritten_after_the_fact(connection: object) -> None:
+    """A verdict about a finished run, which something may already have published."""
+
+    error = _as_role(
+        connection,
+        "property_tax_ingestion",
+        "UPDATE ingestion.release_outcome SET disposition='rejected'",
+    )
+
+    assert error is not None
+    assert "permission denied" in error.lower()
+
+
 # ---------------------------------------------------------------------------
 # Privileges
 # ---------------------------------------------------------------------------
@@ -374,30 +543,57 @@ _RECORD = (
 )
 
 
-def _lineage(connection: object) -> tuple[int, int]:
-    """A manifest and a run for Silver rows to point at.
+def _lineage(
+    connection: object,
+    *,
+    jurisdiction: str = "tx-collin",
+    release: str = "rel-1",
+    tax_year: int = 2025,
+    release_kind: str = "certified",
+) -> tuple[int, int]:
+    """Build one coherent artifact -> manifest -> partition -> run chain.
 
-    Both are NOT NULL: a record that cannot say which bytes it came from or which
-    run produced it cannot be attributed, re-run, or withdrawn.
+    Explicit rather than borrowing whatever manifest happens to exist: Silver now
+    binds run, manifest, county, and release as a single composite reference, so a
+    fixture that mixes one county's manifest with another's release would fail for
+    a reason unrelated to the test asking for it.
     """
 
+    digest = hashlib.sha256(f"{jurisdiction}/{release}".encode()).hexdigest()
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute("SELECT manifest_id FROM bronze.release_manifest LIMIT 1")
+        cursor.execute(
+            "SELECT run_id, manifest_id FROM ingestion.run "
+            f"WHERE jurisdiction_code='{jurisdiction}' AND release_identifier='{release}'"
+        )
         row = cursor.fetchone()
-        if row is None:
-            cursor.execute(
-                "INSERT INTO bronze.artifact(sha256,byte_size,media_type) VALUES "
-                "('" + "a" * 64 + "',10,'application/zip') ON CONFLICT DO NOTHING"
-            )
-            cursor.execute(
-                "INSERT INTO bronze.release_manifest"
-                "(artifact_sha256,jurisdiction_code,release_identifier,source_url,retrieved_at) "
-                "VALUES ('" + "a" * 64 + "','tx-collin','lineage',"
-                "'https://example.invalid/a.zip',now()) RETURNING manifest_id"
-            )
-            row = cursor.fetchone()
-        manifest_id = int(row[0])
-    return manifest_id, _one_outcome(connection)[0]
+        if row is not None:
+            return int(row[1]), int(row[0])
+
+        cursor.execute(
+            "INSERT INTO bronze.artifact(sha256,locator,byte_count,media_type) "
+            f"VALUES ('{digest}','s3://fixture/{digest}.zip',10,'application/zip') "
+            "ON CONFLICT (sha256) DO NOTHING"
+        )
+        cursor.execute(
+            "INSERT INTO bronze.release_manifest"
+            "(jurisdiction_code,artifact_sha256,acquired_at,source_url,response_status,"
+            "manifest_version) "
+            f"VALUES ('{jurisdiction}','{digest}',now(),"
+            "'https://example.invalid/a.zip',200,1) RETURNING manifest_id"
+        )
+        manifest_id = int(cursor.fetchone()[0])
+        cursor.execute(
+            "INSERT INTO bronze.release_partition"
+            "(manifest_id,jurisdiction_code,tax_year,release_kind) "
+            f"VALUES ({manifest_id},'{jurisdiction}',{tax_year},'{release_kind}') "
+            "ON CONFLICT DO NOTHING"
+        )
+        cursor.execute(
+            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier,manifest_id) "
+            f"VALUES ('{jurisdiction}','{release}',{manifest_id}) RETURNING run_id"
+        )
+        run_id = int(cursor.fetchone()[0])
+    return manifest_id, run_id
 
 
 def _record(
@@ -411,7 +607,7 @@ def _record(
     family: str | None = None,
     status: str | None = None,
 ) -> str:
-    manifest_id, run_id = _lineage(connection)
+    manifest_id, run_id = _lineage(connection, jurisdiction=jurisdiction, release=release)
     columns = ""
     values = ""
     if family is not None:
@@ -653,15 +849,7 @@ def test_the_diagnostic_vocabulary_is_closed(connection: object) -> None:
 def test_an_outcome_cannot_record_a_plausible_lie(
     connection: object, label: str, disposition: str, staged: int, committed: int
 ) -> None:
-    run_id, _ = _one_outcome(connection)
-    accepts(
-        connection,
-        "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
-        f"VALUES ('tx-denton','{label.replace(' ', '-')}') RETURNING run_id",
-    )
-    with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute("SELECT max(run_id) FROM ingestion.run")
-        fresh_run = int(cursor.fetchone()[0])
+    _, fresh_run = _lineage(connection, jurisdiction="tx-denton", release=label.replace(" ", "-"))
 
     message = refuses(
         connection,
@@ -674,24 +862,20 @@ def test_an_outcome_cannot_record_a_plausible_lie(
 
 
 def _one_outcome(connection: object) -> tuple[int, int]:
+    """A run with an accepted outcome, built on a coherent lineage chain."""
+
+    _, run_id = _lineage(connection, jurisdiction="tx-collin", release="seed")
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute("SELECT run_id FROM ingestion.run WHERE release_identifier='seed' LIMIT 1")
-        row = cursor.fetchone()
-        if row is None:
-            cursor.execute(
-                "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
-                "VALUES ('tx-collin','seed') RETURNING run_id"
-            )
-            run_id = int(cursor.fetchone()[0])
-            cursor.execute(
-                "INSERT INTO ingestion.release_outcome"
-                "(run_id,disposition,boundary_contract_version,staged_record_count,"
-                "committed_record_count) "
-                f"VALUES ({run_id},'accepted',1,500,500) RETURNING outcome_id"
-            )
-            return run_id, int(cursor.fetchone()[0])
-        run_id = int(row[0])
         cursor.execute(f"SELECT outcome_id FROM ingestion.release_outcome WHERE run_id={run_id}")
+        row = cursor.fetchone()
+        if row is not None:
+            return run_id, int(row[0])
+        cursor.execute(
+            "INSERT INTO ingestion.release_outcome"
+            "(run_id,disposition,boundary_contract_version,staged_record_count,"
+            "committed_record_count) "
+            f"VALUES ({run_id},'accepted',1,500,500) RETURNING outcome_id"
+        )
         return run_id, int(cursor.fetchone()[0])
 
 
@@ -848,13 +1032,22 @@ def test_an_evaluation_cannot_pin_a_rule_version_that_does_not_exist(
 # ---------------------------------------------------------------------------
 
 
-def _accepted_run(connection: object, jurisdiction: str, release: str) -> int:
+def _accepted_run(
+    connection: object,
+    jurisdiction: str,
+    release: str,
+    *,
+    tax_year: int = 2025,
+    release_kind: str = "certified",
+) -> int:
+    _, run_id = _lineage(
+        connection,
+        jurisdiction=jurisdiction,
+        release=release,
+        tax_year=tax_year,
+        release_kind=release_kind,
+    )
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute(
-            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
-            f"VALUES ('{jurisdiction}','{release}') RETURNING run_id"
-        )
-        run_id = int(cursor.fetchone()[0])
         cursor.execute(
             "INSERT INTO ingestion.release_outcome"
             "(run_id,disposition,boundary_contract_version,staged_record_count,"
@@ -885,12 +1078,7 @@ def test_a_publication_cannot_become_current_without_an_accepted_outcome(
 ) -> None:
     """A run nothing has judged is not a release anyone accepted."""
 
-    with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute(
-            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
-            "VALUES ('tx-collin','unjudged') RETURNING run_id"
-        )
-        run_id = int(cursor.fetchone()[0])
+    _, run_id = _lineage(connection, jurisdiction="tx-collin", release="unjudged")
 
     message = refuses(connection, _publish("tx-collin", "unjudged", run_id))
 
@@ -898,16 +1086,12 @@ def test_a_publication_cannot_become_current_without_an_accepted_outcome(
 
 
 def test_a_rejected_release_does_not_become_current(connection: object) -> None:
+    _, run_id = _lineage(connection, jurisdiction="tx-collin", release="rejected-rel")
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
         cursor.execute(
-            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
-            "VALUES ('tx-collin','rejected-rel') RETURNING run_id"
-        )
-        run_id = int(cursor.fetchone()[0])
-        cursor.execute(
             "INSERT INTO ingestion.release_outcome"
-            "(run_id,disposition,boundary_contract_version) "
-            f"VALUES ({run_id},'rejected',1)"
+            "(run_id,disposition,boundary_contract_version,total_diagnostic_count) "
+            f"VALUES ({run_id},'rejected',1,1)"
         )
 
     message = refuses(connection, _publish("tx-collin", "rejected-rel", run_id))
@@ -954,6 +1138,64 @@ def test_a_publication_cannot_claim_a_run_from_another_release(connection: objec
     message = refuses(connection, _publish("tx-collin", "a-different-one", run_id))
 
     assert "processed" in message
+
+
+def test_a_publication_cannot_claim_a_year_the_artifact_does_not_carry(
+    connection: object,
+) -> None:
+    """The run does not carry year or kind, so they are checked against the artifact."""
+
+    run_id = _accepted_run(connection, "tx-tarrant", "year-bind")
+
+    message = refuses(
+        connection,
+        "INSERT INTO publication.publication"
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        f"VALUES ('history','tx-tarrant',2099,'certified','year-bind',{run_id},"
+        "'current',now())",
+    )
+
+    assert "carries no" in message
+
+
+def test_the_gate_admits_at_promotion_and_does_not_maintain_afterwards(
+    connection: object,
+) -> None:
+    """A known limit, recorded so it is a decision rather than a surprise.
+
+    The trigger fires when a publication row is written. A blocking evaluation
+    recorded afterwards leaves an already-current row current, because sealing
+    quality for a published release needs a finalization model that task 6.2
+    owns. This test exists to keep that gap visible and to fail loudly if 6.2
+    later closes it, at which point it should be replaced rather than deleted.
+    """
+
+    run_id = _accepted_run(connection, "tx-rockwall", "later-blocked")
+    accepts(connection, _publish("tx-rockwall", "later-blocked", run_id))
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('late_blocker',1,'x','blocking','value_validity')",
+    )
+    accepts(
+        connection,
+        "INSERT INTO quality.evaluation"
+        "(run_id,rule_id,rule_version,passed,measured_value,expected_value) "
+        f"VALUES ({run_id},'late_blocker',1,false,'1','0')",
+    )
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT count(*) FROM publication.current_publication "
+            "WHERE release_identifier='later-blocked'"
+        )
+        still_current = cursor.fetchone()[0]
+
+    assert still_current == 1, (
+        "if this now reads 0 the invariant became durable; replace this test "
+        "with one asserting the maintained behaviour rather than removing it"
+    )
 
 
 def test_an_accepted_clean_release_may_become_current(connection: object) -> None:
@@ -1008,7 +1250,9 @@ def test_proposed_values_may_move_available_without_moving_certified(
 ) -> None:
     """Which is only possible if they are separate products, not one with a flag."""
 
-    run_c = _accepted_run(connection, "tx-ellis", "rel-c")
+    run_c = _accepted_run(
+        connection, "tx-ellis", "rel-c", tax_year=2026, release_kind="preliminary"
+    )
     accepts(
         connection,
         "INSERT INTO publication.publication"

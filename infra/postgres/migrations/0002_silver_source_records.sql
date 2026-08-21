@@ -10,7 +10,14 @@
 \if :{?file_sha256}
 \else
 \echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
-\quit
+\echo '       The ledger records what was applied, and a version number cannot'
+\echo '       tell you whether the file behind it was edited afterwards.'
+-- Not \quit: psql treats that as normal termination and exits 0, so a script
+-- reading the status would call this a success. An error exits 3 under
+-- ON_ERROR_STOP, which is what the operator's `&&` is testing.
+DO $missing$ BEGIN
+    RAISE EXCEPTION 'file_sha256 was not supplied';
+END $missing$;
 \endif
 
 BEGIN;
@@ -59,8 +66,10 @@ CREATE TABLE silver.source_record (
     observed_fields           text[],
     normalized_fields         text[],
 
-    manifest_id               bigint      NOT NULL
-                                          REFERENCES bronze.release_manifest (manifest_id),
+    -- No standalone reference: 0003 binds this together with run_id,
+    -- jurisdiction_code, and release_identifier to one run, so the four cannot
+    -- describe different releases.
+    manifest_id               bigint      NOT NULL,
     loaded_at                 timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT record_jurisdiction_is_state_and_county

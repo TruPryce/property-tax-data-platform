@@ -110,6 +110,21 @@ reject data that looks reasonable:
   column to store a verdict in, because a stored verdict is a claim about what else existed when some
   writer looked, and two writers can both look, both see nothing, and both write.
 
+- **Lineage is one release, not four facts that agree.** A Silver row's run, manifest, county, and
+  release identifier are a single composite reference to `ingestion.run`, and a run's county is a
+  composite reference to the manifest it read. Four separate foreign keys would each hold while the
+  row named one county and pointed at another's run.
+
+- **A persisted outcome is one the carrier could have produced.** The constraints on
+  `ingestion.release_outcome` mirror `ReleaseOutcome.__post_init__`: accepted exactly when there were
+  no diagnostics, commits exactly what it staged, rejects no row, boundary contract version one,
+  prepared fields set together or not at all, retained evidence indexed 0 to 99. The publication gate
+  reads `accepted` as authoritative, so an outcome the boundary could not have made would be trusted.
+
+- **An outcome cannot be rewritten.** `property_tax_ingestion` may insert an outcome and its evidence
+  and may not update them: a disposition is a verdict about a run that has finished, and something may
+  already have published from it.
+
 - **Silver retry is idempotent by unique index**, on release, member, row, appraisal year, source
   family, and source status — with `NULLS NOT DISTINCT`, so a row whose family is absent collides
   with itself rather than quietly becoming two records.
@@ -124,6 +139,14 @@ reject data that looks reasonable:
 
 - **A failing quality rule must state what it measured and what it expected.** Enforced as a
   constraint, because a failure an operator cannot act on is a failure they will learn to ignore.
+
+- **A publication is admitted as current only against an accepted release.** A trigger requires a run
+  with an accepted outcome, that read this release, whose artifact carries the year and kind claimed,
+  and that has no blocking quality failure. **This is admission, not maintenance**: it runs when the
+  publication row is written and does not re-evaluate, so a blocking evaluation recorded afterwards
+  leaves an already-current row current. Sealing quality for a published release needs a finalization
+  model that task 6.2 owns, and is deliberately not attempted here. A test records that gap so it
+  stays a decision rather than a surprise.
 
 - **At most one publication is current per product and jurisdiction**, as a partial unique index.
   That is what makes publication atomic: promoting a build and demoting its predecessor is one
@@ -190,6 +213,8 @@ remains future work, and it owes three things this procedure cannot provide:
   it never re-reads prior entries to detect a migration edited after the fact.
 - **Failing closed on a mismatch**, aborting rather than continuing past a file whose recorded hash no
   longer matches its contents.
+- **A sealed quality boundary for published releases**, so `current` is a maintained invariant rather
+  than a check that passed once. Task 6.2 owns it.
 
 Also outstanding:
 

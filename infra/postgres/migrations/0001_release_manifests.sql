@@ -15,7 +15,12 @@
 \echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
 \echo '       The ledger records what was applied, and a version number cannot'
 \echo '       tell you whether the file behind it was edited afterwards.'
-\quit
+-- Not \quit: psql treats that as normal termination and exits 0, so a script
+-- reading the status would call this a success. An error exits 3 under
+-- ON_ERROR_STOP, which is what the operator's `&&` is testing.
+DO $missing$ BEGIN
+    RAISE EXCEPTION 'file_sha256 was not supplied';
+END $missing$;
 \endif
 
 BEGIN;
@@ -140,6 +145,12 @@ COMMENT ON TABLE bronze.release_manifest IS
     'One acquisition event. Response metadata is bounded and sanitized before it '
     'arrives here; there is no column for a response body, a credential, or a header '
     'the acquisition layer did not admit.';
+
+-- An FK target for ingestion.run, so a run's county is the county of the bytes
+-- it read rather than a second independently supplied string. manifest_id alone
+-- is already unique; the pair is what a composite reference can point at.
+ALTER TABLE bronze.release_manifest
+    ADD CONSTRAINT release_manifest_identity UNIQUE (manifest_id, jurisdiction_code);
 
 CREATE INDEX release_manifest_by_artifact
     ON bronze.release_manifest (artifact_sha256);

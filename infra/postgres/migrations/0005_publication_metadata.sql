@@ -10,7 +10,14 @@
 \if :{?file_sha256}
 \else
 \echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
-\quit
+\echo '       The ledger records what was applied, and a version number cannot'
+\echo '       tell you whether the file behind it was edited afterwards.'
+-- Not \quit: psql treats that as normal termination and exits 0, so a script
+-- reading the status would call this a success. An error exits 3 under
+-- ON_ERROR_STOP, which is what the operator's `&&` is testing.
+DO $missing$ BEGIN
+    RAISE EXCEPTION 'file_sha256 was not supplied';
+END $missing$;
 \endif
 
 BEGIN;
@@ -157,6 +164,7 @@ LANGUAGE plpgsql AS $assert$
 DECLARE
     run_jurisdiction text;
     run_release      text;
+    run_manifest     bigint;
     run_disposition  text;
     blocking_count   integer;
 BEGIN
@@ -171,8 +179,9 @@ BEGIN
             'a current publication must name the ingestion run it was built from';
     END IF;
 
-    SELECT run.jurisdiction_code, run.release_identifier, outcome.disposition
-      INTO run_jurisdiction, run_release, run_disposition
+    SELECT run.jurisdiction_code, run.release_identifier, run.manifest_id,
+           outcome.disposition
+      INTO run_jurisdiction, run_release, run_manifest, run_disposition
       FROM ingestion.run AS run
       LEFT JOIN ingestion.release_outcome AS outcome ON outcome.run_id = run.run_id
      WHERE run.run_id = NEW.run_id;
@@ -196,6 +205,21 @@ BEGIN
             NEW.jurisdiction_code, NEW.release_identifier;
     END IF;
 
+    -- The year and kind are the publication's own claim, and the run does not
+    -- carry them. They have to be a partition of the artifact the run read, or a
+    -- row could name any year it liked over an accepted release.
+    IF NOT EXISTS (
+        SELECT 1 FROM bronze.release_partition AS partition
+         WHERE partition.manifest_id       = run_manifest
+           AND partition.jurisdiction_code = NEW.jurisdiction_code
+           AND partition.tax_year          = NEW.tax_year
+           AND partition.release_kind      = NEW.release_kind
+    ) THEN
+        RAISE EXCEPTION
+            'the artifact run % read carries no %/% partition for %',
+            NEW.run_id, NEW.tax_year, NEW.release_kind, NEW.jurisdiction_code;
+    END IF;
+
     SELECT count(*) INTO blocking_count
       FROM quality.blocking_failure
      WHERE quality.blocking_failure.run_id = NEW.run_id;
@@ -215,10 +239,13 @@ CREATE TRIGGER publication_current_is_validated
     FOR EACH ROW EXECUTE FUNCTION publication.assert_current_is_validated();
 
 COMMENT ON FUNCTION publication.assert_current_is_validated() IS
-    'A publication becomes current only for a run that was accepted, that processed '
-    'the release the publication names, and that carries no blocking quality failure. '
-    'Enforced in the database because the role writing the row is the one that must '
-    'not be trusted to have checked.';
+    'Admission, not maintenance. It runs when a publication row is written and checks '
+    'what is true then: an accepted outcome, a run that read this release and an '
+    'artifact carrying this year and kind, and no blocking quality failure. It does '
+    'NOT re-evaluate afterwards, so a blocking evaluation recorded later leaves an '
+    'already-current row current. Sealing quality for a published release is task 6.2 '
+    'and is deliberately not attempted here; this is a floor beneath that, and the '
+    'guarantee it gives is point-in-time rather than durable.';
 
 -- ---------------------------------------------------------------------------
 -- Privileges

@@ -9,7 +9,14 @@
 \if :{?file_sha256}
 \else
 \echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
-\quit
+\echo '       The ledger records what was applied, and a version number cannot'
+\echo '       tell you whether the file behind it was edited afterwards.'
+-- Not \quit: psql treats that as normal termination and exits 0, so a script
+-- reading the status would call this a success. An error exits 3 under
+-- ON_ERROR_STOP, which is what the operator's `&&` is testing.
+DO $missing$ BEGIN
+    RAISE EXCEPTION 'file_sha256 was not supplied';
+END $missing$;
 \endif
 
 BEGIN;
