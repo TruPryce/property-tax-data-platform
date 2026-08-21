@@ -3,12 +3,34 @@
 -- Bronze lineage: the bytes that arrived, where they came from, and which
 -- logical releases they carry.
 --
--- Run with:  psql --single-transaction --set ON_ERROR_STOP=on -f 0001_release_manifests.sql
+-- Run with:  psql --set ON_ERROR_STOP=on \
+--              -v file_sha256="$(sha256sum 0001_release_manifests.sql | cut -d' ' -f1)" \
+--              -f 0001_release_manifests.sql
 --
 -- The whole file is one transaction. A migration that half-applies is worse
 -- than one that fails, because the second is obvious.
 
+\if :{?file_sha256}
+\else
+\echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
+\echo '       The ledger records what was applied, and a version number cannot'
+\echo '       tell you whether the file behind it was edited afterwards.'
+\quit
+\endif
+
 BEGIN;
+
+DO $$
+BEGIN
+    -- Re-applying would otherwise fail on "schema platform already exists", which
+    -- says what broke rather than what is true.  Nested so the inner statement is
+    -- never planned on a database where the ledger does not exist yet.
+    IF to_regclass('platform.schema_migration') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM platform.schema_migration WHERE version = 1) THEN
+            RAISE EXCEPTION 'migration 0001 is already applied';
+        END IF;
+    END IF;
+END $$;
 
 DO $$
 BEGIN
@@ -38,13 +60,20 @@ CREATE TABLE platform.schema_migration (
     name              text        NOT NULL,
     applied_at        timestamptz NOT NULL DEFAULT now(),
     applied_by        text        NOT NULL DEFAULT current_user,
+    file_sha256       text        NOT NULL,
 
-    CONSTRAINT schema_migration_name_not_blank CHECK (btrim(name) <> '')
+    CONSTRAINT schema_migration_name_not_blank CHECK (btrim(name) <> ''),
+    CONSTRAINT schema_migration_sha256_is_lowercase_hex
+        CHECK (file_sha256 ~ '^[0-9a-f]{64}$')
 );
 
 COMMENT ON TABLE platform.schema_migration IS
     'One row per applied migration. These files are run by hand, so this is where '
     '"what is applied" is recorded rather than inferred from which tables happen to exist.';
+COMMENT ON COLUMN platform.schema_migration.file_sha256 IS
+    'The hash of the file that was applied, supplied by the operator. Without it the '
+    'ledger records that version 3 ran and cannot say whether the 0003 file on disk is '
+    'still the one that ran, which under manual application nothing else would notice.';
 
 -- ---------------------------------------------------------------------------
 -- The bytes
@@ -190,7 +219,31 @@ COMMENT ON VIEW bronze.diverged_release IS
     'some writer looked, and two writers can both look, both see nothing, and both '
     'write. The only honest answer is computed when the question is asked.';
 
-INSERT INTO platform.schema_migration (version, name)
-VALUES (1, '0001_release_manifests');
+-- ---------------------------------------------------------------------------
+-- Privileges
+--
+-- The bootstrap leaves both roles able only to connect, so every object created
+-- here is unreachable until granted.  Bronze is acquisition evidence: INSERT and
+-- SELECT only, so immutability is enforced by privilege rather than by intent.
+-- Neither role is granted anything on platform.schema_migration; the ledger is
+-- the migrator's.
+-- ---------------------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA bronze TO property_tax_ingestion;
+
+GRANT SELECT, INSERT ON
+    bronze.artifact,
+    bronze.release_manifest,
+    bronze.release_partition,
+    bronze.release_redirect
+    TO property_tax_ingestion;
+
+GRANT SELECT ON bronze.diverged_release TO property_tax_ingestion;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA bronze
+    GRANT SELECT, INSERT ON TABLES TO property_tax_ingestion;
+
+INSERT INTO platform.schema_migration (version, name, file_sha256)
+VALUES (1, '0001_release_manifests', :'file_sha256');
 
 COMMIT;

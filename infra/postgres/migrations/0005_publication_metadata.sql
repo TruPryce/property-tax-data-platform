@@ -3,7 +3,15 @@
 -- What is published, from which release, and since when. Publication is a
 -- swap: the previous version stays readable until the new one is complete.
 --
--- Run with:  psql --single-transaction --set ON_ERROR_STOP=on -f 0005_publication_metadata.sql
+-- Run with:  psql --set ON_ERROR_STOP=on \
+--              -v file_sha256="$(sha256sum 0005_publication_metadata.sql | cut -d' ' -f1)" \
+--              -f 0005_publication_metadata.sql
+
+\if :{?file_sha256}
+\else
+\echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
+\quit
+\endif
 
 BEGIN;
 
@@ -131,7 +139,28 @@ COMMENT ON VIEW publication.current_publication IS
     'identity — everything the lineage and freshness requirement asks a consumer to '
     'be able to determine, in one place rather than assembled per query.';
 
-INSERT INTO platform.schema_migration (version, name)
-VALUES (5, '0005_publication_metadata');
+-- ---------------------------------------------------------------------------
+-- Privileges
+--
+-- Granted here rather than later, because the bootstrap leaves both roles able
+-- only to connect and an object with no grant is invisible to the role that
+-- needs it.  The ALTER DEFAULT PRIVILEGES lines are what make a table added by
+-- a later migration reachable without anyone remembering to come back.
+--
+-- No sequence grants: every generated key is GENERATED ALWAYS AS IDENTITY, whose
+-- implicit sequence is covered by INSERT on the table.
+-- ---------------------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA publication TO property_tax_ingestion, property_tax_api;
+
+GRANT SELECT ON publication.product TO property_tax_ingestion, property_tax_api;
+GRANT SELECT, INSERT, UPDATE ON publication.publication TO property_tax_ingestion;
+GRANT SELECT ON publication.publication, publication.current_publication TO property_tax_api;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA publication
+    GRANT SELECT ON TABLES TO property_tax_ingestion, property_tax_api;
+
+INSERT INTO platform.schema_migration (version, name, file_sha256)
+VALUES (5, '0005_publication_metadata', :'file_sha256');
 
 COMMIT;

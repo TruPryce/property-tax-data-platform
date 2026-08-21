@@ -3,7 +3,15 @@
 -- What happened during one processing run, in the closed vocabulary the
 -- boundary already speaks.
 --
--- Run with:  psql --single-transaction --set ON_ERROR_STOP=on -f 0003_release_diagnostics.sql
+-- Run with:  psql --set ON_ERROR_STOP=on \
+--              -v file_sha256="$(sha256sum 0003_release_diagnostics.sql | cut -d' ' -f1)" \
+--              -f 0003_release_diagnostics.sql
+
+\if :{?file_sha256}
+\else
+\echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
+\quit
+\endif
 
 BEGIN;
 
@@ -151,7 +159,40 @@ COMMENT ON TABLE ingestion.release_notice IS
     'closed, so the shape is constrained instead: a lowercase name, and still nowhere '
     'to put content.';
 
-INSERT INTO platform.schema_migration (version, name)
-VALUES (3, '0003_release_diagnostics');
+-- ---------------------------------------------------------------------------
+-- Privileges
+--
+-- Granted here rather than later, because the bootstrap leaves both roles able
+-- only to connect and an object with no grant is invisible to the role that
+-- needs it.  The ALTER DEFAULT PRIVILEGES lines are what make a table added by
+-- a later migration reachable without anyone remembering to come back.
+--
+-- No sequence grants: every generated key is GENERATED ALWAYS AS IDENTITY, whose
+-- implicit sequence is covered by INSERT on the table.
+-- ---------------------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA ingestion TO property_tax_ingestion, property_tax_api;
+
+GRANT SELECT, INSERT, UPDATE ON
+    ingestion.run,
+    ingestion.release_outcome,
+    ingestion.release_diagnostic,
+    ingestion.release_notice
+    TO property_tax_ingestion;
+
+GRANT SELECT ON
+    ingestion.run,
+    ingestion.release_outcome,
+    ingestion.release_diagnostic,
+    ingestion.release_notice
+    TO property_tax_api;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA ingestion
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO property_tax_ingestion;
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA ingestion
+    GRANT SELECT ON TABLES TO property_tax_api;
+
+INSERT INTO platform.schema_migration (version, name, file_sha256)
+VALUES (3, '0003_release_diagnostics', :'file_sha256');
 
 COMMIT;

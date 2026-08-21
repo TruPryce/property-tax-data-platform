@@ -28,7 +28,6 @@ infra/postgres/
   migrations/0003_release_diagnostics.sql
   migrations/0004_quality_results.sql
   migrations/0005_publication_metadata.sql
-  migrations/rollback/          one per migration, reverse order only
 ```
 
 `NNNN_snake_case_description.sql`, applied in ascending filename order.
@@ -37,21 +36,28 @@ The four-digit zero padding is what makes lexicographic order match numeric orde
 sorts before `9`, and the apply order silently stops matching the order the migrations were written
 in. Numbers are never reused and never renumbered.
 
-Migrations are deliberately **not** copied into the image. They are operational SQL, not container
+The Dockerfile copies `init/` as a **directory**, so adding `20-create-extensions.sql` beside the
+bootstrap script needs no change to it and the lexicographic convention is real rather than
+documented. Migrations are deliberately **not** copied in: they are operational SQL, not container
 content, and baking them in would invite the belief that starting a container applies them.
 
 ## Applying
 
 ```sh
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/0001_release_manifests.sql
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/0002_silver_canonical.sql
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/0003_release_diagnostics.sql
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/0004_quality_results.sql
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/0005_publication_metadata.sql
+cd infra/postgres/migrations
+for f in 0001_*.sql 0002_*.sql 0003_*.sql 0004_*.sql 0005_*.sql; do
+    psql "$DATABASE_URL" --set ON_ERROR_STOP=on \
+        -v file_sha256="$(sha256sum "$f" | cut -d' ' -f1)" -f "$f"
+done
 ```
 
-`--single-transaction` is belt to the file's own `BEGIN`/`COMMIT`, and `ON_ERROR_STOP=on` is what
-stops psql continuing past a failed statement.
+Each file carries its own `BEGIN`/`COMMIT`, so `--single-transaction` is not used: it opens a second
+transaction, warns on every file, and the file's own `COMMIT` closes things first anyway.
+`ON_ERROR_STOP=on` is what stops psql continuing past a failed statement.
+
+`file_sha256` is required. A migration refuses to run without it and says how to supply it, because
+the ledger recording that version 3 ran cannot otherwise tell you whether the 0003 file on disk is
+still the one that ran — and under manual application nothing else is positioned to notice.
 
 Migrations run as `property_tax_migrator`, which owns the `property_tax` database. They do not run
 as `platform_admin`: a migration that needs superuser is a migration doing something it should not.
@@ -64,7 +70,8 @@ is 16.11.
 ## What is applied
 
 ```sql
-SELECT version, name, applied_at, applied_by FROM platform.schema_migration ORDER BY version;
+SELECT version, name, applied_at, applied_by, file_sha256
+FROM platform.schema_migration ORDER BY version;
 ```
 
 The ledger is the record, not an inference from which tables happen to exist. Re-running an applied
@@ -112,22 +119,18 @@ reject data that looks reasonable:
 - **Publishing a sensitive field requires a named approver, an approval time, and a review
   reference.** Permission cannot be granted by a default or by a migration.
 
-## Rolling back
+## There is no rollback
 
-```sh
-psql "$DATABASE_URL" --single-transaction --set ON_ERROR_STOP=on -f infra/postgres/migrations/rollback/0005_publication_metadata.sql
-```
+Migrations are forward-only. A mistake is corrected by a new migration, which is the only form that
+also works on a database that has already moved on.
 
-Reverse order only; each rollback refuses while a later migration is still applied and names what is
-blocking it.
+A disposable database is rebuilt: drop it or destroy the volume, start a fresh cluster so `init/`
+runs, and apply the migrations from `0001`. A real one is recovered through the restore path in
+[ADR-0002](../../docs/decisions/0002-s3-durable-recovery-boundary.md).
 
-**Rollbacks `DROP SCHEMA ... CASCADE`**, so they destroy any data loaded since. They guard ordering,
-not data: nothing checks whether a table holds rows. Treat them as a development teardown for a
-database that has never held a real release.
-
-For a database that has, recovery from a bad migration is the restore path in
-[ADR-0002](../../docs/decisions/0002-s3-durable-recovery-boundary.md), and the correction is a new
-forward migration — the only form that also works on a database that has already moved on.
+Inverse scripts were considered and removed. One that `DROP SCHEMA ... CASCADE` is a production
+footgun sitting beside the thing it destroys, and it is a second schema history that has to stay
+correct forever to be worth anything.
 
 ## Privileges Are Migration Work
 
@@ -149,24 +152,23 @@ table added afterwards is invisible to the reading role until someone notices in
 
 Grant the narrowest privilege the role needs. `property_tax_api` reads; it does not write.
 
-**The migrations here carry no grants yet.** Until they do, both roles remain connect-only and
-cannot see these schemas, which blocks the ingestion loader and the read-only API role.
+Every migration here grants what its objects need. Bronze is `SELECT`/`INSERT` only for
+`property_tax_ingestion`, so acquisition evidence is immutable by privilege rather than by
+intention; `property_tax_api` reads and never writes, and neither role may define a quality rule.
+No sequence grants are needed: every generated key is `GENERATED ALWAYS AS IDENTITY`, whose implicit
+sequence is covered by `INSERT` on the table.
 
 ## Not Yet Met
 
 Recorded so the gap is visible rather than assumed closed:
 
-- **No checksum in the ledger.** `platform.schema_migration` records version, name, time, and role,
-  but not a hash of the file. Under manual application nothing else is positioned to notice that an
-  applied file was edited afterwards.
-- **No grants**, as above.
-- **No `lock_timeout` or `statement_timeout`.** Harmless while tables are empty; on a populated
+- **No `lock_timeout` or `statement_timeout`.** Harmless while these tables are empty; on a populated
   `silver` a statement that cannot take its lock waits behind live traffic and blocks everything
-  queued behind it.
+  queued behind it. Add both to any migration that touches a table holding rows.
 
 ## Verifying a Migration Before It Ships
 
-`tests/migrations/test_migrations.py` applies every file against a real PostgreSQL and then attacks
+`tests/integration/postgres/test_migrations.py` applies every file against a real PostgreSQL and then attacks
 each invariant above. It needs a database and skips without one:
 
 ```sh
@@ -175,7 +177,7 @@ docker run -d --name ptdp-test -p 5433:5432 \
     -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16-alpine
 
 PTDP_TEST_DATABASE_URL=postgresql://postgres@localhost:5433/ptdp \
-    uv run pytest tests/migrations -v
+    uv run pytest tests/integration/postgres -v
 ```
 
 The password stays in `PGPASSWORD`, which libpq reads, rather than in the connection string. A URL

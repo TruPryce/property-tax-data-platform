@@ -11,7 +11,7 @@ and they skip:
     docker run -d --name ptdp-test -p 5433:5432 \
         -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16-alpine
     PTDP_TEST_DATABASE_URL=postgresql://postgres@localhost:5433/ptdp \
-        uv run pytest tests/migrations
+        uv run pytest tests/integration/postgres
 
 The password goes in `PGPASSWORD`, which libpq reads, rather than into the
 connection string, so it stays out of shell history and process listings.
@@ -19,6 +19,7 @@ connection string, so it stays out of shell history and process listings.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,8 +28,9 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg", reason="psycopg is required to talk to PostgreSQL")
 
-MIGRATIONS = Path(__file__).resolve().parents[2] / "infra" / "postgres" / "migrations"
+MIGRATIONS = Path(__file__).resolve().parents[3] / "infra" / "postgres" / "migrations"
 SCHEMAS = ("publication", "quality", "ingestion", "silver", "bronze", "platform")
+ROLES = ("property_tax_migrator", "property_tax_ingestion", "property_tax_api")
 
 
 def _dsn() -> str:
@@ -42,8 +44,17 @@ def migration_files() -> list[Path]:
     return sorted(path for path in MIGRATIONS.glob("[0-9]*.sql"))
 
 
-def rollback_files() -> list[Path]:
-    return sorted(path for path in (MIGRATIONS / "rollback").glob("[0-9]*.sql"))
+def render(path: Path) -> str:
+    """Render a migration the way psql would, for the two features it uses.
+
+    psycopg speaks the wire protocol and knows nothing about psql meta-commands
+    or variables, so the `\\if` guard and `:'file_sha256'` are resolved here.
+    That means these tests exercise the SQL rather than the psql invocation; the
+    documented command is in infra/postgres/README.md.
+    """
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    body = "\n".join(line for line in path.read_text().splitlines() if not line.startswith("\\"))
+    return body.replace(":'file_sha256'", f"'{digest}'")
 
 
 @pytest.fixture(scope="module")
@@ -60,9 +71,18 @@ def connection() -> Iterator[object]:
         with handle.cursor() as cursor:
             for schema in SCHEMAS:
                 cursor.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            # The migrations grant to roles the cluster bootstrap creates. A test
+            # database has not run init/, so stand them up here rather than let a
+            # GRANT to a missing role look like a broken migration.
+            for role in ROLES:
+                cursor.execute(
+                    "DO $$ BEGIN "
+                    f"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') "
+                    f"THEN CREATE ROLE {role} NOLOGIN; END IF; END $$"
+                )
         for path in migration_files():
             with handle.cursor() as cursor:
-                cursor.execute(path.read_text())
+                cursor.execute(render(path))
         yield handle
 
 
@@ -95,10 +115,14 @@ def accepts(connection: object, statement: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_every_migration_has_a_rollback() -> None:
-    """A schema change nobody can undo is a decision, not a migration."""
+def test_there_are_no_inverse_scripts() -> None:
+    """Forward-only: a DROP SCHEMA CASCADE script is a production footgun.
 
-    assert [path.name for path in migration_files()] == [path.name for path in rollback_files()]
+    A disposable database is rebuilt from empty; a real one is corrected by a
+    forward migration and recovered by restore.
+    """
+
+    assert not (MIGRATIONS / "rollback").exists()
 
 
 def test_migration_versions_are_contiguous_and_unique() -> None:
@@ -110,7 +134,7 @@ def test_migration_versions_are_contiguous_and_unique() -> None:
 def test_every_migration_is_one_transaction() -> None:
     """Half-applied is worse than failed, because failed is obvious."""
 
-    for path in migration_files() + rollback_files():
+    for path in migration_files():
         body = path.read_text()
         assert body.count("BEGIN;") == 1, path.name
         assert body.rstrip().endswith("COMMIT;"), path.name
@@ -126,10 +150,15 @@ def test_the_ledger_records_every_applied_file(connection: object) -> None:
     ]
 
 
-def test_applying_a_migration_twice_is_refused(connection: object) -> None:
-    """The DBA runs these by hand, so running one twice is a real Tuesday."""
+@pytest.mark.parametrize("path", migration_files(), ids=lambda path: path.stem)
+def test_applying_a_migration_twice_is_refused(connection: object, path: Path) -> None:
+    """The DBA runs these by hand, so running one twice is a real Tuesday.
 
-    message = refuses(connection, migration_files()[2].read_text())
+    Every file, including 0001: it creates the ledger it checks, so its guard has
+    to survive the table not existing on a first run and existing on a second.
+    """
+
+    message = refuses(connection, render(path))
 
     assert "already applied" in message
 
@@ -228,6 +257,58 @@ def test_the_same_release_identity_with_different_bytes_is_kept_twice(
 
 
 # ---------------------------------------------------------------------------
+# Privileges
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("role", "relation", "privilege", "expected"),
+    [
+        ("property_tax_ingestion", "silver.source_record", "INSERT", True),
+        ("property_tax_ingestion", "bronze.release_manifest", "INSERT", True),
+        ("property_tax_ingestion", "ingestion.release_diagnostic", "INSERT", True),
+        ("property_tax_ingestion", "quality.evaluation", "INSERT", True),
+        ("property_tax_api", "silver.source_record", "SELECT", True),
+        ("property_tax_api", "publication.publication", "SELECT", True),
+        # Bronze is acquisition evidence, so nobody may rewrite it.
+        ("property_tax_ingestion", "bronze.release_manifest", "UPDATE", False),
+        ("property_tax_ingestion", "bronze.artifact", "DELETE", False),
+        # The API reads. It does not write, and it does not define quality rules.
+        ("property_tax_api", "silver.source_record", "INSERT", False),
+        ("property_tax_api", "quality.rule", "INSERT", False),
+        ("property_tax_ingestion", "quality.rule", "INSERT", False),
+    ],
+)
+def test_the_roles_reach_exactly_what_they_were_granted(
+    connection: object, role: str, relation: str, privilege: str, expected: bool
+) -> None:
+    """The bootstrap leaves both roles connect-only, so an ungranted table is invisible."""
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(f"SELECT has_table_privilege('{role}', '{relation}', '{privilege}')")
+        assert cursor.fetchone()[0] is expected
+
+
+@pytest.mark.parametrize("schema", ["silver", "bronze", "ingestion", "quality", "publication"])
+def test_a_table_added_later_is_reachable_without_anyone_remembering(
+    connection: object, schema: str
+) -> None:
+    """ALTER DEFAULT PRIVILEGES is the line usually forgotten.
+
+    Without it the granted tables work and every table added afterwards is
+    invisible to the reading role until someone notices in production.
+    """
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT count(*) FROM pg_default_acl acl "
+            "JOIN pg_namespace ns ON ns.oid = acl.defaclnamespace "
+            f"WHERE ns.nspname = '{schema}' AND acl.defaclobjtype = 'r'"
+        )
+        assert cursor.fetchone()[0] >= 1, f"{schema} grants nothing to objects created later"
+
+
+# ---------------------------------------------------------------------------
 # Silver
 # ---------------------------------------------------------------------------
 
@@ -289,6 +370,33 @@ def test_one_row_may_emit_current_and_certified_observations(connection: object)
             "SELECT count(*) FROM silver.source_record WHERE release_identifier='two-obs'"
         )
         assert cursor.fetchone()[0] == 2
+
+
+def test_two_counties_may_share_a_release_name_member_and_row(connection: object) -> None:
+    """release_identifier is caller-supplied and local, so it cannot be the key alone.
+
+    Dallas and Collin can each publish a "certified-2025" containing a
+    "property.txt" whose row 100 is a different property. Without
+    jurisdiction_code leading the identity, whichever county loads second has its
+    rows silently swallowed as retries of the first.
+    """
+
+    shared = {"release": "certified-2025", "member": "property.txt", "row": 100, "year": 2025}
+    accepts(connection, _record(connection, jurisdiction="tx-dallas", **shared))
+    accepts(connection, _record(connection, jurisdiction="tx-collin", **shared))
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT jurisdiction_code FROM silver.source_record "
+            "WHERE release_identifier='certified-2025' AND source_member_name='property.txt' "
+            "AND source_row_number=100 ORDER BY jurisdiction_code"
+        )
+        assert [row[0] for row in cursor.fetchall()] == ["tx-collin", "tx-dallas"]
+
+    # Within one county the retry still collides, which is the property the key
+    # exists for and the one a wider key could have broken.
+    message = refuses(connection, _record(connection, jurisdiction="tx-dallas", **shared))
+    assert "duplicate key" in message
 
 
 def test_a_record_with_no_family_still_collides_with_itself(connection: object) -> None:
@@ -490,22 +598,22 @@ def test_a_failing_rule_must_say_what_it_saw_and_what_it_wanted(connection: obje
     run_id, _ = _one_outcome(connection)
     accepts(
         connection,
-        "INSERT INTO quality.rule(rule_id,description,severity,rule_family) "
-        "VALUES ('account_key_present','required key','blocking','required_key_completeness')",
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('account_key_present',1,'required key','blocking','required_key_completeness')",
     )
 
     message = refuses(
         connection,
-        "INSERT INTO quality.evaluation(run_id,rule_id,severity,passed,subject) "
-        f"VALUES ({run_id},'account_key_present','blocking',false,'prop.csv')",
+        "INSERT INTO quality.evaluation(run_id,rule_id,rule_version,passed,subject) "
+        f"VALUES ({run_id},'account_key_present',1,false,'prop.csv')",
     )
     assert "violates" in message
 
     accepts(
         connection,
         "INSERT INTO quality.evaluation"
-        "(run_id,rule_id,severity,passed,measured_value,expected_value,subject) "
-        f"VALUES ({run_id},'account_key_present','blocking',false,'461219','>= 461510','p.csv')",
+        "(run_id,rule_id,rule_version,passed,measured_value,expected_value,subject) "
+        f"VALUES ({run_id},'account_key_present',1,false,'461219','>= 461510','p.csv')",
     )
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
         cursor.execute(
@@ -520,11 +628,81 @@ def test_there_is_no_third_severity(connection: object) -> None:
 
     message = refuses(
         connection,
-        "INSERT INTO quality.rule(rule_id,description,severity,rule_family) "
-        "VALUES ('advisory_thing','x','advisory','value_validity')",
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('advisory_thing',1,'x','advisory','value_validity')",
     )
 
     assert "violates" in message
+
+
+def test_a_loader_cannot_restate_the_severity_it_was_judged_by(connection: object) -> None:
+    """The forgeable copy is gone: severity lives on the rule and nowhere else.
+
+    A loader that wrote 'warning' beside a blocking rule would make the failure
+    vanish from quality.blocking_failure while every row still looked well formed.
+    """
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema='quality' AND table_name='evaluation' AND column_name='severity'"
+        )
+        assert cursor.fetchone()[0] == 0
+
+    run_id, _ = _one_outcome(connection)
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('dupes',1,'duplicate accounts','blocking','logical_uniqueness')",
+    )
+    accepts(
+        connection,
+        "INSERT INTO quality.evaluation"
+        "(run_id,rule_id,rule_version,passed,measured_value,expected_value) "
+        f"VALUES ({run_id},'dupes',1,false,'3','0')",
+    )
+
+    # The blocking failure is visible because the rule says blocking. Scoped to
+    # this rule: the run legitimately carries failures from other rules.
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            f"SELECT count(*) FROM quality.blocking_failure "
+            f"WHERE run_id={run_id} AND rule_id='dupes'"
+        )
+        assert cursor.fetchone()[0] == 1
+
+    # Softening the rule later cannot rewrite what this run was judged by,
+    # because the evaluation pins the version rather than copying the severity.
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('dupes',2,'duplicate accounts','warning','logical_uniqueness')",
+    )
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            f"SELECT count(*) FROM quality.blocking_failure "
+            f"WHERE run_id={run_id} AND rule_id='dupes'"
+        )
+        assert cursor.fetchone()[0] == 1
+
+
+def test_an_evaluation_cannot_pin_a_rule_version_that_does_not_exist(
+    connection: object,
+) -> None:
+    run_id, _ = _one_outcome(connection)
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('only_v1',1,'x','warning','value_validity')",
+    )
+
+    message = refuses(
+        connection,
+        "INSERT INTO quality.evaluation(run_id,rule_id,rule_version,passed) "
+        f"VALUES ({run_id},'only_v1',7,true)",
+    )
+
+    assert "foreign key" in message.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,15 @@
 -- Silver: county rows at source grain, vendor-neutral, with their origin
 -- attached and nothing inferred.
 --
--- Run with:  psql --single-transaction --set ON_ERROR_STOP=on -f 0002_silver_canonical.sql
+-- Run with:  psql --set ON_ERROR_STOP=on \
+--              -v file_sha256="$(sha256sum 0002_silver_canonical.sql | cut -d' ' -f1)" \
+--              -f 0002_silver_canonical.sql
+
+\if :{?file_sha256}
+\else
+\echo 'ERROR: pass -v file_sha256="$(sha256sum <this file> | cut -d\' \' -f1)"'
+\quit
+\endif
 
 BEGIN;
 
@@ -96,8 +104,15 @@ COMMENT ON COLUMN silver.source_record.observed_fields IS
 -- Idempotent retry. NULLS NOT DISTINCT because an absent source_family is a
 -- value here, not an unknown: two loads of the same row must collide rather
 -- than quietly become two records.
+--
+-- jurisdiction_code leads the key because release_identifier is caller-supplied
+-- and local to a county, not a global name. Dallas and Collin can each publish
+-- "certified-2025" containing a "property.txt" with a row 100, and those are two
+-- different facts. Without the county in the key the second county to load
+-- collides with the first and its rows are silently rejected as retries.
 CREATE UNIQUE INDEX source_record_logical_identity
     ON silver.source_record (
+        jurisdiction_code,
         release_identifier,
         source_member_name,
         source_row_number,
@@ -208,7 +223,41 @@ COMMENT ON TABLE silver.field_publication_policy IS
     'markers are sensitive until a reviewed county policy says otherwise, and the '
     'absence of a protected-owner flag is not evidence that a row is safe.';
 
-INSERT INTO platform.schema_migration (version, name)
-VALUES (2, '0002_silver_canonical');
+-- ---------------------------------------------------------------------------
+-- Privileges
+--
+-- Granted here rather than later, because the bootstrap leaves both roles able
+-- only to connect and an object with no grant is invisible to the role that
+-- needs it.  The ALTER DEFAULT PRIVILEGES lines are what make a table added by
+-- a later migration reachable without anyone remembering to come back.
+--
+-- No sequence grants: every generated key is GENERATED ALWAYS AS IDENTITY, whose
+-- implicit sequence is covered by INSERT on the table.
+-- ---------------------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA silver TO property_tax_ingestion, property_tax_api;
+
+GRANT SELECT, INSERT, UPDATE ON
+    silver.source_record,
+    silver.source_native_identifier,
+    silver.source_native_value
+    TO property_tax_ingestion;
+
+GRANT SELECT ON silver.field_publication_policy TO property_tax_ingestion;
+
+GRANT SELECT ON
+    silver.source_record,
+    silver.source_native_identifier,
+    silver.source_native_value,
+    silver.field_publication_policy
+    TO property_tax_api;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA silver
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO property_tax_ingestion;
+ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA silver
+    GRANT SELECT ON TABLES TO property_tax_api;
+
+INSERT INTO platform.schema_migration (version, name, file_sha256)
+VALUES (2, '0002_silver_canonical', :'file_sha256');
 
 COMMIT;
