@@ -92,7 +92,10 @@ CREATE TABLE quality.evaluation (
 
     FOREIGN KEY (rule_id, rule_version)
         REFERENCES quality.rule (rule_id, version),
-    UNIQUE (run_id, rule_id, subject),
+    -- NULLS NOT DISTINCT because a NULL subject means "evaluated once for this
+    -- run", which is a value rather than an unknown. Under ordinary UNIQUE two
+    -- such rows are distinct and the same rule records two verdicts for one run.
+    UNIQUE NULLS NOT DISTINCT (run_id, rule_id, subject),
     CONSTRAINT evaluation_failure_states_what_it_saw_and_wanted CHECK (
         passed OR (measured_value IS NOT NULL AND expected_value IS NOT NULL)
     )
@@ -156,17 +159,20 @@ COMMENT ON VIEW quality.blocking_failure IS
 -- implicit sequence is covered by INSERT on the table.
 -- ---------------------------------------------------------------------------
 
-GRANT USAGE ON SCHEMA quality TO property_tax_ingestion, property_tax_api;
+GRANT USAGE ON SCHEMA quality TO property_tax_ingestion;
 
 -- Rules are configuration the migrator owns; a loader reads them and records
 -- results against them, and may not redefine what blocks.
-GRANT SELECT ON quality.rule TO property_tax_ingestion, property_tax_api;
+GRANT SELECT ON quality.rule TO property_tax_ingestion;
 GRANT SELECT, INSERT ON quality.evaluation TO property_tax_ingestion;
-GRANT SELECT ON quality.evaluation, quality.blocking_failure TO property_tax_api;
 GRANT SELECT ON quality.blocking_failure TO property_tax_ingestion;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA quality
-    GRANT SELECT ON TABLES TO property_tax_ingestion, property_tax_api;
+    GRANT SELECT ON TABLES TO property_tax_ingestion;
+
+-- property_tax_api is granted nothing in quality: an evaluation names the
+-- measured and expected values of a rule over a release, which is internal
+-- detail rather than an approved product.
 
 INSERT INTO platform.schema_migration (version, name, file_sha256)
 VALUES (4, '0004_quality_results', :'file_sha256');

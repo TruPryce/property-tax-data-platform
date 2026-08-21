@@ -1,11 +1,11 @@
--- 0002_silver_canonical.sql
+-- 0002_silver_source_records.sql
 --
--- Silver: county rows at source grain, vendor-neutral, with their origin
+-- Silver source records: county rows at adapter grain, vendor-neutral, with their origin
 -- attached and nothing inferred.
 --
 -- Run with:  psql --set ON_ERROR_STOP=on \
---              -v file_sha256="$(sha256sum 0002_silver_canonical.sql | cut -d' ' -f1)" \
---              -f 0002_silver_canonical.sql
+--              -v file_sha256="$(sha256sum 0002_silver_source_records.sql | cut -d' ' -f1)" \
+--              -f 0002_silver_source_records.sql
 
 \if :{?file_sha256}
 \else
@@ -59,7 +59,8 @@ CREATE TABLE silver.source_record (
     observed_fields           text[],
     normalized_fields         text[],
 
-    manifest_id               bigint      REFERENCES bronze.release_manifest (manifest_id),
+    manifest_id               bigint      NOT NULL
+                                          REFERENCES bronze.release_manifest (manifest_id),
     loaded_at                 timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT record_jurisdiction_is_state_and_county
@@ -212,7 +213,13 @@ CREATE TABLE silver.field_publication_policy (
         CHECK (sensitivity IN ('sensitive', 'ordinary')),
     CONSTRAINT policy_permission_carries_its_approval CHECK (
         NOT publication_allowed
-        OR (approved_by IS NOT NULL AND approved_at IS NOT NULL AND review_reference IS NOT NULL)
+        OR (
+            approved_at IS NOT NULL
+            -- btrim of the ASCII control range as well as spaces: '' and '\t'
+            -- are not a named approver, and neither is a tab someone pasted.
+            AND btrim(coalesce(approved_by, ''), E' \t\r\n\v\f') <> ''
+            AND btrim(coalesce(review_reference, ''), E' \t\r\n\v\f') <> ''
+        )
     )
 );
 
@@ -235,7 +242,7 @@ COMMENT ON TABLE silver.field_publication_policy IS
 -- implicit sequence is covered by INSERT on the table.
 -- ---------------------------------------------------------------------------
 
-GRANT USAGE ON SCHEMA silver TO property_tax_ingestion, property_tax_api;
+GRANT USAGE ON SCHEMA silver TO property_tax_ingestion;
 
 GRANT SELECT, INSERT, UPDATE ON
     silver.source_record,
@@ -245,19 +252,21 @@ GRANT SELECT, INSERT, UPDATE ON
 
 GRANT SELECT ON silver.field_publication_policy TO property_tax_ingestion;
 
-GRANT SELECT ON
-    silver.source_record,
-    silver.source_native_identifier,
-    silver.source_native_value,
-    silver.field_publication_policy
-    TO property_tax_api;
-
 ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA silver
     GRANT SELECT, INSERT, UPDATE ON TABLES TO property_tax_ingestion;
-ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA silver
-    GRANT SELECT ON TABLES TO property_tax_api;
+
+-- property_tax_api is granted nothing in silver, deliberately.
+--
+-- field_publication_policy is metadata: no view, no row policy, and no privilege
+-- applies it, so SELECT on source_native_value would return every retained value
+-- including those whose policy says publication_allowed = false. Dallas retains
+-- every unknown extra column by accepted contract (issue #78), so an OWNER_NAME
+-- or address-shaped column in a real release would land there.
+--
+-- The API reads approved Gold products through bounded projections that do not
+-- exist yet. Until they do, connect-only is the honest privilege.
 
 INSERT INTO platform.schema_migration (version, name, file_sha256)
-VALUES (2, '0002_silver_canonical', :'file_sha256');
+VALUES (2, '0002_silver_source_records', :'file_sha256');
 
 COMMIT;

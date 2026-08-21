@@ -78,7 +78,7 @@ def connection() -> Iterator[object]:
                 cursor.execute(
                     "DO $$ BEGIN "
                     f"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') "
-                    f"THEN CREATE ROLE {role} NOLOGIN; END IF; END $$"
+                    f"THEN CREATE ROLE {role} NOINHERIT; END IF; END $$"
                 )
         for path in migration_files():
             with handle.cursor() as cursor:
@@ -268,14 +268,19 @@ def test_the_same_release_identity_with_different_bytes_is_kept_twice(
         ("property_tax_ingestion", "bronze.release_manifest", "INSERT", True),
         ("property_tax_ingestion", "ingestion.release_diagnostic", "INSERT", True),
         ("property_tax_ingestion", "quality.evaluation", "INSERT", True),
-        ("property_tax_api", "silver.source_record", "SELECT", True),
-        ("property_tax_api", "publication.publication", "SELECT", True),
+        # The API role reaches nothing these migrations create. Gold projections
+        # do not exist yet, and field_publication_policy is metadata no privilege
+        # applies, so SELECT on a value table would return denied values too.
+        ("property_tax_api", "silver.source_record", "SELECT", False),
+        ("property_tax_api", "silver.source_native_value", "SELECT", False),
+        ("property_tax_api", "publication.publication", "SELECT", False),
+        ("property_tax_api", "publication.current_publication", "SELECT", False),
+        ("property_tax_api", "quality.evaluation", "SELECT", False),
+        ("property_tax_api", "ingestion.release_diagnostic", "SELECT", False),
         # Bronze is acquisition evidence, so nobody may rewrite it.
         ("property_tax_ingestion", "bronze.release_manifest", "UPDATE", False),
         ("property_tax_ingestion", "bronze.artifact", "DELETE", False),
         # The API reads. It does not write, and it does not define quality rules.
-        ("property_tax_api", "silver.source_record", "INSERT", False),
-        ("property_tax_api", "quality.rule", "INSERT", False),
         ("property_tax_ingestion", "quality.rule", "INSERT", False),
     ],
 )
@@ -287,6 +292,53 @@ def test_the_roles_reach_exactly_what_they_were_granted(
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
         cursor.execute(f"SELECT has_table_privilege('{role}', '{relation}', '{privilege}')")
         assert cursor.fetchone()[0] is expected
+
+
+def _as_role(connection: object, role: str, statement: str) -> str | None:
+    """Run a statement as the consuming role. Returns the error, or None if it ran.
+
+    ACL catalogues say what was granted; this says what the role can do. They
+    differ whenever a grant is right and something else — a schema USAGE, a view's
+    underlying table — is not.
+    """
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(f"SET ROLE {role}")
+        try:
+            cursor.execute(statement)
+        except psycopg.Error as error:
+            return str(error)
+        finally:
+            cursor.execute("RESET ROLE")
+            connection.rollback()  # type: ignore[attr-defined]
+    return None
+
+
+def test_the_api_role_cannot_read_silver_as_itself(connection: object) -> None:
+    """The blocking case, exercised as the consumer rather than inferred from ACLs."""
+
+    error = _as_role(connection, "property_tax_api", "SELECT 1 FROM silver.source_native_value")
+
+    assert error is not None
+    assert "permission denied" in error.lower()
+
+
+def test_the_ingestion_role_can_write_silver_as_itself(connection: object) -> None:
+    connection.rollback()  # type: ignore[attr-defined]
+    statement = _record(connection, jurisdiction="tx-dallas", release="as-role", row=4242)
+
+    assert _as_role(connection, "property_tax_ingestion", statement) is None
+
+
+def test_the_ingestion_role_cannot_rewrite_acquisition_evidence(connection: object) -> None:
+    """Bronze immutability is a privilege, not an intention."""
+
+    error = _as_role(
+        connection, "property_tax_ingestion", "UPDATE bronze.release_manifest SET source_url='x'"
+    )
+
+    assert error is not None
+    assert "permission denied" in error.lower()
 
 
 @pytest.mark.parametrize("schema", ["silver", "bronze", "ingestion", "quality", "publication"])
@@ -315,9 +367,37 @@ def test_a_table_added_later_is_reachable_without_anyone_remembering(
 _RECORD = (
     "INSERT INTO silver.source_record"
     "(jurisdiction_code,appraisal_year,release_identifier,source_member_name,"
-    "source_row_number,parser_contract_version,layout_fingerprint{extra_columns})"
-    " VALUES ('{jurisdiction}',{year},'{release}','{member}',{row},1,'fp'{extra_values})"
+    "source_row_number,parser_contract_version,layout_fingerprint,manifest_id,run_id"
+    "{extra_columns})"
+    " VALUES ('{jurisdiction}',{year},'{release}','{member}',{row},1,'fp',"
+    "{manifest_id},{run_id}{extra_values})"
 )
+
+
+def _lineage(connection: object) -> tuple[int, int]:
+    """A manifest and a run for Silver rows to point at.
+
+    Both are NOT NULL: a record that cannot say which bytes it came from or which
+    run produced it cannot be attributed, re-run, or withdrawn.
+    """
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute("SELECT manifest_id FROM bronze.release_manifest LIMIT 1")
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO bronze.artifact(sha256,byte_size,media_type) VALUES "
+                "('" + "a" * 64 + "',10,'application/zip') ON CONFLICT DO NOTHING"
+            )
+            cursor.execute(
+                "INSERT INTO bronze.release_manifest"
+                "(artifact_sha256,jurisdiction_code,release_identifier,source_url,retrieved_at) "
+                "VALUES ('" + "a" * 64 + "','tx-collin','lineage',"
+                "'https://example.invalid/a.zip',now()) RETURNING manifest_id"
+            )
+            row = cursor.fetchone()
+        manifest_id = int(row[0])
+    return manifest_id, _one_outcome(connection)[0]
 
 
 def _record(
@@ -331,6 +411,7 @@ def _record(
     family: str | None = None,
     status: str | None = None,
 ) -> str:
+    manifest_id, run_id = _lineage(connection)
     columns = ""
     values = ""
     if family is not None:
@@ -342,6 +423,8 @@ def _record(
     return _RECORD.format(
         extra_columns=columns,
         extra_values=values,
+        manifest_id=manifest_id,
+        run_id=run_id,
         jurisdiction=jurisdiction,
         year=year,
         release=release,
@@ -493,6 +576,31 @@ def test_publishing_a_field_requires_a_recorded_approval(connection: object) -> 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("label", "approver", "reference"),
+    [
+        ("empty strings", "''", "''"),
+        ("whitespace", "'   '", "'  '"),
+        ("a pasted tab", "E'\\t'", "'REV-1'"),
+    ],
+)
+def test_a_blank_approval_is_not_a_named_approver(
+    connection: object, label: str, approver: str, reference: str
+) -> None:
+    """NOT NULL is not the same as named, and the policy says named."""
+
+    message = refuses(
+        connection,
+        "INSERT INTO silver.field_publication_policy"
+        "(jurisdiction_code,source_field,sensitivity,publication_allowed,"
+        "approved_by,approved_at,review_reference) "
+        f"VALUES ('tx-collin','owner_name_{len(label)}','sensitive',true,"
+        f"{approver},now(),{reference})",
+    )
+
+    assert "violates" in message
+
+
 def test_a_diagnostic_has_nowhere_to_put_content(connection: object) -> None:
     """Four columns and no fifth.
 
@@ -623,6 +731,36 @@ def test_a_failing_rule_must_say_what_it_saw_and_what_it_wanted(connection: obje
         assert cursor.fetchone() == ("461219", ">= 461510")
 
 
+def test_one_rule_records_one_verdict_per_run_even_with_no_subject(
+    connection: object,
+) -> None:
+    """NULL subject means "evaluated once for the run", which is a value.
+
+    Under ordinary UNIQUE two NULLs are distinct, so the same rule could record
+    two verdicts for one run and a reader would have to guess which counted.
+    """
+
+    run_id, _ = _one_outcome(connection)
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('run_wide',1,'once per run','warning','record_count_drift')",
+    )
+    accepts(
+        connection,
+        "INSERT INTO quality.evaluation(run_id,rule_id,rule_version,passed) "
+        f"VALUES ({run_id},'run_wide',1,true)",
+    )
+
+    message = refuses(
+        connection,
+        "INSERT INTO quality.evaluation(run_id,rule_id,rule_version,passed) "
+        f"VALUES ({run_id},'run_wide',1,true)",
+    )
+
+    assert "duplicate key" in message
+
+
 def test_there_is_no_third_severity(connection: object) -> None:
     """So failing rules cannot quietly be moved to "advisory"."""
 
@@ -710,6 +848,132 @@ def test_an_evaluation_cannot_pin_a_rule_version_that_does_not_exist(
 # ---------------------------------------------------------------------------
 
 
+def _accepted_run(connection: object, jurisdiction: str, release: str) -> int:
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
+            f"VALUES ('{jurisdiction}','{release}') RETURNING run_id"
+        )
+        run_id = int(cursor.fetchone()[0])
+        cursor.execute(
+            "INSERT INTO ingestion.release_outcome"
+            "(run_id,disposition,boundary_contract_version,staged_record_count,"
+            f"committed_record_count) VALUES ({run_id},'accepted',1,10,10)"
+        )
+    return run_id
+
+
+def _publish(jurisdiction: str, release: str, run_id: int | str, state: str = "current") -> str:
+    published = "now()" if state == "current" else "NULL"
+    return (
+        "INSERT INTO publication.publication"
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        f"VALUES ('latest_available','{jurisdiction}',2025,'certified','{release}',"
+        f"{run_id},'{state}',{published})"
+    )
+
+
+def test_a_publication_cannot_become_current_without_a_run(connection: object) -> None:
+    message = refuses(connection, _publish("tx-collin", "no-run", "NULL"))
+
+    assert "must name the ingestion run" in message
+
+
+def test_a_publication_cannot_become_current_without_an_accepted_outcome(
+    connection: object,
+) -> None:
+    """A run nothing has judged is not a release anyone accepted."""
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
+            "VALUES ('tx-collin','unjudged') RETURNING run_id"
+        )
+        run_id = int(cursor.fetchone()[0])
+
+    message = refuses(connection, _publish("tx-collin", "unjudged", run_id))
+
+    assert "no release outcome" in message
+
+
+def test_a_rejected_release_does_not_become_current(connection: object) -> None:
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier) "
+            "VALUES ('tx-collin','rejected-rel') RETURNING run_id"
+        )
+        run_id = int(cursor.fetchone()[0])
+        cursor.execute(
+            "INSERT INTO ingestion.release_outcome"
+            "(run_id,disposition,boundary_contract_version) "
+            f"VALUES ({run_id},'rejected',1)"
+        )
+
+    message = refuses(connection, _publish("tx-collin", "rejected-rel", run_id))
+
+    assert "rejected" in message
+
+
+def test_a_blocking_quality_failure_keeps_the_prior_publication_current(
+    connection: object,
+) -> None:
+    """The accepted rule: a blocking failure prevents publication."""
+
+    run_id = _accepted_run(connection, "tx-collin", "blocked-rel")
+    accepts(
+        connection,
+        "INSERT INTO quality.rule(rule_id,version,description,severity,rule_family) "
+        "VALUES ('blocker_rule',1,'x','blocking','value_validity')",
+    )
+    accepts(
+        connection,
+        "INSERT INTO quality.evaluation"
+        "(run_id,rule_id,rule_version,passed,measured_value,expected_value) "
+        f"VALUES ({run_id},'blocker_rule',1,false,'9','0')",
+    )
+
+    message = refuses(connection, _publish("tx-collin", "blocked-rel", run_id))
+
+    assert "blocking quality failure" in message
+
+    # And it is not merely the insert that is refused: the pointer never moved.
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT count(*) FROM publication.current_publication "
+            "WHERE release_identifier='blocked-rel'"
+        )
+        assert cursor.fetchone()[0] == 0
+
+
+def test_a_publication_cannot_claim_a_run_from_another_release(connection: object) -> None:
+    """Accepted lineage has to be *this* release's, not merely some accepted one."""
+
+    run_id = _accepted_run(connection, "tx-collin", "the-real-one")
+
+    message = refuses(connection, _publish("tx-collin", "a-different-one", run_id))
+
+    assert "processed" in message
+
+
+def test_an_accepted_clean_release_may_become_current(connection: object) -> None:
+    """The gate admits what it should, which is the half that proves it is a gate."""
+
+    # A jurisdiction of its own: one publication is current per product and
+    # jurisdiction, so reusing another test's county would collide on that index
+    # rather than on the gate this test is about.
+    run_id = _accepted_run(connection, "tx-denton", "clean-rel")
+
+    accepts(connection, _publish("tx-denton", "clean-rel", run_id))
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(
+            "SELECT run_id FROM publication.current_publication "
+            "WHERE release_identifier='clean-rel'"
+        )
+        assert cursor.fetchone()[0] == run_id
+
+
 def test_only_one_publication_is_current_per_product_and_jurisdiction(
     connection: object,
 ) -> None:
@@ -719,17 +983,21 @@ def test_only_one_publication_is_current_per_product_and_jurisdiction(
     half-finished swap cannot leave two rows claiming to be what consumers read.
     """
 
+    run_a = _accepted_run(connection, "tx-ellis", "rel-a")
+    run_b = _accepted_run(connection, "tx-ellis", "rel-b")
     accepts(
         connection,
         "INSERT INTO publication.publication"
-        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,state,published_at) "
-        "VALUES ('latest_certified','tx-ellis',2025,'certified','rel-a','current',now())",
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        f"VALUES ('latest_certified','tx-ellis',2025,'certified','rel-a',{run_a},'current',now())",
     )
     message = refuses(
         connection,
         "INSERT INTO publication.publication"
-        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,state,published_at) "
-        "VALUES ('latest_certified','tx-ellis',2025,'certified','rel-b','current',now())",
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        f"VALUES ('latest_certified','tx-ellis',2025,'certified','rel-b',{run_b},'current',now())",
     )
 
     assert "duplicate key" in message
@@ -740,11 +1008,14 @@ def test_proposed_values_may_move_available_without_moving_certified(
 ) -> None:
     """Which is only possible if they are separate products, not one with a flag."""
 
+    run_c = _accepted_run(connection, "tx-ellis", "rel-c")
     accepts(
         connection,
         "INSERT INTO publication.publication"
-        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,state,published_at) "
-        "VALUES ('latest_available','tx-ellis',2026,'preliminary','rel-c','current',now())",
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        "VALUES ('latest_available','tx-ellis',2026,'preliminary','rel-c',"
+        f"{run_c},'current',now())",
     )
 
     with connection.cursor() as cursor:  # type: ignore[attr-defined]
@@ -756,11 +1027,12 @@ def test_proposed_values_may_move_available_without_moving_certified(
 
 
 def test_a_build_is_never_current_without_being_published(connection: object) -> None:
+    run_d = _accepted_run(connection, "tx-rockwall", "rel-d")
     message = refuses(
         connection,
         "INSERT INTO publication.publication"
-        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,state) "
-        "VALUES ('history','tx-rockwall',2025,'certified','rel-d','current')",
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,state) "
+        f"VALUES ('history','tx-rockwall',2025,'certified','rel-d',{run_d},'current')",
     )
 
     assert "violates" in message

@@ -160,6 +160,24 @@ COMMENT ON TABLE ingestion.release_notice IS
     'to put content.';
 
 -- ---------------------------------------------------------------------------
+-- Silver gains its run lineage
+--
+-- silver.source_record is created in 0002 and ingestion.run here, so the
+-- reference can only be added once both exist. Without it a Silver row records
+-- which bytes it came from and not which processing run produced it, and the
+-- accepted contract requires both.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE silver.source_record
+    ADD COLUMN run_id bigint NOT NULL REFERENCES ingestion.run (run_id);
+
+COMMENT ON COLUMN silver.source_record.run_id IS
+    'The processing run that produced this row. NOT NULL: a record whose run is '
+    'unknown cannot be attributed, re-run, or withdrawn with the release it came from.';
+
+CREATE INDEX source_record_by_run ON silver.source_record (run_id);
+
+-- ---------------------------------------------------------------------------
 -- Privileges
 --
 -- Granted here rather than later, because the bootstrap leaves both roles able
@@ -171,7 +189,7 @@ COMMENT ON TABLE ingestion.release_notice IS
 -- implicit sequence is covered by INSERT on the table.
 -- ---------------------------------------------------------------------------
 
-GRANT USAGE ON SCHEMA ingestion TO property_tax_ingestion, property_tax_api;
+GRANT USAGE ON SCHEMA ingestion TO property_tax_ingestion;
 
 GRANT SELECT, INSERT, UPDATE ON
     ingestion.run,
@@ -180,17 +198,11 @@ GRANT SELECT, INSERT, UPDATE ON
     ingestion.release_notice
     TO property_tax_ingestion;
 
-GRANT SELECT ON
-    ingestion.run,
-    ingestion.release_outcome,
-    ingestion.release_diagnostic,
-    ingestion.release_notice
-    TO property_tax_api;
-
 ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA ingestion
     GRANT SELECT, INSERT, UPDATE ON TABLES TO property_tax_ingestion;
-ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA ingestion
-    GRANT SELECT ON TABLES TO property_tax_api;
+
+-- property_tax_api is granted nothing in ingestion. Diagnostics are bounded but
+-- they are operational detail, not an approved consumer product.
 
 INSERT INTO platform.schema_migration (version, name, file_sha256)
 VALUES (3, '0003_release_diagnostics', :'file_sha256');

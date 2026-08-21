@@ -62,7 +62,7 @@ CREATE TABLE publication.publication (
     tax_year           integer     NOT NULL,
     release_kind       text        NOT NULL,
     release_identifier text        NOT NULL,
-    run_id             bigint      REFERENCES ingestion.run (run_id),
+    run_id             bigint      NOT NULL REFERENCES ingestion.run (run_id),
     source_as_of       timestamptz,
     state              text        NOT NULL DEFAULT 'building',
     built_at           timestamptz NOT NULL DEFAULT now(),
@@ -140,6 +140,87 @@ COMMENT ON VIEW publication.current_publication IS
     'be able to determine, in one place rather than assembled per query.';
 
 -- ---------------------------------------------------------------------------
+-- What may become current
+--
+-- A CHECK cannot see another table, so the rule that a release must be accepted
+-- and free of blocking failures before it is what consumers read has to be a
+-- trigger. It is enforced here rather than in a loader because the loader is the
+-- thing being constrained: whoever writes the row is who must not be trusted to
+-- have checked.
+--
+-- Task 6.2 owns the full promotion path, including demoting the predecessor in
+-- the same transaction. This is the floor beneath it, not a replacement for it.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION publication.assert_current_is_validated() RETURNS trigger
+LANGUAGE plpgsql AS $assert$
+DECLARE
+    run_jurisdiction text;
+    run_release      text;
+    run_disposition  text;
+    blocking_count   integer;
+BEGIN
+    IF NEW.state <> 'current' THEN
+        RETURN NEW;
+    END IF;
+
+    -- A BEFORE trigger runs ahead of the NOT NULL check, so say this plainly
+    -- rather than let the column's error arrive after a confusing one.
+    IF NEW.run_id IS NULL THEN
+        RAISE EXCEPTION
+            'a current publication must name the ingestion run it was built from';
+    END IF;
+
+    SELECT run.jurisdiction_code, run.release_identifier, outcome.disposition
+      INTO run_jurisdiction, run_release, run_disposition
+      FROM ingestion.run AS run
+      LEFT JOIN ingestion.release_outcome AS outcome ON outcome.run_id = run.run_id
+     WHERE run.run_id = NEW.run_id;
+
+    IF run_disposition IS NULL THEN
+        RAISE EXCEPTION
+            'run % has no release outcome, so nothing has accepted it', NEW.run_id;
+    END IF;
+    IF run_disposition <> 'accepted' THEN
+        RAISE EXCEPTION
+            'run % was %, and a rejected release does not become current',
+            NEW.run_id, run_disposition;
+    END IF;
+
+    -- The lineage must be the same release, not merely some accepted one.
+    IF run_jurisdiction IS DISTINCT FROM NEW.jurisdiction_code
+       OR run_release IS DISTINCT FROM NEW.release_identifier THEN
+        RAISE EXCEPTION
+            'run % processed %/%, not %/%',
+            NEW.run_id, run_jurisdiction, run_release,
+            NEW.jurisdiction_code, NEW.release_identifier;
+    END IF;
+
+    SELECT count(*) INTO blocking_count
+      FROM quality.blocking_failure
+     WHERE quality.blocking_failure.run_id = NEW.run_id;
+
+    IF blocking_count > 0 THEN
+        RAISE EXCEPTION
+            'run % has % blocking quality failure(s), so the prior publication stays current',
+            NEW.run_id, blocking_count;
+    END IF;
+
+    RETURN NEW;
+END
+$assert$;
+
+CREATE TRIGGER publication_current_is_validated
+    BEFORE INSERT OR UPDATE ON publication.publication
+    FOR EACH ROW EXECUTE FUNCTION publication.assert_current_is_validated();
+
+COMMENT ON FUNCTION publication.assert_current_is_validated() IS
+    'A publication becomes current only for a run that was accepted, that processed '
+    'the release the publication names, and that carries no blocking quality failure. '
+    'Enforced in the database because the role writing the row is the one that must '
+    'not be trusted to have checked.';
+
+-- ---------------------------------------------------------------------------
 -- Privileges
 --
 -- Granted here rather than later, because the bootstrap leaves both roles able
@@ -151,14 +232,18 @@ COMMENT ON VIEW publication.current_publication IS
 -- implicit sequence is covered by INSERT on the table.
 -- ---------------------------------------------------------------------------
 
-GRANT USAGE ON SCHEMA publication TO property_tax_ingestion, property_tax_api;
+GRANT USAGE ON SCHEMA publication TO property_tax_ingestion;
 
-GRANT SELECT ON publication.product TO property_tax_ingestion, property_tax_api;
+GRANT SELECT ON publication.product TO property_tax_ingestion;
 GRANT SELECT, INSERT, UPDATE ON publication.publication TO property_tax_ingestion;
-GRANT SELECT ON publication.publication, publication.current_publication TO property_tax_api;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE property_tax_migrator IN SCHEMA publication
-    GRANT SELECT ON TABLES TO property_tax_ingestion, property_tax_api;
+    GRANT SELECT ON TABLES TO property_tax_ingestion;
+
+-- property_tax_api is granted nothing here either. current_publication is a
+-- pointer the loader writes, and task 6.2 owns the promotion path that makes it
+-- trustworthy; exposing it now would let the API read a pointer whose gate is
+-- still being built.
 
 INSERT INTO platform.schema_migration (version, name, file_sha256)
 VALUES (5, '0005_publication_metadata', :'file_sha256');

@@ -24,7 +24,7 @@ infra/postgres/
   Dockerfile                    copies init/ into the image, and nothing else
   init/                         automatic, lexicographic, only on an empty data directory
   migrations/0001_release_manifests.sql
-  migrations/0002_silver_canonical.sql
+  migrations/0002_silver_source_records.sql
   migrations/0003_release_diagnostics.sql
   migrations/0004_quality_results.sql
   migrations/0005_publication_metadata.sql
@@ -67,6 +67,19 @@ as `platform_admin`: a migration that needs superuser is a migration doing somet
 through a migration is worse than one on line one. Verified against 16.13; the pinned runtime image
 is 16.11.
 
+## What these are not
+
+`silver` here persists the shared adapter source-record shape: one row per physical source row,
+identifiers and values under their exact source names. It is **not** the canonical Silver model. There
+is no account snapshot and no owner, allocation, exemption, jurisdiction, land, improvement, or
+geometry child table, and `source_account_id` is nullable because Collin publishes no single account
+identifier.
+
+Those belong to the canonical record types in task 2.2, which is unstarted, and to a migration that
+follows an approved canonical contract. Bootstrap task **3.4 is therefore not complete** and stays
+unchecked: this is the persistence the adapters and the release boundary need, not the model the
+publication contract requires.
+
 ## What is applied
 
 ```sql
@@ -82,7 +95,7 @@ file raises `migration 000N is already applied` and changes nothing.
 | # | Schema | Holds |
 |---|---|---|
 | 0001 | `platform`, `bronze` | The migration ledger; artifacts keyed by content, acquisition manifests, redirect chains, and the logical release partitions those bytes carry. |
-| 0002 | `silver` | County rows at source grain with provenance inlined, identifiers and values under their exact source names, and the default-deny field publication policy. |
+| 0002 | `silver` | County rows at **adapter** grain with provenance inlined, identifiers and values under their exact source names, and the default-deny field publication policy. |
 | 0003 | `ingestion` | Processing runs, one verdict per run with its counts, and diagnostics and notices in the closed vocabulary. |
 | 0004 | `quality` | Rules as rows with configurable thresholds, and one result per rule evaluated against a run. |
 | 0005 | `publication` | The three Gold products, every publication attempt with its lineage, and the current-publication pointer. |
@@ -154,13 +167,31 @@ Grant the narrowest privilege the role needs. `property_tax_api` reads; it does 
 
 Every migration here grants what its objects need. Bronze is `SELECT`/`INSERT` only for
 `property_tax_ingestion`, so acquisition evidence is immutable by privilege rather than by
-intention; `property_tax_api` reads and never writes, and neither role may define a quality rule.
-No sequence grants are needed: every generated key is `GENERATED ALWAYS AS IDENTITY`, whose implicit
-sequence is covered by `INSERT` on the table.
+intention, and no role may define a quality rule. No sequence grants are needed: every generated key
+is `GENERATED ALWAYS AS IDENTITY`, whose implicit sequence is covered by `INSERT` on the table.
 
-## Not Yet Met
+**`property_tax_api` is granted nothing by these migrations and stays connect-only.**
+`silver.field_publication_policy` is metadata: no view, row policy, or privilege applies it, so
+`SELECT` on `silver.source_native_value` would return every retained value including those the policy
+denies. Dallas retains every unknown extra column by accepted contract (issue #78), so an
+`OWNER_NAME` or address-shaped column in a real release lands there. The API reads approved Gold
+products through bounded projections that do not exist yet; until they do, connect-only is the only
+honest privilege.
 
-Recorded so the gap is visible rather than assumed closed:
+## The Apply Contract, and What Still Does Not Meet It
+
+Manual `psql` execution is the interim path, not a replacement for the apply contract. A runner
+remains future work, and it owes three things this procedure cannot provide:
+
+- **An advisory lock** taken before applying, so a deploy and a hand-run cannot both apply the same
+  file. Nothing serialises two operators today.
+- **Verification of every already-applied checksum**, not only recording the current one. The ledger
+  stores what an operator supplied; it cannot prove that value was the hash of the file that ran, and
+  it never re-reads prior entries to detect a migration edited after the fact.
+- **Failing closed on a mismatch**, aborting rather than continuing past a file whose recorded hash no
+  longer matches its contents.
+
+Also outstanding:
 
 - **No `lock_timeout` or `statement_timeout`.** Harmless while these tables are empty; on a populated
   `silver` a statement that cannot take its lock waits behind live traffic and blocks everything
@@ -174,11 +205,14 @@ each invariant above. It needs a database and skips without one:
 ```sh
 export PGPASSWORD="$(openssl rand -hex 16)"
 docker run -d --name ptdp-test -p 5433:5432 \
-    -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16-alpine
+    -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16.11-bookworm
 
 PTDP_TEST_DATABASE_URL=postgresql://postgres@localhost:5433/ptdp \
     uv run pytest tests/integration/postgres -v
 ```
+
+The image is the one the runtime pins, so the suite exercises the server that will actually run these
+rather than a nearby version.
 
 The password stays in `PGPASSWORD`, which libpq reads, rather than in the connection string. A URL
 carrying a password ends up in shell history, process listings, and eventually in a file someone
