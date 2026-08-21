@@ -27,7 +27,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg", reason="psycopg is required to talk to PostgreSQL")
 
-MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+MIGRATIONS = Path(__file__).resolve().parents[2] / "infra" / "postgres" / "migrations"
 SCHEMAS = ("publication", "quality", "ingestion", "silver", "bronze", "platform")
 
 

@@ -5,7 +5,7 @@
 - Never edit, rename, or renumber a migration that has been applied anywhere; correct it with a new one.
 - Name files `NNNN_snake_case_description.sql` with four-digit zero padding, so lexicographic order is the apply order.
 - Never reuse a number. If two branches claim the same one, renumber the unmerged migration before merging.
-- Keep migrations forward-only. There are no down migrations; recovery is a restore, not a rollback.
+- Correct a migration with a new forward migration. The `rollback/` files are a development teardown that `DROP SCHEMA ... CASCADE` and guard ordering but not data; on a database that has held a real release, recovery is the ADR-0002 restore.
 - One logical change per file. A migration that does two unrelated things cannot be reasoned about when one half fails.
 - Grant privileges to `property_tax_ingestion` and `property_tax_api` in the same migration that creates the object, and include `ALTER DEFAULT PRIVILEGES` so later objects inherit them.
 - Grant the narrowest privilege the role needs; the API role reads and does not write.
