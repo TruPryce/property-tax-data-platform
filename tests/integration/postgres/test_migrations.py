@@ -1292,27 +1292,42 @@ def test_the_loader_cannot_open_a_run_with_a_unicode_blank_release(
 
 
 _BTRIM_CALL = re.compile(r"\bbtrim\s*\(", re.IGNORECASE)
-_HELPER_BODY = re.compile(r"\$named\$.*?\$named\$", re.DOTALL)
+_HELPER_FILE = "0001_release_manifests.sql"
+_HELPER_DEFINITION = re.compile(
+    r"CREATE\s+FUNCTION\s+platform\.is_named\b.*?\$named\$(?P<body>.*?)\$named\$",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def plain_btrim_offenders(sources: dict[str, str]) -> list[str]:
     """Lines that trim without going through platform.is_named.
 
     Case-insensitive and whitespace-tolerant, because `BTRIM(` and `btrim (` are
-    the same call and a literal search for one spelling is a guard that only
-    stops the mutation nobody would make.
+    the same call, and a literal search for one spelling only stops the mutation
+    nobody would make.
 
-    The helper's own call is excused **by location** -- the body between its
-    dollar quotes is removed before scanning -- rather than by matching line
-    text, since any exemption phrased as text is itself something a new line can
-    contain.
+    Exactly one call is excused: the one inside `platform.is_named`'s body in
+    `0001`. Anything reusable is not an exemption but a bypass waiting to be
+    written -- skipping any `$named$` block would hide a second function using
+    the same tag, and skipping lines that mention `platform.is_named` would hide
+    `CHECK (platform.is_named(x) OR BTRIM(x) <> '')`, which reads as compliant
+    and accepts a non-breaking space.
     """
 
     offenders: list[str] = []
     for name, body in sorted(sources.items()):
-        scannable = _HELPER_BODY.sub(lambda match: "\n" * match.group().count("\n"), body)
+        scannable = body
+        if name == _HELPER_FILE:
+            match = _HELPER_DEFINITION.search(body)
+            if match is None:
+                offenders.append(f"{name}: platform.is_named is not defined here")
+            else:
+                start, end = match.span("body")
+                # Blank the body, keeping newlines so line numbers still point
+                # at the file a reader will open.
+                scannable = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
         for number, line in enumerate(scannable.splitlines(), 1):
-            if line.strip().startswith("--") or "platform.is_named" in line:
+            if line.strip().startswith("--"):
                 continue
             if _BTRIM_CALL.search(line):
                 offenders.append(f"{name}:{number}")
@@ -1344,6 +1359,12 @@ def test_every_blank_check_uses_the_shared_definition() -> None:
         ("mixed case", "BTrim(locator) <> ''"),
         ("space before the paren", "btrim (locator) <> ''"),
         ("uppercase and spaced", "BTRIM  (locator) <> ''"),
+        # Reads as compliant and accepts a non-breaking space: the disjunction
+        # means the plain trim is enough on its own.
+        (
+            "a valid call beside an invalid one",
+            "platform.is_named(locator) OR BTRIM(locator) <> ''",
+        ),
     ],
 )
 def test_the_guard_catches_every_spelling_of_a_bypass(label: str, mutation: str) -> None:
@@ -1365,11 +1386,44 @@ def test_the_guard_catches_every_spelling_of_a_bypass(label: str, mutation: str)
     assert any(item.startswith(target) for item in offenders)
 
 
+def test_a_second_function_cannot_borrow_the_helper_s_dollar_tag() -> None:
+    """`$named$` is a tag anyone may reuse, so it cannot be what earns the exemption.
+
+    Skipping every block with that tag would hide a second function trimming
+    plainly, in a different migration, with no mention of platform.is_named.
+    """
+
+    sources = _migration_sources()
+    sources["0004_quality_results.sql"] += (
+        "\n\nCREATE FUNCTION quality.looks_named(value text) RETURNS boolean\n"
+        "LANGUAGE sql IMMUTABLE AS $named$\n"
+        "    SELECT btrim(value) <> ''\n"
+        "$named$;\n"
+    )
+
+    offenders = plain_btrim_offenders(sources)
+
+    assert any(item.startswith("0004_quality_results.sql") for item in offenders)
+
+
+def test_the_guard_notices_if_the_helper_stops_being_defined_where_it_looks() -> None:
+    """The exemption is anchored to one function in one file, so it can go missing."""
+
+    sources = _migration_sources()
+    sources[_HELPER_FILE] = sources[_HELPER_FILE].replace(
+        "CREATE FUNCTION platform.is_named", "CREATE FUNCTION platform.was_named", 1
+    )
+
+    offenders = plain_btrim_offenders(sources)
+
+    assert any("is not defined here" in item for item in offenders)
+
+
 def test_the_guard_does_not_flag_the_helper_itself() -> None:
     """Excused by location, so the exemption is not a phrase a new line can carry."""
 
     assert not plain_btrim_offenders(_migration_sources())
-    assert "btrim" in (MIGRATIONS / "0001_release_manifests.sql").read_text(encoding="utf-8")
+    assert "btrim" in (MIGRATIONS / _HELPER_FILE).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

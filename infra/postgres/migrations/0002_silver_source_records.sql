@@ -224,8 +224,8 @@ CREATE TABLE silver.field_publication_policy (
         NOT publication_allowed
         OR (
             approved_at IS NOT NULL
-            -- btrim of the ASCII control range as well as spaces: '' and '\t'
-            -- are not a named approver, and neither is a tab someone pasted.
+            -- '', '   ', and a pasted non-breaking space are not a named
+            -- approver; platform.is_named is where that judgement lives.
             AND platform.is_named(coalesce(approved_by, ''))
             AND platform.is_named(coalesce(review_reference, ''))
         )
