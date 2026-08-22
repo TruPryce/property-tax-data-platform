@@ -51,7 +51,7 @@ CREATE TABLE quality.rule (
     CONSTRAINT rule_id_is_a_lowercase_name
         CHECK (rule_id ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT rule_description_not_blank
-        CHECK (btrim(description) <> ''),
+        CHECK (platform.is_named(description)),
     CONSTRAINT rule_severity_is_blocking_or_warning
         CHECK (severity IN ('blocking', 'warning')),
     CONSTRAINT rule_threshold_is_an_object

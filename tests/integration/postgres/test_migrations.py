@@ -1207,6 +1207,146 @@ def test_no_whitespace_character_alone_is_a_name(connection: object, character: 
         assert cursor.fetchone()[0] is False, f"U+{ord(character):04X} accepted as a name"
 
 
+NBSP = "\u00a0"
+
+
+@pytest.mark.parametrize(
+    ("label", "column"),
+    [
+        ("release identifier", "release_identifier"),
+        ("source member name", "source_member_name"),
+        ("layout fingerprint", "layout_fingerprint"),
+        ("source account id", "source_account_id"),
+        ("source family", "source_family"),
+        ("source status", "source_status"),
+        ("parcel reference", "parcel_reference"),
+        ("provenance table name", "provenance_table_name"),
+        ("provenance source family", "provenance_source_family"),
+        ("provenance source status", "provenance_source_status"),
+    ],
+)
+def test_the_loader_cannot_store_a_unicode_blank_source_record_field(
+    connection: object, label: str, column: str
+) -> None:
+    """As the runtime role, end to end, against every carrier-backed field.
+
+    The helper being right does not prove each constraint calls it: these fields
+    map to SourceProvenance and AppraisalSourceRecord, whose carriers reject
+    anything blank under `.strip()`, and they were still trimming ASCII only.
+    """
+
+    manifest_id, run_id = _lineage(connection, jurisdiction="tx-collin", release=f"nbsp-{column}")
+    columns = {
+        "jurisdiction_code": "'tx-collin'",
+        "appraisal_year": "2025",
+        "release_identifier": f"'nbsp-{column}'",
+        "source_member_name": "'p.csv'",
+        "source_row_number": "1",
+        "parser_contract_version": "1",
+        "layout_fingerprint": "'fp'",
+        "manifest_id": str(manifest_id),
+        "run_id": str(run_id),
+    }
+    # The composite lineage key needs release_identifier to stay the run's, so
+    # that case is exercised through a run whose own identifier is the blank.
+    if column == "release_identifier":
+        # The composite lineage key forces this to equal the run's, so a blank
+        # here cannot be reached without a blank run identifier. That is where
+        # the field is settable, and the test below covers it there.
+        pytest.skip("settable on the run, not the record; see the run identity test")
+    columns[column] = f"'{NBSP}'"
+
+    error = _as_role(
+        connection,
+        "property_tax_ingestion",
+        f"INSERT INTO silver.source_record({','.join(columns)}) "
+        f"VALUES ({','.join(columns.values())})",
+    )
+
+    assert error is not None, f"{label} accepted a non-breaking space"
+    assert "violates check constraint" in error
+
+
+def test_the_loader_cannot_open_a_run_with_a_unicode_blank_release(
+    connection: object,
+) -> None:
+    """Where a blank release identifier is actually settable.
+
+    silver.source_record inherits this value through the composite lineage key,
+    so constraining it at the run is what makes the record's copy unreachable.
+    """
+
+    manifest_id, _ = _lineage(connection, jurisdiction="tx-collin", release="nbsp-run")
+
+    error = _as_role(
+        connection,
+        "property_tax_ingestion",
+        "INSERT INTO ingestion.run"
+        "(jurisdiction_code,release_identifier,manifest_id,tax_year,release_kind) "
+        f"VALUES ('tx-collin','{NBSP}',{manifest_id},2025,'certified')",
+    )
+
+    assert error is not None
+    assert "violates check constraint" in error
+
+
+def test_every_blank_check_uses_the_shared_definition() -> None:
+    """The split between ASCII and Unicode trimming was the defect, twice.
+
+    A field left on plain btrim looks correct beside one that is not, so the
+    class is closed rather than the instances: the only btrim in the migrations
+    is the one inside platform.is_named.
+    """
+
+    offenders: list[str] = []
+    for path in sorted(MIGRATIONS.glob("[0-9]*.sql")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if "btrim(" not in line or stripped.startswith("--"):
+                continue
+            if "platform.is_named" in line or "SELECT btrim(value" in line:
+                continue
+            offenders.append(f"{path.name}:{number}")
+
+    assert not offenders, f"plain btrim bypasses platform.is_named at {offenders}"
+
+
+@pytest.mark.parametrize(
+    ("label", "statement"),
+    [
+        (
+            "native identifier name",
+            "INSERT INTO silver.source_native_identifier"
+            "(record_id,identifier_name,identifier_value) VALUES ({record},'{nbsp}','v')",
+        ),
+        (
+            "native identifier value",
+            "INSERT INTO silver.source_native_identifier"
+            "(record_id,identifier_name,identifier_value) VALUES ({record},'geo','{nbsp}')",
+        ),
+        (
+            "native value source field",
+            "INSERT INTO silver.source_native_value"
+            "(record_id,source_field,lexical_text,text_value) "
+            "VALUES ({record},'{nbsp}','x','x')",
+        ),
+    ],
+)
+def test_the_loader_cannot_store_a_unicode_blank_child_field(
+    connection: object, label: str, statement: str
+) -> None:
+    record_id = _one_record_id(connection)
+
+    error = _as_role(
+        connection,
+        "property_tax_ingestion",
+        statement.format(record=record_id, nbsp=NBSP),
+    )
+
+    assert error is not None, f"{label} accepted a non-breaking space"
+    assert "violates check constraint" in error
+
+
 @pytest.mark.parametrize(
     ("label", "value"),
     [

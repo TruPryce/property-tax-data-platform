@@ -50,7 +50,7 @@ CREATE TABLE ingestion.run (
     CONSTRAINT run_jurisdiction_is_state_and_county
         CHECK (jurisdiction_code ~ '^[a-z]{2}-[a-z0-9]+(-[a-z0-9]+)*$'),
     CONSTRAINT run_release_identifier_not_blank
-        CHECK (btrim(release_identifier) <> ''),
+        CHECK (platform.is_named(release_identifier)),
     CONSTRAINT run_finishes_after_it_starts
         CHECK (finished_at IS NULL OR finished_at >= started_at),
 

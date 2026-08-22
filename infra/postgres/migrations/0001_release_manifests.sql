@@ -57,30 +57,6 @@ COMMENT ON SCHEMA bronze IS
     'Immutable acquisition evidence. Nothing here is derived, corrected, or normalized.';
 
 -- ---------------------------------------------------------------------------
--- What has been applied
--- ---------------------------------------------------------------------------
-
-CREATE TABLE platform.schema_migration (
-    version           integer     PRIMARY KEY,
-    name              text        NOT NULL,
-    applied_at        timestamptz NOT NULL DEFAULT now(),
-    applied_by        text        NOT NULL DEFAULT current_user,
-    file_sha256       text        NOT NULL,
-
-    CONSTRAINT schema_migration_name_not_blank CHECK (btrim(name) <> ''),
-    CONSTRAINT schema_migration_sha256_is_lowercase_hex
-        CHECK (file_sha256 ~ '^[0-9a-f]{64}$')
-);
-
-COMMENT ON TABLE platform.schema_migration IS
-    'One row per applied migration. These files are run by hand, so this is where '
-    '"what is applied" is recorded rather than inferred from which tables happen to exist.';
-COMMENT ON COLUMN platform.schema_migration.file_sha256 IS
-    'The hash of the file that was applied, supplied by the operator. Without it the '
-    'ledger records that version 3 ran and cannot say whether the 0003 file on disk is '
-    'still the one that ran, which under manual application nothing else would notice.';
-
--- ---------------------------------------------------------------------------
 -- What counts as a name
 --
 -- The carrier's _require_optional_name rejects any string that is blank under
@@ -106,6 +82,30 @@ COMMENT ON FUNCTION platform.is_named(text) IS
     'name the carrier refuses is not a name here either.';
 
 -- ---------------------------------------------------------------------------
+-- What has been applied
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE platform.schema_migration (
+    version           integer     PRIMARY KEY,
+    name              text        NOT NULL,
+    applied_at        timestamptz NOT NULL DEFAULT now(),
+    applied_by        text        NOT NULL DEFAULT current_user,
+    file_sha256       text        NOT NULL,
+
+    CONSTRAINT schema_migration_name_not_blank CHECK (platform.is_named(name)),
+    CONSTRAINT schema_migration_sha256_is_lowercase_hex
+        CHECK (file_sha256 ~ '^[0-9a-f]{64}$')
+);
+
+COMMENT ON TABLE platform.schema_migration IS
+    'One row per applied migration. These files are run by hand, so this is where '
+    '"what is applied" is recorded rather than inferred from which tables happen to exist.';
+COMMENT ON COLUMN platform.schema_migration.file_sha256 IS
+    'The hash of the file that was applied, supplied by the operator. Without it the '
+    'ledger records that version 3 ran and cannot say whether the 0003 file on disk is '
+    'still the one that ran, which under manual application nothing else would notice.';
+
+-- ---------------------------------------------------------------------------
 -- The bytes
 -- ---------------------------------------------------------------------------
 
@@ -121,11 +121,11 @@ CREATE TABLE bronze.artifact (
     CONSTRAINT artifact_byte_count_not_negative
         CHECK (byte_count >= 0),
     CONSTRAINT artifact_locator_not_blank
-        CHECK (btrim(locator) <> ''),
+        CHECK (platform.is_named(locator)),
     CONSTRAINT artifact_locator_carries_no_control_character
         CHECK (locator !~ '[[:cntrl:]]'),
     CONSTRAINT artifact_media_type_not_blank
-        CHECK (media_type IS NULL OR btrim(media_type) <> '')
+        CHECK (media_type IS NULL OR platform.is_named(media_type))
 );
 
 COMMENT ON TABLE bronze.artifact IS
@@ -159,7 +159,7 @@ CREATE TABLE bronze.release_manifest (
     CONSTRAINT manifest_version_positive
         CHECK (manifest_version >= 1),
     CONSTRAINT manifest_source_url_not_blank
-        CHECK (btrim(source_url) <> ''),
+        CHECK (platform.is_named(source_url)),
     CONSTRAINT manifest_headers_is_an_object
         CHECK (jsonb_typeof(response_headers) = 'object'),
     CONSTRAINT manifest_tool_versions_is_an_object
@@ -195,7 +195,7 @@ CREATE TABLE bronze.release_redirect (
     CONSTRAINT redirect_hop_index_zero_based CHECK (hop_index >= 0),
     CONSTRAINT redirect_status_is_a_status    CHECK (status BETWEEN 100 AND 599),
     CONSTRAINT redirect_urls_not_blank
-        CHECK (btrim(from_url) <> '' AND btrim(to_url) <> '')
+        CHECK (platform.is_named(from_url) AND platform.is_named(to_url))
 );
 
 COMMENT ON TABLE bronze.release_redirect IS

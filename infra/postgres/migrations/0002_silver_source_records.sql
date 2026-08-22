@@ -83,19 +83,19 @@ CREATE TABLE silver.source_record (
     CONSTRAINT record_provenance_source_year_positive
         CHECK (provenance_source_year IS NULL OR provenance_source_year >= 1),
     CONSTRAINT record_release_identifier_not_blank
-        CHECK (btrim(release_identifier) <> ''),
+        CHECK (platform.is_named(release_identifier)),
     CONSTRAINT record_source_member_name_not_blank
-        CHECK (btrim(source_member_name) <> ''),
+        CHECK (platform.is_named(source_member_name)),
     CONSTRAINT record_layout_fingerprint_not_blank
-        CHECK (btrim(layout_fingerprint) <> ''),
+        CHECK (platform.is_named(layout_fingerprint)),
     CONSTRAINT record_optional_text_not_blank CHECK (
-        (source_account_id        IS NULL OR btrim(source_account_id)        <> '') AND
-        (source_family            IS NULL OR btrim(source_family)            <> '') AND
-        (source_status            IS NULL OR btrim(source_status)            <> '') AND
-        (parcel_reference         IS NULL OR btrim(parcel_reference)         <> '') AND
-        (provenance_table_name    IS NULL OR btrim(provenance_table_name)    <> '') AND
-        (provenance_source_family IS NULL OR btrim(provenance_source_family) <> '') AND
-        (provenance_source_status IS NULL OR btrim(provenance_source_status) <> '')
+        (source_account_id        IS NULL OR platform.is_named(source_account_id))        AND
+        (source_family            IS NULL OR platform.is_named(source_family))            AND
+        (source_status            IS NULL OR platform.is_named(source_status))            AND
+        (parcel_reference         IS NULL OR platform.is_named(parcel_reference))         AND
+        (provenance_table_name    IS NULL OR platform.is_named(provenance_table_name))    AND
+        (provenance_source_family IS NULL OR platform.is_named(provenance_source_family)) AND
+        (provenance_source_status IS NULL OR platform.is_named(provenance_source_status))
     )
 );
 
@@ -149,8 +149,8 @@ CREATE TABLE silver.source_native_identifier (
     identifier_value  text   NOT NULL,
 
     PRIMARY KEY (record_id, identifier_name),
-    CONSTRAINT native_identifier_name_not_blank  CHECK (btrim(identifier_name) <> ''),
-    CONSTRAINT native_identifier_value_not_blank CHECK (btrim(identifier_value) <> '')
+    CONSTRAINT native_identifier_name_not_blank  CHECK (platform.is_named(identifier_name)),
+    CONSTRAINT native_identifier_value_not_blank CHECK (platform.is_named(identifier_value))
 );
 
 COMMENT ON TABLE silver.source_native_identifier IS
@@ -175,7 +175,7 @@ CREATE TABLE silver.source_native_value (
 
     PRIMARY KEY (record_id, source_field),
     CONSTRAINT native_value_source_field_not_blank
-        CHECK (btrim(source_field) <> ''),
+        CHECK (platform.is_named(source_field)),
     CONSTRAINT native_value_classification_is_source_native
         CHECK (classification = 'source-native'),
     CONSTRAINT native_value_has_exactly_one_representation CHECK (

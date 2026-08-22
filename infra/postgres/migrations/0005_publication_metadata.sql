@@ -84,7 +84,7 @@ CREATE TABLE publication.publication (
     CONSTRAINT publication_release_kind_is_an_identifier
         CHECK (release_kind ~ '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'),
     CONSTRAINT publication_release_identifier_not_blank
-        CHECK (btrim(release_identifier) <> ''),
+        CHECK (platform.is_named(release_identifier)),
     CONSTRAINT publication_state_is_known
         CHECK (state IN ('building', 'current', 'superseded', 'failed')),
     CONSTRAINT publication_current_has_a_publication_time
