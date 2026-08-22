@@ -3,6 +3,8 @@
 ### Requirement: Jurisdiction identity
 The system SHALL identify an appraisal jurisdiction by `state_code` and `county_slug` only. `county_fips` SHALL be required validated registry metadata reachable from a jurisdiction, SHALL NOT participate in equality or hashing, and SHALL NOT appear in the jurisdiction identity document. No database surrogate key, object-store location, URL, filesystem path, orchestration run identifier, or acquisition timestamp SHALL participate in jurisdiction identity or equality.
 
+`state_code` SHALL be exactly two lowercase ASCII letters and `county_slug` SHALL match `[a-z0-9]+(-[a-z0-9]+)*`, together composing the `^[a-z]{2}-[a-z0-9]+(-[a-z0-9]+)*$` jurisdiction code the platform already stores. An uppercase or mixed-case component SHALL be rejected and MUST NOT be normalized, so a caller never receives an identity other than the one supplied. `county_fips` SHALL be exactly five digits. Where the version-controlled registry stores a state code in another case, the comparison SHALL case-fold on the registry side, and caller-supplied identity SHALL NOT be rewritten to match it.
+
 The set of attributes participating in equality SHALL be exactly `state_code` and `county_slug`, and that set SHALL be assertable directly. Stating instead that equality holds "regardless of any other attribute" would be unfalsifiable, because registry validation makes a jurisdiction whose FIPS differs from its slug's registered value unconstructible.
 
 #### Scenario: Equal state and slug are one jurisdiction
@@ -23,6 +25,10 @@ The system SHALL reject construction of a `Jurisdiction` whose registry metadata
 #### Scenario: Slug and FIPS disagree
 - **WHEN** a caller constructs a jurisdiction with the Collin slug and Dallas County's FIPS
 - **THEN** construction fails and no jurisdiction value is produced
+
+#### Scenario: A caller supplies an uppercase state code
+- **WHEN** a jurisdiction is constructed with `TX` rather than `tx`
+- **THEN** construction fails and the value is not case-folded into a valid identity
 
 #### Scenario: FIPS is malformed
 - **WHEN** a caller supplies a FIPS that is not exactly five digits
@@ -58,12 +64,16 @@ The system SHALL identify a logical release by `Jurisdiction`, `tax_year`, `Rele
 - **WHEN** a supplied release identifier differs from an accepted form only by case, surrounding whitespace, or a character outside the accepted alphabet
 - **THEN** construction fails and the identifier is not lowercased, trimmed, slugified, or otherwise rewritten
 
-#### Scenario: A tax year is outside the plausible range
-- **WHEN** a tax year is not an integer within the accepted range
+The tax year SHALL be an `int` from 1900 through 2200 inclusive, matching the bound `ReleasePartition` and the merged `partition_tax_year_plausible` constraint already enforce, and `bool` SHALL be rejected. The narrower 1900–2100 bound applied to source years at the county parser boundary is a different value and remains unchanged.
+
+#### Scenario: A tax year is outside 1900 through 2200
+- **WHEN** a tax year is not an `int` from 1900 through 2200 inclusive
 - **THEN** construction fails rather than clamping or coercing the value
 
 ### Requirement: Canonical release kind vocabulary
 The system SHALL define a closed canonical `ReleaseKind` vocabulary of exactly `proposed`, `certified`, `supplemental`, and `current`. A county-native label SHALL be mapped to a canonical kind only where an accepted county contract supports semantic equivalence, and the source-native label SHALL be retained at the adapter or source boundary. The vocabulary SHALL NOT be widened to carry an unresolved county label.
+
+The mapping table is fixed here as normative data. **Runtime mapping behavior is deferred** to the county-aware use-case boundary in bootstrap task 2.4 and requires its own scope decision, because the only shared adapter module available today is county-neutral by its accepted contract and its suite asserts that no county name appears in it. The scenarios below therefore state the contract that boundary must satisfy; nothing in this change implements them, and no task in this change may be checked as satisfying them.
 
 #### Scenario: A contract-supported label is canonicalized
 - **WHEN** an adapter maps a county-native label for which an accepted contract establishes equivalence
@@ -143,7 +153,15 @@ The complete named-field shapes SHALL be:
  "parser_contract_version": 1, "layout_fingerprint": "<64 lowercase hex>"}
 ```
 
-Identity values SHALL nest as objects rather than as pre-rendered strings, so no reader parses a string to recover a field the writer held. An absent optional value SHALL be emitted as JSON `null` and SHALL NOT be omitted, so that a field's absence and a reader's older schema are distinguishable. Key order SHALL be the declaration order shown above and SHALL NOT depend on insertion or hashing. Registry metadata SHALL serialize as its own document keyed by the identity rather than inside it.
+Registry metadata SHALL serialize as its own document keyed by the identity rather than inside it, and that document is the sixth normative shape:
+
+```json
+{"jurisdiction": {"state_code": "tx", "county_slug": "collin"}, "county_fips": "48085"}
+```
+
+Identity values SHALL nest as objects rather than as pre-rendered strings, so no reader parses a string to recover a field the writer held. An absent optional value SHALL be emitted as JSON `null` and SHALL NOT be omitted, so that a field's absence and a reader's older schema are distinguishable. Key order SHALL be the declaration order shown above for all six shapes and SHALL NOT depend on insertion or hashing.
+
+Parsing SHALL be defined as follows, because a `Jurisdiction` requires a FIPS its identity document omits. Parsing a jurisdiction identity document SHALL resolve `county_fips` from the version-controlled registry for the named slug — the same source construction validates against — and SHALL fail when the registry describes no such slug, rather than producing a jurisdiction with an invented or stale value. The registry document SHALL have its own parser, SHALL be rejected when its FIPS disagrees with the registry, and SHALL NOT be used to reconstruct identity in place of the registry.
 
 #### Scenario: Equal values serialize identically
 - **WHEN** two equal identity values are serialized
@@ -152,6 +170,14 @@ Identity values SHALL nest as objects rather than as pre-rendered strings, so no
 #### Scenario: Serialized identity round-trips
 - **WHEN** an identity value is serialized and parsed back
 - **THEN** the result compares equal to the original and carries no altered component
+
+#### Scenario: A jurisdiction identity document is parsed
+- **WHEN** a jurisdiction identity document is parsed
+- **THEN** its FIPS is resolved from the version-controlled registry, and a document naming a slug the registry does not describe fails to parse rather than resolving to an invented value
+
+#### Scenario: A registry document disagrees with the registry
+- **WHEN** a registry metadata document carries a FIPS the registry does not assign to that slug
+- **THEN** it is rejected rather than preferred over the registry
 
 #### Scenario: A compact rendering is reversed
 - **WHEN** a compact release rendering is parsed for any accepted release identifier
@@ -180,3 +206,14 @@ Enforcement SHALL sit at the county mapping boundary that knows the contract, an
 #### Scenario: A syntactically valid identifier arrives from an unapproved source
 - **WHEN** a well-formed release identifier is supplied for a county whose discriminator is unapproved
 - **THEN** the refusal comes from the county mapping rather than from the domain constructor, which has no basis to distinguish it from an approved one
+
+### Requirement: Explicit public domain surface
+The system SHALL export the canonical identity and provenance types through the `property_tax_domain` package root with an explicit `__all__`, and SHALL NOT require consumers to import a private module path. The exported set SHALL be asserted by a test, so that adding or removing a public type is a deliberate change rather than a side effect of moving a file.
+
+#### Scenario: A consumer imports the vocabulary
+- **WHEN** another layer imports the canonical identity and provenance types
+- **THEN** they are available from the package root and the import does not depend on the module each type happens to live in
+
+#### Scenario: A type is added without a decision
+- **WHEN** a new public type appears in the package without being added to the declared export set
+- **THEN** the export-surface test fails

@@ -55,6 +55,28 @@ it in code, because it will be implemented faithfully.
 A `Jurisdiction` must reject registry data that disagrees with itself: `tx-collin`
 paired with Dallas County's FIPS is unconstructible, not merely discouraged.
 
+The lexical forms are fixed here rather than left to the implementer, because
+the registry and the identity disagree on case today. `County.state_code` is
+`"TX"`, hard-checked against that literal, while every `jurisdiction_code` the
+platform stores matches `^[a-z]{2}-[a-z0-9]+(-[a-z0-9]+)*$` and is lowercase.
+
+Identity takes the lowercase form, because that is what five storage and
+provenance layers already hold and what the compact rendering must produce:
+`state_code` is exactly two lowercase ASCII letters, and `county_slug` is
+`[a-z0-9]+(-[a-z0-9]+)*`. Uppercase is **rejected, not normalized** — a caller
+who supplies `TX` gets an error rather than a silently different identity than
+the one they asked for, which is the same rule D2 applies to release
+identifiers. The registry comparison case-folds on the *registry* side when
+matching `County.state_code`, so the uppercase datum stays valid where it lives
+and no caller-supplied identity is rewritten.
+
+The tax-year bound is 1900 through 2200 inclusive, matching `ReleasePartition`
+and the `partition_tax_year_plausible` constraint in the merged migration, which
+are the two places a release's year is already bounded. The narrower 1900–2100
+bound in the county parsers is an adapter-level check on a source year and stays
+where it is; a release identity and a parsed source year are different values,
+and unifying them would be a change to the parsers this plan does not authorize.
+
 **Rejected — FIPS as identity.** It is a stable federal code, which is a real
 argument. It is also absent from every storage key, every provenance field, and
 every constraint the platform has already shipped, so adopting it would mean
@@ -125,8 +147,9 @@ Not mapped, deliberately:
 | Denton | `roll-correction` | Resembles `supplemental`. Both are described as full replacement snapshots, which is a similarity between two descriptions, not evidence that they are the same release kind. |
 | Dallas | `certified-with-supplemental` | **D7 proposes** mapping this to `supplemental`; see below. |
 
-**D7 (proposed by this change, requires human merge):** Dallas
-`certified-with-supplemental` maps to canonical `supplemental`. The accepted
+### D7 (proposed by this change, requires human merge): Dallas certified-with-supplemental maps to supplemental
+
+Dallas `certified-with-supplemental` maps to canonical `supplemental`. The accepted
 Dallas contract classifies it as a distinct label-derived release, treats it as a
 complete replacement snapshot, and requires the dated certified-at-certification
 snapshot to be retained separately — so it is already a release of its own kind
@@ -186,12 +209,18 @@ These stay outside `property_tax_domain`, at the adapter boundary: `table_name`,
 every county-native field vector. The last two are vectors of county field
 *names*, and admitting them would put county vocabulary in the domain.
 
-Every value is bounded and validated. There is no free-form field, which is
-enforced structurally rather than by review: with no field capable of holding
-one, a complete source row, an arbitrary source value, owner information, a
-mailing or situs address, a credential, a signed URL, a host-local path, and
-exception text are all unrepresentable. Absence is explicit and never a
-fabricated placeholder.
+Every value is bounded and validated, and there is no generic payload, detail,
+extra, metadata, or annotation field, no mapping, and no sequence of arbitrary
+values.
+
+What that does and does not guarantee is worth stating precisely, because an
+earlier revision of this paragraph overstated it and the normative requirement
+had to contradict its own design. Structure prevents a field whose purpose is to
+accept whatever a caller has. It does not make owner data, an address, a
+credential, or a path *unrepresentable*: a bounded string named
+`source_member_name` can still be handed `JOHN_DOE`. Keeping sensitive values
+out of what reaches provenance stays the adapter's obligation under the accepted
+county contracts. Absence is explicit and never a fabricated placeholder.
 
 **Rejected — a `details` or `extra` mapping for adapter-specific lineage.** It is
 the field every one of the above eventually lands in.
@@ -233,6 +262,45 @@ D1 is untouched: FIPS remains required, validated registry metadata reachable
 from a `Jurisdiction`, and is not a second identity. If the maintainer wants FIPS
 inside the identity document, the coherent form is to include it in equality
 too — a composite identity rather than a halfway one.
+
+Splitting the document raises a question the split has to answer: a
+`Jurisdiction` requires FIPS, and its identity document omits it, so parsing one
+cannot reconstruct the value object from the document alone. Resolution: the
+identity document parses by resolving FIPS from the version-controlled registry
+for the named slug, which is the same source construction validates against, so
+a document written before a registry correction fails to parse rather than
+resolving to a jurisdiction the registry no longer describes. The registry
+document is a separate normative shape with its own parser, used for transport
+and audit rather than for reconstructing identity, and a registry document whose
+FIPS disagrees with the registry is rejected rather than preferred over it.
+Neither parser invents a FIPS and neither silently accepts a stale one.
+
+### D8 (proposed by this change, requires human merge): the domain's public surface is explicit
+
+`property_tax_domain/__init__.py` maintains an explicit `__all__`, and the new
+value objects are exported through it rather than left as module-only imports.
+The proposal calls these one stable vocabulary for the rest of the platform;
+a vocabulary reached by importing a private module path is not stable, because
+the path is then part of the contract. A test asserts the exported set, so
+adding a type is a deliberate line in a diff rather than a side effect.
+
+**Rejected — module-only imports.** It keeps the root namespace small and makes
+every consumer depend on file layout.
+
+### D9 (proposed by this change, requires human merge): runtime label mapping is deferred with a named owner
+
+D3 fixes the canonical vocabulary and the contract-supported mapping table as
+normative data. It does **not** deliver runtime mapping code in this change,
+because the only shared adapter module available is county-neutral by its own
+accepted contract and its suite asserts that no county name appears in it.
+
+Runtime mapping is therefore deferred to bootstrap task 2.4, which owns the
+county-aware use-case boundary, and it needs its own scope decision authorizing
+where the mapping lives. Task 5.1 records that as an explicitly blocked
+follow-on rather than leaving the capability's mapping scenarios satisfiable by
+a documentation task. An earlier revision of this plan left task 1.3 claiming
+task 3.1 would add that code after task 3.1 had been reduced to documentation,
+so every task could be checked while the behavior stayed absent.
 
 The compact release rendering is `tx-collin/2025/certified/COLLIN-2025-CERT-01`,
 and it needs no escaping. That is measured rather than assumed: every accepted
