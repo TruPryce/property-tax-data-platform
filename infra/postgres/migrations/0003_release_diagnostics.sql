@@ -114,6 +114,12 @@ CREATE TABLE ingestion.release_outcome (
     -- never have produced, and the publication gate trusts `accepted`.
     CONSTRAINT outcome_boundary_contract_version_is_one
         CHECK (boundary_contract_version = 1),
+    -- _require_optional_name: absent, or a name. '' and '   ' are neither, and
+    -- the carrier refuses both.
+    CONSTRAINT outcome_layout_fingerprint_is_absent_or_named CHECK (
+        layout_fingerprint IS NULL
+        OR btrim(layout_fingerprint, E' \t\r\n\v\f') <> ''
+    ),
     CONSTRAINT outcome_prepared_fields_are_set_together CHECK (
         (parser_contract_version IS NULL) = (layout_fingerprint IS NULL)
     ),
@@ -162,6 +168,13 @@ CREATE TABLE ingestion.release_diagnostic (
     PRIMARY KEY (outcome_id, diagnostic_index),
     -- DIAGNOSTIC_RETENTION_LIMIT is 100, so a retained entry is 0..99. A row at
     -- index 100 is evidence the carrier could not have produced.
+    CONSTRAINT diagnostic_field_name_is_absent_or_named CHECK (
+        field_name IS NULL OR btrim(field_name, E' \t\r\n\v\f') <> ''
+    ),
+    CONSTRAINT diagnostic_layout_fingerprint_is_absent_or_named CHECK (
+        layout_fingerprint IS NULL
+        OR btrim(layout_fingerprint, E' \t\r\n\v\f') <> ''
+    ),
     CONSTRAINT diagnostic_index_within_retention
         CHECK (diagnostic_index BETWEEN 0 AND 99),
     CONSTRAINT diagnostic_row_number_one_based
@@ -201,6 +214,9 @@ CREATE TABLE ingestion.release_notice (
     physical_row_number bigint,
 
     PRIMARY KEY (outcome_id, notice_index),
+    CONSTRAINT notice_field_name_is_absent_or_named CHECK (
+        field_name IS NULL OR btrim(field_name, E' \t\r\n\v\f') <> ''
+    ),
     CONSTRAINT notice_index_within_retention
         CHECK (notice_index BETWEEN 0 AND 99),
     CONSTRAINT notice_row_number_one_based
@@ -280,7 +296,9 @@ BEGIN
     SELECT count(*) INTO disagreeing
       FROM ingestion.release_diagnostic AS diagnostic
      WHERE diagnostic.outcome_id = target_outcome
-       AND diagnostic.layout_fingerprint IS NOT NULL
+       -- No IS NOT NULL exemption: the carrier compares with plain inequality,
+       -- so a NULL fingerprint under an outcome that has one is a disagreement
+       -- too. IS DISTINCT FROM is what makes NULL compare rather than vanish.
        AND diagnostic.layout_fingerprint IS DISTINCT FROM outcome.layout_fingerprint;
     IF disagreeing > 0 THEN
         RAISE EXCEPTION

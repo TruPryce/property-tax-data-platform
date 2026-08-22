@@ -182,14 +182,20 @@ COMMENT ON TABLE bronze.release_redirect IS
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE bronze.release_partition (
-    manifest_id       bigint      NOT NULL
-                                  REFERENCES bronze.release_manifest (manifest_id)
-                                  ON DELETE CASCADE,
+    manifest_id       bigint      NOT NULL,
     jurisdiction_code text        NOT NULL,
     tax_year          integer     NOT NULL,
     release_kind      text        NOT NULL,
 
     PRIMARY KEY (manifest_id, jurisdiction_code, tax_year, release_kind),
+
+    -- Composite, so a partition's county is the county of the artifact it
+    -- partitions. On manifest_id alone the county was an independent string: a
+    -- Dallas partition could sit on a Collin manifest, and a run bound to that
+    -- partition inherited the forgery.
+    FOREIGN KEY (manifest_id, jurisdiction_code)
+        REFERENCES bronze.release_manifest (manifest_id, jurisdiction_code)
+        ON DELETE CASCADE,
     CONSTRAINT partition_jurisdiction_is_state_and_county
         CHECK (jurisdiction_code ~ '^[a-z]{2}-[a-z0-9]+(-[a-z0-9]+)*$'),
     CONSTRAINT partition_tax_year_plausible

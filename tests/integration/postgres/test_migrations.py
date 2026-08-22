@@ -185,29 +185,33 @@ def accepts(connection: object, statement: str) -> None:
 
 
 @pytest.mark.skipif(shutil.which("psql") is None, reason="requires the psql client")
-def test_omitting_the_checksum_exits_nonzero(tmp_path: Path) -> None:
+def test_omitting_the_checksum_exits_nonzero() -> None:
     """`\\quit` terminates normally and exits 0, so an operator script reads success.
 
-    Exercised through the real psql because render() strips meta-commands, which
-    is exactly the layer this defect lived in. It needs no server: the guard runs
-    before any statement reaches one.
+    Against the live server, deliberately. psql connects before it reads `-f`, so
+    an unreachable DSN exits 2 for the name lookup and never reaches the guard at
+    all -- a probe pointed at one passes whether the guard exists or not.
+
+    Exercised through psql because render() strips the meta-commands this defect
+    lived in, so no in-process test can see it.
     """
 
+    dsn = _dsn()
     completed = subprocess.run(
-        [
-            "psql",
-            "--set",
-            "ON_ERROR_STOP=on",
-            "-f",
-            str(migration_files()[0]),
-            "postgresql://invalid:1/none?connect_timeout=1",
-        ],
+        ["psql", "--set", "ON_ERROR_STOP=on", "-f", str(migration_files()[0]), dsn],
         capture_output=True,
         text=True,
         check=False,
     )
 
-    assert completed.returncode != 0
+    # 3 is psql's "error in script under ON_ERROR_STOP"; 2 would be the
+    # connection failing, which is what this test exists not to measure.
+    assert completed.returncode == 3, completed.stderr
+
+    # The message, not the status, is what discriminates. Deleting the guard
+    # still exits 3 -- the unset variable becomes a syntax error further down --
+    # so a status-only assertion would pass against a migration with no guard.
+    assert "file_sha256 was not supplied" in completed.stderr
 
 
 def test_there_are_no_inverse_scripts() -> None:
@@ -377,16 +381,35 @@ def test_silver_lineage_must_describe_one_release(connection: object) -> None:
 
 
 def test_a_run_belongs_to_the_county_whose_bytes_it_read(connection: object) -> None:
+    """The forged partition is attempted first, because that is the real attack.
+
+    A run now references a partition rather than a manifest, so refusing a Dallas
+    run against a Collin manifest proves nothing unless the Dallas partition it
+    would need is itself refused. Creating the run without that row fails for the
+    uninteresting reason that no such partition exists.
+    """
+
     manifest_id, _ = _lineage(connection, jurisdiction="tx-collin", release="county-bind")
 
-    message = refuses(
+    partition_message = refuses(
+        connection,
+        "INSERT INTO bronze.release_partition"
+        "(manifest_id,jurisdiction_code,tax_year,release_kind) "
+        f"VALUES ({manifest_id},'tx-dallas',2025,'certified')",
+    )
+
+    assert "foreign key" in partition_message.lower()
+
+    # And with the forgery refused, the run that would have inherited it has
+    # nothing to point at.
+    run_message = refuses(
         connection,
         "INSERT INTO ingestion.run"
         "(jurisdiction_code,release_identifier,manifest_id,tax_year,release_kind) "
         f"VALUES ('tx-dallas','borrowed',{manifest_id},2025,'certified')",
     )
 
-    assert "foreign key" in message.lower()
+    assert "foreign key" in run_message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1073,22 +1096,104 @@ def test_truncation_is_true_exactly_when_evidence_overflowed(connection: object)
     assert message is not None and "declares 2 diagnostic(s) with diagnostics_truncated" in message
 
 
-def test_a_retained_diagnostic_names_the_outcome_s_own_layout(connection: object) -> None:
-    _, run_id = _lineage(connection, jurisdiction="tx-denton", release="fingerprint-drift")
+@pytest.mark.parametrize(
+    ("label", "outcome_fingerprint", "diagnostic_fingerprint"),
+    [
+        ("value against a different value", "'fp-outcome'", "'fp-somewhere-else'"),
+        ("value against absent", "'fp-outcome'", "NULL"),
+        ("absent against value", "NULL", "'fp-appeared'"),
+    ],
+)
+def test_a_diagnostic_fingerprint_disagreeing_with_its_outcome_is_refused(
+    connection: object, label: str, outcome_fingerprint: str, diagnostic_fingerprint: str
+) -> None:
+    """The carrier compares with plain inequality, so NULL is a value here.
+
+    An exemption for a NULL diagnostic fingerprint would admit exactly the pair
+    ReleaseOutcome.__post_init__ rejects.
+    """
+
+    parser_version = "NULL" if outcome_fingerprint == "NULL" else "1"
+    _, run_id = _lineage(
+        connection, jurisdiction="tx-denton", release=f"fp-{len(label)}-{label[0]}"
+    )
 
     message = commits(
         connection,
         "INSERT INTO ingestion.release_outcome"
         "(run_id,disposition,boundary_contract_version,total_diagnostic_count,"
         "parser_contract_version,layout_fingerprint) "
-        f"VALUES ({run_id},'rejected',1,1,1,'fp-outcome')",
+        f"VALUES ({run_id},'rejected',1,1,{parser_version},{outcome_fingerprint})",
         "INSERT INTO ingestion.release_diagnostic"
         "(outcome_id,diagnostic_index,code,layout_fingerprint) "
-        "SELECT max(outcome_id),0,'layout_rejected','fp-somewhere-else' "
+        f"SELECT max(outcome_id),0,'layout_rejected',{diagnostic_fingerprint} "
         "FROM ingestion.release_outcome",
     )
 
     assert message is not None and "layout fingerprint is not its own" in message
+
+
+@pytest.mark.parametrize(
+    ("label", "columns", "values"),
+    [
+        (
+            "an outcome fingerprint that is blank",
+            "disposition,boundary_contract_version,parser_contract_version,layout_fingerprint",
+            "'accepted',1,1,''",
+        ),
+        (
+            "an outcome fingerprint that is whitespace",
+            "disposition,boundary_contract_version,parser_contract_version,layout_fingerprint",
+            "'accepted',1,1,'   '",
+        ),
+    ],
+)
+def test_an_optional_name_is_absent_or_named(
+    connection: object, label: str, columns: str, values: str
+) -> None:
+    """_require_optional_name: None, or a non-blank str. '' is neither."""
+
+    _, run_id = _lineage(connection, jurisdiction="tx-ellis", release=f"blank-{len(values)}")
+
+    message = refuses(
+        connection,
+        f"INSERT INTO ingestion.release_outcome(run_id,{columns}) VALUES ({run_id},{values})",
+    )
+
+    assert "violates" in message
+
+
+@pytest.mark.parametrize(
+    ("label", "column", "value"),
+    [
+        ("a diagnostic field name", "field_name", "'  '"),
+        ("a diagnostic fingerprint", "layout_fingerprint", "''"),
+    ],
+)
+def test_a_blank_diagnostic_name_is_refused(
+    connection: object, label: str, column: str, value: str
+) -> None:
+    outcome_id = _rejected_outcome(connection, f"blank-diag-{column}", 1)
+
+    message = refuses(
+        connection,
+        f"INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code,{column}) "
+        f"VALUES ({outcome_id},1,'record_rejected',{value})",
+    )
+
+    assert "violates" in message
+
+
+def test_a_blank_notice_field_name_is_refused(connection: object) -> None:
+    outcome_id = _rejected_outcome(connection, "blank-notice", 1)
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.release_notice(outcome_id,notice_index,code,field_name) "
+        f"VALUES ({outcome_id},0,'extra_column_present','')",
+    )
+
+    assert "violates" in message
 
 
 def test_evidence_cannot_be_appended_after_the_outcome_is_sealed(connection: object) -> None:
