@@ -226,8 +226,8 @@ CREATE TABLE silver.field_publication_policy (
             approved_at IS NOT NULL
             -- btrim of the ASCII control range as well as spaces: '' and '\t'
             -- are not a named approver, and neither is a tab someone pasted.
-            AND btrim(coalesce(approved_by, ''), E' \t\r\n\v\f') <> ''
-            AND btrim(coalesce(review_reference, ''), E' \t\r\n\v\f') <> ''
+            AND platform.is_named(coalesce(approved_by, ''))
+            AND platform.is_named(coalesce(review_reference, ''))
         )
     )
 );

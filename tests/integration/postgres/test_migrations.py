@@ -1184,6 +1184,59 @@ def test_a_blank_diagnostic_name_is_refused(
     assert "violates" in message
 
 
+PYTHON_WHITESPACE = sorted(
+    {chr(codepoint) for codepoint in range(0x110000) if chr(codepoint).isspace()}
+)
+
+
+def test_the_database_and_the_carrier_agree_on_what_whitespace_is() -> None:
+    """Enumerated from Python rather than transcribed, so the two cannot drift.
+
+    `_require_optional_name` rejects anything blank under `str.strip()`, which
+    removes 29 Unicode characters and not the six ASCII ones a naive `btrim`
+    would. A U+00A0-only fingerprint was blank to the carrier and a name here.
+    """
+
+    assert len(PYTHON_WHITESPACE) == 29
+
+
+@pytest.mark.parametrize("character", PYTHON_WHITESPACE, ids=lambda c: f"U+{ord(c):04X}")
+def test_no_whitespace_character_alone_is_a_name(connection: object, character: str) -> None:
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute("SELECT platform.is_named(%s)", (character * 3,))
+        assert cursor.fetchone()[0] is False, f"U+{ord(character):04X} accepted as a name"
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("a non-breaking space", "\u00a0"),
+        ("an em space", "\u2003"),
+        ("an ideographic space", "\u3000"),
+    ],
+)
+def test_a_unicode_blank_fingerprint_is_refused(connection: object, label: str, value: str) -> None:
+    """The carrier rejects these; the ASCII-only trim accepted them."""
+
+    _, run_id = _lineage(connection, jurisdiction="tx-ellis", release=f"ws-{ord(value):04x}")
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        try:
+            cursor.execute(
+                "INSERT INTO ingestion.release_outcome"
+                "(run_id,disposition,boundary_contract_version,parser_contract_version,"
+                "layout_fingerprint) VALUES (%s,'accepted',1,1,%s)",
+                (run_id, value),
+            )
+        except psycopg.Error as error:
+            message = str(error)
+        else:  # pragma: no cover - the constraint is what this test is about
+            message = ""
+        connection.rollback()  # type: ignore[attr-defined]
+
+    assert "violates" in message
+
+
 def test_a_blank_notice_field_name_is_refused(connection: object) -> None:
     outcome_id = _rejected_outcome(connection, "blank-notice", 1)
 
@@ -1194,6 +1247,50 @@ def test_a_blank_notice_field_name_is_refused(connection: object) -> None:
     )
 
     assert "violates" in message
+
+
+@pytest.mark.parametrize("table", ["release_diagnostic", "release_notice"])
+def test_reparenting_evidence_leaves_neither_outcome_unsealed(
+    connection: object, table: str
+) -> None:
+    """Moving a row changes two aggregates, so both are judged.
+
+    Checking only the row's new parent left its former outcome declaring evidence
+    it no longer holds -- reached through UPDATE, an event the trigger already
+    fires on, so the gap was in which id it looked at rather than in coverage.
+    """
+
+    index_column = "diagnostic_index" if table == "release_diagnostic" else "notice_index"
+    code = "'record_rejected'" if table == "release_diagnostic" else "'extra_column_present'"
+    source = _rejected_outcome(connection, f"reparent-from-{table}", 1)
+    target = _rejected_outcome(connection, f"reparent-to-{table}", 1)
+    if table == "release_notice":
+        # _rejected_outcome seeds diagnostics; give each outcome one notice too.
+        for outcome_id in (source, target):
+            assert (
+                commits(
+                    connection,
+                    "UPDATE ingestion.release_outcome SET total_notice_count = 1 "
+                    f"WHERE outcome_id = {outcome_id}",
+                    f"INSERT INTO ingestion.release_notice(outcome_id,notice_index,code) "
+                    f"VALUES ({outcome_id},0,{code})",
+                )
+                is None
+            )
+
+    # Raise the target's declared total and move the source's row into it. The
+    # target ends valid; the source is left declaring one and holding none.
+    message = commits(
+        connection,
+        "UPDATE ingestion.release_outcome "
+        f"SET total_{'diagnostic' if table == 'release_diagnostic' else 'notice'}_count = 2 "
+        f"WHERE outcome_id = {target}",
+        f"UPDATE ingestion.{table} SET outcome_id = {target}, {index_column} = 1 "
+        f"WHERE outcome_id = {source}",
+    )
+
+    assert message is not None, "the source outcome was left unsealed"
+    assert f"outcome {source}" in message
 
 
 def test_evidence_cannot_be_appended_after_the_outcome_is_sealed(connection: object) -> None:

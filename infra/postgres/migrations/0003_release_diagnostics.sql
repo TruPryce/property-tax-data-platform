@@ -117,8 +117,7 @@ CREATE TABLE ingestion.release_outcome (
     -- _require_optional_name: absent, or a name. '' and '   ' are neither, and
     -- the carrier refuses both.
     CONSTRAINT outcome_layout_fingerprint_is_absent_or_named CHECK (
-        layout_fingerprint IS NULL
-        OR btrim(layout_fingerprint, E' \t\r\n\v\f') <> ''
+        layout_fingerprint IS NULL OR platform.is_named(layout_fingerprint)
     ),
     CONSTRAINT outcome_prepared_fields_are_set_together CHECK (
         (parser_contract_version IS NULL) = (layout_fingerprint IS NULL)
@@ -169,11 +168,10 @@ CREATE TABLE ingestion.release_diagnostic (
     -- DIAGNOSTIC_RETENTION_LIMIT is 100, so a retained entry is 0..99. A row at
     -- index 100 is evidence the carrier could not have produced.
     CONSTRAINT diagnostic_field_name_is_absent_or_named CHECK (
-        field_name IS NULL OR btrim(field_name, E' \t\r\n\v\f') <> ''
+        field_name IS NULL OR platform.is_named(field_name)
     ),
     CONSTRAINT diagnostic_layout_fingerprint_is_absent_or_named CHECK (
-        layout_fingerprint IS NULL
-        OR btrim(layout_fingerprint, E' \t\r\n\v\f') <> ''
+        layout_fingerprint IS NULL OR platform.is_named(layout_fingerprint)
     ),
     CONSTRAINT diagnostic_index_within_retention
         CHECK (diagnostic_index BETWEEN 0 AND 99),
@@ -215,7 +213,7 @@ CREATE TABLE ingestion.release_notice (
 
     PRIMARY KEY (outcome_id, notice_index),
     CONSTRAINT notice_field_name_is_absent_or_named CHECK (
-        field_name IS NULL OR btrim(field_name, E' \t\r\n\v\f') <> ''
+        field_name IS NULL OR platform.is_named(field_name)
     ),
     CONSTRAINT notice_index_within_retention
         CHECK (notice_index BETWEEN 0 AND 99),
@@ -315,9 +313,16 @@ COMMENT ON FUNCTION ingestion.assert_outcome_evidence_agrees(bigint) IS
 CREATE FUNCTION ingestion.assert_outcome_seal() RETURNS trigger
 LANGUAGE plpgsql AS $seal$
 BEGIN
-    PERFORM ingestion.assert_outcome_evidence_agrees(
-        CASE WHEN TG_OP = 'DELETE' THEN OLD.outcome_id ELSE NEW.outcome_id END
-    );
+    -- Both sides on UPDATE. Reparenting a diagnostic changes two aggregates and
+    -- checking only NEW left the row's former outcome declaring evidence it no
+    -- longer holds -- the state the seal exists to make impossible, reached
+    -- through the event the trigger already fires on.
+    IF TG_OP <> 'INSERT' THEN
+        PERFORM ingestion.assert_outcome_evidence_agrees(OLD.outcome_id);
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        PERFORM ingestion.assert_outcome_evidence_agrees(NEW.outcome_id);
+    END IF;
     RETURN NULL;
 END
 $seal$;

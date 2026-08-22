@@ -81,6 +81,31 @@ COMMENT ON COLUMN platform.schema_migration.file_sha256 IS
     'still the one that ran, which under manual application nothing else would notice.';
 
 -- ---------------------------------------------------------------------------
+-- What counts as a name
+--
+-- The carrier's _require_optional_name rejects any string that is blank under
+-- Python's str.strip(), which removes 29 Unicode whitespace characters and not
+-- the six ASCII ones a naive btrim would.  A U+00A0-only fingerprint is blank to
+-- the carrier and was a name to the database, so provenance that looks empty
+-- could be stored through the ingestion role.
+--
+-- Defined once because five constraints need it and five hand-copied escape
+-- lists is the drift this exists to prevent.  A test enumerates the set from
+-- Python and asserts the database rejects each one, so the two cannot diverge
+-- silently.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION platform.is_named(value text) RETURNS boolean
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $named$
+    SELECT btrim(value, E'\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000') <> ''
+$named$;
+
+COMMENT ON FUNCTION platform.is_named(text) IS
+    'True when the value contains something other than whitespace, using Python '
+    'str.strip()''s definition of whitespace rather than the ASCII subset, so a '
+    'name the carrier refuses is not a name here either.';
+
+-- ---------------------------------------------------------------------------
 -- The bytes
 -- ---------------------------------------------------------------------------
 
