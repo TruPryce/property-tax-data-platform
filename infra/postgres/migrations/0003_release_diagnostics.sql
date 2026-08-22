@@ -42,6 +42,8 @@ CREATE TABLE ingestion.run (
     jurisdiction_code  text        NOT NULL,
     release_identifier text        NOT NULL,
     manifest_id        bigint      NOT NULL,
+    tax_year           integer     NOT NULL,
+    release_kind       text        NOT NULL,
     started_at         timestamptz NOT NULL DEFAULT now(),
     finished_at        timestamptz,
 
@@ -52,14 +54,30 @@ CREATE TABLE ingestion.run (
     CONSTRAINT run_finishes_after_it_starts
         CHECK (finished_at IS NULL OR finished_at >= started_at),
 
-    -- Composite, not two independent facts: a run reads one manifest, and its
-    -- county is that manifest's county rather than a second string a caller
-    -- supplied.
-    FOREIGN KEY (manifest_id, jurisdiction_code)
-        REFERENCES bronze.release_manifest (manifest_id, jurisdiction_code),
+    CONSTRAINT run_tax_year_plausible
+        CHECK (tax_year BETWEEN 1900 AND 2200),
+    CONSTRAINT run_release_kind_is_an_identifier
+        CHECK (release_kind ~ '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'),
 
-    -- The target silver.source_record binds to below.
-    UNIQUE (run_id, manifest_id, jurisdiction_code, release_identifier)
+    -- One logical partition, not an artifact and a hope. An artifact carries
+    -- more than one release -- a measured Collin archive holds current values
+    -- for one year and certified values for another -- so binding a run to the
+    -- manifest alone leaves which of them it processed unstated, and anything
+    -- downstream asking "does this artifact carry that partition" gets yes for
+    -- a partition the run never touched.
+    FOREIGN KEY (manifest_id, jurisdiction_code, tax_year, release_kind)
+        REFERENCES bronze.release_partition
+                   (manifest_id, jurisdiction_code, tax_year, release_kind),
+
+    -- The target silver.source_record binds to below. Silver reaches the
+    -- partition through the run rather than repeating it: one run processes one
+    -- partition, so a record bound to the run is bound to the partition.
+    UNIQUE (run_id, manifest_id, jurisdiction_code, release_identifier),
+
+    -- The target publication.publication binds to, so a publication's county,
+    -- release, year, and kind are the run's rather than a second set of claims
+    -- a trigger has to keep comparing.
+    UNIQUE (run_id, jurisdiction_code, release_identifier, tax_year, release_kind)
 );
 
 CREATE INDEX run_by_release ON ingestion.run (release_identifier, started_at DESC);
@@ -197,6 +215,111 @@ COMMENT ON TABLE ingestion.release_notice IS
     'to put content.';
 
 -- ---------------------------------------------------------------------------
+-- The outcome and its evidence are one sealed unit
+--
+-- The scalar counts on release_outcome and the rows in release_diagnostic /
+-- release_notice are two descriptions of the same thing, and a CHECK can only
+-- see one row of one of them.  Until now an accepted outcome declaring zero
+-- diagnostics could carry a record_rejected diagnostic underneath it, and the
+-- publication gate -- which trusts `accepted` -- would promote that release.
+--
+-- Deferred constraint triggers close it at COMMIT rather than per statement, so
+-- a loader may insert the outcome and its evidence in any order within one
+-- transaction and cannot leave the pair disagreeing at the end of it.  That also
+-- makes the aggregate sealed: appending evidence in a later transaction re-runs
+-- the check against a total that is now wrong, and fails.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION ingestion.assert_outcome_evidence_agrees(target_outcome bigint)
+RETURNS void LANGUAGE plpgsql AS $agree$
+DECLARE
+    outcome              ingestion.release_outcome%ROWTYPE;
+    retained_diagnostics integer;
+    retained_notices     integer;
+    disagreeing          integer;
+BEGIN
+    SELECT * INTO outcome FROM ingestion.release_outcome WHERE outcome_id = target_outcome;
+    IF NOT FOUND THEN
+        RETURN;  -- deleted within the same transaction; nothing to agree with
+    END IF;
+
+    SELECT count(*) INTO retained_diagnostics
+      FROM ingestion.release_diagnostic WHERE outcome_id = target_outcome;
+    SELECT count(*) INTO retained_notices
+      FROM ingestion.release_notice WHERE outcome_id = target_outcome;
+
+    -- DIAGNOSTIC_RETENTION_LIMIT is 100: the carrier retains every entry up to
+    -- that and then truncates, so the retained count is not free of the total.
+    IF retained_diagnostics <> least(outcome.total_diagnostic_count, 100) THEN
+        RAISE EXCEPTION
+            'outcome % declares % diagnostic(s) and retains %, expected %',
+            target_outcome, outcome.total_diagnostic_count, retained_diagnostics,
+            least(outcome.total_diagnostic_count, 100);
+    END IF;
+    IF retained_notices <> least(outcome.total_notice_count, 100) THEN
+        RAISE EXCEPTION
+            'outcome % declares % notice(s) and retains %, expected %',
+            target_outcome, outcome.total_notice_count, retained_notices,
+            least(outcome.total_notice_count, 100);
+    END IF;
+
+    IF outcome.diagnostics_truncated <> (outcome.total_diagnostic_count > 100) THEN
+        RAISE EXCEPTION
+            'outcome % declares % diagnostic(s) with diagnostics_truncated = %',
+            target_outcome, outcome.total_diagnostic_count, outcome.diagnostics_truncated;
+    END IF;
+    IF outcome.notices_truncated <> (outcome.total_notice_count > 100) THEN
+        RAISE EXCEPTION
+            'outcome % declares % notice(s) with notices_truncated = %',
+            target_outcome, outcome.total_notice_count, outcome.notices_truncated;
+    END IF;
+
+    -- A diagnostic names the layout it was raised against, and the outcome names
+    -- the layout it prepared. Two fingerprints for one release is one of them
+    -- being wrong.
+    SELECT count(*) INTO disagreeing
+      FROM ingestion.release_diagnostic AS diagnostic
+     WHERE diagnostic.outcome_id = target_outcome
+       AND diagnostic.layout_fingerprint IS NOT NULL
+       AND diagnostic.layout_fingerprint IS DISTINCT FROM outcome.layout_fingerprint;
+    IF disagreeing > 0 THEN
+        RAISE EXCEPTION
+            'outcome % retains % diagnostic(s) whose layout fingerprint is not its own',
+            target_outcome, disagreeing;
+    END IF;
+END
+$agree$;
+
+COMMENT ON FUNCTION ingestion.assert_outcome_evidence_agrees(bigint) IS
+    'Checks one outcome against the evidence rows beneath it. Called from deferred '
+    'constraint triggers so the pair is judged at COMMIT, when both halves exist.';
+
+CREATE FUNCTION ingestion.assert_outcome_seal() RETURNS trigger
+LANGUAGE plpgsql AS $seal$
+BEGIN
+    PERFORM ingestion.assert_outcome_evidence_agrees(
+        CASE WHEN TG_OP = 'DELETE' THEN OLD.outcome_id ELSE NEW.outcome_id END
+    );
+    RETURN NULL;
+END
+$seal$;
+
+CREATE CONSTRAINT TRIGGER release_outcome_agrees_with_its_evidence
+    AFTER INSERT OR UPDATE ON ingestion.release_outcome
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ingestion.assert_outcome_seal();
+
+CREATE CONSTRAINT TRIGGER release_diagnostic_agrees_with_its_outcome
+    AFTER INSERT OR UPDATE OR DELETE ON ingestion.release_diagnostic
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ingestion.assert_outcome_seal();
+
+CREATE CONSTRAINT TRIGGER release_notice_agrees_with_its_outcome
+    AFTER INSERT OR UPDATE OR DELETE ON ingestion.release_notice
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ingestion.assert_outcome_seal();
+
+-- ---------------------------------------------------------------------------
 -- Silver gains its run lineage
 --
 -- silver.source_record is created in 0002 and ingestion.run here, so the
@@ -215,6 +338,11 @@ ALTER TABLE silver.source_record
     ADD CONSTRAINT source_record_lineage_is_one_release
     FOREIGN KEY (run_id, manifest_id, jurisdiction_code, release_identifier)
     REFERENCES ingestion.run (run_id, manifest_id, jurisdiction_code, release_identifier);
+
+COMMENT ON COLUMN ingestion.run.tax_year IS
+    'With release_kind, the logical partition of the artifact this run processed. '
+    'Immutable once written: a publication binds to it, and a run that could be '
+    'repointed afterwards would make that binding a description rather than a fact.';
 
 COMMENT ON COLUMN silver.source_record.run_id IS
     'The processing run that produced this row. NOT NULL: a record whose run is '
@@ -236,7 +364,12 @@ CREATE INDEX source_record_by_run ON silver.source_record (run_id);
 
 GRANT USAGE ON SCHEMA ingestion TO property_tax_ingestion;
 
-GRANT SELECT, INSERT, UPDATE ON ingestion.run TO property_tax_ingestion;
+-- Column-level, so a run may be closed but never repointed. Its identity --
+-- manifest, county, partition, release -- is what silver records and
+-- publications bind to, and an UPDATE that moved it would invalidate both while
+-- every foreign key still held.
+GRANT SELECT, INSERT ON ingestion.run TO property_tax_ingestion;
+GRANT UPDATE (finished_at) ON ingestion.run TO property_tax_ingestion;
 
 -- No UPDATE on the outcome or its evidence. A disposition is a verdict about a
 -- run that has finished, and the publication gate reads it; allowing a rewrite

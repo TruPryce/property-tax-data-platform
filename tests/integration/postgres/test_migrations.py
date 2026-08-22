@@ -9,7 +9,7 @@ and they skip:
 
     export PGPASSWORD="$(openssl rand -hex 16)"
     docker run -d --name ptdp-test -p 5433:5432 \
-        -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16-alpine
+        -e POSTGRES_PASSWORD="$PGPASSWORD" -e POSTGRES_DB=ptdp postgres:16.11-bookworm
     PTDP_TEST_DATABASE_URL=postgresql://postgres@localhost:5433/ptdp \
         uv run pytest tests/integration/postgres
 
@@ -122,6 +122,55 @@ def refuses(connection: object, statement: str) -> str:
     message = str(raised.value)
     connection.rollback()  # type: ignore[attr-defined]
     return message
+
+
+def commits(connection: object, *statements: str) -> str | None:
+    """Run statements as one transaction; return the failure, or None.
+
+    The outcome seal is a deferred constraint trigger judged at COMMIT, so an
+    outcome and its evidence have to arrive together. This module's connection is
+    autocommit, which would seal after every statement and make that impossible --
+    which is itself the contract: a loader writes the pair in one transaction.
+    """
+
+    connection.autocommit = False  # type: ignore[attr-defined]
+    try:
+        with connection.cursor() as cursor:  # type: ignore[attr-defined]
+            for statement in statements:
+                cursor.execute(statement)
+        connection.commit()  # type: ignore[attr-defined]
+        return None
+    except psycopg.Error as error:
+        connection.rollback()  # type: ignore[attr-defined]
+        return str(error)
+    finally:
+        connection.autocommit = True  # type: ignore[attr-defined]
+
+
+def _rejected_outcome(connection: object, release: str, diagnostics: int) -> int:
+    """A rejected outcome whose declared and retained diagnostics already agree."""
+
+    _, run_id = _lineage(connection, jurisdiction="tx-denton", release=release)
+    connection.autocommit = False  # type: ignore[attr-defined]
+    try:
+        with connection.cursor() as cursor:  # type: ignore[attr-defined]
+            cursor.execute(
+                "INSERT INTO ingestion.release_outcome"
+                "(run_id,disposition,boundary_contract_version,total_diagnostic_count,"
+                "parser_contract_version,layout_fingerprint) "
+                f"VALUES ({run_id},'rejected',1,{diagnostics},1,'fp-1') RETURNING outcome_id"
+            )
+            outcome_id = int(cursor.fetchone()[0])
+            for index in range(diagnostics):
+                cursor.execute(
+                    "INSERT INTO ingestion.release_diagnostic"
+                    "(outcome_id,diagnostic_index,code,layout_fingerprint) "
+                    f"VALUES ({outcome_id},{index},'record_rejected','fp-1')"
+                )
+        connection.commit()  # type: ignore[attr-defined]
+    finally:
+        connection.autocommit = True  # type: ignore[attr-defined]
+    return outcome_id
 
 
 def accepts(connection: object, statement: str) -> None:
@@ -332,8 +381,9 @@ def test_a_run_belongs_to_the_county_whose_bytes_it_read(connection: object) -> 
 
     message = refuses(
         connection,
-        "INSERT INTO ingestion.run(jurisdiction_code,release_identifier,manifest_id) "
-        f"VALUES ('tx-dallas','borrowed',{manifest_id})",
+        "INSERT INTO ingestion.run"
+        "(jurisdiction_code,release_identifier,manifest_id,tax_year,release_kind) "
+        f"VALUES ('tx-dallas','borrowed',{manifest_id},2025,'certified')",
     )
 
     assert "foreign key" in message.lower()
@@ -589,8 +639,10 @@ def _lineage(
             "ON CONFLICT DO NOTHING"
         )
         cursor.execute(
-            "INSERT INTO ingestion.run(jurisdiction_code,release_identifier,manifest_id) "
-            f"VALUES ('{jurisdiction}','{release}',{manifest_id}) RETURNING run_id"
+            "INSERT INTO ingestion.run"
+            "(jurisdiction_code,release_identifier,manifest_id,tax_year,release_kind) "
+            f"VALUES ('{jurisdiction}','{release}',{manifest_id},{tax_year},"
+            f"'{release_kind}') RETURNING run_id"
         )
         run_id = int(cursor.fetchone()[0])
     return manifest_id, run_id
@@ -823,13 +875,10 @@ def test_a_diagnostic_has_nowhere_to_put_content(connection: object) -> None:
 
 
 def test_the_diagnostic_vocabulary_is_closed(connection: object) -> None:
-    run_id, outcome_id = _one_outcome(connection)
+    # A rejected outcome declaring one diagnostic, so the row below is legal
+    # evidence rather than a contradiction of an accepted outcome.
+    outcome_id = _rejected_outcome(connection, "closed-vocabulary", 1)
 
-    accepts(
-        connection,
-        f"INSERT INTO ingestion.release_diagnostic VALUES ({outcome_id},0,'record_rejected',"
-        "'curr_market',42,'fp-1')",
-    )
     message = refuses(
         connection,
         f"INSERT INTO ingestion.release_diagnostic VALUES ({outcome_id},1,"
@@ -877,6 +926,183 @@ def _one_outcome(connection: object) -> tuple[int, int]:
             f"VALUES ({run_id},'accepted',1,500,500) RETURNING outcome_id"
         )
         return run_id, int(cursor.fetchone()[0])
+
+
+def test_a_run_is_bound_to_one_logical_partition(connection: object) -> None:
+    """One artifact carries several releases, so the manifest alone does not say which.
+
+    A measured Collin archive holds current values for one year and certified
+    values for another. Binding a run to the artifact left which of them it
+    processed unstated, and a publication could then claim the other.
+    """
+
+    manifest_id, _ = _lineage(
+        connection,
+        jurisdiction="tx-collin",
+        release="current-2026",
+        tax_year=2026,
+        release_kind="current",
+    )
+    # The same artifact also carries 2025/certified.
+    accepts(
+        connection,
+        "INSERT INTO bronze.release_partition"
+        "(manifest_id,jurisdiction_code,tax_year,release_kind) "
+        f"VALUES ({manifest_id},'tx-collin',2025,'certified')",
+    )
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.run"
+        "(jurisdiction_code,release_identifier,manifest_id,tax_year,release_kind) "
+        f"VALUES ('tx-collin','no-such-partition',{manifest_id},2099,'certified')",
+    )
+
+    assert "foreign key" in message.lower()
+
+
+def test_a_publication_cannot_claim_a_partition_its_run_did_not_process(
+    connection: object,
+) -> None:
+    """The artifact carrying a partition is not the run having processed it."""
+
+    manifest_id, run_id = _lineage(
+        connection,
+        jurisdiction="tx-collin",
+        release="multi-2026",
+        tax_year=2026,
+        release_kind="current",
+    )
+    accepts(
+        connection,
+        "INSERT INTO bronze.release_partition"
+        "(manifest_id,jurisdiction_code,tax_year,release_kind) "
+        f"VALUES ({manifest_id},'tx-collin',2025,'certified')",
+    )
+    accepts(
+        connection,
+        "INSERT INTO ingestion.release_outcome"
+        "(run_id,disposition,boundary_contract_version,staged_record_count,"
+        f"committed_record_count) VALUES ({run_id},'accepted',1,1,1)",
+    )
+
+    # The run processed 2026/current; this claims the artifact's other partition.
+    message = refuses(
+        connection,
+        "INSERT INTO publication.publication"
+        "(product,jurisdiction_code,tax_year,release_kind,release_identifier,run_id,"
+        "state,published_at) "
+        f"VALUES ('latest_certified','tx-collin',2025,'certified','multi-2026',{run_id},"
+        "'current',now())",
+    )
+
+    assert "foreign key" in message.lower()
+
+
+def test_the_loader_cannot_repoint_a_run_after_publication(connection: object) -> None:
+    """Run identity is what silver and publications bind to."""
+
+    error = _as_role(
+        connection,
+        "property_tax_ingestion",
+        "UPDATE ingestion.run SET release_identifier='rewritten-after-publication'",
+    )
+
+    assert error is not None
+    assert "permission denied" in error.lower()
+
+
+def test_the_loader_may_still_close_a_run(connection: object) -> None:
+    """Column-level, so lifecycle stays writable while identity does not."""
+
+    assert (
+        _as_role(
+            connection, "property_tax_ingestion", "UPDATE ingestion.run SET finished_at = now()"
+        )
+        is None
+    )
+
+
+def test_an_accepted_outcome_cannot_retain_a_diagnostic(connection: object) -> None:
+    """The contradiction the earlier suite demonstrated by accident.
+
+    An accepted outcome declares zero diagnostics, so a retained one means the
+    scalar and the rows describe different releases -- and the publication gate
+    trusts the scalar.
+    """
+
+    _, outcome_id = _one_outcome(connection)
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+        f"VALUES ({outcome_id},0,'record_rejected')",
+    )
+
+    assert "retains 1, expected 0" in message
+
+
+def test_declared_and_retained_evidence_must_agree(connection: object) -> None:
+    _, run_id = _lineage(connection, jurisdiction="tx-denton", release="counts-disagree")
+
+    message = commits(
+        connection,
+        "INSERT INTO ingestion.release_outcome"
+        "(run_id,disposition,boundary_contract_version,total_diagnostic_count) "
+        f"VALUES ({run_id},'rejected',1,3)",
+    )
+
+    assert message is not None and "retains 0, expected 3" in message
+
+
+def test_truncation_is_true_exactly_when_evidence_overflowed(connection: object) -> None:
+    _, run_id = _lineage(connection, jurisdiction="tx-denton", release="truncation-lie")
+
+    message = commits(
+        connection,
+        "INSERT INTO ingestion.release_outcome"
+        "(run_id,disposition,boundary_contract_version,total_diagnostic_count,"
+        f"diagnostics_truncated) VALUES ({run_id},'rejected',1,2,true)",
+        "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+        "SELECT max(outcome_id),0,'record_rejected' FROM ingestion.release_outcome",
+        "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+        "SELECT max(outcome_id),1,'record_rejected' FROM ingestion.release_outcome",
+    )
+
+    # PostgreSQL renders a boolean as t, so match the stable half.
+    assert message is not None and "declares 2 diagnostic(s) with diagnostics_truncated" in message
+
+
+def test_a_retained_diagnostic_names_the_outcome_s_own_layout(connection: object) -> None:
+    _, run_id = _lineage(connection, jurisdiction="tx-denton", release="fingerprint-drift")
+
+    message = commits(
+        connection,
+        "INSERT INTO ingestion.release_outcome"
+        "(run_id,disposition,boundary_contract_version,total_diagnostic_count,"
+        "parser_contract_version,layout_fingerprint) "
+        f"VALUES ({run_id},'rejected',1,1,1,'fp-outcome')",
+        "INSERT INTO ingestion.release_diagnostic"
+        "(outcome_id,diagnostic_index,code,layout_fingerprint) "
+        "SELECT max(outcome_id),0,'layout_rejected','fp-somewhere-else' "
+        "FROM ingestion.release_outcome",
+    )
+
+    assert message is not None and "layout fingerprint is not its own" in message
+
+
+def test_evidence_cannot_be_appended_after_the_outcome_is_sealed(connection: object) -> None:
+    """A second transaction re-runs the check against a total that is now wrong."""
+
+    outcome_id = _rejected_outcome(connection, "sealed", 1)
+
+    message = refuses(
+        connection,
+        "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+        f"VALUES ({outcome_id},1,'record_rejected')",
+    )
+
+    assert "retains 2, expected 1" in message
 
 
 # ---------------------------------------------------------------------------
@@ -1087,12 +1313,19 @@ def test_a_publication_cannot_become_current_without_an_accepted_outcome(
 
 def test_a_rejected_release_does_not_become_current(connection: object) -> None:
     _, run_id = _lineage(connection, jurisdiction="tx-collin", release="rejected-rel")
-    with connection.cursor() as cursor:  # type: ignore[attr-defined]
-        cursor.execute(
+    # Rejected means at least one diagnostic, and the seal requires the row to
+    # exist alongside the count, so both arrive in one transaction.
+    assert (
+        commits(
+            connection,
             "INSERT INTO ingestion.release_outcome"
             "(run_id,disposition,boundary_contract_version,total_diagnostic_count) "
-            f"VALUES ({run_id},'rejected',1,1)"
+            f"VALUES ({run_id},'rejected',1,1)",
+            "INSERT INTO ingestion.release_diagnostic(outcome_id,diagnostic_index,code) "
+            "SELECT max(outcome_id),0,'record_rejected' FROM ingestion.release_outcome",
         )
+        is None
+    )
 
     message = refuses(connection, _publish("tx-collin", "rejected-rel", run_id))
 
@@ -1137,7 +1370,9 @@ def test_a_publication_cannot_claim_a_run_from_another_release(connection: objec
 
     message = refuses(connection, _publish("tx-collin", "a-different-one", run_id))
 
-    assert "processed" in message
+    # A key now, not a comparison: it holds against every writer rather than only
+    # when this table is touched.
+    assert "foreign key" in message.lower()
 
 
 def test_a_publication_cannot_claim_a_year_the_artifact_does_not_carry(
@@ -1156,7 +1391,7 @@ def test_a_publication_cannot_claim_a_year_the_artifact_does_not_carry(
         "'current',now())",
     )
 
-    assert "carries no" in message
+    assert "foreign key" in message.lower()
 
 
 def test_the_gate_admits_at_promotion_and_does_not_maintain_afterwards(

@@ -115,6 +115,23 @@ reject data that looks reasonable:
   composite reference to the manifest it read. Four separate foreign keys would each hold while the
   row named one county and pointed at another's run.
 
+- **A run processes one logical partition, not an artifact.** One archive carries current values for
+  one year and certified values for another, so a run names its `tax_year` and `release_kind` and
+  references `bronze.release_partition`. Binding to the manifest alone left which release a run
+  processed unstated, and a publication could then claim the other one.
+
+- **Run identity is immutable to the loader.** `property_tax_ingestion` may insert a run and update
+  only `finished_at`. Silver records and publications bind to a run's county, release, and partition,
+  so an `UPDATE` that repointed it would invalidate both while every foreign key still held.
+
+- **An outcome and its retained evidence are one sealed unit.** The scalar counts and the diagnostic
+  rows are two descriptions of the same thing, and a `CHECK` sees only one row of one of them.
+  Deferred constraint triggers judge them together at `COMMIT`: retained rows equal
+  `min(total, 100)`, truncation is true exactly when the total exceeds 100, an accepted outcome
+  retains nothing, and a retained diagnostic's layout fingerprint is the outcome's own. A loader
+  therefore writes the pair in one transaction, and appending evidence afterwards fails because the
+  total no longer matches.
+
 - **A persisted outcome is one the carrier could have produced.** The constraints on
   `ingestion.release_outcome` mirror `ReleaseOutcome.__post_init__`: accepted exactly when there were
   no diagnostics, commits exactly what it staged, rejects no row, boundary contract version one,

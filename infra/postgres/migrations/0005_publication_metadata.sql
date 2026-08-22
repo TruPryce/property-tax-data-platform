@@ -96,7 +96,14 @@ CREATE TABLE publication.publication (
         OR (superseded_at IS NOT NULL AND superseded_by IS NOT NULL)
     ),
     CONSTRAINT publication_supersedes_something_other_than_itself
-        CHECK (superseded_by IS DISTINCT FROM publication_id)
+        CHECK (superseded_by IS DISTINCT FROM publication_id),
+
+    -- Composite rather than run_id alone. The county, release, year, and kind a
+    -- publication claims are the run's own, enforced by the key rather than
+    -- compared by a trigger that only fires when this row changes.
+    FOREIGN KEY (run_id, jurisdiction_code, release_identifier, tax_year, release_kind)
+        REFERENCES ingestion.run
+                   (run_id, jurisdiction_code, release_identifier, tax_year, release_kind)
 );
 
 COMMENT ON TABLE publication.publication IS
@@ -162,29 +169,27 @@ COMMENT ON VIEW publication.current_publication IS
 CREATE FUNCTION publication.assert_current_is_validated() RETURNS trigger
 LANGUAGE plpgsql AS $assert$
 DECLARE
-    run_jurisdiction text;
-    run_release      text;
-    run_manifest     bigint;
-    run_disposition  text;
-    blocking_count   integer;
+    run_disposition text;
+    blocking_count  integer;
 BEGIN
     IF NEW.state <> 'current' THEN
         RETURN NEW;
     END IF;
 
     -- A BEFORE trigger runs ahead of the NOT NULL check, so say this plainly
-    -- rather than let the column's error arrive after a confusing one.
+    -- rather than let a lookup on NULL produce a stranger message.
     IF NEW.run_id IS NULL THEN
         RAISE EXCEPTION
             'a current publication must name the ingestion run it was built from';
     END IF;
 
-    SELECT run.jurisdiction_code, run.release_identifier, run.manifest_id,
-           outcome.disposition
-      INTO run_jurisdiction, run_release, run_manifest, run_disposition
-      FROM ingestion.run AS run
-      LEFT JOIN ingestion.release_outcome AS outcome ON outcome.run_id = run.run_id
-     WHERE run.run_id = NEW.run_id;
+    -- Lineage is not checked here any more: the composite foreign key already
+    -- makes this row's county, release, year, and kind the run's own, and a key
+    -- holds against every writer rather than only when this table is touched.
+    -- What remains is what a key cannot express.
+    SELECT outcome.disposition INTO run_disposition
+      FROM ingestion.release_outcome AS outcome
+     WHERE outcome.run_id = NEW.run_id;
 
     IF run_disposition IS NULL THEN
         RAISE EXCEPTION
@@ -194,30 +199,6 @@ BEGIN
         RAISE EXCEPTION
             'run % was %, and a rejected release does not become current',
             NEW.run_id, run_disposition;
-    END IF;
-
-    -- The lineage must be the same release, not merely some accepted one.
-    IF run_jurisdiction IS DISTINCT FROM NEW.jurisdiction_code
-       OR run_release IS DISTINCT FROM NEW.release_identifier THEN
-        RAISE EXCEPTION
-            'run % processed %/%, not %/%',
-            NEW.run_id, run_jurisdiction, run_release,
-            NEW.jurisdiction_code, NEW.release_identifier;
-    END IF;
-
-    -- The year and kind are the publication's own claim, and the run does not
-    -- carry them. They have to be a partition of the artifact the run read, or a
-    -- row could name any year it liked over an accepted release.
-    IF NOT EXISTS (
-        SELECT 1 FROM bronze.release_partition AS partition
-         WHERE partition.manifest_id       = run_manifest
-           AND partition.jurisdiction_code = NEW.jurisdiction_code
-           AND partition.tax_year          = NEW.tax_year
-           AND partition.release_kind      = NEW.release_kind
-    ) THEN
-        RAISE EXCEPTION
-            'the artifact run % read carries no %/% partition for %',
-            NEW.run_id, NEW.tax_year, NEW.release_kind, NEW.jurisdiction_code;
     END IF;
 
     SELECT count(*) INTO blocking_count
@@ -239,9 +220,9 @@ CREATE TRIGGER publication_current_is_validated
     FOR EACH ROW EXECUTE FUNCTION publication.assert_current_is_validated();
 
 COMMENT ON FUNCTION publication.assert_current_is_validated() IS
-    'Admission, not maintenance. It runs when a publication row is written and checks '
-    'what is true then: an accepted outcome, a run that read this release and an '
-    'artifact carrying this year and kind, and no blocking quality failure. It does '
+    'Admission, not maintenance. Lineage is a foreign key rather than a check here; '
+    'this judges what a key cannot: that the run has an accepted outcome and no '
+    'blocking quality failure. It does '
     'NOT re-evaluate afterwards, so a blocking evaluation recorded later leaves an '
     'already-current row current. Sealing quality for a published release is task 6.2 '
     'and is deliberately not attempted here; this is a floor beneath that, and the '
