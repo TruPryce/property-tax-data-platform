@@ -39,9 +39,19 @@ county adapters, and the migrations keep their current representations, and this
 change documents how each maps to the new types rather than moving any of them.
 The one normative correction is to the still-unimplemented canonical account
 contract, whose account identity becomes `(Jurisdiction, source_account_id)`
-rather than `(county_fips, source_account_id)` — because a platform that
-identifies a county by slug in five places and by FIPS in a sixth has the defect
-this change exists to prevent, written into its own specification.
+rather than `(county_fips, source_account_id)`, so that a county is identified
+one way rather than by slug in the layers that key on it and by FIPS in the
+sentence that defines account identity.
+
+FIPS keeps its accepted role. It appears in fourteen files outside this change,
+including all six county source contracts, each of which assigns it from
+version-controlled configuration — none of which keys, joins, or compares on it
+except the one sentence amended here. What changes is FIPS as an *identifier*;
+what remains is FIPS as validated registry metadata.
+
+Every decision below is proposed and takes effect on merge of this planning pull
+request, which is the repository's approval event. Issue #100 carries no
+comments, so nothing here is settled yet.
 
 ## What this change does not do
 

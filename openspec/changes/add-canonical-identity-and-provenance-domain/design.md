@@ -3,25 +3,47 @@
 ## Context
 
 Issue #100 lists six decisions that had to be settled before implementation.
-All six were settled by the maintainer and are recorded here as D1 through D6,
-each with the evidence that supports it and the alternatives that were rejected.
+All six are recorded here as D1 through D6, each with the evidence that supports
+it and the alternatives that were rejected.
+
+**None of them is accepted yet.** They were resolved for this draft in
+maintainer direction that is not a durable, linkable artifact: issue #100 still
+carries no comments. The repository's approval event is the human merge of this
+planning pull request, so every decision below is proposed and requires that
+merge, exactly as D7 does. An earlier revision of this document labelled D1
+through D6 accepted, which described a decision as settled by an event that had
+not happened.
+
 Two points that evidence does not settle are recorded as blockers rather than
 answered.
 
 ## Decisions
 
-### D1 (accepted): Jurisdiction identity is state and county slug; FIPS is registry metadata
+### D1 (proposed by this change, requires human merge): Jurisdiction identity is state and county slug; FIPS is registry metadata
 
 `Jurisdiction` is identified by `state_code` and `county_slug`, rendered
 `tx-collin`. `county_fips` is required, validated registry metadata carried on
 the same object, and is not a second identity.
 
 The evidence is that the slug is already the identifier everywhere the platform
-actually keys on a jurisdiction: `SourceProvenance.jurisdiction_code`,
+*keys* on a jurisdiction: `SourceProvenance.jurisdiction_code`,
 `ReleasePartition.jurisdiction_code`, the `jurisdiction_code` column and its
 pattern constraint in all five merged schemas, and the `releases/{jurisdiction_code}/`
-S3 prefix. FIPS appears in exactly two places — `County.fips` and one CLI
-field — and in one specification sentence.
+S3 prefix.
+
+FIPS is not marginal, and an earlier revision of this document said it was. It
+appears in fourteen files outside this change: `County.fips`, one CLI field, one
+unit test, `bootstrap` design, **all six county source contracts**, and the
+`county-appraisal-normalization`, `source-release-ingestion`,
+`validated-data-publication`, and `appraisal-query-api` requirements. Each county
+contract assigns its FIPS from version-controlled configuration, and the
+canonical account identity is written in terms of it.
+
+So this decision supersedes an accepted role rather than filling a gap. What it
+supersedes is FIPS as an *identifier*; what it keeps is FIPS as the validated
+registry attribute those contracts assign. Every one of those sentences remains
+true with FIPS as metadata — none of them keys, joins, or compares on it except
+the account-identity sentence, which is the one this change amends.
 
 That sentence is the problem this decision removes. The canonical account
 identity in `county-appraisal-normalization` reads `(county_fips, source_account_id)`,
@@ -46,7 +68,7 @@ working. It also admits `tx-collin-old-2` and cannot say which part is the state
 so equality and rendering would depend on parsing a string the domain claims to
 own.
 
-### D2 (accepted): Release identity is jurisdiction, tax year, kind, and the source-supplied identifier
+### D2 (proposed by this change, requires human merge): Release identity is jurisdiction, tax year, kind, and the source-supplied identifier
 
 `ReleaseIdentity` carries all four. `release_identifier` is required, bounded,
 opaque, caller-supplied, namespaced by `Jurisdiction`, never assumed globally
@@ -76,7 +98,7 @@ which is a statement about storage, not about what a county published.
 **Rejected — an acquisition timestamp in identity.** It discriminates, and it
 means the same release acquired twice has two identities.
 
-### D3 (accepted): Four canonical release kinds, mapped only where a contract supports it
+### D3 (proposed by this change, requires human merge): Four canonical release kinds, mapped only where a contract supports it
 
 `ReleaseKind` is a closed vocabulary of `proposed`, `certified`, `supplemental`,
 and `current` — the four the accepted `county-appraisal-normalization` contract
@@ -120,7 +142,7 @@ the canonical enum would grow with each county rather than converge.
 adapter write `preliminary` straight through, which is precisely the inference
 this decision refuses to make silently.
 
-### D4 (accepted): Artifact identity is content alone, related to releases by an explicit binding
+### D4 (proposed by this change, requires human merge): Artifact identity is content alone, related to releases by an explicit binding
 
 `ArtifactIdentity` is a SHA-256 digest and nothing else: no S3 URI, bucket, key,
 URL, filename, ETag, surrogate ID, or acquisition timestamp. `ReleaseIdentity`
@@ -129,8 +151,16 @@ it is many-to-many in both directions:
 
 - one artifact carries several logical releases — measured on Collin, where one
   archive holds current values for one tax year and certified values for another;
-- one release is observed in several artifacts — required by Tarrant, and the
-  case that makes divergence observable rather than destructive.
+- one release is observed in several artifacts — required by Bronze divergence,
+  where `BronzeConflict.DIVERGED` names the same release identity arriving with
+  a different checksum, both versions are kept and flagged rather than
+  overwritten, and the merged `bronze.diverged_release` view counts the distinct
+  artifacts behind one identity.
+
+An earlier revision cited Tarrant for that second direction. It is evidence for
+the opposite: Tarrant's accepted contract says **every artifact is a separate
+release**, which is one artifact per release, not one release across several
+artifacts. Tarrant is the source of blocker B1, not of this cardinality.
 
 **Rejected — promoting the existing S3 reference object or the PostgreSQL
 association row into the domain.** Both already express this relationship
@@ -142,7 +172,7 @@ layout and reintroduce the coupling this change removes.
 the one way identity must not be: acquiring a second artifact would change the
 identity of a release that has not changed.
 
-### D5 (accepted): Domain provenance composes identities and carries nothing free-form
+### D5 (proposed by this change, requires human merge): Domain provenance composes identities and carries nothing free-form
 
 `DomainProvenance` carries `ReleaseIdentity`, `ArtifactIdentity`,
 `source_member_name`, `source_row_number` where applicable,
@@ -166,19 +196,43 @@ fabricated placeholder.
 **Rejected — a `details` or `extra` mapping for adapter-specific lineage.** It is
 the field every one of the above eventually lands in.
 
-### D6 (accepted): Named-field JSON is authoritative; the compact form is derived and reversible
+### D6 (proposed by this change, requires human merge): Named-field JSON is authoritative; the compact form is derived and reversible
 
 The canonical serialization is named-field JSON. Compact renderings exist for
 readability and for adapters to derive keys from, and they are not the contract.
 
 ```json
 {
-  "jurisdiction": {"state_code": "tx", "county_slug": "collin", "county_fips": "48085"},
+  "jurisdiction": {"state_code": "tx", "county_slug": "collin"},
   "tax_year": 2025,
   "release_kind": "certified",
   "release_identifier": "COLLIN-2025-CERT-01"
 }
 ```
+
+**`county_fips` is deliberately absent from the identity document, and this
+departs from the example in the issue's D6 — flagged rather than done quietly.**
+
+Including it makes two accepted rules contradict each other. Equality is state
+and slug only, so two `Jurisdiction` values carrying different FIPS would be
+equal; serialization requires equal values to be byte-identical, so they would
+also have to serialize the same. Both hold at once only because registry
+validation makes a mismatched pair unconstructible — which means the rule that
+FIPS is excluded from identity can never be falsified, and the identity document
+silently depends on the registry never changing. A stored identity from before a
+registry correction would then no longer serialize as its own identity.
+
+Identity documents therefore carry identity. Registry metadata is a separate
+document keyed by the same identity:
+
+```json
+{"jurisdiction": {"state_code": "tx", "county_slug": "collin"}, "county_fips": "48085"}
+```
+
+D1 is untouched: FIPS remains required, validated registry metadata reachable
+from a `Jurisdiction`, and is not a second identity. If the maintainer wants FIPS
+inside the identity document, the coherent form is to include it in equality
+too — a composite identity rather than a halfway one.
 
 The compact release rendering is `tx-collin/2025/certified/COLLIN-2025-CERT-01`,
 and it needs no escaping. That is measured rather than assumed: every accepted
@@ -216,9 +270,16 @@ two mutable same-year snapshots. Its own scenario already resolves this the same
 way: a newer artifact under a mutable or companion locator is stored in Bronze
 and blocked until account-set comparison or official documentation classifies it.
 Canonical `ReleaseIdentity` construction for that case is therefore blocked on
-approved evidence. A Tarrant snapshot without an approved discriminator must fail
-construction rather than be coerced, and the specification requires a test
-proving it.
+approved evidence.
+
+Enforcement belongs at the county mapping boundary, not in the domain
+constructor. The constructor sees four syntactically valid components and cannot
+know whether `TARRANT-2025-01` is an *approved* discriminator or a string
+somebody supplied — that is a fact about Tarrant's contract, which the domain
+does not and must not import. The domain rejects a missing or malformed
+identifier; the Tarrant mapping refuses to produce one at all while no
+discriminator is approved, and the specification requires the test at that
+boundary.
 
 **B2 — Denton `preliminary` and `roll-correction`.** Unmapped, as recorded in D3.
 Denton's `certified` releases are unaffected.
