@@ -65,10 +65,11 @@ COMMENT ON SCHEMA bronze IS
 -- the carrier and was a name to the database, so provenance that looks empty
 -- could be stored through the ingestion role.
 --
--- Defined once because five constraints need it and five hand-copied escape
--- lists is the drift this exists to prevent.  A test enumerates the set from
--- Python and asserts the database rejects each one, so the two cannot diverge
--- silently.
+-- Every name-like constraint in this schema calls it, and it is the only place
+-- the character set is written down: hand-copied escape lists are the drift this
+-- exists to prevent, and a count here would be one more thing to keep true.  A
+-- test enumerates the set from Python and asserts the database rejects each
+-- character, and another fails on any constraint that trims without it.
 -- ---------------------------------------------------------------------------
 
 CREATE FUNCTION platform.is_named(value text) RETURNS boolean

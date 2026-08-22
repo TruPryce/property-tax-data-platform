@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -1290,6 +1291,38 @@ def test_the_loader_cannot_open_a_run_with_a_unicode_blank_release(
     assert "violates check constraint" in error
 
 
+_BTRIM_CALL = re.compile(r"\bbtrim\s*\(", re.IGNORECASE)
+_HELPER_BODY = re.compile(r"\$named\$.*?\$named\$", re.DOTALL)
+
+
+def plain_btrim_offenders(sources: dict[str, str]) -> list[str]:
+    """Lines that trim without going through platform.is_named.
+
+    Case-insensitive and whitespace-tolerant, because `BTRIM(` and `btrim (` are
+    the same call and a literal search for one spelling is a guard that only
+    stops the mutation nobody would make.
+
+    The helper's own call is excused **by location** -- the body between its
+    dollar quotes is removed before scanning -- rather than by matching line
+    text, since any exemption phrased as text is itself something a new line can
+    contain.
+    """
+
+    offenders: list[str] = []
+    for name, body in sorted(sources.items()):
+        scannable = _HELPER_BODY.sub(lambda match: "\n" * match.group().count("\n"), body)
+        for number, line in enumerate(scannable.splitlines(), 1):
+            if line.strip().startswith("--") or "platform.is_named" in line:
+                continue
+            if _BTRIM_CALL.search(line):
+                offenders.append(f"{name}:{number}")
+    return offenders
+
+
+def _migration_sources() -> dict[str, str]:
+    return {p.name: p.read_text(encoding="utf-8") for p in MIGRATIONS.glob("[0-9]*.sql")}
+
+
 def test_every_blank_check_uses_the_shared_definition() -> None:
     """The split between ASCII and Unicode trimming was the defect, twice.
 
@@ -1298,17 +1331,45 @@ def test_every_blank_check_uses_the_shared_definition() -> None:
     is the one inside platform.is_named.
     """
 
-    offenders: list[str] = []
-    for path in sorted(MIGRATIONS.glob("[0-9]*.sql")):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.strip()
-            if "btrim(" not in line or stripped.startswith("--"):
-                continue
-            if "platform.is_named" in line or "SELECT btrim(value" in line:
-                continue
-            offenders.append(f"{path.name}:{number}")
+    offenders = plain_btrim_offenders(_migration_sources())
 
     assert not offenders, f"plain btrim bypasses platform.is_named at {offenders}"
+
+
+@pytest.mark.parametrize(
+    ("label", "mutation"),
+    [
+        ("lowercase", "btrim(locator) <> ''"),
+        ("uppercase", "BTRIM(locator) <> ''"),
+        ("mixed case", "BTrim(locator) <> ''"),
+        ("space before the paren", "btrim (locator) <> ''"),
+        ("uppercase and spaced", "BTRIM  (locator) <> ''"),
+    ],
+)
+def test_the_guard_catches_every_spelling_of_a_bypass(label: str, mutation: str) -> None:
+    """A guard nobody attacks is a guard nobody knows the shape of.
+
+    The first version matched the literal `btrim(`, so `BTRIM(` and `btrim (`
+    restored the Unicode mismatch while the regression stayed green.
+    """
+
+    sources = _migration_sources()
+    target = "0001_release_manifests.sql"
+    sources[target] = sources[target].replace(
+        "CHECK (platform.is_named(locator)),", f"CHECK ({mutation}),", 1
+    )
+
+    offenders = plain_btrim_offenders(sources)
+
+    assert offenders, f"{label} bypass went undetected"
+    assert any(item.startswith(target) for item in offenders)
+
+
+def test_the_guard_does_not_flag_the_helper_itself() -> None:
+    """Excused by location, so the exemption is not a phrase a new line can carry."""
+
+    assert not plain_btrim_offenders(_migration_sources())
+    assert "btrim" in (MIGRATIONS / "0001_release_manifests.sql").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
