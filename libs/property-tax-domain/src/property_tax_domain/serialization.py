@@ -21,6 +21,7 @@ Standard library only.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Final
 
 from property_tax_domain.artifact import ArtifactIdentity
@@ -55,6 +56,31 @@ __all__ = [
 COMPACT_RELEASE_SEPARATOR: Final = "/"
 
 _STATE_CODE_CHARS: Final = 2
+
+#: Exactly four ASCII digits. `str.isdigit()` admits Arabic-Indic and fullwidth
+#: forms and `int()` then rewrites them, which turns a rendering that should be
+#: refused into a different identity that looks like a successful parse.
+_TAX_YEAR_DIGITS: Final = re.compile(r"[0-9]{4}\Z")
+
+#: The complete key set of each shape, in declared order. A document carrying a
+#: key outside its set is refused rather than silently reduced: permitting
+#: extras would let two different documents parse to one value, and would let a
+#: provenance document carry the payload the provenance shape exists to
+#: exclude. A test asserts each builder emits exactly these, so the parser and
+#: the builder cannot drift apart.
+JURISDICTION_KEYS: Final = ("state_code", "county_slug")
+JURISDICTION_REGISTRY_KEYS: Final = ("jurisdiction", "county_fips")
+ARTIFACT_KEYS: Final = ("sha256",)
+RELEASE_KEYS: Final = ("jurisdiction", "tax_year", "release_kind", "release_identifier")
+BINDING_KEYS: Final = ("artifact", "release")
+PROVENANCE_KEYS: Final = (
+    "release",
+    "artifact",
+    "source_member_name",
+    "source_row_number",
+    "parser_contract_version",
+    "layout_fingerprint",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +156,7 @@ def parse_jurisdiction_document(document: dict[str, Any]) -> Jurisdiction:
     registry document is where such a disagreement is visible.
     """
 
+    _require_exact_keys(document, JURISDICTION_KEYS, "a jurisdiction identity document")
     state_code = _require_field(document, "state_code", str)
     county_slug = _require_field(document, "county_slug", str)
     from property_tax_domain.counties import county_by_slug
@@ -156,6 +183,7 @@ def parse_jurisdiction_registry_document(
     place.
     """
 
+    _require_exact_keys(document, JURISDICTION_REGISTRY_KEYS, "a registry metadata document")
     nested = _require_field(document, "jurisdiction", dict)
     recorded_fips = _require_field(document, "county_fips", str)
     jurisdiction = parse_jurisdiction_document(nested)
@@ -168,10 +196,12 @@ def parse_jurisdiction_registry_document(
 
 
 def parse_artifact_document(document: dict[str, Any]) -> ArtifactIdentity:
+    _require_exact_keys(document, ARTIFACT_KEYS, "an artifact document")
     return ArtifactIdentity(sha256=_require_field(document, "sha256", str))
 
 
 def parse_release_document(document: dict[str, Any]) -> ReleaseIdentity:
+    _require_exact_keys(document, RELEASE_KEYS, "a release document")
     return ReleaseIdentity(
         jurisdiction=parse_jurisdiction_document(_require_field(document, "jurisdiction", dict)),
         tax_year=_require_field(document, "tax_year", int),
@@ -181,6 +211,7 @@ def parse_release_document(document: dict[str, Any]) -> ReleaseIdentity:
 
 
 def parse_binding_document(document: dict[str, Any]) -> ArtifactReleaseBinding:
+    _require_exact_keys(document, BINDING_KEYS, "a binding document")
     return ArtifactReleaseBinding(
         artifact=parse_artifact_document(_require_field(document, "artifact", dict)),
         release=parse_release_document(_require_field(document, "release", dict)),
@@ -188,9 +219,7 @@ def parse_binding_document(document: dict[str, Any]) -> ArtifactReleaseBinding:
 
 
 def parse_provenance_document(document: dict[str, Any]) -> DomainProvenance:
-    for key in ("source_row_number", "layout_fingerprint"):
-        if key not in document:
-            raise ValueError(f"{key} must be present, as null where absent")
+    _require_exact_keys(document, PROVENANCE_KEYS, "a provenance document")
     return DomainProvenance(
         release=parse_release_document(_require_field(document, "release", dict)),
         artifact=parse_artifact_document(_require_field(document, "artifact", dict)),
@@ -226,8 +255,12 @@ def parse_compact_release(rendered: str) -> ReleaseIdentity:
     jurisdiction_code, tax_year, release_kind, release_identifier = parts
     if len(jurisdiction_code) <= _STATE_CODE_CHARS or jurisdiction_code[_STATE_CODE_CHARS] != "-":
         raise ValueError(f"jurisdiction code {jurisdiction_code!r} is not a state and a slug")
-    if not tax_year.isdigit():
-        raise ValueError(f"tax_year {tax_year!r} is not digits")
+    # Not `str.isdigit()`: it admits Arabic-Indic and fullwidth digits, and the
+    # conversion then rewrites them into a different rendering that parses
+    # cleanly. A leading zero does the same. The component is refused unless it
+    # is already the exact four ASCII digits the renderer emits.
+    if _TAX_YEAR_DIGITS.fullmatch(tax_year) is None:
+        raise ValueError(f"tax_year {tax_year!r} is not exactly four ASCII digits")
     return ReleaseIdentity(
         jurisdiction=parse_jurisdiction_document(
             {
@@ -242,6 +275,29 @@ def parse_compact_release(rendered: str) -> ReleaseIdentity:
 
 
 # ---------------------------------------------------------------------------
+
+
+def _require_exact_keys(document: Any, expected: tuple[str, ...], label: str) -> None:
+    """Refuse a document carrying anything outside its declared shape.
+
+    Applied at every object level, so a nested jurisdiction cannot smuggle in
+    what the root refuses. Absent optionals are `null` rather than omitted, so a
+    complete shape means every declared key is present and no other.
+    """
+
+    if not isinstance(document, dict):
+        raise ValueError(f"{label} must be an object, got {type(document).__name__}")
+    present = set(document)
+    declared = set(expected)
+    unknown = sorted(present - declared)
+    if unknown:
+        raise ValueError(f"{label} carries undeclared field(s): {', '.join(unknown)}")
+    missing = sorted(declared - present)
+    if missing:
+        raise ValueError(
+            f"{label} is missing field(s): {', '.join(missing)} — an absent optional "
+            "is null, never omitted"
+        )
 
 
 def _require_field(document: dict[str, Any], key: str, expected: type) -> Any:

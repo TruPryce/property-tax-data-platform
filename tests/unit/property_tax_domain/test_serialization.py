@@ -285,3 +285,159 @@ def test_a_release_document_with_a_bool_tax_year_is_refused() -> None:
 
     with pytest.raises(ValueError):
         s.parse_release_document(document)
+
+
+# --------------------------------------------------------------------------
+# The shapes are complete, not merely sufficient
+# --------------------------------------------------------------------------
+
+
+def documents_and_parsers() -> list[tuple[str, dict, object]]:
+    binding = ArtifactReleaseBinding(artifact=ARTIFACT, release=release())
+    return [
+        ("jurisdiction", s.jurisdiction_document(COLLIN), s.parse_jurisdiction_document),
+        (
+            "registry",
+            s.jurisdiction_registry_document(COLLIN),
+            s.parse_jurisdiction_registry_document,
+        ),
+        ("artifact", s.artifact_document(ARTIFACT), s.parse_artifact_document),
+        ("release", s.release_document(release()), s.parse_release_document),
+        ("binding", s.binding_document(binding), s.parse_binding_document),
+        ("provenance", s.provenance_document(provenance()), s.parse_provenance_document),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "document", "parse"), documents_and_parsers(), ids=lambda value: str(value)[:20]
+)
+def test_an_undeclared_root_field_is_refused(label, document, parse) -> None:  # noqa: ANN001
+    """A complete shape means these keys and no others.
+
+    Accepting extras would let two different documents parse to one value, and
+    would let a provenance document carry the payload that shape exists to
+    exclude.
+    """
+
+    hostile = dict(document)
+    hostile["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="undeclared"):
+        parse(hostile)
+
+
+@pytest.mark.parametrize(
+    ("label", "path"),
+    [
+        ("release.jurisdiction", ("jurisdiction",)),
+        ("binding.artifact", ("artifact",)),
+        ("binding.release", ("release",)),
+        ("provenance.release", ("release",)),
+        ("provenance.release.jurisdiction", ("release", "jurisdiction")),
+        ("provenance.artifact", ("artifact",)),
+        ("registry.jurisdiction", ("jurisdiction",)),
+    ],
+)
+def test_an_undeclared_nested_field_is_refused(label: str, path: tuple[str, ...]) -> None:
+    """Nesting is not a way in.
+
+    A nested object refusing nothing would make the root check cosmetic.
+    """
+
+    root, parse = {
+        "release.jurisdiction": (s.release_document(release()), s.parse_release_document),
+        "binding.artifact": (
+            s.binding_document(ArtifactReleaseBinding(artifact=ARTIFACT, release=release())),
+            s.parse_binding_document,
+        ),
+        "binding.release": (
+            s.binding_document(ArtifactReleaseBinding(artifact=ARTIFACT, release=release())),
+            s.parse_binding_document,
+        ),
+        "provenance.release": (s.provenance_document(provenance()), s.parse_provenance_document),
+        "provenance.release.jurisdiction": (
+            s.provenance_document(provenance()),
+            s.parse_provenance_document,
+        ),
+        "provenance.artifact": (s.provenance_document(provenance()), s.parse_provenance_document),
+        "registry.jurisdiction": (
+            s.jurisdiction_registry_document(COLLIN),
+            s.parse_jurisdiction_registry_document,
+        ),
+    }[label]
+
+    hostile = json.loads(json.dumps(root))
+    target = hostile
+    for step in path:
+        target = target[step]
+    target["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="undeclared"):
+        parse(hostile)
+
+
+@pytest.mark.parametrize(
+    ("label", "document", "parse"), documents_and_parsers(), ids=lambda value: str(value)[:20]
+)
+def test_a_missing_declared_field_is_refused(label, document, parse) -> None:  # noqa: ANN001
+    for key in list(document):
+        incomplete = {name: value for name, value in document.items() if name != key}
+        with pytest.raises(ValueError, match="missing"):
+            parse(incomplete)
+
+
+def test_the_declared_key_sets_match_what_the_builders_emit() -> None:
+    """The parser's expectation and the builder's output are one fact.
+
+    Written in two places, they would drift; asserted equal, they cannot.
+    """
+
+    binding = ArtifactReleaseBinding(artifact=ARTIFACT, release=release())
+
+    assert tuple(s.jurisdiction_document(COLLIN)) == s.JURISDICTION_KEYS
+    assert tuple(s.jurisdiction_registry_document(COLLIN)) == s.JURISDICTION_REGISTRY_KEYS
+    assert tuple(s.artifact_document(ARTIFACT)) == s.ARTIFACT_KEYS
+    assert tuple(s.release_document(release())) == s.RELEASE_KEYS
+    assert tuple(s.binding_document(binding)) == s.BINDING_KEYS
+    assert tuple(s.provenance_document(provenance())) == s.PROVENANCE_KEYS
+
+
+# --------------------------------------------------------------------------
+# The compact rendering alters nothing
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "rendered"),
+    [
+        ("leading zero", "tx-collin/02025/certified/A"),
+        ("six digits", "tx-collin/002025/certified/A"),
+        ("three digits", "tx-collin/202/certified/A"),
+        ("Arabic-Indic digits", "tx-collin/\u0662\u0660\u0662\u0665/certified/A"),
+        ("fullwidth digits", "tx-collin/\uff12\uff10\uff12\uff15/certified/A"),
+        ("signed", "tx-collin/+2025/certified/A"),
+        ("whitespace padded", "tx-collin/ 2025/certified/A"),
+    ],
+)
+def test_a_non_canonical_tax_year_component_is_refused_not_rewritten(
+    label: str, rendered: str
+) -> None:
+    """`str.isdigit()` admits these and `int()` then rewrites them.
+
+    Each one previously parsed cleanly into a *different* identity whose own
+    rendering no longer matched the input, which is the alteration the accepted
+    scenario forbids.
+    """
+
+    with pytest.raises(ValueError):
+        s.parse_compact_release(rendered)
+
+
+def test_every_accepted_rendering_reproduces_itself_exactly() -> None:
+    """The property the individual cases are instances of."""
+
+    for identifier in ("A", "a", "A.b-c_d", "z" * 128, "DCAD2025_CURRENT"):
+        for year in (1900, 2025, 2200):
+            for kind in ReleaseKind:
+                subject = release(identifier, tax_year=year, release_kind=kind)
+                assert s.parse_compact_release(subject.rendered).rendered == subject.rendered
