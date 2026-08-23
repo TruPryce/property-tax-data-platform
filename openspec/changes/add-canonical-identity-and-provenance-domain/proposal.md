@@ -62,6 +62,18 @@ API surface, or publication policy changes. No runtime dependency is added:
 these types must be usable without boto3, psycopg, Airflow, or any county
 adapter import, and an architecture test proves it.
 
+## How this lands
+
+The implementation lane can write neither this change's own task file, which
+artifact validation holds immutable, nor anything under `openspec`, which its
+path policy prohibits. So after the implementation pull request merges, every
+checkbox here and bootstrap task 2.1 are still unchecked by design.
+
+A separate completion and archival pull request closes that out in order:
+reconcile and check this change's verified tasks, check bootstrap task 2.1 while
+leaving bootstrap 2.2 and 3.4 open, then archive this change and promote the
+capability.
+
 ## Blocked, deliberately
 
 Two points are recorded as blockers rather than resolved by inference, and

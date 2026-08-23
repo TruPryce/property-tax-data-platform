@@ -45,6 +45,12 @@ The system SHALL identify an artifact by its SHA-256 content digest alone. `Arti
 - **WHEN** two artifacts published under one source name carry different digests
 - **THEN** their artifact identities do not compare equal
 
+The digest length SHALL be published as `ARTIFACT_IDENTITY_HEX_LENGTH`, whose value SHALL be 64, so a consumer asserting the bound reads it from the vocabulary rather than repeating the literal.
+
+#### Scenario: The published digest length is read
+- **WHEN** a consumer reads `ARTIFACT_IDENTITY_HEX_LENGTH`
+- **THEN** its value is 64 and it is the same bound artifact construction enforces
+
 #### Scenario: Digest is malformed
 - **WHEN** a digest is not exactly sixty-four lowercase hexadecimal characters
 - **THEN** construction fails rather than trimming, padding, or case-folding the value
@@ -79,11 +85,47 @@ The tax year SHALL be an `int` from 1900 through 2200 inclusive, matching the bo
 ### Requirement: Canonical release kind vocabulary
 The system SHALL define a closed canonical `ReleaseKind` vocabulary of exactly `proposed`, `certified`, `supplemental`, and `current`. A county-native label SHALL be mapped to a canonical kind only where an accepted county contract supports semantic equivalence, and the source-native label SHALL be retained at the adapter or source boundary. The vocabulary SHALL NOT be widened to carry an unresolved county label.
 
-The mapping table is fixed here as normative data. **Runtime mapping behavior is deferred** to the county-aware use-case boundary in bootstrap task 2.4 and requires its own scope decision, because the only shared adapter module available today is county-neutral by its accepted contract and its suite asserts that no county name appears in it. The scenarios below therefore state the contract that boundary must satisfy; nothing in this change implements them, and no task in this change may be checked as satisfying them.
+The mapping table is fixed here as normative data, in this document rather than in a design or engineering note, because the promoted capability spec is the only one of those that survives archival as contract.
+
+Supported mappings, each resting on an accepted county contract:
+
+| jurisdiction | source-native label | canonical `ReleaseKind` |
+|---|---|---|
+| `tx-dallas` | `proposed` | `proposed` |
+| `tx-dallas` | `certified` | `certified` |
+| `tx-dallas` | `certified-with-supplemental` | `supplemental` |
+| `tx-collin` | `current` | `current` |
+| `tx-collin` | `certified` | `certified` |
+| `tx-denton` | `certified` | `certified` |
+| `tx-ellis` | `certified` | `certified` |
+| `tx-tarrant` | `certified` | `certified` |
+
+The Dallas `certified-with-supplemental` row is decision D7 and takes effect on merge of this change. If D7 is not accepted, that row is removed and Dallas canonicalizes only `proposed` and `certified`.
+
+Unmapped, and SHALL NOT be canonicalized without a separate decision establishing equivalence:
+
+| jurisdiction | source-native label | why it is unmapped |
+|---|---|---|
+| `tx-denton` | `preliminary` | It resembles `proposed`, and no accepted contract establishes equivalence; Denton's contract leaves preliminary-to-certified replacement semantics subject to unmeasured same-year evidence. |
+| `tx-denton` | `roll-correction` | It resembles `supplemental`, and both are described as full replacement snapshots — a similarity between two descriptions rather than evidence that they are one release kind. |
+
+This table deliberately has no canonical-kind column. Naming the kind each label *resembles* in the position the supported table uses for the kind each label *maps to* is how a reader, or a checker, comes to treat a resemblance as a mapping.
+
+No jurisdiction absent from the supported table SHALL have a native label canonicalized, and `tx-rockwall` publishes no appraisal roll and appears in neither table.
+
+**Runtime mapping behavior is deferred** to the county-aware use-case boundary in bootstrap task 2.4 and requires its own scope decision, because the only shared adapter module available today is county-neutral by its accepted contract and its suite asserts that no county name appears in it. The scenarios below therefore state the contract that boundary must satisfy; nothing in this change implements them, and no task in this change may be checked as satisfying them.
 
 #### Scenario: A contract-supported label is canonicalized
 - **WHEN** an adapter maps a county-native label for which an accepted contract establishes equivalence
 - **THEN** the canonical kind is used and the source-native label is retained separately
+
+#### Scenario: A Dallas supplemental release is classified
+- **WHEN** a Dallas release carries the source-native label `certified-with-supplemental`
+- **THEN** it maps to canonical kind `supplemental` and the verbatim label is retained, and it is not classified as `certified`
+
+#### Scenario: A Denton preliminary release is presented
+- **WHEN** a Denton release carries the source-native label `preliminary` or `roll-correction`
+- **THEN** no canonical kind is produced, the source-native label is retained, and the label is not canonicalized as `proposed` or `supplemental`
 
 #### Scenario: An unresolved label is presented for canonicalization
 - **WHEN** an adapter presents a county-native label that no accepted contract establishes as equivalent
@@ -235,3 +277,14 @@ The four existing names SHALL be retained: `CountySlug` and `county_by_slug` are
 #### Scenario: The export set drifts from the enumeration
 - **WHEN** a public name is added to or removed from the package root
 - **THEN** the export-surface test fails against the enumerated set, including removal of any of the four pre-existing names
+
+### Requirement: Completion and archival handoff
+The implementation lane SHALL NOT modify this change's own task file, which artifact validation holds immutable, and SHALL NOT write under `openspec`, which the implementation path policy prohibits. A separate post-implementation completion and archival pull request SHALL therefore perform, in order: reconcile and check this change's verified tasks; check bootstrap task 2.1 while leaving bootstrap tasks 2.2 and 3.4 unchecked; then archive this change and promote the capability.
+
+#### Scenario: The implementation pull request merges
+- **WHEN** every implementation and falsification task has passed and its pull request has merged
+- **THEN** this change's task checkboxes and bootstrap task 2.1 are still unchecked, because neither file is writable by the implementation lane
+
+#### Scenario: The completion pull request runs
+- **WHEN** the completion and archival pull request is prepared
+- **THEN** it checks this change's verified tasks first, then bootstrap task 2.1, leaves bootstrap tasks 2.2 and 3.4 unchecked, and only then archives the change and promotes the capability
