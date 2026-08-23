@@ -745,11 +745,21 @@ def test_the_domain_and_application_packages_gain_no_tarrant_vocabulary() -> Non
     assert "from property_tax_application import" in source
     assert "from property_tax_domain import" in source
 
-    parser_vocabulary = (
+    # Named for the invariant rather than for the parser. `parser_vocabulary`
+    # was ambiguous enough to collect a name this parser never introduced, and
+    # the correction only holds if the tuple says what belongs in it.
+    #
+    # `layout_fingerprint` was removed under D10 of the canonical identity and
+    # provenance change. It is not Tarrant vocabulary: the Dallas parser
+    # introduced it on 2026-08-02, eleven days before this parser existed;
+    # issue #43 D7 established it as shared adapter-neutral provenance; the
+    # merged canonical capability requires it on `DomainProvenance`; and the
+    # Denton and Ellis guards enumerate only their own parser symbols while
+    # their parsers use the name freely. Do not re-add it.
+    tarrant_specific_vocabulary = (
         "TarrantDiagnostic",
         "TarrantValidationReport",
         "validate_certified_member",
-        "layout_fingerprint",
         "TARRANT_REQUIRED_HEADERS",
         "TARRANT_SENSITIVE_HEADERS",
         "TARRANT_PARSER_CONTRACT_VERSION",
@@ -759,7 +769,7 @@ def test_the_domain_and_application_packages_gain_no_tarrant_vocabulary() -> Non
     for package in ("property-tax-domain", "property-tax-application"):
         for path in (repo_root / "libs" / package / "src").rglob("*.py"):
             body = path.read_text(encoding="utf-8")
-            leaked = [name for name in parser_vocabulary if name in body]
+            leaked = [name for name in tarrant_specific_vocabulary if name in body]
             assert leaked == [], (path, leaked)
 
 
