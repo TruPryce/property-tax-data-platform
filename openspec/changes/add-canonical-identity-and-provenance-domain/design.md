@@ -267,13 +267,22 @@ Splitting the document raises a question the split has to answer: a
 `Jurisdiction` requires FIPS, and its identity document omits it, so parsing one
 cannot reconstruct the value object from the document alone. Resolution: the
 identity document parses by resolving FIPS from the version-controlled registry
-for the named slug, which is the same source construction validates against, so
-a document written before a registry correction fails to parse rather than
-resolving to a jurisdiction the registry no longer describes. The registry
-document is a separate normative shape with its own parser, used for transport
-and audit rather than for reconstructing identity, and a registry document whose
-FIPS disagrees with the registry is rejected rather than preferred over it.
-Neither parser invents a FIPS and neither silently accepts a stale one.
+for the named slug, and fails only when the registry describes no such slug.
+
+What that cannot do is worth stating, because an earlier revision claimed it.
+A document written before a registry correction **parses successfully with the
+new FIPS**, and cannot detect the correction — the old value is not in the
+document to compare against. Claiming it would fail described a check the shape
+makes impossible. Round-trip losslessness for the identity document is therefore
+scoped to what it carries: the two identity components and equality. The
+identity of a jurisdiction survives; its metadata is not being round-tripped,
+because it is not in there.
+
+The registry document is the lossless, auditable metadata shape. It carries the
+FIPS as written, has its own parser returning the identity together with the
+recorded FIPS, and is rejected when that FIPS disagrees with the registry —
+which is the check that *can* detect a correction, because the old value is
+present. Neither parser invents a FIPS.
 
 ### D8 (proposed by this change, requires human merge): the domain's public surface is explicit
 
@@ -281,8 +290,33 @@ Neither parser invents a FIPS and neither silently accepts a stale one.
 value objects are exported through it rather than left as module-only imports.
 The proposal calls these one stable vocabulary for the rest of the platform;
 a vocabulary reached by importing a private module path is not stable, because
-the path is then part of the contract. A test asserts the exported set, so
-adding a type is a deliberate line in a diff rather than a side effect.
+the path is then part of the contract.
+
+The exact final set is enumerated here rather than left as "the declared
+vocabulary", because an implementer could otherwise remove the existing API and
+satisfy a self-authored test that the set is exact:
+
+```python
+__all__ = [
+    "ARTIFACT_IDENTITY_HEX_LENGTH",
+    "ArtifactIdentity",
+    "ArtifactReleaseBinding",
+    "County",
+    "CountySlug",
+    "DomainProvenance",
+    "INITIAL_COUNTIES",
+    "Jurisdiction",
+    "ReleaseIdentity",
+    "ReleaseKind",
+    "county_by_slug",
+]
+```
+
+The four existing names stay: `CountySlug` and `county_by_slug` are imported
+from the package root by seven county adapter modules today, so dropping them
+would break every one of them. Serialization functions are **not** exported at
+the root and remain reachable as `property_tax_domain.serialization`; they are
+operations on the vocabulary rather than part of it.
 
 **Rejected — module-only imports.** It keeps the root namespace small and makes
 every consumer depend on file layout.
@@ -296,11 +330,15 @@ accepted contract and its suite asserts that no county name appears in it.
 
 Runtime mapping is therefore deferred to bootstrap task 2.4, which owns the
 county-aware use-case boundary, and it needs its own scope decision authorizing
-where the mapping lives. Task 5.1 records that as an explicitly blocked
-follow-on rather than leaving the capability's mapping scenarios satisfiable by
-a documentation task. An earlier revision of this plan left task 1.3 claiming
-task 3.1 would add that code after task 3.1 had been reduced to documentation,
-so every task could be checked while the behavior stayed absent.
+where the mapping lives.
+
+That deferral is recorded here and **creates no task**. An earlier revision
+added a task marked `**BLOCKED**` in prose, which the implementation parser does
+not read: measured against this head, it reports nineteen tasks all with status
+`incomplete`, so the lane would have dispatched runtime mapping as ordinary work
+whose only writable path was a documentation file. Bold text is not a state. A
+decision may name a future owner; it may not manufacture an unchecked pseudo-task
+that a machine will pick up.
 
 The compact release rendering is `tx-collin/2025/certified/COLLIN-2025-CERT-01`,
 and it needs no escaping. That is measured rather than assumed: every accepted

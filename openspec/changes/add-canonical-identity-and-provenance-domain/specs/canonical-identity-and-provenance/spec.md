@@ -50,7 +50,9 @@ The system SHALL identify an artifact by its SHA-256 content digest alone. `Arti
 - **THEN** construction fails rather than trimming, padding, or case-folding the value
 
 ### Requirement: Logical release identity
-The system SHALL identify a logical release by `Jurisdiction`, `tax_year`, `ReleaseKind`, and a required source-supplied `release_identifier`. The release identifier SHALL be bounded, opaque, namespaced by its jurisdiction, and SHALL NOT be assumed globally unique, inferred from a filename or archive member name, or normalized into a different identifier. `ReleaseIdentity` SHALL contain no artifact identity.
+The system SHALL identify a logical release by `Jurisdiction`, `tax_year`, `ReleaseKind`, and a required source-supplied `release_identifier`. The release identifier SHALL be a `str` of 1 through 128 characters drawn from `[A-Za-z0-9._-]` and SHALL NOT begin with `.` or `-`, matching the alphabet already accepted across the repository. It SHALL be opaque and namespaced by its jurisdiction, and SHALL NOT be assumed globally unique, inferred from a filename or archive member name, or normalized into a different identifier.
+
+Case SHALL be preserved and SHALL be significant: `ABC` and `abc` are both valid and denote different releases, because both letter cases are inside the accepted alphabet. Rejecting an identifier for differing only in case would invalidate half that alphabet or impose an unstated canonical case. Surrounding whitespace SHALL be rejected because whitespace is outside the grammar, which is a different rule from case and SHALL NOT be grouped with it. `ReleaseIdentity` SHALL contain no artifact identity.
 
 #### Scenario: Two counties reuse one source label
 - **WHEN** a Dallas release and a Collin release carry the same source-supplied release identifier, tax year, and kind
@@ -60,9 +62,13 @@ The system SHALL identify a logical release by `Jurisdiction`, `tax_year`, `Rele
 - **WHEN** two releases share a jurisdiction, tax year, and kind and differ only in release identifier
 - **THEN** their release identities do not compare equal
 
+#### Scenario: Two identifiers differ only by case
+- **WHEN** one release identifier is `ABC` and another is `abc`, all else equal
+- **THEN** both are valid and the two release identities are unequal, because case is inside the accepted alphabet and the identifier is opaque
+
 #### Scenario: An identifier would be altered to be accepted
-- **WHEN** a supplied release identifier differs from an accepted form only by case, surrounding whitespace, or a character outside the accepted alphabet
-- **THEN** construction fails and the identifier is not lowercased, trimmed, slugified, or otherwise rewritten
+- **WHEN** a supplied release identifier carries surrounding whitespace, a path separator, or any other character outside the accepted alphabet, or falls outside 1 through 128 characters, or begins with `.` or `-`
+- **THEN** construction fails and the identifier is not trimmed, lowercased, slugified, or otherwise rewritten
 
 The tax year SHALL be an `int` from 1900 through 2200 inclusive, matching the bound `ReleasePartition` and the merged `partition_tax_year_plausible` constraint already enforce, and `bool` SHALL be rejected. The narrower 1900–2100 bound applied to source years at the county parser boundary is a different value and remains unchanged.
 
@@ -134,7 +140,9 @@ This is what structure can enforce, and the guarantee SHALL be stated as that ra
 - **THEN** the domain rejects it and the concept remains at the adapter boundary
 
 ### Requirement: Deterministic serialization
-The system SHALL define named-field JSON as the authoritative canonical serialization for every serialized identity and provenance value, SHALL produce byte-identical output for equal values, and SHALL round-trip without loss. Compact string renderings MAY be derived for readability and for adapter key composition, and SHALL NOT be the authoritative contract. Any compact release rendering SHALL be reversible for every accepted release identifier, and that reversibility SHALL be proved against the accepted identifier alphabet rather than asserted.
+The system SHALL define named-field JSON as the authoritative canonical serialization for every serialized identity and provenance value, and SHALL produce byte-identical output for equal values.
+
+Round-trip losslessness SHALL be scoped to what each document carries. A jurisdiction identity document SHALL round-trip its two identity components and compare equal to the original; it SHALL NOT be described as round-tripping `county_fips`, which it does not carry and therefore cannot detect a change in — a document written before a registry correction parses successfully with the corrected value. The separate registry-metadata document IS the lossless auditable metadata shape: it carries the FIPS as written and can detect that disagreement. Every other serialized value SHALL round-trip without loss and with no altered component. Compact string renderings MAY be derived for readability and for adapter key composition, and SHALL NOT be the authoritative contract. Any compact release rendering SHALL be reversible for every accepted release identifier, and that reversibility SHALL be proved against the accepted identifier alphabet rather than asserted.
 
 The complete named-field shapes SHALL be:
 
@@ -168,8 +176,12 @@ Parsing SHALL be defined as follows, because a `Jurisdiction` requires a FIPS it
 - **THEN** the output is byte-identical, including field order
 
 #### Scenario: Serialized identity round-trips
-- **WHEN** an identity value is serialized and parsed back
+- **WHEN** an identity value other than a jurisdiction identity document is serialized and parsed back
 - **THEN** the result compares equal to the original and carries no altered component
+
+#### Scenario: A jurisdiction identity document round-trips its identity
+- **WHEN** a jurisdiction identity document is serialized and parsed back
+- **THEN** the result compares equal to the original on state code and county slug, and its FIPS is whatever the registry currently assigns rather than a value recovered from the document
 
 #### Scenario: A jurisdiction identity document is parsed
 - **WHEN** a jurisdiction identity document is parsed
@@ -177,7 +189,11 @@ Parsing SHALL be defined as follows, because a `Jurisdiction` requires a FIPS it
 
 #### Scenario: A registry document disagrees with the registry
 - **WHEN** a registry metadata document carries a FIPS the registry does not assign to that slug
-- **THEN** it is rejected rather than preferred over the registry
+- **THEN** it is rejected rather than preferred over the registry, and this is the only shape in which such a disagreement is detectable
+
+#### Scenario: A registry document is parsed
+- **WHEN** a registry metadata document is parsed
+- **THEN** the parser returns the jurisdiction identity together with the FIPS the document recorded, so the recorded value remains available for audit rather than being replaced by the registry's
 
 #### Scenario: A compact rendering is reversed
 - **WHEN** a compact release rendering is parsed for any accepted release identifier
@@ -208,12 +224,14 @@ Enforcement SHALL sit at the county mapping boundary that knows the contract, an
 - **THEN** the refusal comes from the county mapping rather than from the domain constructor, which has no basis to distinguish it from an approved one
 
 ### Requirement: Explicit public domain surface
-The system SHALL export the canonical identity and provenance types through the `property_tax_domain` package root with an explicit `__all__`, and SHALL NOT require consumers to import a private module path. The exported set SHALL be asserted by a test, so that adding or removing a public type is a deliberate change rather than a side effect of moving a file.
+The system SHALL export the canonical identity and provenance types through the `property_tax_domain` package root with an explicit `__all__`, and SHALL NOT require consumers to import a submodule directly. The exported set SHALL be exactly `ARTIFACT_IDENTITY_HEX_LENGTH`, `ArtifactIdentity`, `ArtifactReleaseBinding`, `County`, `CountySlug`, `DomainProvenance`, `INITIAL_COUNTIES`, `Jurisdiction`, `ReleaseIdentity`, `ReleaseKind`, and `county_by_slug`, and SHALL be asserted against that enumeration rather than against a set the implementation declares for itself.
+
+The four existing names SHALL be retained: `CountySlug` and `county_by_slug` are imported from the package root by seven county adapter modules, and removing them would break each. Serialization functions SHALL NOT be exported at the root and remain reachable through the serialization module, being operations on the vocabulary rather than part of it.
 
 #### Scenario: A consumer imports the vocabulary
 - **WHEN** another layer imports the canonical identity and provenance types
-- **THEN** they are available from the package root and the import does not depend on the module each type happens to live in
+- **THEN** they are available from the package root without the consumer importing the submodule each type lives in
 
-#### Scenario: A type is added without a decision
-- **WHEN** a new public type appears in the package without being added to the declared export set
-- **THEN** the export-surface test fails
+#### Scenario: The export set drifts from the enumeration
+- **WHEN** a public name is added to or removed from the package root
+- **THEN** the export-surface test fails against the enumerated set, including removal of any of the four pre-existing names
