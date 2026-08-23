@@ -341,9 +341,10 @@ where the mapping lives.
 
 That deferral is recorded here and **creates no task**. An earlier revision
 added a task marked `**BLOCKED**` in prose, which the implementation parser does
-not read: measured against this head, it reports nineteen tasks all with status
-`incomplete`, so the lane would have dispatched runtime mapping as ordinary work
-whose only writable path was a documentation file. Bold text is not a state. A
+not read: measured when that task existed, the parser reported every unchecked
+task with status `incomplete` and no other state, so the lane would have
+dispatched runtime mapping as ordinary work whose only writable path was a
+documentation file. Bold text is not a state. A
 decision may name a future owner; it may not manufacture an unchecked pseudo-task
 that a machine will pick up.
 
