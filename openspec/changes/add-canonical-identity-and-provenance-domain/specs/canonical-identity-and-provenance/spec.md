@@ -100,8 +100,6 @@ Supported mappings, each resting on an accepted county contract:
 | `tx-ellis` | `certified` | `certified` |
 | `tx-tarrant` | `certified` | `certified` |
 
-The Dallas `certified-with-supplemental` row is decision D7 and takes effect on merge of this change. If D7 is not accepted, that row is removed and Dallas canonicalizes only `proposed` and `certified`.
-
 Unmapped, and SHALL NOT be canonicalized without a separate decision establishing equivalence:
 
 | jurisdiction | source-native label | why it is unmapped |
@@ -277,14 +275,3 @@ The four existing names SHALL be retained: `CountySlug` and `county_by_slug` are
 #### Scenario: The export set drifts from the enumeration
 - **WHEN** a public name is added to or removed from the package root
 - **THEN** the export-surface test fails against the enumerated set, including removal of any of the four pre-existing names
-
-### Requirement: Completion and archival handoff
-The implementation lane SHALL NOT modify this change's own task file, which artifact validation holds immutable, and SHALL NOT write under `openspec`, which the implementation path policy prohibits. A separate post-implementation completion and archival pull request SHALL therefore perform, in order: reconcile and check this change's verified tasks; check bootstrap task 2.1 while leaving bootstrap tasks 2.2 and 3.4 unchecked; then archive this change and promote the capability.
-
-#### Scenario: The implementation pull request merges
-- **WHEN** every implementation and falsification task has passed and its pull request has merged
-- **THEN** this change's task checkboxes and bootstrap task 2.1 are still unchecked, because neither file is writable by the implementation lane
-
-#### Scenario: The completion pull request runs
-- **WHEN** the completion and archival pull request is prepared
-- **THEN** it checks this change's verified tasks first, then bootstrap task 2.1, leaves bootstrap tasks 2.2 and 3.4 unchecked, and only then archives the change and promotes the capability

@@ -154,8 +154,15 @@ Dallas contract classifies it as a distinct label-derived release, treats it as 
 complete replacement snapshot, and requires the dated certified-at-certification
 snapshot to be retained separately — so it is already a release of its own kind
 rather than a variant of `certified`. Merging this change accepts that reading.
-If it is not accepted, Dallas keeps the native label and canonicalizes only
-`proposed` and `certified`, and nothing else in this change changes.
+If it is not accepted, the row is struck from the capability's mapping table
+before merge and Dallas canonicalizes only `proposed` and `certified`; nothing
+else in this change changes.
+
+The capability's table states the row unconditionally, because the promoted spec
+describes the final state and by the time it is promoted D7 has necessarily been
+accepted. A promoted contract carrying "if D7 is refused" would be describing a
+decision that can no longer be refused. The conditionality is planning rationale
+and lives here.
 
 **Rejected — widening `ReleaseKind` to hold every county's vocabulary.** A kind
 per county label is a vocabulary that describes sources rather than releases, and
