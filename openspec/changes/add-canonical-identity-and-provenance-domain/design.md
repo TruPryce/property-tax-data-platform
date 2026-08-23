@@ -341,9 +341,10 @@ where the mapping lives.
 
 That deferral is recorded here and **creates no task**. An earlier revision
 added a task marked `**BLOCKED**` in prose, which the implementation parser does
-not read: measured against this head, it reports nineteen tasks all with status
-`incomplete`, so the lane would have dispatched runtime mapping as ordinary work
-whose only writable path was a documentation file. Bold text is not a state. A
+not read: measured when that task existed, the parser reported every unchecked
+task with status `incomplete` and no other state, so the lane would have
+dispatched runtime mapping as ordinary work whose only writable path was a
+documentation file. Bold text is not a state. A
 decision may name a future owner; it may not manufacture an unchecked pseudo-task
 that a machine will pick up.
 
@@ -372,6 +373,37 @@ mean a bucket reorganization changes domain identity.
 
 **Rejected — a compact form as the only serialization.** Every reader would parse
 a string to recover fields the writer already had.
+
+### D10 (proposed by this change, requires human merge): correct the over-broad Tarrant guard
+
+`DomainProvenance` carries `layout_fingerprint`, and an accepted Tarrant test
+asserts that string appears nowhere in `property_tax_domain` or
+`property_tax_application`. Both are accepted, and they cannot both hold. The
+guard is what is wrong, and five independent facts say so:
+
+- The name was introduced by the **Dallas** parser on 2026-08-02 (`ebd60f8`),
+  eleven days before the Tarrant parser landed on 2026-08-13 (`e64dd35`). It is
+  not a name the Tarrant parser introduces. (The shared `contracts.py` is
+  *newer* than Tarrant — 2026-08-14, `deeae43` — so "the shared module predates
+  Tarrant" would be false and is not the argument.)
+- Issue #43 D7 established `layout_fingerprint` as shared, adapter-neutral
+  provenance rather than county vocabulary.
+- The merged canonical capability requires it on `DomainProvenance`.
+- The accepted Tarrant task states the invariant as "the parser adds no new
+  vocabulary to them", and the test's own docstring as "no name **this parser
+  introduces**". The tuple contradicts both.
+- Denton and Ellis run the identical guard and neither lists it, though their
+  parsers use it 23 and 27 times. Tarrant is the outlier.
+
+The correction removes exactly one entry and renames the tuple from
+`parser_vocabulary` to `tarrant_specific_vocabulary`. The rename is the durable
+half: `parser_vocabulary` is ambiguous enough that the same entry could be
+re-added in good faith, while the new name states the invariant the test is
+actually enforcing. Every genuinely Tarrant-specific entry is preserved, and the
+guard keeps failing on real leakage.
+
+This authorizes one path outside the domain, for one edit, with the entries to
+preserve enumerated in the task so the correction cannot quietly widen.
 
 ## Blockers
 
