@@ -11,7 +11,7 @@
 
 ## 2. Domain and Application Core
 
-- [ ] 2.1 Implement county, release identity, artifact identity, release status, and provenance domain types
+- [x] 2.1 Implement county, release identity, artifact identity, release status, and provenance domain types
 - [ ] 2.2 Implement canonical account, owner, value, exemption, jurisdiction, land, improvement, and geometry record types
 - [ ] 2.3 Define source discovery, artifact storage, manifest, canonical repository, quality, publication, and clock ports
 - [ ] 2.4 Implement discover, acquire, parse, normalize, validate, and publish use cases with idempotent stage boundaries
