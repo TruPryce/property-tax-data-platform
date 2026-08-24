@@ -32,6 +32,8 @@ from property_tax_domain.release_kind import ReleaseKind
 
 __all__ = [
     "COMPACT_RELEASE_SEPARATOR",
+    "CanonicalValue",
+    "registry_metadata_json",
     "artifact_document",
     "binding_document",
     "jurisdiction_document",
@@ -54,6 +56,12 @@ __all__ = [
 #: alphanumeric segments joined by hyphens, so no component can contain it. A
 #: test proves that against the alphabet rather than restating this sentence.
 COMPACT_RELEASE_SEPARATOR: Final = "/"
+
+#: The values `to_json` renders. The registry-metadata document is a second
+#: rendering of a jurisdiction rather than a value of its own.
+CanonicalValue = (
+    Jurisdiction | ArtifactIdentity | ReleaseIdentity | ArtifactReleaseBinding | DomainProvenance
+)
 
 _STATE_CODE_CHARS: Final = 2
 
@@ -136,8 +144,53 @@ def provenance_document(provenance: DomainProvenance) -> dict[str, Any]:
     }
 
 
-def to_json(document: dict[str, Any]) -> str:
-    """Serialize a document with its declared key order preserved."""
+#: Which builder renders each domain value. Canonical bytes are a function of
+#: the value, so there is no dict for a caller to have ordered differently and
+#: no undeclared key for one to have added.
+_BUILDERS: Final[dict[type, Any]] = {
+    Jurisdiction: jurisdiction_document,
+    ArtifactIdentity: artifact_document,
+    ReleaseIdentity: release_document,
+    ArtifactReleaseBinding: binding_document,
+    DomainProvenance: provenance_document,
+}
+
+
+def to_json(value: CanonicalValue) -> str:
+    """Canonical bytes for one domain value.
+
+    This takes a value rather than a document on purpose. Serializing a caller's
+    dict made the output depend on that dict's insertion order, so two mappings
+    of the same declared shape carrying the same fields emitted different bytes
+    while parsing to one identity — and it let the serializer emit an undeclared
+    key that the parsers refuse, so the canonical API could produce a document
+    its own contract rejects.
+
+    Sorting the keys would fix the first half and break the contract: the
+    capability fixes *declaration* order, which is not alphabetical.
+
+    The registry-metadata document is not a distinct type — it is a jurisdiction
+    rendered a second way — so it has its own function rather than a flag.
+    """
+
+    builder = _BUILDERS.get(type(value))
+    if builder is None:
+        raise ValueError(f"to_json takes a canonical domain value, got {type(value).__name__}")
+    return _emit(builder(value))
+
+
+def registry_metadata_json(jurisdiction: Jurisdiction) -> str:
+    """Canonical bytes for the sixth shape, the auditable metadata document."""
+
+    if not isinstance(jurisdiction, Jurisdiction):
+        raise ValueError(
+            f"registry_metadata_json takes a Jurisdiction, got {type(jurisdiction).__name__}"
+        )
+    return _emit(jurisdiction_registry_document(jurisdiction))
+
+
+def _emit(document: dict[str, Any]) -> str:
+    """Bytes from a document a builder just produced, in its declared order."""
 
     return json.dumps(document, sort_keys=False, separators=(",", ":"), ensure_ascii=False)
 

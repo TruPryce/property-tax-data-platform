@@ -110,6 +110,40 @@ in the domain.
   syntax of a supplied identifier and cannot know whether a county contract
   authorized it; that refusal belongs to the county-aware boundary.
 
+## Validated state
+
+Recorded under task 6.1 of the accepted change, from the default repository gate
+rather than a direct package invocation. Checkboxes in the OpenSpec change and
+bootstrap task 2.1 are deliberately untouched; those belong to the separate
+completion and archival pull request.
+
+| gate | result |
+|---|---|
+| `pytest` (default collection) | 1,319 passed, 142 skipped |
+| `make check` | pass, 464 repository files validated |
+| `make prepr-no-ai` | pass |
+| `make docs` | 58 documents, local links validated |
+| `openspec validate --all --strict` | 14 passed, 0 failed |
+| `openspec doctor` | pass |
+| `ruff format --check .` and `ruff check .` | pass |
+| `mypy` | pass, 40 source files |
+
+Collected by the default configuration, which is the number that matters — a
+suite outside `testpaths` exists while every gate ignores it:
+
+| module | tests |
+|---|---:|
+| `tests/unit/property_tax_domain/test_identity.py` | 50 |
+| `tests/unit/property_tax_domain/test_serialization.py` | 67 |
+| `tests/unit/property_tax_domain/test_provenance.py` | 23 |
+| `tests/unit/property_tax_domain/test_public_surface.py` | 17 |
+| `tests/unit/property_tax_domain/test_binding.py` | 7 |
+| `tests/architecture/test_dependency_direction.py` | 5 |
+
+Canonical serialization takes a domain value rather than a mapping, so the bytes
+cannot depend on a caller's insertion order and an undeclared field is
+unrepresentable rather than merely rejected on the way back in.
+
 ## Related
 
 - [Engineering documentation](../README.md)

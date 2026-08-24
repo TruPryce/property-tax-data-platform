@@ -153,7 +153,85 @@ def test_equal_values_serialize_byte_identically() -> None:
     second = release()
 
     assert first == second
-    assert s.to_json(s.release_document(first)) == s.to_json(s.release_document(second))
+    assert s.to_json(first) == s.to_json(second)
+
+
+def test_canonical_bytes_are_a_function_of_the_value_not_of_a_mapping() -> None:
+    """`to_json` takes a value, so there is no insertion order to depend on.
+
+    Serializing a caller's dict made the bytes depend on that dict's ordering:
+    two mappings of the same declared shape carrying the same fields emitted
+    different bytes while parsing to one identity. Sorting the keys would have
+    fixed that and broken the contract, because the capability fixes
+    *declaration* order and that is not alphabetical.
+    """
+
+    subject = release()
+    canonical = s.release_document(subject)
+    reordered = {key: canonical[key] for key in reversed(list(canonical))}
+
+    assert s.parse_release_document(canonical) == s.parse_release_document(reordered)
+    assert list(canonical) != list(reordered)
+    for mapping in (canonical, reordered):
+        with pytest.raises(ValueError, match="canonical domain value"):
+            s.to_json(mapping)  # type: ignore[arg-type]
+
+    assert s.to_json(subject) == s.to_json(s.parse_release_document(reordered))
+
+
+def test_the_serializer_cannot_emit_an_undeclared_field() -> None:
+    """The parsers are fail-closed; the canonical API must not be fail-open.
+
+    A serializer taking a mapping could produce a document its own parser
+    refuses. Taking a value instead makes the undeclared field unrepresentable
+    rather than rejected.
+    """
+
+    hostile = s.provenance_document(provenance())
+    hostile["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="canonical domain value"):
+        s.to_json(hostile)  # type: ignore[arg-type]
+    assert "owner_name" not in s.to_json(provenance())
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("jurisdiction", COLLIN),
+        ("artifact", ARTIFACT),
+        ("release", release()),
+        (
+            "binding",
+            ArtifactReleaseBinding(artifact=ARTIFACT, release=release()),
+        ),
+        ("provenance", provenance()),
+    ],
+)
+def test_every_canonical_value_renders_and_re_renders_identically(label, value) -> None:  # noqa: ANN001
+    assert s.to_json(value) == s.to_json(value)
+
+
+def test_the_registry_document_has_its_own_serializer() -> None:
+    """It is a jurisdiction rendered a second way, not a value of its own."""
+
+    assert json.loads(s.registry_metadata_json(COLLIN)) == {
+        "jurisdiction": {"state_code": "tx", "county_slug": "collin"},
+        "county_fips": "48085",
+    }
+    assert list(json.loads(s.registry_metadata_json(COLLIN))) == list(s.JURISDICTION_REGISTRY_KEYS)
+    assert "county_fips" not in s.to_json(COLLIN)
+    with pytest.raises(ValueError, match="Jurisdiction"):
+        s.registry_metadata_json(release())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [("a str", "tx-collin"), ("an int", 2025), ("a list", []), ("None", None)],
+)
+def test_to_json_refuses_anything_that_is_not_a_canonical_value(label: str, value: object) -> None:
+    with pytest.raises(ValueError, match="canonical domain value"):
+        s.to_json(value)  # type: ignore[arg-type]
 
 
 def test_key_order_is_the_declared_order() -> None:
@@ -203,7 +281,9 @@ def test_an_absent_optional_is_null_rather_than_omitted() -> None:
 
     assert "source_row_number" in document and document["source_row_number"] is None
     assert "layout_fingerprint" in document and document["layout_fingerprint"] is None
-    assert '"source_row_number":null' in s.to_json(document)
+    assert '"source_row_number":null' in s.to_json(
+        provenance(source_row_number=None, layout_fingerprint=None)
+    )
 
 
 def test_a_provenance_document_missing_an_optional_key_is_refused() -> None:
@@ -235,7 +315,7 @@ def test_a_provenance_document_missing_an_optional_key_is_refused() -> None:
     ],
 )
 def test_every_value_round_trips_unaltered(label, value, serialize, parse) -> None:  # noqa: ANN001
-    assert parse(json.loads(s.to_json(serialize(value)))) == value
+    assert parse(json.loads(s.to_json(value))) == value
 
 
 def test_a_jurisdiction_identity_document_round_trips_its_identity() -> None:
