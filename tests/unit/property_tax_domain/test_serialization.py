@@ -1,0 +1,523 @@
+"""Attacks on the serialization contract.
+
+The compact rendering's reversibility is proved against the accepted alphabet
+rather than asserted, by discovering the alphabet from the validator itself. If
+the alphabet is later widened to admit the separator, these fail rather than the
+rendering quietly becoming ambiguous.
+"""
+
+from __future__ import annotations
+
+import json
+import string
+
+import pytest
+from property_tax_domain import (
+    ArtifactIdentity,
+    ArtifactReleaseBinding,
+    DomainProvenance,
+    Jurisdiction,
+    ReleaseIdentity,
+    ReleaseKind,
+)
+from property_tax_domain import serialization as s
+from property_tax_domain.release import IDENTIFIER_MAX_CHARS, require_identifier
+
+COLLIN = Jurisdiction(state_code="tx", county_slug="collin", county_fips="48085")
+DALLAS = Jurisdiction(state_code="tx", county_slug="dallas", county_fips="48113")
+ARTIFACT = ArtifactIdentity(sha256="a" * 64)
+
+
+def release(identifier: str = "COLLIN-2025-CERT-01", **overrides: object) -> ReleaseIdentity:
+    fields: dict[str, object] = {
+        "jurisdiction": COLLIN,
+        "tax_year": 2025,
+        "release_kind": ReleaseKind.CERTIFIED,
+        "release_identifier": identifier,
+    }
+    fields.update(overrides)
+    return ReleaseIdentity(**fields)  # type: ignore[arg-type]
+
+
+def provenance(**overrides: object) -> DomainProvenance:
+    fields: dict[str, object] = {
+        "release": release(),
+        "artifact": ARTIFACT,
+        "source_member_name": "PROP.TXT",
+        "parser_contract_version": 1,
+        "source_row_number": 1,
+        "layout_fingerprint": "b" * 64,
+    }
+    fields.update(overrides)
+    return DomainProvenance(**fields)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------
+# The alphabet, discovered rather than copied
+# --------------------------------------------------------------------------
+
+
+def accepted_alphabet() -> set[str]:
+    """Every ASCII character the identifier validator admits.
+
+    Probed in a non-leading position, because `.` and `-` are inside the
+    alphabet but may not begin an identifier — two different rules that a single
+    probe would conflate.
+    """
+
+    admitted: set[str] = set()
+    for code in range(128):
+        character = chr(code)
+        try:
+            require_identifier(f"a{character}", "probe")
+        except ValueError:
+            continue
+        admitted.add(character)
+    return admitted
+
+
+def test_the_separator_is_outside_the_accepted_alphabet() -> None:
+    """This is why the compact rendering needs no escaping.
+
+    It is a property of the alphabets, not of the renderer, so it is checked
+    against the validator rather than restated from a comment.
+    """
+
+    assert s.COMPACT_RELEASE_SEPARATOR not in accepted_alphabet()
+    assert s.COMPACT_RELEASE_SEPARATOR not in string.ascii_letters + string.digits + "._-"
+
+
+def test_the_compact_rendering_reverses_for_every_admissible_character() -> None:
+    alphabet = accepted_alphabet()
+    assert alphabet, "the probe found no admissible character; it is broken"
+
+    for character in sorted(alphabet):
+        for identifier in (
+            f"a{character}",
+            f"{character}a" if character.isalnum() else f"a{character}a",
+        ):
+            try:
+                require_identifier(identifier, "probe")
+            except ValueError:
+                continue
+            subject = release(identifier)
+            assert s.parse_compact_release(subject.rendered) == subject
+            assert s.parse_compact_release(subject.rendered).release_identifier == identifier
+
+
+def test_the_compact_rendering_reverses_at_the_length_boundaries() -> None:
+    for identifier in ("a", "a" * IDENTIFIER_MAX_CHARS, "A.b-c_d", "DCAD2025_CURRENT"):
+        subject = release(identifier)
+        assert s.parse_compact_release(subject.rendered) == subject
+
+
+def test_no_two_distinct_identities_render_alike() -> None:
+    identities = [
+        release("A-1"),
+        release("a-1"),
+        release("A-2"),
+        release("A-1", tax_year=2024),
+        release("A-1", release_kind=ReleaseKind.CURRENT),
+        release("A-1", jurisdiction=DALLAS),
+    ]
+    rendered = [identity.rendered for identity in identities]
+
+    assert len(set(rendered)) == len(identities)
+    for identity in identities:
+        assert s.parse_compact_release(identity.rendered) == identity
+
+
+@pytest.mark.parametrize(
+    ("label", "rendered"),
+    [
+        ("too few components", "tx-collin/2025/certified"),
+        ("too many components", "tx-collin/2025/certified/a/b"),
+        ("jurisdiction is not state-and-slug", "txcollin/2025/certified/A"),
+        ("year is not digits", "tx-collin/twenty/certified/A"),
+        ("kind outside the vocabulary", "tx-collin/2025/preliminary/A"),
+        ("unknown slug", "tx-harris/2025/certified/A"),
+    ],
+)
+def test_a_malformed_compact_rendering_is_refused(label: str, rendered: str) -> None:
+    with pytest.raises(ValueError):
+        s.parse_compact_release(rendered)
+
+
+# --------------------------------------------------------------------------
+# Named-field JSON
+# --------------------------------------------------------------------------
+
+
+def test_equal_values_serialize_byte_identically() -> None:
+    first = release()
+    second = release()
+
+    assert first == second
+    assert s.to_json(first) == s.to_json(second)
+
+
+def test_canonical_bytes_are_a_function_of_the_value_not_of_a_mapping() -> None:
+    """`to_json` takes a value, so there is no insertion order to depend on.
+
+    Serializing a caller's dict made the bytes depend on that dict's ordering:
+    two mappings of the same declared shape carrying the same fields emitted
+    different bytes while parsing to one identity. Sorting the keys would have
+    fixed that and broken the contract, because the capability fixes
+    *declaration* order and that is not alphabetical.
+    """
+
+    subject = release()
+    canonical = s.release_document(subject)
+    reordered = {key: canonical[key] for key in reversed(list(canonical))}
+
+    assert s.parse_release_document(canonical) == s.parse_release_document(reordered)
+    assert list(canonical) != list(reordered)
+    for mapping in (canonical, reordered):
+        with pytest.raises(ValueError, match="canonical domain value"):
+            s.to_json(mapping)  # type: ignore[arg-type]
+
+    assert s.to_json(subject) == s.to_json(s.parse_release_document(reordered))
+
+
+def test_the_serializer_cannot_emit_an_undeclared_field() -> None:
+    """The parsers are fail-closed; the canonical API must not be fail-open.
+
+    A serializer taking a mapping could produce a document its own parser
+    refuses. Taking a value instead makes the undeclared field unrepresentable
+    rather than rejected.
+    """
+
+    hostile = s.provenance_document(provenance())
+    hostile["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="canonical domain value"):
+        s.to_json(hostile)  # type: ignore[arg-type]
+    assert "owner_name" not in s.to_json(provenance())
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("jurisdiction", COLLIN),
+        ("artifact", ARTIFACT),
+        ("release", release()),
+        (
+            "binding",
+            ArtifactReleaseBinding(artifact=ARTIFACT, release=release()),
+        ),
+        ("provenance", provenance()),
+    ],
+)
+def test_every_canonical_value_renders_and_re_renders_identically(label, value) -> None:  # noqa: ANN001
+    assert s.to_json(value) == s.to_json(value)
+
+
+def test_the_registry_document_has_its_own_serializer() -> None:
+    """It is a jurisdiction rendered a second way, not a value of its own."""
+
+    assert json.loads(s.registry_metadata_json(COLLIN)) == {
+        "jurisdiction": {"state_code": "tx", "county_slug": "collin"},
+        "county_fips": "48085",
+    }
+    assert list(json.loads(s.registry_metadata_json(COLLIN))) == list(s.JURISDICTION_REGISTRY_KEYS)
+    assert "county_fips" not in s.to_json(COLLIN)
+    with pytest.raises(ValueError, match="Jurisdiction"):
+        s.registry_metadata_json(release())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [("a str", "tx-collin"), ("an int", 2025), ("a list", []), ("None", None)],
+)
+def test_to_json_refuses_anything_that_is_not_a_canonical_value(label: str, value: object) -> None:
+    with pytest.raises(ValueError, match="canonical domain value"):
+        s.to_json(value)  # type: ignore[arg-type]
+
+
+def test_key_order_is_the_declared_order() -> None:
+    assert list(s.jurisdiction_document(COLLIN)) == ["state_code", "county_slug"]
+    assert list(s.artifact_document(ARTIFACT)) == ["sha256"]
+    assert list(s.release_document(release())) == [
+        "jurisdiction",
+        "tax_year",
+        "release_kind",
+        "release_identifier",
+    ]
+    assert list(
+        s.binding_document(ArtifactReleaseBinding(artifact=ARTIFACT, release=release()))
+    ) == [
+        "artifact",
+        "release",
+    ]
+    assert list(s.provenance_document(provenance())) == [
+        "release",
+        "artifact",
+        "source_member_name",
+        "source_row_number",
+        "parser_contract_version",
+        "layout_fingerprint",
+    ]
+    assert list(s.jurisdiction_registry_document(COLLIN)) == ["jurisdiction", "county_fips"]
+
+
+def test_the_jurisdiction_identity_document_carries_identity_only() -> None:
+    document = s.jurisdiction_document(COLLIN)
+
+    assert document == {"state_code": "tx", "county_slug": "collin"}
+    assert "county_fips" not in document
+
+
+def test_identities_nest_as_objects_not_pre_rendered_strings() -> None:
+    document = s.release_document(release())
+
+    assert isinstance(document["jurisdiction"], dict)
+    assert document["jurisdiction"] == {"state_code": "tx", "county_slug": "collin"}
+
+
+def test_an_absent_optional_is_null_rather_than_omitted() -> None:
+    """Absence and an older schema must stay distinguishable."""
+
+    document = s.provenance_document(provenance(source_row_number=None, layout_fingerprint=None))
+
+    assert "source_row_number" in document and document["source_row_number"] is None
+    assert "layout_fingerprint" in document and document["layout_fingerprint"] is None
+    assert '"source_row_number":null' in s.to_json(
+        provenance(source_row_number=None, layout_fingerprint=None)
+    )
+
+
+def test_a_provenance_document_missing_an_optional_key_is_refused() -> None:
+    document = s.provenance_document(provenance())
+    del document["layout_fingerprint"]
+
+    with pytest.raises(ValueError, match="null"):
+        s.parse_provenance_document(document)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "serialize", "parse"),
+    [
+        ("artifact", ARTIFACT, s.artifact_document, s.parse_artifact_document),
+        ("release", release(), s.release_document, s.parse_release_document),
+        (
+            "binding",
+            ArtifactReleaseBinding(artifact=ARTIFACT, release=release()),
+            s.binding_document,
+            s.parse_binding_document,
+        ),
+        ("provenance", provenance(), s.provenance_document, s.parse_provenance_document),
+        (
+            "provenance with absences",
+            provenance(source_row_number=None, layout_fingerprint=None),
+            s.provenance_document,
+            s.parse_provenance_document,
+        ),
+    ],
+)
+def test_every_value_round_trips_unaltered(label, value, serialize, parse) -> None:  # noqa: ANN001
+    assert parse(json.loads(s.to_json(value))) == value
+
+
+def test_a_jurisdiction_identity_document_round_trips_its_identity() -> None:
+    """Identity survives; metadata is not being round-tripped, because it is not
+    in there."""
+
+    parsed = s.parse_jurisdiction_document(s.jurisdiction_document(COLLIN))
+
+    assert parsed == COLLIN
+    assert (parsed.state_code, parsed.county_slug) == ("tx", "collin")
+    assert parsed.county_fips == "48085", "resolved from the registry, not from the document"
+
+
+def test_an_identity_document_naming_an_unregistered_slug_fails_to_parse() -> None:
+    with pytest.raises(ValueError, match="registry"):
+        s.parse_jurisdiction_document({"state_code": "tx", "county_slug": "harris"})
+
+
+def test_the_registry_document_is_where_a_disagreement_is_detectable() -> None:
+    document = s.jurisdiction_registry_document(COLLIN)
+    document["county_fips"] = "48113"
+
+    with pytest.raises(ValueError, match="disagrees"):
+        s.parse_jurisdiction_registry_document(document)
+
+
+def test_the_registry_document_parser_returns_the_recorded_value() -> None:
+    jurisdiction, recorded = s.parse_jurisdiction_registry_document(
+        s.jurisdiction_registry_document(COLLIN)
+    )
+
+    assert jurisdiction == COLLIN
+    assert recorded == "48085"
+
+
+def test_a_release_document_with_a_kind_outside_the_vocabulary_is_refused() -> None:
+    document = s.release_document(release())
+    document["release_kind"] = "preliminary"
+
+    with pytest.raises(ValueError, match="vocabulary"):
+        s.parse_release_document(document)
+
+
+def test_a_release_document_with_a_bool_tax_year_is_refused() -> None:
+    document = s.release_document(release())
+    document["tax_year"] = True
+
+    with pytest.raises(ValueError):
+        s.parse_release_document(document)
+
+
+# --------------------------------------------------------------------------
+# The shapes are complete, not merely sufficient
+# --------------------------------------------------------------------------
+
+
+def documents_and_parsers() -> list[tuple[str, dict, object]]:
+    binding = ArtifactReleaseBinding(artifact=ARTIFACT, release=release())
+    return [
+        ("jurisdiction", s.jurisdiction_document(COLLIN), s.parse_jurisdiction_document),
+        (
+            "registry",
+            s.jurisdiction_registry_document(COLLIN),
+            s.parse_jurisdiction_registry_document,
+        ),
+        ("artifact", s.artifact_document(ARTIFACT), s.parse_artifact_document),
+        ("release", s.release_document(release()), s.parse_release_document),
+        ("binding", s.binding_document(binding), s.parse_binding_document),
+        ("provenance", s.provenance_document(provenance()), s.parse_provenance_document),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "document", "parse"), documents_and_parsers(), ids=lambda value: str(value)[:20]
+)
+def test_an_undeclared_root_field_is_refused(label, document, parse) -> None:  # noqa: ANN001
+    """A complete shape means these keys and no others.
+
+    Accepting extras would let two different documents parse to one value, and
+    would let a provenance document carry the payload that shape exists to
+    exclude.
+    """
+
+    hostile = dict(document)
+    hostile["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="undeclared"):
+        parse(hostile)
+
+
+@pytest.mark.parametrize(
+    ("label", "path"),
+    [
+        ("release.jurisdiction", ("jurisdiction",)),
+        ("binding.artifact", ("artifact",)),
+        ("binding.release", ("release",)),
+        ("provenance.release", ("release",)),
+        ("provenance.release.jurisdiction", ("release", "jurisdiction")),
+        ("provenance.artifact", ("artifact",)),
+        ("registry.jurisdiction", ("jurisdiction",)),
+    ],
+)
+def test_an_undeclared_nested_field_is_refused(label: str, path: tuple[str, ...]) -> None:
+    """Nesting is not a way in.
+
+    A nested object refusing nothing would make the root check cosmetic.
+    """
+
+    root, parse = {
+        "release.jurisdiction": (s.release_document(release()), s.parse_release_document),
+        "binding.artifact": (
+            s.binding_document(ArtifactReleaseBinding(artifact=ARTIFACT, release=release())),
+            s.parse_binding_document,
+        ),
+        "binding.release": (
+            s.binding_document(ArtifactReleaseBinding(artifact=ARTIFACT, release=release())),
+            s.parse_binding_document,
+        ),
+        "provenance.release": (s.provenance_document(provenance()), s.parse_provenance_document),
+        "provenance.release.jurisdiction": (
+            s.provenance_document(provenance()),
+            s.parse_provenance_document,
+        ),
+        "provenance.artifact": (s.provenance_document(provenance()), s.parse_provenance_document),
+        "registry.jurisdiction": (
+            s.jurisdiction_registry_document(COLLIN),
+            s.parse_jurisdiction_registry_document,
+        ),
+    }[label]
+
+    hostile = json.loads(json.dumps(root))
+    target = hostile
+    for step in path:
+        target = target[step]
+    target["owner_name"] = "SECRET PERSON"
+
+    with pytest.raises(ValueError, match="undeclared"):
+        parse(hostile)
+
+
+@pytest.mark.parametrize(
+    ("label", "document", "parse"), documents_and_parsers(), ids=lambda value: str(value)[:20]
+)
+def test_a_missing_declared_field_is_refused(label, document, parse) -> None:  # noqa: ANN001
+    for key in list(document):
+        incomplete = {name: value for name, value in document.items() if name != key}
+        with pytest.raises(ValueError, match="missing"):
+            parse(incomplete)
+
+
+def test_the_declared_key_sets_match_what_the_builders_emit() -> None:
+    """The parser's expectation and the builder's output are one fact.
+
+    Written in two places, they would drift; asserted equal, they cannot.
+    """
+
+    binding = ArtifactReleaseBinding(artifact=ARTIFACT, release=release())
+
+    assert tuple(s.jurisdiction_document(COLLIN)) == s.JURISDICTION_KEYS
+    assert tuple(s.jurisdiction_registry_document(COLLIN)) == s.JURISDICTION_REGISTRY_KEYS
+    assert tuple(s.artifact_document(ARTIFACT)) == s.ARTIFACT_KEYS
+    assert tuple(s.release_document(release())) == s.RELEASE_KEYS
+    assert tuple(s.binding_document(binding)) == s.BINDING_KEYS
+    assert tuple(s.provenance_document(provenance())) == s.PROVENANCE_KEYS
+
+
+# --------------------------------------------------------------------------
+# The compact rendering alters nothing
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "rendered"),
+    [
+        ("leading zero", "tx-collin/02025/certified/A"),
+        ("six digits", "tx-collin/002025/certified/A"),
+        ("three digits", "tx-collin/202/certified/A"),
+        ("Arabic-Indic digits", "tx-collin/\u0662\u0660\u0662\u0665/certified/A"),
+        ("fullwidth digits", "tx-collin/\uff12\uff10\uff12\uff15/certified/A"),
+        ("signed", "tx-collin/+2025/certified/A"),
+        ("whitespace padded", "tx-collin/ 2025/certified/A"),
+    ],
+)
+def test_a_non_canonical_tax_year_component_is_refused_not_rewritten(
+    label: str, rendered: str
+) -> None:
+    """`str.isdigit()` admits these and `int()` then rewrites them.
+
+    Each one previously parsed cleanly into a *different* identity whose own
+    rendering no longer matched the input, which is the alteration the accepted
+    scenario forbids.
+    """
+
+    with pytest.raises(ValueError):
+        s.parse_compact_release(rendered)
+
+
+def test_every_accepted_rendering_reproduces_itself_exactly() -> None:
+    """The property the individual cases are instances of."""
+
+    for identifier in ("A", "a", "A.b-c_d", "z" * 128, "DCAD2025_CURRENT"):
+        for year in (1900, 2025, 2200):
+            for kind in ReleaseKind:
+                subject = release(identifier, tax_year=year, release_kind=kind)
+                assert s.parse_compact_release(subject.rendered).rendered == subject.rendered
