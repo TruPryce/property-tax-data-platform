@@ -4,8 +4,9 @@ The vocabulary in `property_tax_domain` for three facts the platform was already
 representing five different ways: which jurisdiction, which logical release, and
 which bytes.
 
-Normative behaviour is the accepted capability, not this page. Where the two
-disagree, the capability governs and this page is wrong.
+Normative behaviour is the [promoted capability](../../openspec/specs/canonical-identity-and-provenance/spec.md),
+not this page. Where the two disagree, the capability governs and this page is
+wrong.
 
 ## The values
 
@@ -148,4 +149,4 @@ unrepresentable rather than merely rejected on the way back in.
 
 - [Engineering documentation](../README.md)
 - [Property tax domain](../../libs/property-tax-domain/README.md)
-- [Canonical identity capability](../../openspec/changes/add-canonical-identity-and-provenance-domain/specs/canonical-identity-and-provenance/spec.md)
+- [Canonical identity and provenance capability](../../openspec/specs/canonical-identity-and-provenance/spec.md)

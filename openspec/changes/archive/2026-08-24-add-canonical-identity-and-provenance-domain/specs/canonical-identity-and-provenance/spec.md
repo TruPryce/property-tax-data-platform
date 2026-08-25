@@ -111,7 +111,7 @@ This table deliberately has no canonical-kind column. Naming the kind each label
 
 No jurisdiction absent from the supported table SHALL have a native label canonicalized, and `tx-rockwall` publishes no appraisal roll and appears in neither table.
 
-**Runtime mapping behavior is deferred** to the county-aware use-case boundary in bootstrap task 2.4 and requires its own scope decision, because the only shared adapter module available today is county-neutral by its accepted contract and its suite asserts that no county name appears in it. The scenarios below therefore state the contract that boundary must satisfy; nothing in this change implements them, and no task in this change may be checked as satisfying them.
+Runtime county-native label mapping belongs at the county-aware use-case boundary. The shared adapter source-contract module SHALL remain county-neutral and SHALL NOT host county-specific mapping behavior. The scenarios below define the contract the county-aware mapping boundary must satisfy.
 
 #### Scenario: A contract-supported label is canonicalized
 - **WHEN** an adapter maps a county-native label for which an accepted contract establishes equivalence
