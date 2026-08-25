@@ -58,11 +58,15 @@ The system SHALL support the official Ellis Appraisal District full PACS fixed-w
 - **THEN** it streams canonical account and child records with Ellis county FIPS, tax year, certified status, and field-level provenance
 
 ### Requirement: Canonical account identity and grain
-The system SHALL identify an appraisal account by its canonical `Jurisdiction` and a county-contract-approved source account identifier and SHALL represent each account snapshot at the grain of logical release, tax year, and source as-of value. The system SHALL distinguish account identity from physical source-row and owner-association grain, and MUST NOT assume that duplicate physical rows imply duplicate business accounts or that a documented APN, property ID, or account identifier is sufficient without measured county-specific evidence. Owner-scoped value and exemption allocations MUST remain at owner-association grain until an approved account roll-up exists. County FIPS remains required validated registry metadata on the jurisdiction and MUST NOT serve as a second, independent county identity.
+The system SHALL identify an appraisal account by its canonical `Jurisdiction` and a county-contract-approved source account identifier and SHALL represent each account snapshot at the grain of that account identity and its logical release. The source as-of value SHALL be recorded as observation metadata rather than as a grain component: the logical release already fixes both the release and its tax year, and a source as-of value is a property of the release rather than of one account within it, so including it would discriminate nothing while storing a second copy of a release-level fact. The system SHALL distinguish account identity from physical source-row and owner-association grain, and MUST NOT assume that duplicate physical rows imply duplicate business accounts or that a documented APN, property ID, or account identifier is sufficient without measured county-specific evidence. Owner-scoped value and exemption allocations MUST remain at owner-association grain until an approved account roll-up exists. County FIPS remains required validated registry metadata on the jurisdiction and MUST NOT serve as a second, independent county identity.
 
 #### Scenario: Receive equal account identifiers from two counties
 - **WHEN** two county adapters emit the same source account identifier
 - **THEN** the system stores distinct canonical account identities because their canonical jurisdictions differ
+
+#### Scenario: Two snapshots differ only by recorded source as-of value
+- **WHEN** two account snapshots share an account identity and a logical release and differ only in the recorded source as-of value
+- **THEN** they are the same snapshot, because the release already fixes which observation this is and the as-of value is metadata about that release
 
 #### Scenario: Documented source key is duplicated
 - **WHEN** source profiling finds duplicate rows for a documented property or account key

@@ -29,12 +29,22 @@ restated — `ReleaseIdentity` carries them, and a second copy of a fact is two
 things that must agree.
 
 `source_as_of` is recorded **observation metadata on the snapshot, not identity**.
-The accepted normalization contract states snapshot grain as "logical release, tax
-year, and source as-of value"; release and tax year are both inside
-`ReleaseIdentity`, and an as-of value is a property of the release rather than of
-one account within it, so including it in the snapshot key would discriminate
-nothing while duplicating something. If evidence later shows one release carrying
-several as-of values, that is a change to this decision and not a gap in it.
+Release and tax year are both inside `ReleaseIdentity`, and an as-of value is a
+property of the release rather than of one account within it, so including it in
+the snapshot key would discriminate nothing while storing a second copy of a
+release-level fact.
+
+The accepted normalization contract stated snapshot grain as "logical release,
+tax year, and source as-of value", so this decision **amends it directly** rather
+than contradicting it silently: the active bootstrap delta now states the grain
+as the account identity and its logical release, records the as-of value as
+observation metadata, gives this reason, and carries a scenario fixing the
+relationship between two snapshots that differ only by it. A plan that changed
+the rule while leaving the accepted contract asserting the old one would be the
+two-representations defect in specification form.
+
+If evidence later shows one release carrying several as-of values, that is a
+change to this decision and not a gap in it.
 
 The hard case is a county whose account key is not approved. Collin's accepted
 contract is explicit: the system "MUST NOT approve `prop_id` as account identity
@@ -42,11 +52,21 @@ until duplicate groups are shown to contain consistent account-level facts."
 Denton and Ellis have approved `prop_id`; Dallas has `ACCOUNT_NUM`; Tarrant has
 `Account_Num`; Collin has nothing yet.
 
-So `AccountIdentity` is constructible only from an identifier a county contract
-approved, and a county without one produces **no canonical account and no
-snapshot**. Its rows stay at source grain with provenance, which is what its own
-contract requires. That is the conservative behaviour, encoded rather than
-described: there is no partial or provisional account identity to reach for.
+**Where that rule is enforced is not the domain, and an earlier revision of this
+design put it there.** A generic constructor receives a jurisdiction and a
+string. Collin's unapproved `prop_id` of `"123"`, a Denton owner sequence of
+`"123"`, and Denton's approved `prop_id` of `"123"` arrive identically, and no
+amount of validation distinguishes them without importing a county contract the
+domain must not import. A rule the constructor cannot enforce is not a rule; it
+is a sentence that will be believed.
+
+This is the boundary already settled for Tarrant release discrimination, and the
+same answer applies. The domain validates the identifier's lexical contract. The
+county-aware mapping boundary, which knows the contract, decides whether a county
+has an approved key and refuses to construct an identity where it does not — so a
+county without one produces no canonical account and no snapshot, and its rows
+stay at source grain with lineage. There is still no provisional or partial
+identity to reach for; what changed is which layer refuses.
 
 **Rejected — a nullable or provisional account identity for unresolved counties.**
 It makes "we do not know this account's key" and "this account's key is X"
@@ -55,10 +75,34 @@ inhabit one type, and every consumer then has to remember which it holds.
 **Rejected — the physical source row as identity.** `(prop_id, owner_sequence)` is
 Denton's *owner-row* grain, and a row number is not a business identity. Making
 one the account key is precisely the mistake the normalization contract's
-duplicate-group scenarios exist to prevent.
+duplicate-group scenarios exist to prevent. The mapping boundary enforces this,
+for the reason above: the domain cannot see which field a string came from.
 
 **Rejected — restating tax year on the snapshot.** It reads as convenient and is
 a second copy of what `ReleaseIdentity` already fixes.
+
+### D13 (proposed by this change, requires human merge): provenance is the only release authority, and a child must agree with its parent
+
+A record carrying lineage carries no `ReleaseIdentity` beside it. `DomainProvenance`
+already composes one, and an earlier revision of this design gave `AccountSnapshot`
+both — in a change whose stated purpose is removing facts stored twice. A snapshot
+whose direct release disagreed with its provenance release would have been
+constructible, and nothing would have noticed.
+
+The provenance is the authority. A record needing its release derives it from
+there.
+
+Where a record carries both a parent and its own provenance, construction requires
+that the two provenance releases are equal. A child observed in a different release
+than the snapshot it hangs from is not a child of that snapshot, and admitting one
+would let a Silver load assemble an account from rows that never appeared together.
+
+**Rejected — keeping both and documenting that they must agree.** Documentation is
+the enforcement mechanism this whole model exists to replace.
+
+**Rejected — deriving a child's provenance from its parent.** A child reached
+without its parent would then have no lineage, and children are exactly what a
+query selects.
 
 ### D2 (proposed by this change, requires human merge): there is no Owner, only an owner observation and an association
 
@@ -312,7 +356,15 @@ snapshot**, **child observation**, **association/allocation**, or **enrichment**
 | `LandObservation` | child observation |
 | `ImprovementObservation` | child observation |
 | `GeometryObservation` | enrichment |
-| `SitusAddress`, `MailingAddress`, `LegalDescription` | composed value objects |
+| `OwnerValueAllocation` | association/allocation |
+
+`SitusAddress`, `MailingAddress`, and `LegalDescription` are **not records** and
+are deliberately outside this classification. They have no grain, carry no
+provenance, and exist only composed onto something that does. An earlier revision
+listed them in the table as "composed value objects", which is not one of the five
+members, so the classification contract could not be satisfied as written. The
+exclusion is now explicit in the capability, the mapping, and the test that
+asserts it.
 
 The classification is exposed in the capability and asserted by a test rather
 than left in a comment, because its purpose is to stop a Silver primary key from
