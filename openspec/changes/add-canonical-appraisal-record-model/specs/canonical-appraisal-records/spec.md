@@ -8,20 +8,24 @@ The system SHALL apply these rules wherever the requirements below name the corr
 | **identifier** | `str` of 1 through 128 characters drawn from `[A-Za-z0-9._-]`, not beginning with `.` or `-`, matching the alphabet already accepted across the repository |
 | **label** | `str` of 1 through 256 characters, containing no control character and at least one non-whitespace character, preserved verbatim including case |
 | **address component** | `str` of 1 through 128 characters, containing no control character and at least one non-whitespace character |
-| **amount** | `Decimal` that is finite; `float`, `bool`, `NaN`, and infinity SHALL be rejected. No sign constraint is imposed, because no accepted contract establishes one and some rolls carry negative adjustments |
+| **amount** | `Decimal` that is finite; `float`, `bool`, `NaN`, and infinity SHALL be rejected. No sign constraint is imposed, because no accepted contract establishes one and some rolls carry negative adjustments. `Decimal(0)` is a valid amount: counties publish zero values, and a constructor receiving a decimal cannot know whether a caller meant zero or meant absent |
 | **percentage** | `Decimal` that is finite and from 0 through 100 inclusive; `float` and `bool` SHALL be rejected |
 | **instant** | timezone-aware `datetime`; a naive value SHALL be rejected |
 | **year** | `int` from 1600 through 2200 inclusive; `bool` SHALL be rejected |
 
-A value outside its kind SHALL be rejected at construction rather than truncated, padded, case-folded, stripped, or otherwise coerced. Absence SHALL be `None` and SHALL NOT be a placeholder such as an empty string, a zero amount, or a zero year.
+A value outside its kind SHALL be rejected at construction rather than truncated, padded, case-folded, stripped, or otherwise coerced. Absence SHALL be `None`. An empty string and a zero **year** SHALL be rejected because neither is a value any source publishes, but a zero **amount** SHALL be accepted, because zero is a figure counties do publish and asking a constructor to distinguish an intended zero from an intended absence is asking it to read intent it cannot see.
 
 #### Scenario: A bounded value exceeds its rule
 - **WHEN** a value longer than its bound, outside its alphabet, carrying a control character, or of the wrong type is supplied
 - **THEN** construction fails and the value is not altered to fit
 
 #### Scenario: Absence is offered as a placeholder
-- **WHEN** an empty string, a zero amount, or a zero year is supplied for an absent fact
+- **WHEN** an empty string or a zero year is supplied for an absent fact
 - **THEN** construction fails, because absence is `None`
+
+#### Scenario: A county publishes a zero value
+- **WHEN** an amount of zero is recorded
+- **THEN** it is accepted as the figure the county published and is not treated as an absent value
 
 ### Requirement: Canonical account identity
 The system SHALL identify a canonical appraisal account with an `AccountIdentity` of exactly two components: the canonical `Jurisdiction`, and a `source_account_id` meeting the **identifier** rule. Two account identities SHALL compare equal when and only when both components are equal, so equal source account identifiers from different jurisdictions SHALL NOT be equal accounts. County FIPS SHALL NOT form a second, independent county identity, and no database identifier, object-store location, source filename, or orchestration identifier SHALL participate.
@@ -58,7 +62,11 @@ Where a record carries both a parent and its own provenance, construction SHALL 
 ### Requirement: Account snapshot grain
 The system SHALL represent one account as one logical release observed it, as an `AccountSnapshot`. Its grain SHALL be exactly its `AccountIdentity` and the release its provenance names. The same account observed in two releases SHALL yield one account identity and two distinct snapshots, and neither SHALL overwrite the other.
 
-A `source_as_of` **instant** SHALL be recorded as optional observation metadata excluded from grain, because a source as-of value is a property of the release rather than of one account within it: including it would discriminate nothing while storing a second copy of a release-level fact.
+The snapshot's account identity jurisdiction SHALL equal the jurisdiction of the release its provenance names, and construction SHALL fail otherwise. Without that invariant an account identity from one county is constructible under another county's release provenance, and every child then agrees with that invalid parent and satisfies the release-agreement rule — an internally consistent account tree that is wrong at its root.
+
+Snapshot **equality** SHALL be structural over every field except `source_as_of`, and the **grain** SHALL be published explicitly as the account identity and the release. Equal grain SHALL NOT imply equal snapshot: two snapshots of one account in one release observed in two different artifacts share a grain and carry different lineage, which is the divergence case and SHALL remain expressible rather than collapsed. Consumers keying by grain SHALL use the published grain rather than object equality.
+
+A `source_as_of` **instant** SHALL be recorded as optional observation metadata excluded from equality, hashing, and grain, because a source as-of value is a property of the release rather than of one account within it: including it would discriminate nothing while storing a second copy of a release-level fact.
 
 A snapshot SHALL compose an optional `SitusAddress` and an optional `LegalDescription`, which have no independent grain.
 
@@ -69,6 +77,14 @@ A snapshot SHALL compose an optional `SitusAddress` and an optional `LegalDescri
 #### Scenario: Two snapshots differ only by source as-of
 - **WHEN** two snapshots share an account identity and a release and differ only in recorded source as-of value
 - **THEN** they are equal, because the as-of value is observation metadata and the release already fixes which observation this is
+
+#### Scenario: Two snapshots share a grain but not an artifact
+- **WHEN** one account in one release is observed in two different artifacts
+- **THEN** the two snapshots share a published grain, are not equal, and each retains its own lineage
+
+#### Scenario: An identity is paired with another county's release
+- **WHEN** an account identity from one jurisdiction is supplied with provenance naming a release of another
+- **THEN** construction fails at the snapshot rather than being accepted and agreed with by its children
 
 ### Requirement: Owner observations carry no independent identity
 The system SHALL represent an owner as an `OwnerObservation` carrying an `owner_name` meeting the **label** rule, an optional composed `MailingAddress`, its parent `AccountSnapshot`, and `DomainProvenance`. It SHALL NOT derive an independently identifiable person or entity from an owner name, a mailing address, or any combination of them, and SHALL NOT perform cross-release or cross-county person or entity resolution.
@@ -176,13 +192,21 @@ No universal land or improvement natural key SHALL be invented. A sequence numbe
 - **THEN** construction fails rather than assuming either
 
 ### Requirement: Geometry is enrichment carried without a geospatial dependency
-The system SHALL represent geometry as a `GeometryObservation` enrichment carrying its parent `AccountSnapshot`, a `GeometryEncoding` of exactly `wkb` or `wkt`, a payload of `bytes` for `wkb` or `str` for `wkt` that is non-empty and at most 8 MiB, a required `crs` of 1 through 64 characters containing no control character and stated as the source stated it, and `DomainProvenance`.
+The system SHALL represent geometry as a `GeometryObservation` enrichment carrying its parent `AccountSnapshot`, a `GeometryEncoding` of exactly `wkb` or `wkt`, a payload of `bytes` for `wkb` or `str` for `wkt` that is non-empty and at most 8 MiB measured as the length of the `bytes` or of the `str` encoded as UTF-8, a required `crs` of 1 through 64 characters containing no control character and at least one non-whitespace character and stated as the source stated it, and `DomainProvenance`.
 
 The domain SHALL NOT parse, validate, reproject, or otherwise interpret geometry, and SHALL NOT import a geospatial library, a spatial database extension, or an object-store client. A coordinate reference SHALL be required, because geometry whose coordinate system is unknown cannot be placed. The presence of geometry for an account SHALL NOT be treated as evidence that a complete appraisal record exists for it.
 
 #### Scenario: Geometry arrives without a coordinate reference
 - **WHEN** a geometry payload is recorded with no coordinate reference identifier
 - **THEN** construction fails rather than assuming a default
+
+#### Scenario: A coordinate reference is blank
+- **WHEN** a coordinate reference consisting only of whitespace is supplied
+- **THEN** construction fails, because a required identifier that names nothing is not one
+
+#### Scenario: A payload sits at and past its bound
+- **WHEN** a payload measures exactly the maximum, and when it measures one unit more, with the text case measured as UTF-8
+- **THEN** the first is accepted and the second is refused
 
 #### Scenario: A payload disagrees with its encoding
 - **WHEN** a `wkb` encoding carries a `str` payload, or `wkt` carries `bytes`

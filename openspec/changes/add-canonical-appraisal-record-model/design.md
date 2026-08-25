@@ -3,7 +3,7 @@
 ## Context
 
 Issue #106 lists twelve decisions that must be settled before implementation.
-All are recorded here as D1 through D12, each with the evidence supporting it and
+All are recorded here as D1 through D13, each with the evidence supporting it and
 the alternatives rejected.
 
 **None is accepted yet.** The repository's approval event is the human merge of
@@ -22,11 +22,29 @@ from task 2.1 and a county-contract-approved `source_account_id`. Nothing else.
 Two counties emitting one source identifier produce two accounts, because the
 jurisdiction is inside the identity.
 
-`AccountSnapshot` is a **release-scoped snapshot**: an `AccountIdentity`, a
-`ReleaseIdentity`, and the lineage that produced it. Its identity is exactly that
-pair. Tax year, release kind, and the source-supplied release identifier are not
-restated — `ReleaseIdentity` carries them, and a second copy of a fact is two
-things that must agree.
+`AccountSnapshot` is a **release-scoped snapshot**: an `AccountIdentity` and the
+`DomainProvenance` that produced it. Its **grain** is the identity and the release
+that provenance names.
+
+It carries no `ReleaseIdentity` of its own. An earlier revision of this decision
+gave it one beside the provenance, which D13 then prohibited — leaving this
+document specifying a shape its own later decision forbade. Tax year, release
+kind, and the source-supplied release identifier are reached through the
+provenance's release, and a second copy of a fact is two things that must agree.
+
+Grain and equality are different questions, and stating only one of them was a
+gap. Equality is structural over every field except `source_as_of`, which is
+observation metadata. Grain is published explicitly as `(identity, release)`.
+Equal grain therefore does **not** imply equal snapshot: two snapshots of one
+account in one release observed in two different artifacts have one grain and two
+provenances, which is precisely the Bronze divergence case and is a fact worth
+being able to state rather than a collision to hide.
+
+A snapshot's identity jurisdiction and its provenance release jurisdiction SHALL
+be equal at construction. Without that root invariant a Dallas account identity is
+constructible under Collin release provenance, and every child then agrees with
+that invalid parent and passes D13 — a whole account tree, internally consistent
+and wrong at its root.
 
 `source_as_of` is recorded **observation metadata on the snapshot, not identity**.
 Release and tax year are both inside `ReleaseIdentity`, and an as-of value is a
@@ -78,8 +96,13 @@ one the account key is precisely the mistake the normalization contract's
 duplicate-group scenarios exist to prevent. The mapping boundary enforces this,
 for the reason above: the domain cannot see which field a string came from.
 
-**Rejected — restating tax year on the snapshot.** It reads as convenient and is
-a second copy of what `ReleaseIdentity` already fixes.
+**Rejected — restating tax year, or any `ReleaseIdentity`, on the snapshot.** It
+reads as convenient and is a second copy of what the provenance already fixes.
+
+**Rejected — equality defined as grain alone.** It would make two snapshots from
+different artifacts of one release compare equal while carrying different
+lineage, so which provenance the value "has" would depend on which copy a caller
+held. Divergence is better represented than collapsed.
 
 ### D13 (proposed by this change, requires human merge): provenance is the only release authority, and a child must agree with its parent
 
@@ -390,6 +413,37 @@ index, or DDL is chosen here.
 **Rejected — choosing surrogate keys or table shapes now.** That is task 3.4's
 work, and doing it here would reintroduce the coupling this task exists to
 prevent.
+
+### D14 (proposed by this change, requires human merge): this change delivers the domain half, and the mapping-boundary scenarios have a named owner
+
+The capability requires the county-aware mapping boundary to refuse constructing
+an account identity for a county whose contract has not approved a key, and
+carries scenarios describing that refusal. Those scenarios are durable capability
+behaviour and belong there.
+
+They are not implementable here. Every authorized path in this change is domain
+code, documentation, or domain and architecture tests, and issue #106 excludes
+ports and use cases. A change that archived claiming full implementation while
+one of its normative scenarios had no implementation path would be asserting
+something untrue about itself.
+
+So the split is stated: this change delivers the domain half — the lexical
+contract, the shapes, and the invariants a constructor can enforce. The
+mapping-boundary scenarios are satisfied by the county-aware use-case work in
+bootstrap task 2.4, which owns the layer that may read a county contract. The
+completion and archival pull request reconciles only what the tasks here deliver
+and does not record those scenarios as satisfied.
+
+No task is created for the deferred half, for the reason established previously:
+the implementation parser has no blocked state and would dispatch one as ordinary
+work.
+
+**Rejected — removing the scenarios from the capability.** They describe durable
+behaviour the platform requires, and deleting them because this change cannot
+implement them would lose the requirement rather than assign it.
+
+**Rejected — authorizing a use-case path here.** It exceeds the scope issue #106
+sets, and a boundary invented alongside a vocabulary tends to be shaped by it.
 
 ## Deliberately unresolved
 
