@@ -1,0 +1,22 @@
+[Unit]
+Description=pgBackRest weekly full backup of the property-tax PostgreSQL cluster
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+# Requires Docker but deliberately not Airflow: this protects Airflow's
+# metadata database, so it must not depend on Airflow being healthy.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=mike
+Group=docker
+WorkingDirectory=/home/mike/property-tax-data-platform
+ExecStart=/home/mike/property-tax-data-platform/infra/scripts/pgbackrest-backup.sh full
+# A full backup of a growing cluster can take a long time; failing it on a
+# timeout would leave the repository without the base every restore needs.
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

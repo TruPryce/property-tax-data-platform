@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly pgBackRest full backup
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00
+# Persistent so a full backup missed while the host was down runs at boot
+# rather than silently waiting a week, which would leave the differentials
+# with no base inside the retention window.
+Persistent=true
+RandomizedDelaySec=15m
+Unit=pgbackrest-full.service
+
+[Install]
+WantedBy=timers.target

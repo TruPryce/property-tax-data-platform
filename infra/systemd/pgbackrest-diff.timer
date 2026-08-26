@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily pgBackRest differential backup
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+
+[Timer]
+# Offset from the weekly full's 02:00 so Sunday does not start both at once.
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=pgbackrest-diff.service
+
+[Install]
+WantedBy=timers.target

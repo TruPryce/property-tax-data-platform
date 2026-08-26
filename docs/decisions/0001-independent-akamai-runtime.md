@@ -4,6 +4,8 @@
 
 Accepted on 2026-07-16. Implementation validation remains open in the bootstrap OpenSpec change.
 
+The attached 250 GB volume in the decision below is amended by [ADR-0010](0010-replaceable-local-storage-and-s3-backup-repository.md): local storage is replaceable capacity and attached Block Storage is optional expansion. The original text is retained as the record of what was decided in July.
+
 ## Context
 
 The platform must evolve independently from TruPryce and other consumers. Source acquisition and county parsing are batch-heavy workloads with different release, scaling, and failure behavior from a consumer application API.

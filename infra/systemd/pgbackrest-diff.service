@@ -1,0 +1,21 @@
+[Unit]
+Description=pgBackRest daily differential backup of the property-tax PostgreSQL cluster
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+After=docker.service
+Requires=docker.service
+# Never runs alongside the weekly full: pgBackRest takes its own lock, but
+# serialising here keeps the two off the same CPU and network budget.
+Conflicts=pgbackrest-full.service
+
+[Service]
+Type=oneshot
+User=mike
+Group=docker
+WorkingDirectory=/home/mike/property-tax-data-platform
+ExecStart=/home/mike/property-tax-data-platform/infra/scripts/pgbackrest-backup.sh diff
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

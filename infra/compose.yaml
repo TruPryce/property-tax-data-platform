@@ -40,6 +40,22 @@ services:
       args:
         POSTGRES_VERSION: ${POSTGRES_VERSION:-16.11}
     image: property-tax-postgres:${POSTGRES_VERSION:-16.11}
+    # archive_mode is not reloadable, so it is set here rather than by ALTER
+    # SYSTEM: turning it on always costs one restart and the restart should be
+    # visible in the topology rather than hidden in a running cluster's state.
+    # archive_timeout bounds the recovery point in wall-clock time -- without it
+    # an idle database holds a partially filled segment indefinitely and the
+    # true RPO drifts arbitrarily far behind the last commit.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=platform archive-push %p
+      - -c
+      - archive_timeout=300
     environment:
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD is required}
@@ -48,10 +64,28 @@ services:
       PROPERTY_TAX_MIGRATOR_PASSWORD: ${PROPERTY_TAX_MIGRATOR_PASSWORD:?PROPERTY_TAX_MIGRATOR_PASSWORD is required}
       PROPERTY_TAX_INGESTION_PASSWORD: ${PROPERTY_TAX_INGESTION_PASSWORD:?PROPERTY_TAX_INGESTION_PASSWORD is required}
       PROPERTY_TAX_API_PASSWORD: ${PROPERTY_TAX_API_PASSWORD:?PROPERTY_TAX_API_PASSWORD is required}
+      # The only secret pgBackRest needs. Resolved from Bitwarden by the wrapper
+      # and read by pgBackRest as the repo1-cipher-pass option, so the committed
+      # pgbackrest.conf holds no passphrase. Losing this value makes every
+      # existing backup unrecoverable; it is escrowed under ADR-0003.
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS is required}
+      # Non-secret identity configuration, kept out of pgbackrest.conf so the
+      # same committed file works on every host and a provider migration
+      # changes environment rather than configuration.
+      PGBACKREST_AWS_CERTIFICATE: ${PGBACKREST_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}
+      PGBACKREST_AWS_PRIVATE_KEY: ${PGBACKREST_AWS_PRIVATE_KEY:-/etc/trupryce/aws/trupryce-data-platform-vps.key}
+      PGBACKREST_AWS_TRUST_ANCHOR_ARN: ${PGBACKREST_AWS_TRUST_ANCHOR_ARN:?PGBACKREST_AWS_TRUST_ANCHOR_ARN is required}
+      PGBACKREST_AWS_PROFILE_ARN: ${PGBACKREST_AWS_PROFILE_ARN:?PGBACKREST_AWS_PROFILE_ARN is required}
+      PGBACKREST_AWS_ROLE_ARN: ${PGBACKREST_AWS_ROLE_ARN:?PGBACKREST_AWS_ROLE_ARN is required}
     ports:
       - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Read-only, and mounted rather than baked: a private key inside an image
+      # is a private key in every layer cache and registry that image reaches.
+      - ${TRUPRYCE_AWS_CERTIFICATE_DIR:-/etc/trupryce/aws}:/etc/trupryce/aws:ro
+      - pgbackrest-log:/var/log/pgbackrest
+      - pgbackrest-spool:/var/spool/pgbackrest
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform_admin -d postgres"]
       interval: 10s
@@ -176,3 +210,5 @@ services:
 volumes:
   airflow-logs:
   postgres-data:
+  pgbackrest-log:
+  pgbackrest-spool:

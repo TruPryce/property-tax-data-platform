@@ -31,6 +31,10 @@ SECRET_NAMES=(
   AIRFLOW_API_SECRET_KEY
   AIRFLOW_JWT_SECRET
   AIRFLOW_ADMIN_PASSWORD
+  # pgBackRest repository encryption. Recovery-critical rather than
+  # access-critical: rotating it does not re-encrypt existing backups, and
+  # losing it makes every backup already in S3 permanently unreadable.
+  PGBACKREST_CIPHER_PASS
 )
 
 # 64 characters because AIRFLOW_JWT_SECRET is the HMAC key for HS512, which

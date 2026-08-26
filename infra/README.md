@@ -31,7 +31,13 @@ AIRFLOW_FERNET_KEY
 AIRFLOW_API_SECRET_KEY
 AIRFLOW_JWT_SECRET
 AIRFLOW_ADMIN_PASSWORD
+PGBACKREST_CIPHER_PASS
 ```
+
+`PGBACKREST_CIPHER_PASS` encrypts the pgBackRest repository. It is recovery-critical
+rather than access-critical: rotating it does not re-encrypt backups already in S3, so
+the previous value stays required for every backup taken under it, and losing it makes
+those backups permanently unreadable.
 
 Generate the values rather than composing them by hand:
 
@@ -150,7 +156,15 @@ The PostgreSQL bootstrap creates no Silver or Gold tables. Schema, object privil
 
 ## Production Boundary
 
-This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
+This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, monitoring, or deployment automation. Those controls remain required before production promotion.
+
+WAL archiving and physical backups **are** configured: PostgreSQL runs with `archive_mode=on`,
+`archive_command='pgbackrest --stanza=platform archive-push %p'`, and `archive_timeout=300`,
+writing to an encrypted pgBackRest repository in S3 reached by a dedicated keyless identity.
+The host workload certificate is bind-mounted read-only from `/etc/trupryce/aws` and is never
+baked into an image. Backups are scheduled by systemd timers, never by Airflow. See
+[PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md); the recorded
+restore exercise there is not yet filled in. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
 
 The machine access token is a separate bootstrap credential. On the host it lives only in `.bws.env`, owned by the invoking user with mode `0600`; the wrapper refuses to run if that file grants any group or world permission. Because the token cannot bootstrap itself from Secrets Manager, a second copy belongs in the Bitwarden vault alongside the other escrowed recovery material, and the credentials guarding that vault belong in offline custody.
 
@@ -168,5 +182,6 @@ make infra-check
 - [Infrastructure agent guidance](AGENTS.md)
 - [PostgreSQL schema and migrations](postgres/README.md)
 - [Operations documentation](../docs/operations/README.md)
+- [PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md)
 - [Independent runtime decision](../docs/decisions/0001-independent-akamai-runtime.md)
 - [Airflow DAG guidance](../dags/README.md)

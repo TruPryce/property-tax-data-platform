@@ -179,7 +179,15 @@ also works on a database that has already moved on.
 
 A disposable database is rebuilt: drop it or destroy the volume, start a fresh cluster so `init/`
 runs, and apply the migrations from `0001`. A real one is recovered through the restore path in
-[ADR-0002](../../docs/decisions/0002-s3-durable-recovery-boundary.md).
+[PostgreSQL backup and recovery](../../docs/operations/postgresql-recovery.md), which implements the
+boundary [ADR-0002](../../docs/decisions/0002-s3-durable-recovery-boundary.md) decided: an encrypted
+pgBackRest repository in S3 with continuous WAL, restored to a chosen point in time into an isolated
+target. Restoring a real database is never done over the production volume.
+
+That path also carries what `init/` cannot. `init/` runs only against an empty data directory, so on a
+cluster initialized long ago it will never run again and the roles it creates exist only because it ran
+once. A physical restore reproduces the whole cluster — databases, roles, and privileges together —
+which is why recovery is a physical backup rather than a dump of the schema these migrations build.
 
 Inverse scripts were considered and removed. One that `DROP SCHEMA ... CASCADE` is a production
 footgun sitting beside the thing it destroys, and it is a second schema history that has to stay
@@ -273,3 +281,4 @@ that wiring.
 - [Infrastructure overview](../README.md)
 - [PostgreSQL migration agent guidance](AGENTS.md)
 - [ADR-0002: S3 durable recovery boundary](../../docs/decisions/0002-s3-durable-recovery-boundary.md)
+- [PostgreSQL backup and recovery](../../docs/operations/postgresql-recovery.md)

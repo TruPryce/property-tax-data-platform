@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -13,6 +14,10 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 INFRA_ROOT = REPOSITORY_ROOT / "infra"
 COMPOSE_FILE = INFRA_ROOT / "compose.yaml"
+PGBACKREST_CONF = INFRA_ROOT / "postgres" / "pgbackrest" / "pgbackrest.conf"
+CREDENTIAL_WRAPPER = INFRA_ROOT / "postgres" / "pgbackrest" / "aws-credential-process.sh"
+BACKUP_SCRIPT = INFRA_ROOT / "scripts" / "pgbackrest-backup.sh"
+SYSTEMD_ROOT = INFRA_ROOT / "systemd"
 SECRET_VARIABLES = {
     "POSTGRES_SUPERUSER_PASSWORD",
     "AIRFLOW_DB_PASSWORD",
@@ -23,6 +28,7 @@ SECRET_VARIABLES = {
     "AIRFLOW_API_SECRET_KEY",
     "AIRFLOW_JWT_SECRET",
     "AIRFLOW_ADMIN_PASSWORD",
+    "PGBACKREST_CIPHER_PASS",
 }
 
 
@@ -268,7 +274,7 @@ def test_bitwarden_creation_round_trips_every_value_intact(tmp_path: Path) -> No
         },
     )
     assert completed.returncode == 0, completed.stderr
-    assert "verified 9 secrets" in completed.stderr
+    assert "verified 10 secrets" in completed.stderr
 
     stored = parse_environment_file(stub_log)
     assert set(stored) == SECRET_VARIABLES
@@ -447,3 +453,178 @@ def test_wrapper_refuses_to_render_resolved_secrets(tmp_path: Path) -> None:
     )
     assert completed.returncode == 2
     assert "it contains resolved secrets" in completed.stderr
+
+
+def code_lines(path: Path) -> str:
+    """File content with whole-line comments removed.
+
+    Every guard below asserts on this rather than on raw text. A comment saying
+    "no AWS_ACCESS_KEY_ID exists here" is the documentation working, and a guard
+    that reads it as a leak is a guard that punishes explanation.
+    """
+    return "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
+def postgres_command() -> str:
+    return " ".join(load_compose()["services"]["postgres"]["command"])
+
+
+def test_postgres_archives_wal_continuously_with_a_wall_clock_bound() -> None:
+    command = postgres_command()
+    assert "archive_mode=on" in command
+    assert "archive_command=pgbackrest --stanza=platform archive-push %p" in command
+    # Without archive_timeout an idle database holds a partially filled segment
+    # indefinitely, so the recovery point drifts arbitrarily far behind the last
+    # commit no matter how healthy archiving looks.
+    assert "archive_timeout=300" in command
+    assert "wal_level=replica" in command
+
+
+def test_pgbackrest_is_pinned_past_the_stock_bookworm_package() -> None:
+    dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
+    assert "PGBACKREST_VERSION=2.59.1-1.pgdg12+1" in dockerfile
+    assert '"pgbackrest=${PGBACKREST_VERSION}"' in dockerfile
+    # Bookworm ships 2.45, which has no `process` S3 key type and so cannot use
+    # keyless credentials at all. Asserted against the install directive rather
+    # than the file, so the comment naming 2.45 as the thing being avoided does
+    # not read as 2.45 being installed.
+    code = code_lines(INFRA_ROOT / "postgres" / "Dockerfile")
+    assert "2.45" not in code
+    # Anchored to the apt install argument list, because `mkdir /var/log/pgbackrest`
+    # also mentions the package and is not an install of it. Collecting the
+    # continuation lines is what makes "installed unpinned" the thing detected.
+    packages: list[str] = []
+    collecting = False
+    for line in code.splitlines():
+        if "apt-get install" in line:
+            collecting = True
+            line = line.split("apt-get install", 1)[1]
+        if collecting:
+            packages.extend(line.replace("\\", " ").split())
+            if not line.rstrip().endswith("\\"):
+                collecting = False
+    installed = [token for token in packages if token.strip('"').startswith("pgbackrest")]
+    assert installed == ['"pgbackrest=${PGBACKREST_VERSION}"'], installed
+    # The build must fail rather than warn if the pin ever resolves elsewhere.
+    assert "expected ${PGBACKREST_EXPECTED_VERSION}" in dockerfile
+    assert "sha256sum -c -" in dockerfile
+
+
+def test_certificates_are_mounted_read_only_and_never_baked() -> None:
+    postgres = load_compose()["services"]["postgres"]
+    mounts = [entry for entry in postgres["volumes"] if "/etc/trupryce/aws" in entry]
+    assert mounts == ["${TRUPRYCE_AWS_CERTIFICATE_DIR:-/etc/trupryce/aws}:/etc/trupryce/aws:ro"]
+    dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
+    # A key copied into a layer is a key in every cache and registry that image
+    # reaches, and it cannot be rotated by replacing a file on the host.
+    assert "trupryce-data-platform-vps.key" not in dockerfile
+    assert "/etc/trupryce" not in dockerfile
+
+
+def test_no_committed_infrastructure_file_carries_key_material() -> None:
+    # Assignment shape, not name mention. `AWS_ACCESS_KEY_ID=AKIA...` is a leak;
+    # a comment stating that no such variable exists is the opposite of one, and
+    # a guard that cannot tell them apart gets weakened the first time it fires.
+    assigned = re.compile(
+        r"(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|repo1-cipher-pass)\s*[=:]\s*\S"
+    )
+    pem = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+    for path in sorted(INFRA_ROOT.rglob("*")):
+        if not path.is_file() or ".env" in path.name:
+            continue
+        code = code_lines(path)
+        match = assigned.search(code)
+        assert match is None, f"{path} assigns {match.group(1) if match else ''}"
+        # Checked against raw text: a PEM block is unmistakable and a `#` inside
+        # base64 must not let one hide behind comment stripping.
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+        assert pem.search(raw) is None, f"{path} contains private key material"
+
+
+def test_pgbackrest_configuration_is_keyless_and_carries_no_passphrase() -> None:
+    settings = [
+        line.strip()
+        for line in PGBACKREST_CONF.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert "repo1-s3-key-type=process" in settings
+    assert "repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-credentials" in settings
+    assert "repo1-cipher-type=aes-256-cbc" in settings
+    assert "repo1-retention-full=4" in settings
+    assert "repo1-retention-full-type=count" in settings
+    assert "repo1-s3-bucket=trupryce-property-tax-backups" in settings
+    assert "repo1-path=/pgbackrest/platform" in settings
+    # Asserted over settings rather than the whole file, so the comment that
+    # explains where the passphrase comes from is not mistaken for the
+    # passphrase being here. Only an assignment would leak it.
+    assert not any(setting.startswith("repo1-cipher-pass") for setting in settings)
+    assert not any(setting.startswith("repo1-s3-key=") for setting in settings)
+    assert not any(setting.startswith("repo1-s3-key-secret") for setting in settings)
+
+
+def test_cipher_passphrase_reaches_pgbackrest_only_through_bitwarden() -> None:
+    compose = COMPOSE_FILE.read_text(encoding="utf-8")
+    environment = load_compose()["services"]["postgres"]["environment"]
+    assert (
+        environment["PGBACKREST_REPO1_CIPHER_PASS"]
+        == "${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS is required}"
+    )
+    # The existing boundary is unchanged: the Bitwarden access token still
+    # reaches no container, so a backup secret does not become a way in.
+    assert "BWS_ACCESS_TOKEN" not in compose
+
+
+def test_credential_wrapper_execs_the_helper_and_never_handles_the_response() -> None:
+    wrapper = CREDENTIAL_WRAPPER.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in wrapper
+    assert "exec aws_signing_helper credential-process" in wrapper
+    code = "\n".join(line for line in wrapper.splitlines() if not line.lstrip().startswith("#"))
+    # Parsing, caching, or logging the response turns a clear "expired
+    # certificate" into an empty-credential failure inside pgBackRest. exec also
+    # makes the helper's exit status the wrapper's, so a failure is visible.
+    for forbidden in ("jq", "python", "tee", "cat ", "logger", ">>", "mktemp"):
+        assert forbidden not in code, forbidden
+    assert code.count("exec ") == 1
+
+
+def test_backup_script_selects_the_container_by_compose_label() -> None:
+    script = BACKUP_SCRIPT.read_text(encoding="utf-8")
+    assert "label=com.docker.compose.project=${COMPOSE_PROJECT}" in script
+    assert "label=com.docker.compose.service=${COMPOSE_SERVICE}" in script
+    # A container ID changes on every recreate, so a unit pinned to one keeps
+    # running and protects nothing the first time the stack is rebuilt.
+    assert "docker ps --quiet" in script
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "--filter name=" not in code
+    assert "refusing to guess" in script
+
+
+def test_backup_scheduling_does_not_depend_on_the_orchestrator_it_protects() -> None:
+    directives = ("After", "Before", "Requires", "Requisite", "Wants", "BindsTo", "PartOf")
+    units = sorted(SYSTEMD_ROOT.glob("pgbackrest-*"))
+    assert {unit.name for unit in units} == {
+        "pgbackrest-full.service",
+        "pgbackrest-full.timer",
+        "pgbackrest-diff.service",
+        "pgbackrest-diff.timer",
+    }
+    for unit in units:
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith(directives) and "=" in stripped:
+                # Checked on directives only: the units carry a comment saying
+                # why Airflow is deliberately absent, and that comment naming
+                # Airflow must not read as a dependency on it.
+                assert "airflow" not in stripped.split("=", 1)[1].lower(), unit.name
+    for unit in ("pgbackrest-full.service", "pgbackrest-diff.service"):
+        body = (SYSTEMD_ROOT / unit).read_text(encoding="utf-8")
+        assert "infra/scripts/pgbackrest-backup.sh" in body
+    for timer in ("pgbackrest-full.timer", "pgbackrest-diff.timer"):
+        body = (SYSTEMD_ROOT / timer).read_text(encoding="utf-8")
+        # Without Persistent a backup missed while the host was down is simply
+        # skipped, which is how a retention window silently loses its base.
+        assert "Persistent=true" in body

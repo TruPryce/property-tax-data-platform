@@ -4,6 +4,8 @@
 
 Accepted on 2026-07-16. The provider backup add-on will be disabled after recovery validation succeeds.
 
+The assumption that the database sits on an attached volume is amended by [ADR-0010](0010-replaceable-local-storage-and-s3-backup-repository.md), which also records the segregated backup identity and keyless credential posture that implement this boundary. The original text is retained as the record of what was decided in July.
+
 ## Context
 
 The platform must be portable to another VPS provider. Akamai's instance backup service does not protect attached Block Storage volumes and is not a substitute for PostgreSQL point-in-time recovery.
