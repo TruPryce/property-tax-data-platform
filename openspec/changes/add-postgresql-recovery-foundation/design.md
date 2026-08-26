@@ -35,7 +35,7 @@ pgBackRest supports `repo1-s3-key-type=process`, which executes a command and re
 
 ```text
 pgbackrest  --repo1-s3-key-type=process
-            --repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-credentials
+            --repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-signing
                         |
                         v
             aws_signing_helper credential-process

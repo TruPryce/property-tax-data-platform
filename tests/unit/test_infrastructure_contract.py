@@ -15,7 +15,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 INFRA_ROOT = REPOSITORY_ROOT / "infra"
 COMPOSE_FILE = INFRA_ROOT / "compose.yaml"
 PGBACKREST_CONF = INFRA_ROOT / "postgres" / "pgbackrest" / "pgbackrest.conf"
-CREDENTIAL_WRAPPER = INFRA_ROOT / "postgres" / "pgbackrest" / "aws-credential-process.sh"
+CREDENTIAL_WRAPPER = INFRA_ROOT / "postgres" / "pgbackrest" / "aws-signing-process.sh"
 BACKUP_SCRIPT = INFRA_ROOT / "scripts" / "pgbackrest-backup.sh"
 SYSTEMD_ROOT = INFRA_ROOT / "systemd"
 SECRET_VARIABLES = {
@@ -552,7 +552,7 @@ def test_pgbackrest_configuration_is_keyless_and_carries_no_passphrase() -> None
         if line.strip() and not line.strip().startswith("#")
     ]
     assert "repo1-s3-key-type=process" in settings
-    assert "repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-credentials" in settings
+    assert "repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-signing" in settings
     assert "repo1-cipher-type=aes-256-cbc" in settings
     assert "repo1-retention-full=4" in settings
     assert "repo1-retention-full-type=count" in settings

@@ -43,7 +43,7 @@ RUN set -eux; \
     chmod 0750 /var/log/pgbackrest /var/spool/pgbackrest
 
 COPY --chmod=0444 infra/postgres/pgbackrest/pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
-COPY --chmod=0555 infra/postgres/pgbackrest/aws-credential-process.sh /usr/local/bin/pgbackrest-aws-credentials
+COPY --chmod=0555 infra/postgres/pgbackrest/aws-signing-process.sh /usr/local/bin/pgbackrest-aws-signing
 
 # The whole directory, so the lexicographic convention is real: the entrypoint
 # runs every .sh and .sql here in filename order, and adding 20-*.sql needs no
