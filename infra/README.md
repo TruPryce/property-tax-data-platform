@@ -158,6 +158,19 @@ The PostgreSQL bootstrap creates no Silver or Gold tables. Schema, object privil
 
 This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, monitoring, or deployment automation. Those controls remain required before production promotion.
 
+The workload certificate and key are bind-mounted read-only from `/etc/trupryce/aws` and are never
+baked into an image. Because the container's `postgres` user is uid 999 and the key belongs to the
+operator, a read-only mount alone gives immutability without readability: the directory and key are
+owned by `TRUPRYCE_AWS_GID` (2000) at `0750`/`0640`, and the PostgreSQL service joins that GID as a
+supplementary group. The key is never world-readable. See
+[section 2.7 of the runbook](../docs/operations/postgresql-recovery.md#27-certificate-file-permissions).
+
+Backup timers are installed with `sudo SERVICE_USER=<user> ./infra/scripts/install-systemd-units.sh`,
+which resolves the service user, repository path, and Docker group at install time; the committed
+units are templates so a rebuilt host does not inherit this one's paths. A point-in-time restore runs
+through `./infra/scripts/pgbackrest-restore.sh --target "<timestamp>"`, which resolves the repository
+passphrase from Bitwarden itself and refuses to restore over the production volume.
+
 WAL archiving and physical backups **are** configured: PostgreSQL runs with `archive_mode=on`,
 `archive_command='pgbackrest --stanza=platform archive-push %p'`, and `archive_timeout=300`,
 writing to an encrypted pgBackRest repository in S3 reached by a dedicated keyless identity.

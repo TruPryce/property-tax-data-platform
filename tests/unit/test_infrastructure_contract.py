@@ -552,7 +552,12 @@ def test_pgbackrest_configuration_is_keyless_and_carries_no_passphrase() -> None
         if line.strip() and not line.strip().startswith("#")
     ]
     assert "repo1-s3-key-type=process" in settings
-    assert "repo1-s3-key-process=/usr/local/bin/pgbackrest-aws-signing" in settings
+    assert "repo1-s3-process-cmd=/usr/local/bin/pgbackrest-aws-signing" in settings
+    # The option pgBackRest 2.59.1 actually defines is `repo-s3-process-cmd`.
+    # `repo1-s3-key-process` is not an alias; it is silently dropped with a
+    # warning, which is why the string assertion alone was not enough and why
+    # test_built_image_parses_the_committed_configuration exists.
+    assert not any(s.startswith("repo1-s3-key-process") for s in settings)
     assert "repo1-cipher-type=aes-256-cbc" in settings
     assert "repo1-retention-full=4" in settings
     assert "repo1-retention-full-type=count" in settings
@@ -607,9 +612,9 @@ def test_backup_scheduling_does_not_depend_on_the_orchestrator_it_protects() -> 
     directives = ("After", "Before", "Requires", "Requisite", "Wants", "BindsTo", "PartOf")
     units = sorted(SYSTEMD_ROOT.glob("pgbackrest-*"))
     assert {unit.name for unit in units} == {
-        "pgbackrest-full.service",
+        "pgbackrest-full.service.template",
         "pgbackrest-full.timer",
-        "pgbackrest-diff.service",
+        "pgbackrest-diff.service.template",
         "pgbackrest-diff.timer",
     }
     for unit in units:
@@ -620,7 +625,7 @@ def test_backup_scheduling_does_not_depend_on_the_orchestrator_it_protects() -> 
                 # why Airflow is deliberately absent, and that comment naming
                 # Airflow must not read as a dependency on it.
                 assert "airflow" not in stripped.split("=", 1)[1].lower(), unit.name
-    for unit in ("pgbackrest-full.service", "pgbackrest-diff.service"):
+    for unit in ("pgbackrest-full.service.template", "pgbackrest-diff.service.template"):
         body = (SYSTEMD_ROOT / unit).read_text(encoding="utf-8")
         assert "infra/scripts/pgbackrest-backup.sh" in body
     for timer in ("pgbackrest-full.timer", "pgbackrest-diff.timer"):
@@ -628,3 +633,356 @@ def test_backup_scheduling_does_not_depend_on_the_orchestrator_it_protects() -> 
         # Without Persistent a backup missed while the host was down is simply
         # skipped, which is how a retention window silently loses its base.
         assert "Persistent=true" in body
+
+
+PGBACKREST_PROBE_IMAGE = "property-tax-postgres:config-probe"
+
+
+def build_probe_image() -> None:
+    subprocess.run(
+        [
+            "docker",
+            "build",
+            "-q",
+            "-f",
+            str(INFRA_ROOT / "postgres" / "Dockerfile"),
+            "-t",
+            PGBACKREST_PROBE_IMAGE,
+            str(REPOSITORY_ROOT),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+
+
+def parse_committed_configuration() -> str:
+    """Run the pinned pgBackRest against the committed config and return its output.
+
+    `help` parses the configuration file fully but reaches neither PostgreSQL nor
+    S3, so this is deterministic and needs no credential.
+    """
+    build_probe_image()
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            PGBACKREST_PROBE_IMAGE,
+            "pgbackrest",
+            "--stanza=platform",
+            "help",
+            "backup",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    return completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="requires docker to build the image")
+def test_built_image_parses_the_committed_configuration() -> None:
+    """The gate that catches a misspelled pgBackRest option.
+
+    pgBackRest treats an unknown option in a configuration *file* as a warning
+    and continues, so the option is silently dropped and the repository ends up
+    with no way to authenticate. Exit status is 0 either way, which is why this
+    asserts on the warning text and on the resolved option set rather than on
+    the return code. A string assertion over the file cannot catch it at all:
+    `repo1-s3-key-process` is a perfectly well-formed line that pgBackRest does
+    not implement.
+    """
+    output = parse_committed_configuration()
+    assert "invalid option" not in output, output
+    assert "invalid value" not in output, output
+    # Present in the options pgBackRest actually resolved, not merely in the file.
+    assert "--repo1-s3-process-cmd=/usr/local/bin/pgbackrest-aws-signing" in output, output
+    assert "--repo1-s3-key-type=process" in output, output
+    assert "--repo1-cipher-type=aes-256-cbc" in output, output
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="requires docker to build the image")
+def test_pinned_binary_defines_the_process_command_option() -> None:
+    """`repo-s3-process-cmd` is the real option name; the other spelling is not an alias."""
+    build_probe_image()
+    completed = subprocess.run(
+        ["docker", "run", "--rm", PGBACKREST_PROBE_IMAGE, "pgbackrest", "help", "backup"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    catalogue = completed.stdout + completed.stderr
+    assert "--repo-s3-process-cmd" in catalogue
+    assert "--repo-s3-key-process" not in catalogue
+
+
+CERTIFICATE_DIR = Path(os.environ.get("TRUPRYCE_AWS_CERTIFICATE_DIR", "/etc/trupryce/aws"))
+WORKLOAD_KEY = CERTIFICATE_DIR / "trupryce-data-platform-vps.key"
+
+
+def certificate_gid() -> str:
+    values = parse_environment_file(INFRA_ROOT / ".env.example")
+    return values["TRUPRYCE_AWS_GID"]
+
+
+def test_postgres_joins_the_certificate_group_to_read_the_workload_key() -> None:
+    """`:ro` gives immutability, not readability.
+
+    The container's postgres user is uid 999 and the host key is owned by the
+    operator at 0640, so without a shared group `archive_command` fails at
+    runtime with a permission error that no static check would surface.
+    """
+    postgres = load_compose()["services"]["postgres"]
+    assert postgres["group_add"] == ["${TRUPRYCE_AWS_GID:-2000}"]
+    assert certificate_gid().isdigit()
+    # Numeric, because the group has no name inside the image; a name would
+    # resolve to nothing and the supplementary group would silently not apply.
+    mounts = [entry for entry in postgres["volumes"] if "/etc/trupryce/aws" in entry]
+    assert mounts == ["${TRUPRYCE_AWS_CERTIFICATE_DIR:-/etc/trupryce/aws}:/etc/trupryce/aws:ro"]
+
+
+@pytest.mark.skipif(not WORKLOAD_KEY.exists(), reason="requires the host workload key")
+def test_workload_key_is_group_readable_but_never_world_readable() -> None:
+    mode = stat.S_IMODE(WORKLOAD_KEY.stat().st_mode)
+    assert mode & 0o007 == 0, f"key is world-accessible: {mode:o}"
+    assert mode & 0o040, f"key is not group-readable, so postgres cannot read it: {mode:o}"
+    assert mode & 0o002 == 0, f"key is world-writable: {mode:o}"
+    assert WORKLOAD_KEY.stat().st_gid == int(certificate_gid())
+    directory = stat.S_IMODE(CERTIFICATE_DIR.stat().st_mode)
+    assert directory & 0o007 == 0, f"certificate directory is world-accessible: {directory:o}"
+    # 0o050 = group r-x; without execute the group cannot traverse into the
+    # directory and the key's own group bit is unreachable.
+    assert directory & 0o050 == 0o050, f"group cannot traverse the directory: {directory:o}"
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None or not WORKLOAD_KEY.exists(),
+    reason="requires docker and the host workload key",
+)
+def test_only_the_certificate_group_can_read_the_key_from_a_container() -> None:
+    """Group membership is the authorization boundary, not file mode alone."""
+    build_probe_image()
+
+    def readable(group_add: bool) -> bool:
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{CERTIFICATE_DIR}:/etc/trupryce/aws:ro",
+            "--user",
+            "postgres",
+        ]
+        if group_add:
+            command += ["--group-add", certificate_gid()]
+        command += [
+            PGBACKREST_PROBE_IMAGE,
+            "test",
+            "-r",
+            "/etc/trupryce/aws/trupryce-data-platform-vps.key",
+        ]
+        return subprocess.run(command, capture_output=True, timeout=300).returncode == 0
+
+    assert readable(group_add=True), "postgres cannot read the key with the certificate group"
+    assert not readable(group_add=False), "key is readable without the group, so it is too open"
+
+
+def test_reported_secret_count_matches_what_is_actually_written(tmp_path: Path) -> None:
+    """The reported count drifted to nine when the tenth secret was added.
+
+    Asserted against the file the run produced rather than against a literal, so
+    adding the eleventh secret cannot reintroduce the same defect. Only names and
+    counts are read here; no generated value is compared, printed, or retained.
+    """
+    output = tmp_path / "runtime-secrets.env"
+    completed = subprocess.run(
+        [str(INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh"), "--write", str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    written = parse_environment_file(output)
+    assert set(written) == SECRET_VARIABLES
+    assert f"wrote {len(written)} secrets" in completed.stderr
+    assert "wrote 9 secrets" not in completed.stderr
+    generator = (INFRA_ROOT / "scripts" / "generate-runtime-secrets.sh").read_text(encoding="utf-8")
+    assert "nine" not in generator.lower()
+
+
+def test_unit_definitions_carry_no_host_specific_identity() -> None:
+    """A durable unit must survive a rebuild onto a different host.
+
+    A hard-coded operator account or home directory produces a timer that
+    installs fine and then fails at its first fire on the replacement VPS --
+    silently, because a timer whose service cannot start is not a visible
+    outage. The placeholders are resolved by the install script instead.
+    """
+    templates = sorted(SYSTEMD_ROOT.glob("*.service.template"))
+    assert templates, "no unit templates found"
+    for template in templates:
+        body = template.read_text(encoding="utf-8")
+        assert "@@SERVICE_USER@@" in body
+        assert "@@REPOSITORY_DIR@@" in body
+        assert "@@DOCKER_GROUP@@" in body
+        for host_specific in ("/home/", "User=mike", "/Users/"):
+            assert host_specific not in body, f"{template.name} hard-codes {host_specific}"
+        # Least privilege is part of the durable definition, not the install.
+        assert "NoNewPrivileges=true" in body
+        assert "ProtectSystem=strict" in body
+    for timer in sorted(SYSTEMD_ROOT.glob("*.timer")):
+        body = timer.read_text(encoding="utf-8")
+        assert "/home/" not in body, f"{timer.name} hard-codes a home directory"
+
+
+def test_install_script_resolves_every_placeholder_and_fails_closed() -> None:
+    script = (INFRA_ROOT / "scripts" / "install-systemd-units.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    for placeholder in ("@@SERVICE_USER@@", "@@DOCKER_GROUP@@", "@@REPOSITORY_DIR@@"):
+        assert placeholder in script, placeholder
+    # An unsubstituted placeholder must stop the install rather than become a
+    # unit that fails once a week.
+    assert "unsubstituted placeholder" in script
+    # Docker access is verified, never granted: membership of the docker group is
+    # root-equivalent, so it is an operator decision rather than a side effect of
+    # installing a timer.
+    assert "usermod" not in script, "install script grants Docker access instead of checking it"
+    assert "could not reach the Docker socket" in script
+    # The certificate group is created with an explicit GID, because the Compose
+    # file passes that number as a supplementary group; a different GID would
+    # join the container to a group that grants nothing.
+    assert "groupadd --gid" in script
+
+
+RESTORE_SCRIPT = INFRA_ROOT / "scripts" / "pgbackrest-restore.sh"
+
+
+def shell_command_lines(markdown: str) -> list[str]:
+    """Lines inside ```bash / ```sh fences, excluding comments.
+
+    Documentation guards must assert on what a reader would *run*, not on what
+    the document *says*. Prose explaining why an option is wrong necessarily
+    contains that option, and a guard that reads the explanation as an
+    instruction makes clear writing fail the build.
+    """
+    lines: list[str] = []
+    in_shell_fence = False
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_shell_fence = stripped[3:].strip() in {"bash", "sh", "shell"}
+            continue
+        if in_shell_fence and stripped and not stripped.startswith("#"):
+            lines.append(line)
+    return lines
+
+
+def test_restore_never_targets_the_production_volume() -> None:
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    # Refused by name and again by Compose label: a caller could pass a
+    # differently named volume that Compose still owns.
+    assert "refusing to restore over the production volume" in script
+    assert "refusing to restore into a Compose-managed volume" in script
+    assert "com.docker.compose.project" in script
+    # Loopback only. A recovered cluster holds production data at some past
+    # state and must not be reachable from the tailnet.
+    assert 'bind_address="127.0.0.1"' in script
+
+
+def test_restore_passes_the_passphrase_by_reference_not_in_argv() -> None:
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    # `-e NAME` takes the value from the environment; `-e NAME=value` puts the
+    # passphrase into argv, where it reaches shell history and `ps` output.
+    assert "-e PGBACKREST_REPO1_CIPHER_PASS\n" in code or "-e PGBACKREST_REPO1_CIPHER_PASS " in code
+    assert "-e PGBACKREST_REPO1_CIPHER_PASS=" not in code
+    assert '-e "PGBACKREST_REPO1_CIPHER_PASS=' not in code
+    # The Bitwarden access token is read on the host and never exported onward.
+    assert "BWS_ACCESS_TOKEN=" in code
+    assert "-e BWS_ACCESS_TOKEN" not in code
+    assert "bws run" in code
+
+
+def test_restore_gives_the_recovered_cluster_what_archive_get_needs() -> None:
+    """Recovery to a timestamp runs `pgbackrest archive-get` during startup.
+
+    A recovered container given only the restored volume replays the base backup,
+    fails to fetch WAL, and stops short of the target while looking successful.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    # One argument array, reused for both the restore and the started cluster,
+    # so the two cannot drift apart.
+    assert "identity_arguments=(" in script
+    started = script.split("docker run -d --name")[1]
+    assert '"${identity_arguments[@]}"' in started
+    assert "/etc/trupryce/aws:ro" in script
+    assert "--group-add" in script
+    for arn in (
+        "PGBACKREST_AWS_TRUST_ANCHOR_ARN",
+        "PGBACKREST_AWS_PROFILE_ARN",
+        "PGBACKREST_AWS_ROLE_ARN",
+    ):
+        assert arn in script, arn
+
+
+def test_runbook_never_teaches_a_literal_passphrase_command() -> None:
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    for line in runbook.splitlines():
+        if "PGBACKREST_REPO1_CIPHER_PASS=" in line:
+            # The single permitted occurrence is the labelled counter-example.
+            assert "<the-passphrase>" in line, line
+    assert "Never do this" in runbook
+    # Administrator commands must name the administrator profile explicitly
+    # rather than relying on ambient credentials.
+    for verb in (
+        "iam create-role",
+        "rolesanywhere create-profile",
+        "s3api create-bucket",
+        "iam put-role-policy",
+        "s3api put-bucket",
+        "s3api put-public-access-block",
+    ):
+        for line in shell_command_lines(runbook):
+            if verb in line and line.strip().startswith("aws"):
+                assert "--profile boss" in line, line
+    # us-east-1 rejects an explicit LocationConstraint of us-east-1. Asserted
+    # over executable command lines only: the prose that explains why it must be
+    # omitted necessarily names it, and a guard that cannot tell an instruction
+    # from an explanation punishes the documentation for being clear.
+    for line in shell_command_lines(runbook):
+        assert "LocationConstraint=us-east-1" not in line, line
+    # Anchored to the create-profile invocation itself. A profile created
+    # without --enabled exists, lists, and refuses every credential exchange,
+    # so a document-wide substring check would pass while the procedure is
+    # broken. The command spans continuation lines, so the whole block is joined
+    # before asserting.
+    commands = " ".join(shell_command_lines(runbook))
+    create_profile = commands.split("rolesanywhere create-profile", 1)
+    assert len(create_profile) == 2, "runbook does not create a Roles Anywhere profile"
+    following = create_profile[1].split("aws ", 1)[0]
+    assert "--enabled" in following, following
+    # The VPS-local data profile is trupryce-data-vps; trupryce-vps is wrong.
+    assert "trupryce-data-vps" in runbook
+    assert "profile trupryce-vps]" not in runbook
+    assert "--profile trupryce-vps" not in runbook
+
+
+def test_certificate_expiry_check_exists_and_claims_no_automation() -> None:
+    script = (INFRA_ROOT / "scripts" / "check-certificate-expiry.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    assert "openssl x509" in script
+    # Honest about what it is: a signal, not monitoring.
+    assert "not monitoring" in script
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    assert "check-certificate-expiry.sh" in runbook
+    assert "2026-11-17" in runbook
+    assert "Nothing alerts on this" in runbook

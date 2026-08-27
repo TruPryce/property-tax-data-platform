@@ -1,0 +1,36 @@
+[Unit]
+Description=pgBackRest daily differential backup of the property-tax PostgreSQL cluster
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+# Requires Docker but deliberately not Airflow: this protects Airflow's metadata
+# database, so it must not depend on Airflow being healthy.
+After=docker.service
+Requires=docker.service
+# Never runs alongside the weekly full: pgBackRest takes its own lock, but
+# serialising here keeps the two off the same CPU and network budget.
+Conflicts=pgbackrest-full.service
+After=pgbackrest-full.service
+
+[Service]
+Type=oneshot
+# Resolved at install time by infra/scripts/install-systemd-units.sh. A durable
+# unit must not carry one host's operator account or home directory, or a
+# replacement VPS inherits a path that does not exist there.
+User=@@SERVICE_USER@@
+Group=@@DOCKER_GROUP@@
+WorkingDirectory=@@REPOSITORY_DIR@@
+ExecStart=@@REPOSITORY_DIR@@/infra/scripts/pgbackrest-backup.sh diff
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle
+
+# Least privilege: the unit needs the Docker socket and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

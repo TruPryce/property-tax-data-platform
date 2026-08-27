@@ -79,6 +79,13 @@ services:
       PGBACKREST_AWS_ROLE_ARN: ${PGBACKREST_AWS_ROLE_ARN:?PGBACKREST_AWS_ROLE_ARN is required}
     ports:
       - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    # The container's postgres user is uid 999 and the host key is owned by the
+    # operator, so `:ro` alone gives immutability without readability and
+    # archive_command fails at runtime with a permission error. Membership of the
+    # certificate group is what grants the read; the key stays 0640 and is never
+    # world-readable. Numeric because the group has no name inside the image.
+    group_add:
+      - "${TRUPRYCE_AWS_GID:-2000}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Read-only, and mounted rather than baked: a private key inside an image

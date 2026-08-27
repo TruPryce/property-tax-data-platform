@@ -23,56 +23,91 @@ Airflow's metadata database is one of the two databases being protected. A backu
 
 ## Part 1 — AWS and IAM Roles Anywhere bootstrap for an external VPS
 
-This part needs **administrative AWS credentials**. The runtime host deliberately does not hold them — its `trupryce-data-platform-vps` role is denied `iam:*` and `rolesanywhere:*`, which is the correct posture and is why this is an operator procedure rather than automation.
+Every command in this part runs with **administrator** credentials as `aws --profile boss`. That profile is deliberately not present on the runtime host: its `trupryce-data-platform-vps` role is denied `iam:*` and `rolesanywhere:*`, which is the posture we want. Run Part 1 from an administrator workstation.
 
-### What already exists
+The workload verification commands at the end deliberately use `--profile trupryce-data-vps` and `--profile trupryce-backup` instead, because those are testing Roles Anywhere, not administrator authority. Never substitute `boss` there — it would prove only that an administrator can read S3.
+
+Do not rely on ambient or default credentials anywhere in this part.
+
+### What already exists and is reused
 
 | Component | Value |
 |---|---|
-| Account | `099427795947`, `us-east-1` |
+| Account / region | `099427795947` / `us-east-1` |
 | CA | `CN=TruPryce Platform Workload CA`, private, valid to 2036 |
 | Trust anchor | `arn:aws:rolesanywhere:us-east-1:099427795947:trust-anchor/63c0a64e-843d-4603-9f55-0ddc7045ecaa` |
-| Workload certificate | `CN=trupryce-data-platform-vps`, at `/etc/trupryce/aws/`, **expires 2026-11-17** |
-| Data role | `arn:aws:iam::099427795947:role/trupryce-data-platform-vps` — no delete, unchanged by this work |
-
-The CA, the trust anchor, and the workload certificate are reused. Only the backup-side authority is new.
+| Workload certificate | `CN=trupryce-data-platform-vps` at `/etc/trupryce/aws/`, **expires 2026-11-17** |
+| Data role | `arn:aws:iam::099427795947:role/trupryce-data-platform-vps` — no delete, not modified here |
+| Source-data bucket | `trupryce-property-tax-data` — reachable by the data role only |
 
 ### 1.1 Create the backup bucket
 
+**`us-east-1` must omit `--create-bucket-configuration`.** It is the S3 API's default region, and passing `LocationConstraint=us-east-1` fails with `InvalidLocationConstraint`. A generic create command copied from another region's runbook does not work here:
+
 ```bash
-aws s3api create-bucket --bucket trupryce-property-tax-backups --region us-east-1
-aws s3api put-public-access-block --bucket trupryce-property-tax-backups \
+# Correct for us-east-1. In any other region, add
+#   --create-bucket-configuration LocationConstraint=<region>
+aws --profile boss s3api create-bucket \
+  --bucket trupryce-property-tax-backups --region us-east-1
+```
+
+Harden it before anything is written. Each of these is a separate call, and each is required:
+
+```bash
+aws --profile boss s3api put-public-access-block \
+  --bucket trupryce-property-tax-backups \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws s3api put-bucket-versioning --bucket trupryce-property-tax-backups \
-  --versioning-configuration Status=Enabled
-aws s3api put-bucket-encryption --bucket trupryce-property-tax-backups \
+
+# ACLs off entirely: ownership is the bucket owner's, and no ACL grant can
+# reintroduce cross-account access.
+aws --profile boss s3api put-bucket-ownership-controls \
+  --bucket trupryce-property-tax-backups \
+  --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+
+aws --profile boss s3api put-bucket-versioning \
+  --bucket trupryce-property-tax-backups --versioning-configuration Status=Enabled
+
+aws --profile boss s3api put-bucket-encryption \
+  --bucket trupryce-property-tax-backups \
   --server-side-encryption-configuration \
   '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 ```
 
-Versioning is on so that a deletion — including one by the backup role — is recoverable. pgBackRest's own retention deletes current versions; the noncurrent versions are the floor under a mistake.
-
-Bound noncurrent growth, or versioning silently becomes unbounded cost:
+Versioning matters because pgBackRest's retention deletes current versions; the noncurrent versions are the floor under a mistake. That floor has to be bounded or it becomes unbounded cost, and incomplete multipart uploads have to be swept because a failed backup leaves parts behind that are billed but invisible in a normal listing:
 
 ```bash
-aws s3api put-bucket-lifecycle-configuration --bucket trupryce-property-tax-backups \
+aws --profile boss s3api put-bucket-lifecycle-configuration \
+  --bucket trupryce-property-tax-backups \
   --lifecycle-configuration '{"Rules":[{
     "ID":"expire-noncurrent","Status":"Enabled","Filter":{"Prefix":"pgbackrest/"},
     "NoncurrentVersionExpiration":{"NoncurrentDays":30},
     "AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]}'
 ```
 
+TLS-only, enforced by the bucket rather than trusted from the client:
+
+```bash
+aws --profile boss s3api put-bucket-policy \
+  --bucket trupryce-property-tax-backups --policy '{
+  "Version":"2012-10-17",
+  "Statement":[{
+    "Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*","Action":"s3:*",
+    "Resource":["arn:aws:s3:::trupryce-property-tax-backups",
+                "arn:aws:s3:::trupryce-property-tax-backups/*"],
+    "Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}'
+```
+
 ### 1.2 Create the backup role
 
-The permission policy is confined to the repository prefix and nothing else:
+The permission policy is confined to the repository prefix:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     { "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"],
       "Resource": "arn:aws:s3:::trupryce-property-tax-backups/pgbackrest/platform/*" },
     { "Effect": "Allow",
       "Action": ["s3:ListBucket","s3:GetBucketLocation"],
@@ -82,9 +117,9 @@ The permission policy is confined to the repository prefix and nothing else:
 }
 ```
 
-`s3:DeleteObject` is present because pgBackRest expires its own retained cycles. It is confined to this prefix, and it is the reason this is a **separate role**: granting delete to `trupryce-data-platform-vps` would let the identity that handles untrusted county downloads destroy the backups protecting against them.
+`s3:DeleteObject` is present because pgBackRest expires its own retained cycles, and `s3:AbortMultipartUpload` because pgBackRest uploads large files in parts and must be able to clean up a failed one. Both are confined to this prefix. This is the reason for a **separate role**: granting delete to `trupryce-data-platform-vps` would let the identity that handles untrusted county downloads destroy the backups protecting against them.
 
-The trust policy restricts assumption to the existing trust anchor **and** the certificate subject:
+The trust policy pins the trust anchor **and** the certificate subject:
 
 ```json
 {
@@ -105,40 +140,99 @@ The trust policy restricts assumption to the existing trust anchor **and** the c
 }
 ```
 
-Both conditions matter. The trust anchor alone would let **any** certificate the CA ever issues assume the backup role; pinning the CN means a valid chain is not by itself authority.
+Both conditions matter. The trust anchor alone would let **any** certificate the CA ever issues assume the backup role, so pinning the CN is what makes a valid chain insufficient on its own.
 
 ```bash
-aws iam create-role --role-name trupryce-data-platform-backup \
+aws --profile boss iam create-role --role-name trupryce-data-platform-backup \
   --assume-role-policy-document file://backup-trust-policy.json
-aws iam put-role-policy --role-name trupryce-data-platform-backup \
+aws --profile boss iam put-role-policy --role-name trupryce-data-platform-backup \
   --policy-name pgbackrest-repository --policy-document file://backup-permission-policy.json
+```
+
+**Retrieve the role ARN explicitly.** Do not reuse a shell variable populated earlier in the session — a re-run, a new shell, or a failed create leaves it stale or empty, and an empty `--role-arns` produces a profile that authorizes nothing while reporting success:
+
+```bash
+BACKUP_ROLE_ARN="$(aws --profile boss iam get-role \
+  --role-name trupryce-data-platform-backup --query Role.Arn --output text)"
+[ -n "$BACKUP_ROLE_ARN" ] && printf 'role: %s\n' "$BACKUP_ROLE_ARN" \
+  || { echo 'role ARN did not resolve; stop here'; }
 ```
 
 ### 1.3 Create the Roles Anywhere profile
 
+**`--enabled` is required.** A profile created without it exists, appears in listings, and refuses every credential exchange:
+
 ```bash
-aws rolesanywhere create-profile --name trupryce-data-platform-backup \
-  --role-arns arn:aws:iam::099427795947:role/trupryce-data-platform-backup --enabled
+aws --profile boss rolesanywhere create-profile \
+  --name trupryce-data-platform-backup \
+  --role-arns "$BACKUP_ROLE_ARN" \
+  --enabled
 ```
 
-Record the returned profile ARN as `PGBACKREST_AWS_PROFILE_ARN` in `infra/.env`. It is not a secret — it names which role may be assumed, not how to prove entitlement. The proof is the certificate.
-
-### 1.4 Verify from the runtime host
+Retrieve and validate the profile ARN explicitly rather than reading it from the create output:
 
 ```bash
-aws --profile trupryce-backup sts get-caller-identity
+BACKUP_PROFILE_ARN="$(aws --profile boss rolesanywhere list-profiles \
+  --query "profiles[?name=='trupryce-data-platform-backup'].profileArn" --output text)"
+aws --profile boss rolesanywhere list-profiles \
+  --query "profiles[?name=='trupryce-data-platform-backup'].[name,enabled,profileArn]" --output table
+```
+
+Confirm `enabled` reads `True` before continuing.
+
+### 1.4 Configure the VPS-local backup profile
+
+On the runtime host. The existing data profile is `trupryce-data-vps`; the new one is `trupryce-backup`. Both use `credential_process`, and neither stores a key:
+
+```ini
+# ~/.aws/config, mode 0600
+[profile trupryce-data-vps]
+region = us-east-1
+credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/trupryce/aws/trupryce-data-platform-vps.pem --private-key /etc/trupryce/aws/trupryce-data-platform-vps.key --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:099427795947:trust-anchor/63c0a64e-843d-4603-9f55-0ddc7045ecaa --profile-arn <DATA_PROFILE_ARN> --role-arn arn:aws:iam::099427795947:role/trupryce-data-platform-vps
+
+[profile trupryce-backup]
+region = us-east-1
+credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/trupryce/aws/trupryce-data-platform-vps.pem --private-key /etc/trupryce/aws/trupryce-data-platform-vps.key --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:099427795947:trust-anchor/63c0a64e-843d-4603-9f55-0ddc7045ecaa --profile-arn <BACKUP_PROFILE_ARN> --role-arn arn:aws:iam::099427795947:role/trupryce-data-platform-backup
+```
+
+There must be no `~/.aws/credentials` file and no `aws_access_key_id` anywhere. If you find yourself creating one, stop.
+
+### 1.5 Verify the isolation, from the runtime host
+
+Four assertions. The third and fourth are the ones that actually prove separation, and both must be **run**, not assumed:
+
+```bash
+# 1. the backup identity resolves to the backup role
+aws --profile trupryce-backup sts get-caller-identity --query Arn --output text
+#    expect: .../assumed-role/trupryce-data-platform-backup/...
+
+# 2. the backup identity can reach the backup bucket
 aws --profile trupryce-backup s3 ls s3://trupryce-property-tax-backups/
+
+# 3. the data identity CANNOT reach the backup bucket
+aws --profile trupryce-data-vps s3 ls s3://trupryce-property-tax-backups/
+#    expect: AccessDenied
+
+# 4. the backup identity CANNOT reach the source-data bucket
+aws --profile trupryce-backup s3 ls s3://trupryce-property-tax-data/
+#    expect: AccessDenied
 ```
 
-Expect an ARN ending `assumed-role/trupryce-data-platform-backup/…`. Also confirm the separation still holds — the data role must **not** reach the backup prefix:
+Recorded results are in [Part 5](#part-5--recorded-evidence).
+
+### 1.6 Bucket hardening is not verifiable from the runtime host
+
+The backup role is denied `s3:GetBucketPolicy`, `s3:GetBucketVersioning`, `s3:GetEncryptionConfiguration`, `s3:GetBucketPublicAccessBlock`, `s3:GetLifecycleConfiguration`, and `s3:GetBucketOwnershipControls` — correct least privilege for a role that only reads and writes objects, and it means hardening must be verified with `--profile boss`:
 
 ```bash
-aws --profile trupryce-data-vps s3 ls s3://trupryce-property-tax-backups/   # expect AccessDenied
+for check in get-public-access-block get-bucket-versioning get-bucket-encryption \
+             get-bucket-ownership-controls get-bucket-lifecycle-configuration get-bucket-policy; do
+  printf '== %s\n' "$check"
+  aws --profile boss s3api "$check" --bucket trupryce-property-tax-backups
+done
 ```
 
-No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is created at any point in this procedure. If you find yourself creating one, stop.
-
----
+Re-run this after any bucket change. A backup repository whose public-access block was removed is not detectable from the host that writes to it.
 
 ## Part 2 — pgBackRest and WAL operation
 
@@ -175,14 +269,16 @@ docker exec --user postgres <container> pgbackrest --stanza=platform stanza-crea
 
 ### 2.3 Schedule
 
+The committed units are **templates**. A durable unit must not carry one host's operator account or home directory, or a rebuilt VPS inherits a path that does not exist there and the timer fails at its first fire — silently, because a timer whose service cannot start is not a visible outage.
+
 ```bash
-sudo cp infra/systemd/pgbackrest-*.service infra/systemd/pgbackrest-*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now pgbackrest-full.timer pgbackrest-diff.timer
+sudo SERVICE_USER=<runtime-user> ./infra/scripts/install-systemd-units.sh
 systemctl list-timers 'pgbackrest-*'
 ```
 
-Both timers are `Persistent=true`, so a run missed while the host was down fires at boot rather than waiting for the next window. That matters most for the weekly full: without it, a host down over a Sunday leaves the differentials with no base inside the retention window.
+The installer resolves the service user, the repository path, and the Docker group; creates the certificate group at the GID Compose passes as a supplementary group; refuses to continue if any placeholder survives substitution; and **checks** that the service user can already reach the Docker socket rather than granting it — Docker group membership is root-equivalent and is an operator decision, not a side effect of installing a timer.
+
+Both timers are `Persistent=true`, so a run missed while the host was down fires at boot rather than waiting for the next window. That matters most for the weekly full: without it, a host down over a Sunday leaves the differentials with no base inside the retention window. The differential unit `Conflicts` with the full so the two never run together.
 
 The units select the container by Compose label, not by ID or name, because an ID changes on every recreate and a unit pinned to one keeps running while protecting nothing.
 
@@ -210,17 +306,56 @@ Fix the cause and drain with `pgbackrest --stanza=platform archive-push` before 
 
 ### 2.6 Certificate renewal — due before 2026-11-17
 
-The workload certificate was issued 2026-08-19 for 90 days. When it expires, credential exchange fails, archiving stops, and the symptom is indistinguishable from a backup that quietly stopped running. Renewal is not automated.
+The workload certificate was issued 2026-08-19 for 90 days. When it expires, credential exchange fails, archiving stops, and the symptom is indistinguishable from a backup that quietly stopped running.
 
-Issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key` in `/etc/trupryce/aws/`, and restart PostgreSQL. The trust anchor and role need no change, because trust is anchored to the CA and the subject, not to a specific certificate.
+**Nothing alerts on this.** There is no renewal automation and no monitoring; this change exposes the signal, it does not watch it. Until observability exists, run the check:
 
----
+```bash
+./infra/scripts/check-certificate-expiry.sh
+```
+
+It prints the not-after date and days remaining, and exits non-zero inside the warning window so it is usable from a timer or a CI job later. Manually, the same fact:
+
+```bash
+openssl x509 -in /etc/trupryce/aws/trupryce-data-platform-vps.pem -noout -enddate -subject
+```
+
+Renewing: issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key` in `/etc/trupryce/aws/`, re-apply the group and mode contract from [2.7](#27-certificate-file-permissions), and restart PostgreSQL. The trust anchor and role need no change, because trust is anchored to the CA and the subject rather than to a particular certificate.
+
+### 2.7 Certificate file permissions
+
+`archive_command` runs as the container's `postgres` user (uid 999), and the key is owned by the operator on the host. A read-only mount gives immutability, not readability — so without a shared group the archive fails at runtime with a permission error that no configuration check surfaces.
+
+The contract:
+
+| Path | Owner | Group | Mode |
+|---|---|---|---|
+| `/etc/trupryce/aws` | operator | `TRUPRYCE_AWS_GID` (2000) | `0750` |
+| `trupryce-data-platform-vps.key` | operator | `TRUPRYCE_AWS_GID` | `0640` |
+| `trupryce-data-platform-vps.pem` | operator | `TRUPRYCE_AWS_GID` | `0644` |
+
+The PostgreSQL service joins that GID as a supplementary group (`group_add` in `compose.yaml`). The key is never world-readable and is never copied into an image.
+
+```bash
+sudo groupadd --gid 2000 trupryce-certificates      # once per host
+sudo chgrp -R 2000 /etc/trupryce/aws
+sudo chmod 0750 /etc/trupryce/aws
+sudo chmod 0640 /etc/trupryce/aws/trupryce-data-platform-vps.key
+sudo chmod 0644 /etc/trupryce/aws/trupryce-data-platform-vps.pem
+```
+
+Verify from the container that will actually use it, not from the host:
+
+```bash
+docker exec --user postgres <postgres-container> \
+  test -r /etc/trupryce/aws/trupryce-data-platform-vps.key && echo readable
+```
 
 ## Part 3 — Point-in-time restore
 
 ### The rule
 
-**Never restore over `postgres-data`.** A restore is a hypothesis about what went wrong; testing it by overwriting the only surviving copy of production makes a recoverable incident unrecoverable. Restore into a new volume, verify, and only then decide about promotion.
+**Never restore over `postgres-data`.** A restore is a hypothesis about what went wrong; testing it by overwriting the only surviving copy of production turns a recoverable incident into an unrecoverable one. `pgbackrest-restore.sh` refuses the production volume by name and refuses any Compose-managed volume by label, so the rule is enforced rather than remembered.
 
 ### 3.1 Choose a target
 
@@ -230,28 +365,42 @@ Issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key
 
 The target must lie inside the WAL range of a full backup that precedes it.
 
-### 3.2 Restore into an isolated volume
+### 3.2 Restore
 
 ```bash
-docker volume create pitr-verify-$(date +%s)      # never postgres-data
-docker run --rm \
-  -v pitr-verify-…:/var/lib/postgresql/data \
-  -v /etc/trupryce/aws:/etc/trupryce/aws:ro \
-  -e PGBACKREST_REPO1_CIPHER_PASS=… \
-  -e PGBACKREST_AWS_… \
-  --user postgres property-tax-postgres:16.11 \
-  pgbackrest --stanza=platform --type=time \
-    --target="2026-08-26 23:45:00+00" --target-action=promote restore
+./infra/scripts/pgbackrest-restore.sh --target "2026-08-27 01:23:45+00"
 ```
 
-Start it on a loopback-only non-production port, never `5432`:
+That single command creates a temporary volume, restores into it, and starts an isolated cluster on `127.0.0.1:55432`. Add `--keep` to leave both in place for inspection; without it they are removed on exit.
+
+**The passphrase is never typed.** The wrapper resolves `PGBACKREST_CIPHER_PASS` from Bitwarden itself and hands it to Docker by reference as `-e PGBACKREST_REPO1_CIPHER_PASS`, so the value never appears in argv, in shell history, or in a process listing. Do not write the literal form:
 
 ```bash
-docker run -d --name pitr-verify -p 127.0.0.1:55432:5432 \
-  -v pitr-verify-…:/var/lib/postgresql/data property-tax-postgres:16.11
+# Never do this. The value that makes every backup in S3 readable would land in
+# shell history and in `ps` output for the duration of the restore.
+docker run -e PGBACKREST_REPO1_CIPHER_PASS=<the-passphrase> ...
 ```
 
-### 3.3 What the restored cluster must prove
+The Bitwarden access token stays host-only. It is read from `infra/.bws.env` on the host and never enters Compose interpolation or any container.
+
+### 3.3 Why the recovered container needs the certificate too
+
+The first version of this runbook gave the certificate and configuration to the *restore* step and then started the recovered cluster with only the restored volume. That is not enough.
+
+Reaching the requested timestamp requires PostgreSQL to run `restore_command` — `pgbackrest archive-get` — during startup, to fetch the WAL segments between the base backup and the target. That needs working S3 credentials **inside the recovering container**. Without them PostgreSQL restores the base backup, fails to fetch WAL, and stops short of the target while appearing to have succeeded.
+
+So the isolated cluster starts with all of:
+
+| | |
+|---|---|
+| image | the same pinned `property-tax-postgres:16.11` |
+| data | an isolated temporary volume, never `postgres-data` |
+| certificate | `/etc/trupryce/aws` mounted read-only, plus the certificate GID |
+| identity | the backup trust anchor, profile, and role ARNs |
+| passphrase | from Bitwarden, by reference |
+| network | `127.0.0.1` on a non-production port |
+
+### 3.4 What the restored cluster must prove
 
 Six assertions. The first five are integrity; the sixth is what makes it *point-in-time* rather than merely a restore:
 
@@ -259,42 +408,28 @@ Six assertions. The first five are integrity; the sixth is what makes it *point-
 |---|---|
 | 1 | `property_tax` database exists |
 | 2 | `airflow` database exists |
-| 3 | all four runtime roles exist (`airflow_metadata`, `property_tax_migrator`, `property_tax_ingestion`, `property_tax_api`) |
-| 4 | PostgreSQL starts cleanly and recovery completes |
+| 3 | all four runtime roles exist |
+| 4 | `pg_is_in_recovery()` is false after promotion |
 | 5 | the marker committed **before** the target is present |
 | 6 | the marker committed **after** the target is **absent** |
 
-Assertion 6 is the one that cannot be faked. A restore that replays all available WAL also satisfies 1–5, so proving only those proves a restore happened, not that the target was honoured.
+Assertion 6 cannot be faked. A restore that simply replays all available WAL satisfies 1–5 too, so proving only those proves that a restore happened — not that the target was honoured.
+
+The wrapper prints all six, plus the restored volume name and proof that the production volume was not among the container's mounts.
+
+### 3.5 Creating the markers
 
 ```sql
-SELECT datname FROM pg_database WHERE datname IN ('property_tax','airflow');
-SELECT rolname FROM pg_roles WHERE rolname LIKE 'property_tax%' OR rolname = 'airflow_metadata';
-SELECT state, note FROM public.recovery_marker ORDER BY recorded_at;  -- 'before' only
-SELECT pg_is_in_recovery();
+CREATE TABLE IF NOT EXISTS public.recovery_marker (
+    state text PRIMARY KEY, recorded_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO public.recovery_marker(state) VALUES ('before');
+SELECT pg_switch_wal();
+-- wait past the boundary, choose a target timestamp here
+INSERT INTO public.recovery_marker(state) VALUES ('after');
+SELECT pg_switch_wal();
 ```
 
-Tear down afterwards:
-
-```bash
-docker rm -f pitr-verify && docker volume rm pitr-verify-…
-```
-
-### 3.4 Recorded exercise
-
-> **Not yet exercised.** The AWS-side bootstrap in Part 1 requires administrative credentials the runtime host does not hold, so the repository does not yet exist and no backup has been taken. This section is filled in from a real run, not from expectation.
->
-> | Field | Value |
-> |---|---|
-> | Date | *pending* |
-> | Backup label | *pending* |
-> | Target timestamp | *pending* |
-> | Measured RPO | *pending* |
-> | Measured RTO | *pending* |
-> | Assertions 1–6 | *pending* |
-
-Record no credential, no certificate material, no passphrase, and no production source data here.
-
----
+Forcing a WAL switch after each marker is what puts the segment containing it into S3; without it the marker is committed locally but not yet recoverable, and the exercise measures nothing.
 
 ## Part 4 — Clean-host restore onto another provider
 
