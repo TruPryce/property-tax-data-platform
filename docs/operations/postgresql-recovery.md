@@ -182,16 +182,13 @@ Confirm `enabled` reads `True` before continuing.
 
 ### 1.4 Configure the VPS-local profiles
 
-Both profile ARNs are discoverable rather than remembered. Run with administrator credentials and paste the results into `~/.aws/config`:
+Both profile ARNs are discoverable rather than remembered. With administrator credentials:
 
 ```bash
 aws --profile boss rolesanywhere list-profiles \
   --query "profiles[].{name:name,enabled:enabled,arn:profileArn}" --output table
-```
 
-The data profile is the one bound to `role/trupryce-data-platform-vps`; the backup profile is bound to `role/trupryce-data-platform-backup`. To resolve each by the role it grants rather than by name:
-
-```bash
+# resolved by the role each grants, rather than by name
 for role in trupryce-data-platform-vps trupryce-data-platform-backup; do
   printf '%s -> ' "$role"
   aws --profile boss rolesanywhere list-profiles \
@@ -199,20 +196,25 @@ for role in trupryce-data-platform-vps trupryce-data-platform-backup; do
 done
 ```
 
-On the runtime host. The existing data profile is `trupryce-data-vps`; the new one is `trupryce-backup`. Both use `credential_process`, and neither stores a key:
+Put both, and this host's certificate paths, into `infra/.env`:
 
-```ini
-# ~/.aws/config, mode 0600
-[profile trupryce-data-vps]
-region = us-east-1
-credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/trupryce/aws/trupryce-data-platform-vps.pem --private-key /etc/trupryce/aws/trupryce-data-platform-vps.key --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:099427795947:trust-anchor/63c0a64e-843d-4603-9f55-0ddc7045ecaa --profile-arn <DATA_PROFILE_ARN> --role-arn arn:aws:iam::099427795947:role/trupryce-data-platform-vps
-
-[profile trupryce-backup]
-region = us-east-1
-credential_process = /usr/local/bin/aws_signing_helper credential-process --certificate /etc/trupryce/aws/trupryce-data-platform-vps.pem --private-key /etc/trupryce/aws/trupryce-data-platform-vps.key --trust-anchor-arn arn:aws:rolesanywhere:us-east-1:099427795947:trust-anchor/63c0a64e-843d-4603-9f55-0ddc7045ecaa --profile-arn <BACKUP_PROFILE_ARN> --role-arn arn:aws:iam::099427795947:role/trupryce-data-platform-backup
+```text
+TRUPRYCE_AWS_CERTIFICATE=<HOST_CERTIFICATE>
+TRUPRYCE_AWS_PRIVATE_KEY=<HOST_PRIVATE_KEY>
+TRUPRYCE_AWS_TRUST_ANCHOR_ARN=<TRUST_ANCHOR_ARN>
+TRUPRYCE_AWS_DATA_PROFILE_ARN=<DATA_PROFILE_ARN>
+TRUPRYCE_AWS_DATA_ROLE_ARN=<DATA_ROLE_ARN>
+TRUPRYCE_AWS_PROFILE_ARN=<BACKUP_PROFILE_ARN>
+TRUPRYCE_AWS_ROLE_ARN=<BACKUP_ROLE_ARN>
 ```
 
-There must be no `~/.aws/credentials` file and no `aws_access_key_id` anywhere. If you find yourself creating one, stop.
+Then render `~/.aws/config` from them:
+
+```bash
+./infra/scripts/install-aws-profiles.sh
+```
+
+**Do not hand-author these profiles.** That is how a rebuilt host ends up pointing at the retired host's certificate: the procedure says "generate a new key, do not reuse the old one" and then shows a config block containing `trupryce-data-platform-vps.pem`, and the second one is what gets copied. The renderer derives everything from `infra/.env`, writes mode `0600`, stores no credential, and prints the certificate subject it wired up so a wrong certificate is visible immediately.
 
 ### 1.5 Verify the isolation, from the runtime host
 
@@ -544,12 +546,15 @@ Top to bottom on the new host. Each step depends on the one above it, and the or
                                       existing CA as CN=trupryce-data-platform-hostinger
  6  authorize the new subject         add that CN to both trust policies, --profile boss
  7  install identity + permissions    sudo ./infra/scripts/install-certificate-identity.sh
- 8  configure local AWS profiles      ~/.aws/config: trupryce-data-vps, trupryce-backup
+ 8  render local AWS profiles         ./infra/scripts/install-aws-profiles.sh
  9  prove identity isolation          STS + the four S3 assertions from §1.5
 10  build the PostgreSQL image        ./infra/scripts/compose-with-bitwarden.sh build postgres
-11  restore AND verify AND promote    ./infra/scripts/pgbackrest-restore.sh --promote --target ...
-12    (11 does all three: restores into the volume Compose will adopt, verifies
-13     it in isolation, and keeps it only if all six assertions pass)
+10a fence the OLD host (planned move) ./infra/scripts/cutover-fence.sh   [on Akamai]
+                                      skip only for a disaster, where there is
+                                      nothing left to fence
+11  restore AND verify AND promote    ./infra/scripts/pgbackrest-restore.sh --promote
+12    (11 does all three: restores to the end of the archive into the volume
+13     Compose will adopt, verifies it in isolation, keeps it only if it passes)
 14  start the runtime                 ./infra/scripts/compose-with-bitwarden.sh up -d
 15  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
 16  install and prove the timers      sudo SERVICE_USER="$(id -un)" REPOSITORY_DIR="$PWD" \
@@ -601,6 +606,36 @@ unset BWS_ACCESS_TOKEN BWS_PROJECT_ID
   ]
 }
 ```
+
+**A planned move needs a write fence, and it comes before the restore.**
+
+A restore reproduces the archive, not the source. Anything committed on the old host after its last archived WAL is simply absent from the new primary, and nothing about a successful restore will say so. Airflow's metadata alone makes that concrete even when ingestion is idle — the scheduler heartbeats into its database every few seconds regardless of whether any DAG runs, which is why the quiescence check names four connected writers on an otherwise quiet system.
+
+Restoring first and fencing afterwards leaves a window as long as verification took. So the order inverts:
+
+```text
+   Akamai serving normally
+        │
+        ├─ fence every writer            ./infra/scripts/cutover-fence.sh
+        │    stops Airflow scheduler, triggerer, dag-processor, api-server
+        │    refuses to continue while any client backend remains connected
+        │    pg_switch_wal(), then waits for that segment to appear in S3
+        │    prints the recoverable boundary
+        │
+        ├─ Akamai stays fenced ─────────────────────────────┐
+        │                                                   │
+   Hostinger: --promote (no --target = end of archive)      │
+        ├─ verify in isolation                              │
+        ├─ start the runtime                                │
+        ├─ verify asynchronous archiving                    │
+        ├─ cut traffic and workloads over                   │
+        │                                                   │
+        └─ only now revoke the Akamai identity ─────────────┘
+```
+
+Nothing may be written on the old host between the fence and cutover. Restarting Airflow "just to check something" creates metadata writes the new primary will not have, and they are invisible afterwards.
+
+**For a disaster** — the old host is gone — there is nothing to fence. Promote to the end of the archive and accept that the recovery point is the last successfully archived WAL, which is what the archiver's `last_archived_wal` reports and what the observability requirement must eventually alert on.
 
 **Step 11 is the promotion path, and it is deliberately a single command.**
 
@@ -711,6 +746,32 @@ Verifying a restore in an isolated volume and then starting Compose against a di
 | write test | `CREATE TABLE` + `INSERT` succeeded — a real promoted primary, not a replica |
 
 The failure direction was checked too: the run refuses outright while the production volume exists, and a failed assertion destroys the volume rather than leaving an unverified one for Compose to pick up.
+
+### Promotion verified without the drill markers
+
+The promotion contract was exercised against a backup of the **current** cluster, which has no `recovery_marker` table — the real migration case:
+
+```text
+  1. property_tax database exists : true
+  2. airflow database exists      : true
+  3. runtime roles present (want 4): 4
+  4. pg_is_in_recovery() is false : true
+  5. accepts writes (real primary) : true
+  6. migration ledger consistent   : true (absent; pre-migration cluster)
+  write probe succeeded
+```
+
+Restored to the end of the archive with no `--target`, then labelled `trupryce.promotion=managed` and sentinelled `verified`. The failure directions were exercised too:
+
+| Scenario | Result |
+|---|---|
+| target later than the last commit on an idle database | `recovery ended before configured recovery target was reached` → volume destroyed |
+| assertion failure | volume destroyed, nothing left for Compose |
+| labelled volume with the sentinel removed (simulating a crash) | `compose … up` **refused** |
+| sentinel restored | `compose … up` proceeded |
+| volume with no promotion label (every pre-existing volume) | unaffected |
+
+The fence's own logic was validated against the live cluster without cutting over: the quiescence query named all four connected Airflow writers — so the fence would refuse to take a boundary — and the WAL flush and S3 confirmation completed in 5 s. The full fence is an operator action at actual cutover time and has not been run here, because it stops Airflow.
 
 ### What this exercise cost, and what it caught
 

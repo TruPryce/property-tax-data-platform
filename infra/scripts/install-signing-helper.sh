@@ -36,10 +36,24 @@ if [[ -x "$INSTALL_PATH" ]]; then
     existing_digest="$(sha256sum "$INSTALL_PATH" | cut -d' ' -f1)"
     installed_version="$("$INSTALL_PATH" version 2>/dev/null || true)"
     if [[ "$existing_digest" == "$SIGNING_HELPER_SHA256" ]]; then
-        info "$INSTALL_PATH already at $SIGNING_HELPER_VERSION (digest verified)"
-        exit 0
-    fi
-    if [[ "$installed_version" == "$SIGNING_HELPER_VERSION" ]]; then
+        # Correct bytes are not enough. If the file or its directory is writable
+        # by anyone but root, the digest just verified says nothing about what
+        # will run next -- and what runs next turns the workload private key
+        # into AWS credentials. Reinstall to fix ownership and mode rather than
+        # accepting it.
+        existing_owner="$(stat -c '%u:%g' "$INSTALL_PATH")"
+        existing_mode="$(stat -c '%a' "$INSTALL_PATH")"
+        directory_mode="$(stat -c '%a' "$(dirname "$INSTALL_PATH")")"
+        if [[ "$existing_owner" == "0:0" ]] \
+            && (( (8#$existing_mode & 022) == 0 )) \
+            && (( (8#$directory_mode & 022) == 0 )); then
+            info "$INSTALL_PATH already at $SIGNING_HELPER_VERSION (digest verified, root-owned, not writable)"
+            exit 0
+        fi
+        info "$INSTALL_PATH has the right digest but weak permissions"
+        info "  owner $existing_owner mode $existing_mode, directory mode $directory_mode"
+        info "reinstalling to restore root:root and a non-writable mode"
+    elif [[ "$installed_version" == "$SIGNING_HELPER_VERSION" ]]; then
         # The dangerous case, called out explicitly: right version, wrong bytes.
         info "$INSTALL_PATH reports $SIGNING_HELPER_VERSION but its digest does not match the pin"
         info "  expected $SIGNING_HELPER_SHA256"

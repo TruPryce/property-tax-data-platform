@@ -1481,7 +1481,130 @@ def test_clean_host_prerequisites_name_every_tool_the_procedure_uses() -> None:
     # Profile ARNs are discovered, not left as placeholders to guess.
     assert "rolesanywhere list-profiles" in runbook
     assert "contains(roleArns[0]" in runbook
-    # The promotion path is what the procedure actually tells you to run.
-    assert "--promote --target" in runbook
+    # The promotion path is what the procedure actually tells you to run, and it
+    # no longer names a target: a migration restores to the end of the archive.
+    assert "pgbackrest-restore.sh --promote" in runbook
     # And the removed primitive is not still described as present.
     assert "`Conflicts` with the full" not in runbook
+
+
+def test_promotion_does_not_require_the_disposable_drill_markers() -> None:
+    """A drill and a disaster restore are not the same procedure.
+
+    The before/after markers are the only assertion proving a chosen target was
+    honoured, so the drill must keep them. They are also a testing artifact the
+    runbook drops from production afterwards, so requiring them for promotion
+    would fail every real migration -- and, worse, destroy the restored volume
+    on the way out.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "--exercise" in script
+    # Anchored to the assertion-query construction. Splitting on the first
+    # `if [[ "$promote" == true ]]` lands in the volume-precondition block,
+    # which mentions neither contract.
+    assertions_block = script.split("common_assertions=", 1)[1]
+    branch = assertions_block.split('if [[ "$promote" == true ]]; then', 1)[1]
+    promote_branch, exercise_branch = branch.split("\nelse\n", 1)
+    # The drill keeps the markers.
+    assert "recovery_marker" in exercise_branch
+    # The promotion must not mention them at all.
+    assert "recovery_marker" not in promote_branch, "promotion still depends on the drill markers"
+    # It proves a writable primary by writing, and reports the migration ledger.
+    assert "accepts writes (real primary)" in promote_branch
+    assert "migration ledger consistent" in promote_branch
+    assert "trupryce_promotion_probe" in script
+    # A promotion may restore to the end of the archive; a drill may not.
+    assert "--target is required for a PITR exercise" in script
+
+
+def test_promoted_volume_is_unadoptable_until_verification_is_recorded() -> None:
+    """An EXIT trap cannot run after kill -9, a reboot, or power loss.
+
+    The label is written by Docker when the volume is created, before any data
+    exists, so it survives any interruption; the sentinel is written only after
+    every assertion and a real write probe. A volume interrupted at any point is
+    therefore labelled and unverified, and the Compose preflight refuses it.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert '--label "$PROMOTION_LABEL=managed"' in script
+    # Sentinel written after verification, never before.
+    body = script.split('if [[ "$verified" == true ]]; then', 1)[1]
+    assert "$PROMOTION_SENTINEL" in body
+
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    assert "require_verified_promotion" in wrapper
+    assert "trupryce.promotion" in wrapper
+    assert "promotion that did not complete" in wrapper
+    # Gated on the startup subcommands, not on every invocation.
+    assert "up | start | run | create) require_verified_promotion" in wrapper
+
+
+def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
+    """A restore reproduces the archive, not the source.
+
+    Fencing after the restore leaves a window as long as verification took, so
+    the fence has to come first and the boundary has to be taken from a
+    quiescent database.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    order = [
+        script.index("1. fence writers"),
+        script.index("2. confirm the database is quiescent"),
+        script.index("3. flush the final WAL segment"),
+        script.index("4. wait for it to reach S3"),
+        script.index("5. recoverable boundary"),
+    ]
+    assert order == sorted(order), "fence steps are out of order"
+    # Airflow is the writer that never stops on its own.
+    for service in ("airflow-scheduler", "airflow-triggerer", "airflow-dag-processor"):
+        assert service in script, service
+    assert "clients are still connected" in script
+    assert "did not reach S3 within" in script
+    # It reports a boundary; it does not cut over.
+    assert "This host stays fenced" in script
+
+
+def test_aws_profiles_are_rendered_from_the_host_configuration() -> None:
+    """Hand-authored profiles are how a rebuild points at the retired host's key."""
+    script = (INFRA_ROOT / "scripts" / "install-aws-profiles.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    assert "read_configuration_value" in script
+    for name in (
+        "TRUPRYCE_AWS_CERTIFICATE",
+        "TRUPRYCE_AWS_PRIVATE_KEY",
+        "TRUPRYCE_AWS_TRUST_ANCHOR_ARN",
+        "TRUPRYCE_AWS_DATA_PROFILE_ARN",
+        "TRUPRYCE_AWS_DATA_ROLE_ARN",
+        "TRUPRYCE_AWS_PROFILE_ARN",
+        "TRUPRYCE_AWS_ROLE_ARN",
+    ):
+        assert name in script, name
+    assert "chmod 0600" in script
+    assert "credential_process" in script
+    # No stored key, ever.
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "aws_access_key_id =" not in code
+    assert "aws_secret_access_key =" not in code
+
+    # The runbook must send the operator to the renderer, not to a config block
+    # naming one particular host's certificate.
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    assert "install-aws-profiles.sh" in runbook
+    for line in shell_command_lines(runbook):
+        if "credential_process" in line:
+            raise AssertionError(f"runbook hand-authors a profile: {line[:80]}")
+    assert "<HOST_CERTIFICATE>" in runbook
+    assert "cutover-fence.sh" in runbook
+
+
+def test_signing_helper_fast_path_requires_root_owned_and_unwritable() -> None:
+    """Correct bytes say nothing if the file can be replaced after the check."""
+    script = (INFRA_ROOT / "scripts" / "install-signing-helper.sh").read_text(encoding="utf-8")
+    assert "existing_owner=\"$(stat -c '%u:%g'" in script
+    assert '"$existing_owner" == "0:0"' in script
+    assert "(( (8#$existing_mode & 022) == 0 ))" in script
+    assert "(( (8#$directory_mode & 022) == 0 ))" in script
+    assert "weak permissions" in script

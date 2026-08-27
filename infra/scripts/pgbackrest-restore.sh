@@ -21,6 +21,8 @@ infra_dir="$(cd "$script_dir/.." && pwd)"
 compose_environment_file="${COMPOSE_ENV_FILE:-$infra_dir/.env}"
 bitwarden_environment_file="${BWS_ENV_FILE:-$infra_dir/.bws.env}"
 
+PROMOTION_LABEL="trupryce.promotion"
+PROMOTION_SENTINEL=".trupryce-promotion"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-property-tax-platform}"
 COMPOSE_VOLUME_NAME="${COMPOSE_VOLUME_NAME:-postgres-data}"
 PRODUCTION_VOLUME="${PRODUCTION_VOLUME:-${COMPOSE_PROJECT_NAME}_${COMPOSE_VOLUME_NAME}}"
@@ -34,16 +36,21 @@ info() { printf 'pgbackrest-restore: %s\n' "$*" >&2; }
 usage() {
     cat >&2 <<'USAGE'
 usage: pgbackrest-restore.sh --target "<timestamp>" [--volume NAME] [--port N] [--keep]
+       pgbackrest-restore.sh --promote [--target "<timestamp>"] [--port N]
 
   --target   recovery target timestamp, e.g. "2026-08-27 01:23:45+00"
   --volume   temporary Docker volume to restore into (default: generated)
   --port     loopback port for the isolated cluster (default: 55432)
   --keep     leave the container and volume in place for inspection
+  --exercise periodic PITR drill (default). Restores into a throwaway volume and
+             additionally requires the disposable before/after markers, which is
+             what proves the recovery TARGET was honoured rather than that a
+             restore merely happened.
   --promote  clean-host mode: restore into the PRODUCTION volume, verify it in
              isolation, and leave it for Compose to adopt. Requires that the
              production volume does not yet exist, so it can never overwrite a
-             live cluster. A failed verification destroys the volume rather
-             than leaving an unverified one for Compose to pick up.
+             live cluster. Does NOT require the drill markers -- a real
+             migration or disaster restores a cluster that has no such table.
 USAGE
     exit 2
 }
@@ -58,12 +65,21 @@ while [[ $# -gt 0 ]]; do
         --volume) restore_volume="${2:?--volume needs a value}"; shift 2 ;;
         --port) RESTORE_PORT="${2:?--port needs a value}"; shift 2 ;;
         --keep) keep=true; shift ;;
+        --exercise) promote=false; shift ;;
         --promote) promote=true; shift ;;
         -h | --help) usage ;;
         *) die "unexpected argument: $1" ;;
     esac
 done
-[[ -n "$target" ]] || usage
+# A drill must name a target: the whole point is proving a chosen point in time
+# was honoured. A promotion defaults to the end of the archive, because a
+# migration or disaster wants everything that was successfully archived, not a
+# historical moment -- and because a timestamp later than the last commit makes
+# PostgreSQL fail with "recovery ended before configured recovery target was
+# reached", which on an idle database is any timestamp at all.
+if [[ "$promote" != true && -z "$target" ]]; then
+    die "--target is required for a PITR exercise; --promote may omit it to restore to the end of the archive"
+fi
 [[ "$promote" == true && -n "$restore_volume" ]] \
     && die "--promote restores into $PRODUCTION_VOLUME; --volume cannot be combined with it"
 
@@ -176,6 +192,11 @@ cleanup() {
         # ready to adopt a restore nobody proved.
         docker rm -f "$container" >/dev/null 2>&1 || true
         if [[ "$verified" == true ]]; then
+            # Written only here, after every assertion and the write probe. The
+            # Compose preflight refuses a promotion-labelled volume without it.
+            docker run --rm -v "$restore_volume:/v" alpine:3.20 \
+                sh -c "printf 'verified %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > /v/$PROMOTION_SENTINEL" >/dev/null 2>&1 \
+                || die "could not record verification on $restore_volume"
             info "verified; $restore_volume is ready for Compose to adopt"
             info "next: ./infra/scripts/compose-with-bitwarden.sh up -d"
         else
@@ -197,14 +218,21 @@ trap cleanup EXIT
 if [[ "$promote" == true ]]; then
     # Labelled as Compose labels its own, so `docker volume ls` and Compose
     # tooling see it the same way after adoption.
+    # The promotion label is written by Docker when the volume is created,
+    # before any data exists, and cannot be lost by a crash the way an EXIT trap
+    # can. Together with the sentinel written only after verification, it means
+    # a volume interrupted at ANY point -- kill -9, reboot, power loss -- is
+    # still recognisably unverified, because the label says it was promoted and
+    # no sentinel says it passed. A volume without the label, such as one that
+    # predates this mechanism, is unaffected.
     docker volume create \
         --label com.docker.compose.project="$COMPOSE_PROJECT_NAME" \
         --label com.docker.compose.volume="$COMPOSE_VOLUME_NAME" \
+        --label "$PROMOTION_LABEL=managed" \
         "$restore_volume" >/dev/null
 else
     docker volume create "$restore_volume" >/dev/null
 fi
-info "restoring into volume $restore_volume (target: $target)"
 
 # -e NAME, never -e NAME=value: the passphrase passes by reference from this
 # process's environment and never appears in argv.
@@ -221,13 +249,24 @@ identity_arguments=(
     --group-add "$certificate_gid"
 )
 
+# --target-action is only valid alongside --type. With no target, PostgreSQL
+# replays to the end of the archive and promotes on its own, because pgBackRest
+# writes recovery.signal rather than standby.signal.
+restore_arguments=(--stanza="$STANZA" --delta restore)
+if [[ -n "$target" ]]; then
+    restore_arguments=(--stanza="$STANZA" --type=time --target="$target"
+                       --target-action=promote --delta restore)
+    info "restoring into volume $restore_volume (target: $target)"
+else
+    info "restoring into volume $restore_volume (target: end of archive)"
+fi
+
 docker run --rm --init \
     -v "$restore_volume:/var/lib/postgresql/data" \
     "${identity_arguments[@]}" \
     --user postgres \
     "$RESTORE_IMAGE" \
-    pgbackrest --stanza="$STANZA" --type=time --target="$target" \
-        --target-action=promote --delta restore
+    pgbackrest "${restore_arguments[@]}"
 
 info "restore complete; starting the isolated cluster on ${bind_address}:${RESTORE_PORT}"
 
@@ -277,14 +316,51 @@ fi
 # heredoc reaches psql as an empty script and every assertion silently prints
 # nothing -- an exercise that looks like it ran and asserted zero things.
 printf '\n===== isolated recovery assertions =====\n'
-assertions=$(docker exec "$container" psql -U platform_admin -d postgres -v ON_ERROR_STOP=1 -tAc "
+# Two contracts, because a drill and a disaster restore are not the same thing.
+#
+# The drill additionally requires the disposable before/after markers, which is
+# the only assertion that proves the recovery TARGET was honoured rather than
+# that a restore merely happened -- so it must not be weakened.
+#
+# A promotion must not require them. The markers are a testing artifact the
+# runbook drops from production afterwards, so a real migration or disaster
+# restores a cluster that has no such table. Requiring it there would fail every
+# genuine recovery and, worse, destroy the restored volume on the way out.
+common_assertions="
 SELECT '  1. property_tax database exists : ' || (EXISTS (SELECT 1 FROM pg_database WHERE datname='property_tax'))::text
 UNION ALL SELECT '  2. airflow database exists      : ' || (EXISTS (SELECT 1 FROM pg_database WHERE datname='airflow'))::text
 UNION ALL SELECT '  3. runtime roles present (want 4): ' || (SELECT count(*) FROM pg_roles WHERE rolname IN ('airflow_metadata','property_tax_migrator','property_tax_ingestion','property_tax_api'))::text
-UNION ALL SELECT '  4. pg_is_in_recovery() is false : ' || (NOT pg_is_in_recovery())::text
+UNION ALL SELECT '  4. pg_is_in_recovery() is false : ' || (NOT pg_is_in_recovery())::text"
+
+if [[ "$promote" == true ]]; then
+    # 5 proves this is a writable primary rather than a cluster that merely
+    # finished replay. 6 reports the migration ledger without requiring it:
+    # absent is correct before task 3.4 is applied, and a present-but-empty
+    # ledger would mean the restore lost it.
+    # Computed in two steps rather than one CASE. PostgreSQL plans every branch
+    # of a CASE, so naming platform.schema_migration inside an unreachable arm
+    # still raises "relation does not exist" on a cluster that predates the
+    # migrations -- which is every cluster today.
+    if [[ "$(docker exec "$container" psql -U platform_admin -d property_tax -tAc \
+             "SELECT to_regclass('platform.schema_migration') IS NOT NULL" 2>/dev/null \
+             | tr -d '[:space:]')" == "t" ]]; then
+        ledger="$(docker exec "$container" psql -U platform_admin -d property_tax -tAc \
+            "SELECT CASE WHEN count(*) > 0 THEN 'true (max version ' || max(version)::text || ')'
+                         ELSE 'false (ledger present but empty)' END FROM platform.schema_migration" \
+            2>/dev/null | sed 's/^[[:space:]]*//')"
+    else
+        ledger="true (absent; pre-migration cluster)"
+    fi
+    assertion_query="$common_assertions
+UNION ALL SELECT '  5. accepts writes (real primary) : ' || (SELECT CASE WHEN pg_is_in_recovery() THEN 'false' ELSE 'true' END)
+UNION ALL SELECT '  6. migration ledger consistent   : ' || \$\$${ledger}\$\$"
+else
+    assertion_query="$common_assertions
 UNION ALL SELECT '  5. marker before present        : ' || (EXISTS (SELECT 1 FROM public.recovery_marker WHERE state='before'))::text
-UNION ALL SELECT '  6. marker after ABSENT          : ' || (NOT EXISTS (SELECT 1 FROM public.recovery_marker WHERE state='after'))::text
-")
+UNION ALL SELECT '  6. marker after ABSENT          : ' || (NOT EXISTS (SELECT 1 FROM public.recovery_marker WHERE state='after'))::text"
+fi
+
+assertions=$(docker exec "$container" psql -U platform_admin -d postgres -v ON_ERROR_STOP=1 -tAc "$assertion_query")
 printf '%s\n' "$assertions"
 
 # An empty or short result means the assertions did not run. Fail loudly rather
@@ -292,8 +368,19 @@ printf '%s\n' "$assertions"
 if [[ "$(printf '%s\n' "$assertions" | grep -c .)" -ne 6 ]]; then
     die "recovery assertions did not execute; refusing to report a passing exercise"
 fi
-if printf '%s' "$assertions" | grep -qE ': false$|\(want 4\): [0-3]$'; then
+if printf '%s' "$assertions" | grep -qE ': false$|: false |\(want 4\): [0-3]$'; then
     die "a recovery assertion failed"
+fi
+
+if [[ "$promote" == true ]]; then
+    # Assertion 5 says the cluster is out of recovery; this proves it by doing
+    # it, because "not in recovery" and "accepts a write" have differed before.
+    docker exec "$container" psql -U platform_admin -d postgres -v ON_ERROR_STOP=1 -qc \
+        'CREATE TABLE IF NOT EXISTS public.trupryce_promotion_probe (checked_at timestamptz primary key);
+         INSERT INTO public.trupryce_promotion_probe VALUES (now());
+         DROP TABLE public.trupryce_promotion_probe;' >/dev/null \
+        || die "restored cluster did not accept a write; not promoting it"
+    info "write probe succeeded"
 fi
 verified=true
 

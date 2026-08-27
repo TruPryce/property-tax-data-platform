@@ -139,6 +139,44 @@ if [[ "$renders_full_configuration" == true && "$config_output_is_bounded" == fa
   exit 2
 fi
 
+# A promotion-labelled volume that never finished verification must not become
+# the next production primary.
+#
+# pgbackrest-restore.sh --promote labels the volume at creation, before any data
+# exists, and writes the verified sentinel only after every assertion and a real
+# write probe. An EXIT trap cleans up ordinary failures, but kill -9, a reboot,
+# or power loss cannot run a trap -- so the label survives and the sentinel does
+# not, and this refuses to start on it. A volume without the label, including
+# every volume predating this mechanism, is untouched.
+require_verified_promotion() {
+    local project volume label sentinel
+    project="$(read_configuration_value COMPOSE_PROJECT_NAME "$compose_environment_file")"
+    project="${project:-property-tax-platform}"
+    volume="${project}_postgres-data"
+
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+
+    label="$(docker volume inspect "$volume" \
+        --format '{{index .Labels "trupryce.promotion"}}' 2>/dev/null || true)"
+    [[ "$label" == "managed" ]] || return 0
+
+    sentinel="$(docker run --rm -v "$volume:/v:ro" alpine:3.20 \
+        sh -c 'cat /v/.trupryce-promotion 2>/dev/null || true' 2>/dev/null || true)"
+    if [[ "$sentinel" == verified* ]]; then
+        return 0
+    fi
+
+    echo "refusing to start: $volume was created by a promotion that did not complete" >&2
+    echo "it carries the promotion label but no verified sentinel, so no restore of it" >&2
+    echo "was ever proven. Remove it and re-run pgbackrest-restore.sh --promote:" >&2
+    echo "  docker volume rm $volume" >&2
+    exit 2
+}
+
+case "$(compose_subcommand "$@")" in
+    up | start | run | create) require_verified_promotion ;;
+esac
+
 BWS_ACCESS_TOKEN="$(read_configuration_value BWS_ACCESS_TOKEN "$bitwarden_environment_file")"
 BWS_PROJECT_ID="$(read_configuration_value BWS_PROJECT_ID "$bitwarden_environment_file")"
 
