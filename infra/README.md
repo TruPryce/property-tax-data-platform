@@ -175,9 +175,10 @@ WAL archiving and physical backups **are** configured: PostgreSQL runs with `arc
 `archive_command='pgbackrest --stanza=platform archive-push %p'`, and `archive_timeout=300`,
 writing to an encrypted pgBackRest repository in S3 reached by a dedicated keyless identity.
 The host workload certificate is bind-mounted read-only from `/etc/trupryce/aws` and is never
-baked into an image. Backups are scheduled by systemd timers, never by Airflow. See
-[PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md); the recorded
-restore exercise there is not yet filled in. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
+baked into an image. Backup scheduling is systemd, never Airflow; **the units are implemented and
+their installation on the Akamai host remains pending**, so scheduled physical backups are not yet
+running. Manual backups and the recorded point-in-time restore exercise are in
+[PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md). Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
 
 The machine access token is a separate bootstrap credential. On the host it lives only in `.bws.env`, owned by the invoking user with mode `0600`; the wrapper refuses to run if that file grants any group or world permission. Because the token cannot bootstrap itself from Secrets Manager, a second copy belongs in the Bitwarden vault alongside the other escrowed recovery material, and the credentials guarding that vault belong in offline custody.
 

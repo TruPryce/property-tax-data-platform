@@ -26,8 +26,10 @@ set -euo pipefail
 # cleaned environment. The variables are present for `docker exec` and for
 # stanza-create, and absent for archive-push -- so an environment-only wrapper
 # authenticates during every check an operator runs by hand and fails only in
-# the background, where the failure surfaces as PostgreSQL crash-looping on a
-# dead archive command rather than as a credential problem.
+# the background, where the failure surfaces as the cluster restarting rather
+# than as a credential problem -- pgBackRest's async worker is orphaned onto
+# PID 1, which is the postmaster, so its nonzero exit is reaped as an
+# unrecognised server process rather than as an archive failure.
 #
 # Environment still wins where it is set, which is what lets the restore wrapper
 # and the tests point at a different identity without rewriting this file.

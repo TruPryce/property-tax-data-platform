@@ -44,9 +44,17 @@ RUN set -eux; \
 # check an operator runs by hand passes, while the archiver -- a child of the
 # postmaster -- runs without it and cannot read the certificate at all.
 #
-# That failure is not quiet. archive-push exits 103, PostgreSQL treats the dead
-# archive command as a crash, and the cluster enters a restart loop. Measured on
-# the deployed runtime before this line existed.
+# That failure is not quiet, though the mechanism is indirect. pgBackRest's
+# asynchronous archive worker daemonizes, so it is orphaned and reparented to
+# PID 1 -- which in this image is the postmaster itself. When the orphan exits
+# 103 the postmaster reaps a child it does not recognise, reports it as
+# `server process (PID n) exited with exit code 103`, and performs a full
+# crash-recovery restart of the cluster.
+#
+# An ordinary nonzero archive_command exit does NOT do this -- it is logged as
+# `archive command failed` and retried. Verified against postgres:16.11: exit
+# 103 from archive_command produced zero restarts, while a detached child
+# exiting 103 reproduced the restart loop verbatim.
 ARG TRUPRYCE_AWS_GID=2000
 RUN set -eux; \
     groupadd --gid "${TRUPRYCE_AWS_GID}" trupryce-certificates; \

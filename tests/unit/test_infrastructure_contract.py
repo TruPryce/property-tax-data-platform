@@ -1089,7 +1089,10 @@ def test_image_grants_postgres_the_certificate_group() -> None:
     from the image's /etc/group, dropping anything Docker added. `docker exec
     --user postgres` keeps the added group, so every hand-run check passes while
     the archiver -- a child of the postmaster -- runs without it, cannot read the
-    key, and takes the cluster into a restart loop.
+    key. The resulting failure presents as cluster restarts rather than archive
+    errors, because pgBackRest's daemonized async worker is orphaned onto PID 1
+    -- the postmaster -- whose nonzero exit is reaped as an unrecognised server
+    process. An ordinary nonzero archive_command exit is merely retried.
     """
     dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
     assert "groupadd --gid" in dockerfile
@@ -1128,3 +1131,134 @@ def test_postmaster_children_can_read_the_key_without_docker_group_add() -> None
         "postgres cannot read the key from image group membership alone; "
         "the archiver would fail at runtime"
     )
+
+
+IDENTITY_INSTALLER = INFRA_ROOT / "scripts" / "install-certificate-identity.sh"
+IDENTITY_FILE = CERTIFICATE_DIR / "identity.env"
+
+
+def test_identity_installer_derives_values_and_admits_no_secret() -> None:
+    """The async worker's identity file must be reproducible on a clean host.
+
+    It is derived from infra/.env rather than hand-written, so an ARN has one
+    home and no duplicate to drift, and it carries only non-secret values: the
+    passphrase, the Bitwarden token, and AWS credentials are all obtained
+    elsewhere and would be readable by the whole certificate group if written
+    here.
+    """
+    script = IDENTITY_INSTALLER.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    for key in (
+        "TRUPRYCE_AWS_CERTIFICATE",
+        "TRUPRYCE_AWS_PRIVATE_KEY",
+        "TRUPRYCE_AWS_TRUST_ANCHOR_ARN",
+        "TRUPRYCE_AWS_PROFILE_ARN",
+        "TRUPRYCE_AWS_ROLE_ARN",
+    ):
+        assert key in script, key
+    # Derived, not duplicated.
+    assert "read_configuration_value" in script
+    assert "$infra_dir/.env" in script
+    # Refuses to write anything secret-shaped.
+    for forbidden in ("PGBACKREST_CIPHER_PASS", "BWS_ACCESS_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+        assert forbidden in script, f"{forbidden} is not guarded against"
+    assert "refusing to write" in script
+    # The permission contract lives here too, and fails closed.
+    assert "chmod 0640" in script and "chmod 0750" in script
+    assert "world-accessible" in script
+
+
+@pytest.mark.skipif(not IDENTITY_FILE.exists(), reason="requires the host identity file")
+def test_installed_identity_file_holds_no_secret_and_matches_the_contract() -> None:
+    mode = stat.S_IMODE(IDENTITY_FILE.stat().st_mode)
+    assert mode & 0o007 == 0, f"identity file is world-accessible: {mode:o}"
+    assert mode & 0o040, f"identity file is not group-readable: {mode:o}"
+    assert IDENTITY_FILE.stat().st_gid == int(certificate_gid())
+
+    assignments = {
+        line.split("=", 1)[0].strip()
+        for line in IDENTITY_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#") and "=" in line
+    }
+    assert assignments == {
+        "TRUPRYCE_AWS_CERTIFICATE",
+        "TRUPRYCE_AWS_PRIVATE_KEY",
+        "TRUPRYCE_AWS_TRUST_ANCHOR_ARN",
+        "TRUPRYCE_AWS_PROFILE_ARN",
+        "TRUPRYCE_AWS_ROLE_ARN",
+    }
+    # Asserted over assignments, not raw text: the file's own comment states
+    # that it holds no token, and a substring check would read that as one.
+    for name in assignments:
+        assert not any(marker in name for marker in ("CIPHER", "TOKEN", "SECRET", "ACCESS_KEY")), (
+            name
+        )
+
+
+def test_documentation_does_not_overclaim_the_recovery_point() -> None:
+    """`archive_timeout` bounds an idle segment switch, not durable RPO.
+
+    Archive failure or backlog puts the real recovery point arbitrarily far
+    behind the configured interval, which is exactly the gap the unimplemented
+    observability requirement has to alert on. Documentation that calls the
+    interval a guarantee would report five minutes while nothing had reached S3
+    for a day.
+    """
+    sources = [
+        REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md",
+        REPOSITORY_ROOT
+        / "docs"
+        / "decisions"
+        / "0010-replaceable-local-storage-and-s3-backup-repository.md",
+        REPOSITORY_ROOT
+        / "openspec"
+        / "changes"
+        / "add-postgresql-recovery-foundation"
+        / "design.md",
+        REPOSITORY_ROOT
+        / "openspec"
+        / "changes"
+        / "add-postgresql-recovery-foundation"
+        / "proposal.md",
+        COMPOSE_FILE,
+    ]
+    overclaims = (
+        "bounds the recovery point",
+        "bounding the recovery point",
+        "RPO bounded",
+        "bounded at 300",
+        "wall-clock guarantee",
+    )
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        for phrase in overclaims:
+            assert phrase not in text, f"{source.name} claims {phrase!r}"
+
+    # The configuration itself is unchanged: only the claim about it moved.
+    assert "archive_timeout=300" in postgres_command()
+
+
+def test_archive_failure_mechanism_is_stated_accurately() -> None:
+    """An ordinary nonzero archive_command exit is retried, not fatal.
+
+    The restart came from pgBackRest's daemonized async worker being orphaned
+    onto PID 1 -- the postmaster -- and reaped as an unrecognised server
+    process. Documenting the simpler, wrong version sends an operator looking
+    for a signal source that does not exist.
+    """
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    design = (
+        REPOSITORY_ROOT
+        / "openspec"
+        / "changes"
+        / "add-postgresql-recovery-foundation"
+        / "design.md"
+    ).read_text(encoding="utf-8")
+    for text in (runbook, design):
+        assert "reparent" in text.lower() or "orphan" in text.lower()
+        assert "PID 1" in text
+        assert "retried" in text or "retries" in text
+    for source in (runbook, design, (INFRA_ROOT / "postgres" / "Dockerfile").read_text("utf-8")):
+        assert "treats the dead archive command as a backend crash" not in source

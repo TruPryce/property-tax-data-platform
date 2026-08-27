@@ -89,11 +89,13 @@ Operational policy, deliberately kept out of the capability text and expressed o
 | weekly | full backup | the base every restore in the window starts from |
 | daily | differential backup | bounds restore time to at most one day of WAL replay |
 | `archive-async` | y | archiving never blocks a committing backend |
-| `archive_timeout` | 300s | bounds the recovery point at five minutes of wall-clock, not five minutes of write volume |
+| `archive_timeout` | 300s | maximum idle segment-switch interval while archiving is healthy; not a durability guarantee |
 | `repo1-cipher-type` | aes-256-cbc | the repository is encrypted before it leaves the host |
 | `compress-type` | zst | cheaper than gzip at the same ratio on this CPU |
 
-`archive_timeout=300` is what makes the RPO a wall-clock guarantee. Without it, an idle database can hold a partially-filled WAL segment indefinitely and the true recovery point drifts arbitrarily far behind the last commit.
+`archive_timeout=300` bounds how long an idle database may sit on a partially filled WAL segment before switching; without it that interval is unbounded and the recovery point drifts arbitrarily far behind the last commit.
+
+It does **not** bound the durable recovery point. A segment switch only makes a segment eligible for archiving; the recovery point is the age of the latest segment confirmed present in the repository, and archive failure or backlog puts that arbitrarily far behind. Measuring the configured interval and calling it RPO would report five minutes while nothing had reached S3 for a day. Alerting on the age of the latest successfully archived WAL is what closes the gap, and it belongs to the observability requirement this change does not implement.
 
 ## The restore exercise
 
@@ -146,7 +148,21 @@ Four things in the sketch above were wrong in ways only execution revealed. They
 
 **Supplementary groups do not survive the entrypoint.** This is the one worth remembering. Compose's `group_add` sets groups on the container's initial process, but the postgres entrypoint starts as root and re-derives supplementary groups from the image's `/etc/group` when it drops to `postgres`. `docker exec --user postgres` keeps the Docker-added group and reads the key; the archiver, a child of the postmaster, does not.
 
-The failure mode is not subtle once it happens: `archive-push` exits 103, PostgreSQL treats the dead archive command as a backend crash, and the postmaster reinitialises the whole cluster every ten seconds. It *is* subtle before it happens, because a green `pgbackrest check`, a successful `stanza-create`, and a successful full backup are all reachable while it is broken. The group is therefore created in the image with `postgres` as a member, and the GID is a build argument so image and host cannot drift.
+The failure mode is loud but its mechanism is indirect, and worth stating precisely because the obvious explanation is wrong.
+
+An ordinary nonzero `archive_command` exit is **not** fatal: PostgreSQL logs `archive command failed with exit code N` and retries, exactly as the PostgreSQL 16 documentation says. Verified in isolation against `postgres:16.11` — `archive_command=exit 103` produced nine archive failures and zero postmaster restarts.
+
+What actually restarts the cluster is orphan reparenting. `archive-async=y` makes pgBackRest daemonize a worker, so the worker is orphaned and reparented to PID 1 — which in this image is the postmaster itself, because the container runs `postgres` as PID 1. When that orphan exits 103 the postmaster reaps a child it does not recognise, classifies it as a crashed backend, and performs full crash recovery:
+
+```text
+[1] LOG:  server process (PID 65) exited with exit code 103
+[1] LOG:  terminating any other active server processes
+[1] LOG:  all server processes terminated; reinitializing
+```
+
+An isolated `archive_command` that spawns a detached child exiting 103 while the parent returns 0 reproduces those three lines verbatim. The archiver's own `terminated by signal 3: Quit` arrives 150 ms *after* the crash line and is collateral from the shutdown, not its cause.
+
+It is subtle before it happens, because a green `pgbackrest check`, a successful `stanza-create`, and a successful full backup are all reachable while archiving is broken. The group is therefore created in the image with `postgres` as a member, and the GID is a build argument so image and host cannot drift.
 
 **Compose labels are image labels.** `docker compose build` writes `com.docker.compose.project` and `service` into the image, so every container started from it answers a project/service selector — including an isolated restore. The backup script's refuse-on-ambiguity behaviour turned that into a clean failure instead of a backup of the wrong cluster, and the selector now also requires `com.docker.compose.oneoff=False`.
 

@@ -322,34 +322,60 @@ openssl x509 -in /etc/trupryce/aws/trupryce-data-platform-vps.pem -noout -enddat
 
 Renewing: issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key` in `/etc/trupryce/aws/`, re-apply the group and mode contract from [2.7](#27-certificate-file-permissions), and restart PostgreSQL. The trust anchor and role need no change, because trust is anchored to the CA and the subject rather than to a particular certificate.
 
-### 2.7 Certificate file permissions
+### 2.7 Certificate directory: permissions and identity
 
-`archive_command` runs as the container's `postgres` user (uid 999), and the key is owned by the operator on the host. A read-only mount gives immutability, not readability — so without a shared group the archive fails at runtime with a permission error that no configuration check surfaces.
+Two things live in `/etc/trupryce/aws` that no image can carry, and both are installed by one script.
 
-The contract:
+**The permission contract.** `archive_command` runs as the container's `postgres` user (uid 999) and the key is owned by the operator on the host. A read-only mount gives immutability, not readability, so without a shared group the archive fails at runtime.
 
 | Path | Owner | Group | Mode |
 |---|---|---|---|
 | `/etc/trupryce/aws` | operator | `TRUPRYCE_AWS_GID` (2000) | `0750` |
 | `trupryce-data-platform-vps.key` | operator | `TRUPRYCE_AWS_GID` | `0640` |
 | `trupryce-data-platform-vps.pem` | operator | `TRUPRYCE_AWS_GID` | `0644` |
+| `root-ca.pem` | operator | `TRUPRYCE_AWS_GID` | `0644` |
+| `identity.env` | operator | `TRUPRYCE_AWS_GID` | `0640` |
 
-The PostgreSQL service joins that GID as a supplementary group (`group_add` in `compose.yaml`). The key is never world-readable and is never copied into an image.
+The group must also exist **inside the image** with `postgres` as a member — see [§2.8](#28-why-group_add-is-not-enough).
+
+**`identity.env`.** pgBackRest's asynchronous archive worker execs the signing wrapper with a cleaned environment. The variables Compose sets reach a `docker exec` and a `stanza-create`, and are absent exactly where archiving happens, so the wrapper reads its identity from this file instead, with environment taking precedence where set.
+
+It contains **only** non-secret values — the certificate and key paths and the three Roles Anywhere ARNs. It holds no cipher passphrase, no Bitwarden token, and no AWS credential: temporary credentials are exchanged per invocation from the certificate, and the passphrase comes from Bitwarden. The installer refuses to write any of those names.
+
+Install both with one command, run as root on the host:
 
 ```bash
-sudo groupadd --gid 2000 trupryce-certificates      # once per host
-sudo chgrp -R 2000 /etc/trupryce/aws
-sudo chmod 0750 /etc/trupryce/aws
-sudo chmod 0640 /etc/trupryce/aws/trupryce-data-platform-vps.key
-sudo chmod 0644 /etc/trupryce/aws/trupryce-data-platform-vps.pem
+sudo ./infra/scripts/install-certificate-identity.sh
 ```
+
+Values are **derived from `infra/.env`**, the reviewed non-secret host configuration, so an ARN is changed in one place and re-applied by re-running the script. There is no hand-edited duplicate to drift. The script creates the certificate group if absent, applies every mode in the table, and fails closed if the private key ends up world-accessible.
 
 Verify from the container that will actually use it, not from the host:
 
 ```bash
 docker exec --user postgres <postgres-container> \
   test -r /etc/trupryce/aws/trupryce-data-platform-vps.key && echo readable
+docker exec --user postgres <postgres-container> \
+  env -i /usr/local/bin/pgbackrest-aws-signing >/dev/null && echo "credentials exchanged with no environment"
 ```
+
+The `env -i` form is the one that matters: it reproduces the async worker's cleaned environment, which is the case that silently failed before `identity.env` existed.
+
+### 2.8 Why `group_add` is not enough
+
+Compose's `group_add` sets supplementary groups on the container's *initial* process. The postgres entrypoint starts as root and switches to the `postgres` user, re-deriving supplementary groups from the image's `/etc/group` and discarding everything Docker added.
+
+The consequence is asymmetric and misleading: `docker exec --user postgres` keeps the Docker-added group and reads the key, so every check an operator runs by hand succeeds, while the archiver — a child of the postmaster — runs without it and cannot read the certificate at all.
+
+So the group is created in the image, with `postgres` as a member, at the GID Compose passes as a build argument:
+
+```dockerfile
+ARG TRUPRYCE_AWS_GID=2000
+RUN groupadd --gid "${TRUPRYCE_AWS_GID}" trupryce-certificates \
+ && usermod --append --groups trupryce-certificates postgres
+```
+
+`group_add` is retained so `docker exec` behaves the same way, but the image membership is what makes archiving work.
 
 ## Part 3 — Point-in-time restore
 
@@ -449,13 +475,19 @@ Moving to Hostinger is a **restore**, not a volume transfer. Nothing from the Ak
 
 ### Recreated per host — never copied
 
-| Component | Why it must be new |
-|---|---|
-| Leaf certificate and private key | A private key that exists in two places has two ways to leak, and revoking one host revokes the other |
-| Host-specific certificate CN authorization | The trust policy pins a CN; a new host is a new subject |
-| AWS local profile and config (`~/.aws/config`) | Points at host-local certificate paths |
-| Docker runtime | Host software, rebuilt from the repository |
-| Restored PostgreSQL volume | Created by the restore itself |
+| Component | Recreated by | Why it must be new |
+|---|---|---|
+| Leaf certificate and private key | issue from the CA **on the new host** | A private key that exists in two places has two ways to leak, and revoking one host revokes the other |
+| Host-specific certificate CN authorization | trust-policy edit, `--profile boss` | The trust policy pins a CN; a new host is a new subject |
+| Certificate GID, file modes, and `identity.env` | `sudo ./infra/scripts/install-certificate-identity.sh` | Host-local ownership; `identity.env` is derived from that host's `infra/.env` |
+| Local AWS CLI profiles (`~/.aws/config`) | hand-written per [§1.4](#14-configure-the-vps-local-backup-profile) | Points at host-local certificate paths |
+| `infra/.env` | `./infra/scripts/bootstrap-env.sh` | Holds this host's paths, bind addresses, and ARNs |
+| Bitwarden bootstrap (`infra/.bws.env`) | `./infra/scripts/bootstrap-env.sh` | The access token is host-only and never leaves it |
+| Docker runtime and images | `compose-with-bitwarden.sh build` | Host software, rebuilt from the repository |
+| systemd units | `sudo SERVICE_USER=... ./infra/scripts/install-systemd-units.sh` | Resolve this host's service user and repository path |
+| Restored PostgreSQL volume | the restore itself | Created by `pgbackrest-restore.sh` |
+
+Nothing in that column is copied from the retired host. Every row is a command run on the new one.
 
 ### Procedure
 
@@ -523,7 +555,7 @@ Both directions were tested rather than inferred.
 | Target timestamp | `2026-08-27 00:57:48+00` |
 | `before` committed | 00:57:35.114187+00 |
 | `after` committed | 00:57:53.583189+00 |
-| Measured RPO | **3.61s** for a forced WAL switch; bounded at 300 s by `archive_timeout` when idle |
+| Measured RPO | **3.61s** from `pg_switch_wal()` to the segment being present in S3, archiving healthy |
 | Measured RTO | **56s** end to end — restore, start, replay to target, promote, assert |
 
 All six assertions passed, through the committed wrapper:
@@ -545,10 +577,34 @@ Four defects surfaced only by running it, none of which any static check would h
 
 1. **`PGBACKREST_*` is pgBackRest's own option namespace.** Identity variables named `PGBACKREST_AWS_…` were parsed as pgBackRest options, rejected as invalid, and warned about on every command. Renamed to `TRUPRYCE_AWS_…`.
 2. **pgBackRest connects as the OS user it runs as.** This cluster's superuser is `platform_admin`, so `stanza-create` failed with `role "postgres" does not exist` until `pg1-user` was set.
-3. **Compose `group_add` does not survive the entrypoint.** The postgres entrypoint re-derives supplementary groups from the image's `/etc/group` when it switches from root, dropping what Docker added. `docker exec --user postgres` kept the group and read the key, so every hand-run check passed — while the archiver ran without it, could not read the certificate, and **took the cluster into a restart loop**: `archive-push` exits 103, PostgreSQL treats the dead archive command as a crash, and the postmaster reinitialises every ten seconds. Fixed by creating the group inside the image with `postgres` as a member.
+3. **Compose `group_add` does not survive the entrypoint.** The postgres entrypoint re-derives supplementary groups from the image's `/etc/group` when it switches from root, dropping what Docker added. `docker exec --user postgres` kept the group and read the key, so every hand-run check passed — while the archiver ran without it and could not read the certificate. Fixed by creating the group inside the image with `postgres` as a member. The resulting archive failure **restarted the cluster repeatedly**; the mechanism is [documented below](#why-a-failing-archive-restarted-the-cluster), and it is not the one you would guess.
 4. **Compose bakes project and service labels into the image.** Every container started from it inherits them, so the backup script's label selector matched both the production cluster and the temporary restore cluster. Its refuse-on-ambiguity guard turned that into a clean failure rather than a backup of the wrong cluster; the selector now also requires `com.docker.compose.oneoff=False`, and the restore container overwrites the inherited labels.
 
-Points 3 and 4 are the argument for this exercise being mandatory rather than optional: a green `check` and a successful backup were both true while the cluster was crash-looping, and neither would have revealed it.
+Points 3 and 4 are the argument for this exercise being mandatory rather than optional: a green `check` and a successful backup were both true while the cluster was restarting in a loop, and neither would have revealed it.
+
+### Why a failing archive restarted the cluster
+
+The obvious explanation is wrong, and it is worth being precise because the wrong version leads an operator to the wrong fix.
+
+**An ordinary nonzero `archive_command` exit does not restart anything.** PostgreSQL logs `archive command failed with exit code N` and retries, as PostgreSQL 16 documents. Verified in isolation against `postgres:16.11`:
+
+| Experiment | Result |
+|---|---|
+| `archive_command=exit 103` | 9 archive failures, **0** postmaster restarts |
+| `archive_command` killed by `SIGQUIT` | archiver `FATAL ... exit code 131`, **0** postmaster restarts |
+| `archive_command` spawns a detached child that exits 103, parent returns 0 | **1 postmaster restart**, reproducing the observed lines verbatim |
+
+The third is what happened. `archive-async=y` makes pgBackRest daemonize a worker; the worker is orphaned and reparented to PID 1, and in this image PID 1 **is the postmaster**. The postmaster reaps a child it does not recognise, treats the nonzero exit as a crashed backend, and performs full crash recovery:
+
+```text
+[1] LOG:  server process (PID 65) exited with exit code 103
+[1] LOG:  terminating any other active server processes
+[1] LOG:  all server processes terminated; reinitializing
+```
+
+The archiver's `archive command was terminated by signal 3: Quit` appears 150 ms later and is collateral from that shutdown, not its cause — reading it as the cause is what sends you looking for a signal source that does not exist.
+
+Practical consequence for a rebuild: any archive-side failure that leaves a daemonized pgBackRest worker exiting nonzero will present as cluster restarts rather than as archive errors, for as long as the postmaster runs as PID 1.
 
 ## Related
 

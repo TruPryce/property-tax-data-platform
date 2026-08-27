@@ -44,9 +44,10 @@ services:
     # archive_mode is not reloadable, so it is set here rather than by ALTER
     # SYSTEM: turning it on always costs one restart and the restart should be
     # visible in the topology rather than hidden in a running cluster's state.
-    # archive_timeout bounds the recovery point in wall-clock time -- without it
-    # an idle database holds a partially filled segment indefinitely and the
-    # true RPO drifts arbitrarily far behind the last commit.
+    # archive_timeout is the maximum idle segment-switch interval, not a
+    # durability guarantee: it bounds how long an idle database sits on a
+    # partially filled segment, while the real recovery point is the age of
+    # the latest segment confirmed present in the repository.
     command:
       - postgres
       - -c
