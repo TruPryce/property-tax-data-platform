@@ -867,10 +867,11 @@ def test_install_script_resolves_every_placeholder_and_fails_closed() -> None:
     # installing a timer.
     assert "usermod" not in script, "install script grants Docker access instead of checking it"
     assert "could not reach the Docker socket" in script
-    # The certificate group is created with an explicit GID, because the Compose
-    # file passes that number as a supplementary group; a different GID would
-    # join the container to a group that grants nothing.
-    assert "groupadd --gid" in script
+    # The certificate group contract comes from the shared helper, so this
+    # installer and install-certificate-identity.sh cannot disagree about what
+    # the configured GID means.
+    assert "lib/certificate-group.sh" in script
+    assert "require_certificate_group" in script
 
 
 RESTORE_SCRIPT = INFRA_ROOT / "scripts" / "pgbackrest-restore.sh"
@@ -933,7 +934,7 @@ def test_restore_gives_the_recovered_cluster_what_archive_get_needs() -> None:
     # One argument array, reused for both the restore and the started cluster,
     # so the two cannot drift apart.
     assert "identity_arguments=(" in script
-    started = script.split("docker run -d --name")[1]
+    started = script.split("docker run -d --init --name")[1]
     assert '"${identity_arguments[@]}"' in started
     assert "/etc/trupryce/aws:ro" in script
     assert "--group-add" in script
@@ -1262,3 +1263,116 @@ def test_archive_failure_mechanism_is_stated_accurately() -> None:
         assert "retried" in text or "retries" in text
     for source in (runbook, design, (INFRA_ROOT / "postgres" / "Dockerfile").read_text("utf-8")):
         assert "treats the dead archive command as a backend crash" not in source
+
+
+def test_postgres_is_not_pid_one() -> None:
+    """A backup failure must not become a database availability failure.
+
+    `archive-async` daemonizes a pgBackRest worker; a daemonized worker is
+    orphaned, and an orphan is reparented to PID 1. With PostgreSQL as PID 1 the
+    postmaster reaps a child it never forked, treats the nonzero exit as a
+    crashed backend, and runs full crash recovery. An init process as PID 1
+    reaps orphans instead, so archiving can fail and be repaired without
+    restarting the database.
+    """
+    assert load_compose()["services"]["postgres"]["init"] is True
+    # The isolated recovery cluster runs archive-get during startup and has the
+    # same exposure, so it gets the same treatment.
+    restore = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "docker run -d --init --name" in restore
+    assert "docker run --rm --init" in restore
+
+
+def test_installers_share_one_fail_closed_certificate_group_contract() -> None:
+    """Adopting an existing GID is a silent privilege leak.
+
+    Debian and Ubuntu hand out 1000+ to ordinary user groups, so the configured
+    GID may already be `developers`. Accepting it and then chgrp-ing the Roles
+    Anywhere private key to 0640 grants every member of an unrelated group the
+    ability to assume the platform's AWS identity.
+    """
+    helper = (INFRA_ROOT / "scripts" / "lib" / "certificate-group.sh").read_text(encoding="utf-8")
+    assert "require_certificate_group" in helper
+    assert "already belongs to group" in helper
+    assert "refusing to grant private-key access to an unrelated group" in helper
+    # Name and number must agree in both directions.
+    assert "but the configuration says" in helper
+
+    for installer in ("install-certificate-identity.sh", "install-systemd-units.sh"):
+        script = (INFRA_ROOT / "scripts" / installer).read_text(encoding="utf-8")
+        assert "lib/certificate-group.sh" in script, installer
+        assert "require_certificate_group" in script, installer
+        # The naive form must not survive anywhere.
+        code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+        assert "groupadd --gid" not in code, f"{installer} still creates a group directly"
+
+
+def test_backup_units_do_not_use_conflicts_as_a_mutex() -> None:
+    """`Conflicts=` stops the other unit; it is not a lock and does not wait.
+
+    With a daily differential and a weekly full, any Sunday full still running
+    at the differential's start time would be terminated mid-backup -- and the
+    full is the base every restore in the retention window depends on. The
+    longer it takes, the more there is to lose, and the likelier it is to be
+    destroyed.
+    """
+    for unit in sorted(SYSTEMD_ROOT.glob("*.service.template")):
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Conflicts=") and "pgbackrest" in stripped:
+                raise AssertionError(
+                    f"{unit.name} uses Conflicts= between backup units: {stripped}"
+                )
+
+    full_timer = (SYSTEMD_ROOT / "pgbackrest-full.timer").read_text(encoding="utf-8")
+    diff_timer = (SYSTEMD_ROOT / "pgbackrest-diff.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=Sun " in full_timer
+    # Mon-Sat: the two never contend on schedule, however long the full runs.
+    assert "OnCalendar=Mon,Tue,Wed,Thu,Fri,Sat " in diff_timer
+    assert "*-*-* 03:30:00" in diff_timer
+    # Ordering is still declared for the Persistent=true catch-up case, where
+    # both may be queued in one transaction and the full must go first.
+    diff_service = (SYSTEMD_ROOT / "pgbackrest-diff.service.template").read_text(encoding="utf-8")
+    assert "After=pgbackrest-full.service" in diff_service
+
+
+def test_host_signing_helper_is_installable_and_pinned() -> None:
+    """`~/.aws/config` invokes the helper on the HOST, not the one in the image.
+
+    Without it every `aws --profile trupryce-backup ...` command fails on a
+    fresh server, including the isolation checks that gate the rest of the
+    bootstrap.
+    """
+    script = (INFRA_ROOT / "scripts" / "install-signing-helper.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    assert "SIGNING_HELPER_VERSION:-1.8.4" in script
+    assert "sha256sum -c -" in script
+    assert "checksum mismatch; refusing to install" in script
+    # A digest is architecture-specific; refuse rather than install unverified.
+    assert "no pinned digest for" in script
+
+
+def test_clean_host_procedure_orders_identity_before_archiving() -> None:
+    """The runbook must be executable top to bottom on a new host."""
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    # Host prerequisites come before the step that starts PostgreSQL archiving.
+    prerequisites = runbook.index("### 2.1 Host prerequisites")
+    enable_archiving = runbook.index("### 2.3 Enable archiving")
+    assert prerequisites < enable_archiving
+
+    identity_install = runbook.index("install-certificate-identity.sh")
+    assert identity_install < enable_archiving, (
+        "identity installation is documented after the restart that needs it"
+    )
+
+    # Every host-bootstrap step the procedure depends on is named in it.
+    for step in (
+        "install-signing-helper.sh",
+        "bootstrap-env.sh",
+        "install-certificate-identity.sh",
+        "install-systemd-units.sh",
+        "trupryce-data-platform-hostinger",
+    ):
+        assert step in runbook, step

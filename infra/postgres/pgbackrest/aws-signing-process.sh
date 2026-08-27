@@ -22,14 +22,11 @@ set -euo pipefail
 
 # Identity comes from a file, not from inherited environment.
 #
-# pgBackRest's asynchronous archive-push worker execs this command with a
-# cleaned environment. The variables are present for `docker exec` and for
-# stanza-create, and absent for archive-push -- so an environment-only wrapper
-# authenticates during every check an operator runs by hand and fails only in
-# the background, where the failure surfaces as the cluster restarting rather
-# than as a credential problem -- pgBackRest's async worker is orphaned onto
-# PID 1, which is the postmaster, so its nonzero exit is reaped as an
-# unrecognised server process rather than as an archive failure.
+# The file is a fallback, not the primary path: measurement showed the async
+# archive worker does inherit the environment, and the failure that prompted
+# this was a missing supplementary group, not a missing variable. Reading a file
+# as well removes an assumption about what a daemonized worker inherits, and it
+# is what makes a clean host reproducible from one non-secret source.
 #
 # Environment still wins where it is set, which is what lets the restore wrapper
 # and the tests point at a different identity without rewriting this file.

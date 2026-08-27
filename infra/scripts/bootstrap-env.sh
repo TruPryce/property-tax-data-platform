@@ -53,3 +53,35 @@ mv "$temporary_environment_file" "$environment_file"
 mv "$temporary_bitwarden_file" "$bitwarden_environment_file"
 trap - EXIT
 echo "created $environment_file and $bitwarden_environment_file with mode 0600"
+
+# The template is a template. It carries one deliberately blank value and a set
+# of certificate paths named for the host it was first written on, so copying it
+# verbatim onto a replacement host produces a file that looks complete and is
+# not. Say so here rather than letting it surface later as a credential error
+# during the first archive attempt.
+needs_attention=()
+while IFS= read -r line; do
+  [[ "$line" == TRUPRYCE_AWS_* ]] || continue
+  name="${line%%=*}"
+  value="${line#*=}"
+  if [[ -z "$value" ]]; then
+    needs_attention+=("$name (empty)")
+  elif [[ "$value" == *trupryce-data-platform-vps* ]]; then
+    needs_attention+=("$name (names the Akamai host identity)")
+  fi
+done <"$environment_file"
+
+if (( ${#needs_attention[@]} > 0 )); then
+  {
+    echo
+    echo "before this host can archive, set these in $environment_file:"
+    printf '  - %s\n' "${needs_attention[@]}"
+    echo
+    echo "then run, as root:"
+    echo "  ./infra/scripts/install-signing-helper.sh"
+    echo "  ./infra/scripts/install-certificate-identity.sh"
+    echo
+    echo "install-certificate-identity.sh refuses to run while any of them is unset,"
+    echo "so it is the gate rather than this warning."
+  } >&2
+fi

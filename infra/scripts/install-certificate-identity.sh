@@ -5,13 +5,14 @@
 #
 #   1. The workload key readable by the container's postgres user without being
 #      world-readable, which is a group with a fixed numeric GID.
-#   2. A non-secret identity file the signing wrapper can read when pgBackRest's
-#      asynchronous archive worker execs it with a cleaned environment.
+#   2. A non-secret identity file the signing wrapper reads when its environment
+#      does not carry the identity.
 #
-# The second exists because the environment variables Compose sets reach a
-# `docker exec` and a `stanza-create` but not the async worker, so an
-# environment-only wrapper authenticates for every check an operator runs by
-# hand and fails exactly where archiving happens.
+# The second is not load-bearing for the measured failure -- instrumenting the
+# wrapper showed the async worker did inherit the environment, and the fault was
+# the missing supplementary group. It is kept because it makes a clean host
+# reproducible from one non-secret source, and because it removes an assumption
+# about what a daemonized worker inherits.
 #
 # Values are DERIVED from infra/.env, the reviewed non-secret host configuration,
 # so there is one place to change an ARN and no duplicate to drift.
@@ -74,12 +75,11 @@ for required_file in "$certificate_path" "$private_key_path"; do
     [[ -f "$required_file" ]] || die "missing certificate material: $required_file"
 done
 
-if getent group "$certificate_gid" >/dev/null; then
-    info "certificate group $certificate_gid present ($(getent group "$certificate_gid" | cut -d: -f1))"
-else
-    groupadd --gid "$certificate_gid" trupryce-certificates
-    info "created group trupryce-certificates ($certificate_gid)"
-fi
+# Shared with install-systemd-units.sh so the two cannot disagree about what
+# this GID means. Fails closed if the number already belongs to another group.
+# shellcheck source=lib/certificate-group.sh
+source "$script_dir/lib/certificate-group.sh"
+require_certificate_group "$certificate_gid" || die "certificate group contract not satisfied"
 
 identity_file="$certificate_directory/identity.env"
 umask 027
@@ -88,8 +88,8 @@ umask 027
     printf '# Derived from %s; change values there and re-run.\n' "$compose_environment_file"
     printf '#\n'
     printf '# Non-secret: certificate paths and ARNs only. Read by the pgBackRest S3\n'
-    printf '# signing wrapper because the asynchronous archive worker execs it with a\n'
-    printf '# cleaned environment. Contains no passphrase, token, or AWS credential.\n'
+    printf '# signing wrapper as a fallback for the case where the invoking\n'
+    printf '# environment does not carry it. Holds no passphrase, token, or credential.\n'
     for key in "${IDENTITY_KEYS[@]}"; do
         name="resolved_$key"
         printf '%s=%s\n' "$key" "${!name}"

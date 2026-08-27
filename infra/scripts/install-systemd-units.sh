@@ -36,14 +36,12 @@ if ! id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx "$DOCKER_GROUP"; then
 fi
 
 # The certificate group must exist with the GID the Compose file passes as a
-# supplementary group, or the container joins a GID that grants nothing.
-if getent group "$CERTIFICATE_GID" >/dev/null; then
-    printf 'install-systemd-units: certificate group %s present (%s)\n' \
-        "$CERTIFICATE_GID" "$(getent group "$CERTIFICATE_GID" | cut -d: -f1)" >&2
-else
-    groupadd --gid "$CERTIFICATE_GID" trupryce-certificates
-    printf 'install-systemd-units: created group trupryce-certificates (%s)\n' "$CERTIFICATE_GID" >&2
-fi
+# supplementary group, or the container joins a GID that grants nothing. Shared
+# with install-certificate-identity.sh so the two cannot disagree, and fails
+# closed rather than adopting a GID that already belongs to another group.
+# shellcheck source=lib/certificate-group.sh
+source "$REPOSITORY_DIR/infra/scripts/lib/certificate-group.sh"
+require_certificate_group "$CERTIFICATE_GID" || die "certificate group contract not satisfied"
 
 for kind in full diff; do
     template="$REPOSITORY_DIR/infra/systemd/pgbackrest-${kind}.service.template"

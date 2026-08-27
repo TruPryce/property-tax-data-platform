@@ -5,9 +5,22 @@ Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/d
 # database, so it must not depend on Airflow being healthy.
 After=docker.service
 Requires=docker.service
-# Never runs alongside the weekly full: pgBackRest takes its own lock, but
-# serialising here keeps the two off the same CPU and network budget.
-Conflicts=pgbackrest-full.service
+# Deliberately NOT Conflicts=pgbackrest-full.service.
+#
+# Conflicts is a negative dependency: starting this unit *stops* the conflicting
+# one. It is not a mutex and does not wait. With a daily differential and a
+# weekly full, any Sunday full still running at the differential's start time
+# would be killed mid-backup -- and a full backup is the base every restore in
+# the retention window depends on. The longer the full takes, which is to say
+# the more data there is to lose, the likelier it is to be destroyed.
+#
+# After= alone is kept: it orders the two when both are queued in the same
+# transaction, which is what happens when Persistent=true catches up after
+# downtime, so the full runs first and the differential has a base.
+#
+# Overlap is prevented by schedule (the full runs Sunday, this runs Mon-Sat)
+# and, as defence in depth, by pgBackRest's own repository lock, which makes a
+# concurrent second backup fail cleanly instead of terminating the first.
 After=pgbackrest-full.service
 
 [Service]

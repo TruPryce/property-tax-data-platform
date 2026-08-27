@@ -236,7 +236,27 @@ Re-run this after any bucket change. A backup repository whose public-access blo
 
 ## Part 2 — pgBackRest and WAL operation
 
-### 2.1 Secrets and configuration
+### 2.1 Host prerequisites — do these first
+
+On a fresh host, in this order. Each one is a prerequisite of the next, and skipping any of them fails later in a way that looks like a credential problem rather than a missing step.
+
+```bash
+# 1. the signing helper the HOST's AWS profiles invoke.
+#    The PostgreSQL image ships its own copy; ~/.aws/config does not use that one.
+sudo ./infra/scripts/install-signing-helper.sh
+
+# 2. non-secret runtime configuration and the Bitwarden bootstrap
+./infra/scripts/bootstrap-env.sh
+#    then edit infra/.env: certificate paths for THIS host and all three ARNs.
+#    bootstrap-env.sh prints exactly which values still need attention.
+
+# 3. certificate group, file modes, and identity.env -- derived from infra/.env
+sudo ./infra/scripts/install-certificate-identity.sh
+```
+
+Step 3 is the gate: it refuses to run while any identity value is unset, and refuses to adopt a GID that already belongs to another group. Nothing below will archive until it has succeeded.
+
+### 2.2 Secrets and configuration
 
 The cipher passphrase is a Bitwarden secret in the `tax-platform` project:
 
@@ -248,7 +268,7 @@ BWS_ACCESS_TOKEN=… ./infra/scripts/generate-runtime-secrets.sh --bws "$BWS_PRO
 
 Everything else is non-secret configuration in `infra/.env` — the certificate paths and the three ARNs. See `infra/.env.example`.
 
-### 2.2 Enable archiving
+### 2.3 Enable archiving
 
 `archive_mode` is not reloadable, so this costs one restart:
 
@@ -267,7 +287,7 @@ docker exec --user postgres <container> pgbackrest --stanza=platform stanza-crea
 
 `check` is the one command that proves the whole chain end to end: configuration parses, credentials exchange, the bucket is writable, and PostgreSQL's `archive_command` actually reaches the repository. A green `check` is worth more than a successful backup, because a backup can succeed while archiving is broken — and then the backup is unrestorable to any point after it.
 
-### 2.3 Schedule
+### 2.4 Schedule
 
 The committed units are **templates**. A durable unit must not carry one host's operator account or home directory, or a rebuilt VPS inherits a path that does not exist there and the timer fails at its first fire — silently, because a timer whose service cannot start is not a visible outage.
 
@@ -282,7 +302,7 @@ Both timers are `Persistent=true`, so a run missed while the host was down fires
 
 The units select the container by Compose label, not by ID or name, because an ID changes on every recreate and a unit pinned to one keeps running while protecting nothing.
 
-### 2.4 Routine checks
+### 2.5 Routine checks
 
 ```bash
 ./infra/scripts/pgbackrest-backup.sh info     # backup set, WAL range, sizes
@@ -293,7 +313,7 @@ docker exec <container> psql -U platform_admin -c \
 
 `failed_count` rising with `last_archived_time` stalling is the signature of a broken archive. Alerting on it belongs to the unimplemented "Backup and recovery observability" requirement; until then it is a manual check.
 
-### 2.5 Failure mode: WAL accumulation
+### 2.6 Failure mode: WAL accumulation
 
 If archiving fails, PostgreSQL keeps every unarchived segment. `pg_wal` grows until the root disk fills, and PostgreSQL stops when it does — an outage caused by the backup system, not prevented by it.
 
@@ -304,7 +324,7 @@ docker exec <container> ls /var/spool/pgbackrest/archive/platform/out | head
 
 Fix the cause and drain with `pgbackrest --stanza=platform archive-push` before the disk fills. Do **not** delete WAL segments by hand: a segment removed before it reaches S3 is a permanent hole in the recovery timeline, and every point after it becomes unreachable.
 
-### 2.6 Certificate renewal — due before 2026-11-17
+### 2.7 Certificate renewal — due before 2026-11-17
 
 The workload certificate was issued 2026-08-19 for 90 days. When it expires, credential exchange fails, archiving stops, and the symptom is indistinguishable from a backup that quietly stopped running.
 
@@ -320,9 +340,9 @@ It prints the not-after date and days remaining, and exits non-zero inside the w
 openssl x509 -in /etc/trupryce/aws/trupryce-data-platform-vps.pem -noout -enddate -subject
 ```
 
-Renewing: issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key` in `/etc/trupryce/aws/`, re-apply the group and mode contract from [2.7](#27-certificate-file-permissions), and restart PostgreSQL. The trust anchor and role need no change, because trust is anchored to the CA and the subject rather than to a particular certificate.
+Renewing: issue a new leaf from the same CA with the same CN, replace the `.pem` and `.key` in `/etc/trupryce/aws/`, re-apply the group and mode contract from [§2.8](#28-certificate-directory-permissions-and-identity), and restart PostgreSQL. The trust anchor and role need no change, because trust is anchored to the CA and the subject rather than to a particular certificate.
 
-### 2.7 Certificate directory: permissions and identity
+### 2.8 Certificate directory: permissions and identity
 
 Two things live in `/etc/trupryce/aws` that no image can carry, and both are installed by one script.
 
@@ -336,9 +356,11 @@ Two things live in `/etc/trupryce/aws` that no image can carry, and both are ins
 | `root-ca.pem` | operator | `TRUPRYCE_AWS_GID` | `0644` |
 | `identity.env` | operator | `TRUPRYCE_AWS_GID` | `0640` |
 
-The group must also exist **inside the image** with `postgres` as a member — see [§2.8](#28-why-group_add-is-not-enough).
+The group must also exist **inside the image** with `postgres` as a member — see [§2.9](#29-why-group_add-is-not-enough).
 
-**`identity.env`.** pgBackRest's asynchronous archive worker execs the signing wrapper with a cleaned environment. The variables Compose sets reach a `docker exec` and a `stanza-create`, and are absent exactly where archiving happens, so the wrapper reads its identity from this file instead, with environment taking precedence where set.
+**`identity.env`.** The signing wrapper reads its identity from this file when the environment does not carry it; environment takes precedence where set.
+
+It is worth being accurate about why it exists, because an earlier draft of this runbook was not. It was introduced on the theory that the asynchronous archive worker runs with a cleaned environment. Instrumenting the wrapper during the actual failure disproved that — five `TRUPRYCE_AWS_*` variables were present and the supplementary group was missing. The file is kept because it makes a clean host reproducible from one non-secret source, and because it removes an assumption about what a daemonized worker inherits.
 
 It contains **only** non-secret values — the certificate and key paths and the three Roles Anywhere ARNs. It holds no cipher passphrase, no Bitwarden token, and no AWS credential: temporary credentials are exchanged per invocation from the certificate, and the passphrase comes from Bitwarden. The installer refuses to write any of those names.
 
@@ -359,9 +381,9 @@ docker exec --user postgres <postgres-container> \
   env -i /usr/local/bin/pgbackrest-aws-signing >/dev/null && echo "credentials exchanged with no environment"
 ```
 
-The `env -i` form is the one that matters: it reproduces the async worker's cleaned environment, which is the case that silently failed before `identity.env` existed.
+The `env -i` form proves the wrapper does not depend on inherited environment at all. The `test -r` check above it is the one that reproduces the failure actually observed.
 
-### 2.8 Why `group_add` is not enough
+### 2.9 Why `group_add` is not enough
 
 Compose's `group_add` sets supplementary groups on the container's *initial* process. The postgres entrypoint starts as root and switches to the `postgres` user, re-deriving supplementary groups from the image's `/etc/group` and discarding everything Docker added.
 
@@ -491,29 +513,50 @@ Nothing in that column is copied from the retired host. Every row is a command r
 
 ### Procedure
 
-1. **Issue a new leaf** from the existing CA as `CN=trupryce-data-platform-hostinger`, with its own key generated **on the Hostinger host**. Do not copy `/etc/trupryce/aws/trupryce-data-platform-vps.key`. Do not reuse the Akamai key under a new filename.
-2. **Authorize the new subject.** Add the new CN to the backup and data role trust policies. During migration **both identities may be temporarily authorized** — the old host may still be archiving while the new one restores:
+Top to bottom on the new host. Each step depends on the one above it, and the ordering is the point: the identity must exist before anything tries to archive, and the isolation must be proven before anything is restored.
 
-   ```json
-   "StringEquals": {
-     "aws:PrincipalTag/x509Subject/CN": [
-       "trupryce-data-platform-vps",
-       "trupryce-data-platform-hostinger"
-     ]
-   }
-   ```
+```text
+ 1  install host dependencies         Docker Engine + Compose V2, bws, git, curl
+ 2  install pinned signing helper     sudo ./infra/scripts/install-signing-helper.sh
+ 3  bootstrap configuration           ./infra/scripts/bootstrap-env.sh
+ 4  fill + validate host identity     edit infra/.env: certificate paths for THIS
+                                      host, and all three ARNs
+ 5  issue the Hostinger certificate   new key generated ON this host, signed by the
+                                      existing CA as CN=trupryce-data-platform-hostinger
+ 6  authorize the new subject         add that CN to both trust policies, --profile boss
+ 7  install identity + permissions    sudo ./infra/scripts/install-certificate-identity.sh
+ 8  configure local AWS profiles      ~/.aws/config: trupryce-data-vps, trupryce-backup
+ 9  prove identity isolation          STS + the four S3 assertions from §1.5
+10  build the PostgreSQL image        ./infra/scripts/compose-with-bitwarden.sh build postgres
+11  restore into a fresh volume       ./infra/scripts/pgbackrest-restore.sh --target ...
+12  verify the six assertions         before present, after absent, roles, databases
+13  start the restored cluster        promote and point the runtime at it
+14  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
+15  install and prove the timers      sudo SERVICE_USER=... ./infra/scripts/install-systemd-units.sh
+                                      then systemctl start pgbackrest-diff.service
+16  cut over
+17  revoke the Akamai identity        remove its CN from both trust policies, revoke the
+                                      certificate at the CA, destroy the key on the old host
+```
 
-3. **Install the runtime** from Git, write `infra/.env` with the new certificate paths, and bootstrap secrets from Bitwarden.
-4. **Restore** into a fresh volume as in Part 3, targeting the latest recoverable point.
-5. **Verify** all six assertions before pointing anything at the new host.
-6. **Cut over**, then stop archiving from Akamai.
-7. **Remove the Akamai identity.** Delete `trupryce-data-platform-vps` from both trust policies, revoke its certificate at the CA, and destroy the key on the retired host. Leaving it authorized after cutover means a decommissioned machine retains write access to the backup repository.
+**Step 2 is easy to miss.** The PostgreSQL image installs its own signing helper for pgBackRest, but `~/.aws/config` invokes `/usr/local/bin/aws_signing_helper` on the *host*. Without step 2 every `aws --profile trupryce-backup …` command fails, including the step 9 checks that gate everything after them.
 
-Step 7 is the one that gets skipped. A migration is not finished while the old identity can still write.
+**Step 4 is not optional.** `bootstrap-env.sh` copies a template that carries a deliberately blank `TRUPRYCE_AWS_PROFILE_ARN` and certificate paths named for the Akamai host. It prints exactly which values need attention; step 7 refuses to run until they are set.
 
-### Order matters
+**Step 5 generates the key on the new host.** Do not copy `trupryce-data-platform-vps.key`, and do not reuse it under a new filename.
 
-Restore and verify **before** cutover, and revoke **after**. Revoking the Akamai identity before the Hostinger restore is verified leaves no working identity if the restore fails.
+**Step 6 may authorize both identities at once.** During migration the old host may still be archiving while the new one restores:
+
+```json
+"StringEquals": {
+  "aws:PrincipalTag/x509Subject/CN": [
+    "trupryce-data-platform-vps",
+    "trupryce-data-platform-hostinger"
+  ]
+}
+```
+
+**Step 17 is the one that gets skipped.** A migration is not finished while a decommissioned machine can still write to the backup repository. Revoke *after* step 12 has passed, never before — revoking early leaves no working identity if the restore fails.
 
 ## Part 5 — Recorded evidence
 
@@ -570,6 +613,32 @@ All six assertions passed, through the committed wrapper:
 ```
 
 Isolation: restored into `pitr-verify-20260827010147-…`; `property-tax-platform_postgres-data` was **not** among the container's mounts; published on `127.0.0.1:55432` only. Container and volume removed afterwards, and the disposable marker table dropped from production.
+
+### Backup failure no longer takes the database with it
+
+The restart loop above was possible because PostgreSQL ran as PID 1, so a daemonized pgBackRest worker was orphaned onto the postmaster itself. Documenting that mechanism does not remove it: any future credential, network, or S3 failure that leaves an async worker exiting nonzero would do the same thing.
+
+`init: true` on the PostgreSQL service (and `--init` on the isolated recovery containers) puts `docker-init` at PID 1 instead:
+
+```text
+before                     after
+  PostgreSQL (PID 1)         docker-init (PID 1)
+    └── orphaned worker        ├── PostgreSQL
+                               └── orphaned worker
+```
+
+Proven behaviourally, not by reading the YAML. With `init: true` in place, the private key was made unreadable to the container — reproducing the exact failure that caused the original loop — and WAL was forced:
+
+| | Before (`PostgreSQL` as PID 1) | After (`docker-init` as PID 1) |
+|---|---|---|
+| async worker | `ERROR: [103] … terminated unexpectedly [2]` | `ERROR: [103] … terminated unexpectedly [2]` |
+| archiver | failing | `failed=3` |
+| postmaster restarts | every ~10 s | **0** |
+| `reinitializing` events | continuous | **0** |
+| container restart count | — | **0** |
+| accepting queries | intermittently | **yes, throughout** |
+
+Restoring the key drained the pending segment to S3 in **62 s** with no intervention, and `check` passed again. The archive subsystem can now fail, back up, and be repaired without touching database availability — which is the property that makes an archive failure an operational annoyance rather than an outage.
 
 ### What this exercise cost, and what it caught
 

@@ -144,7 +144,9 @@ Four things in the sketch above were wrong in ways only execution revealed. They
 
 **The `PGBACKREST_` prefix is not free.** pgBackRest maps every `PGBACKREST_<X>` variable onto its option `<x>`, so naming the identity variables `PGBACKREST_AWS_…` made them invalid options rather than configuration. They live under `TRUPRYCE_AWS_…` now.
 
-**Identity cannot come from inherited environment.** pgBackRest's asynchronous archive-push worker execs the credential process with a cleaned environment. The variables are present for `docker exec` and for `stanza-create`, and absent exactly where archiving happens, so the wrapper reads a non-secret identity file mounted beside the certificates, with environment as an override.
+**Identity does not depend on inherited environment.** An earlier draft of this design claimed the asynchronous archive worker execs the credential process with a *cleaned* environment. That is not what was measured: instrumenting the wrapper during the failure recorded five `TRUPRYCE_AWS_*` variables present and the supplementary group absent — the environment was fine, the group was the fault.
+
+The identity file is kept anyway, for two reasons that survive that correction. It is the mechanism that makes a clean host reproducible, derived from `infra/.env` so an ARN has one home; and it removes an assumption about what a daemonized worker inherits, which is exactly the kind of assumption this change has already been wrong about twice. Environment still takes precedence where set.
 
 **Supplementary groups do not survive the entrypoint.** This is the one worth remembering. Compose's `group_add` sets groups on the container's initial process, but the postgres entrypoint starts as root and re-derives supplementary groups from the image's `/etc/group` when it drops to `postgres`. `docker exec --user postgres` keeps the Docker-added group and reads the key; the archiver, a child of the postmaster, does not.
 

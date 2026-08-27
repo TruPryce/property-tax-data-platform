@@ -41,6 +41,22 @@ services:
         POSTGRES_VERSION: ${POSTGRES_VERSION:-16.11}
         TRUPRYCE_AWS_GID: ${TRUPRYCE_AWS_GID:-2000}
     image: property-tax-postgres:${POSTGRES_VERSION:-16.11}
+    # An init process as PID 1, so PostgreSQL is not PID 1.
+    #
+    # `archive-async=y` makes pgBackRest daemonize a worker. A daemonized worker
+    # is orphaned, and an orphan is reparented to PID 1. With PostgreSQL as PID 1
+    # the postmaster reaps a child it never forked, classifies the nonzero exit
+    # as a crashed backend, and runs full crash recovery -- so any archive-side
+    # failure becomes a database availability failure.
+    #
+    # Measured on this runtime: an `archive_command` spawning a detached child
+    # that exits 103 reproduces `server process (PID n) exited with exit code
+    # 103` followed by `reinitializing`, while an ordinary nonzero
+    # `archive_command` exit is merely logged and retried.
+    #
+    # docker-init reaps orphans instead, which decouples the two: archiving can
+    # fail, back up, and be repaired without restarting the database.
+    init: true
     # archive_mode is not reloadable, so it is set here rather than by ALTER
     # SYSTEM: turning it on always costs one restart and the restart should be
     # visible in the topology rather than hidden in a running cluster's state.

@@ -166,7 +166,7 @@ identity_arguments=(
     --group-add "$certificate_gid"
 )
 
-docker run --rm \
+docker run --rm --init \
     -v "$restore_volume:/var/lib/postgresql/data" \
     "${identity_arguments[@]}" \
     --user postgres \
@@ -182,7 +182,10 @@ info "restore complete; starting the isolated cluster on ${bind_address}:${RESTO
 # Overwrite the Compose labels inherited from the image so this container can
 # never be mistaken for the production service by a label selector -- including
 # the backup timers', which would otherwise see two candidates.
-docker run -d --name "$container" \
+# --init for the same reason production sets `init: true`: recovery runs
+# archive-get, whose daemonized worker would otherwise be orphaned onto a
+# PostgreSQL running as PID 1.
+docker run -d --init --name "$container" \
     --label com.docker.compose.project=pitr-verify \
     --label com.docker.compose.service=pitr-verify \
     --label com.docker.compose.oneoff=True \
