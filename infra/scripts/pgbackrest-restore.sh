@@ -21,7 +21,9 @@ infra_dir="$(cd "$script_dir/.." && pwd)"
 compose_environment_file="${COMPOSE_ENV_FILE:-$infra_dir/.env}"
 bitwarden_environment_file="${BWS_ENV_FILE:-$infra_dir/.bws.env}"
 
-PRODUCTION_VOLUME="${PRODUCTION_VOLUME:-property-tax-platform_postgres-data}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-property-tax-platform}"
+COMPOSE_VOLUME_NAME="${COMPOSE_VOLUME_NAME:-postgres-data}"
+PRODUCTION_VOLUME="${PRODUCTION_VOLUME:-${COMPOSE_PROJECT_NAME}_${COMPOSE_VOLUME_NAME}}"
 STANZA="${PGBACKREST_STANZA:-platform}"
 RESTORE_PORT="${RESTORE_PORT:-55432}"
 RESTORE_IMAGE="${RESTORE_IMAGE:-property-tax-postgres:${POSTGRES_VERSION:-16.11}}"
@@ -37,6 +39,11 @@ usage: pgbackrest-restore.sh --target "<timestamp>" [--volume NAME] [--port N] [
   --volume   temporary Docker volume to restore into (default: generated)
   --port     loopback port for the isolated cluster (default: 55432)
   --keep     leave the container and volume in place for inspection
+  --promote  clean-host mode: restore into the PRODUCTION volume, verify it in
+             isolation, and leave it for Compose to adopt. Requires that the
+             production volume does not yet exist, so it can never overwrite a
+             live cluster. A failed verification destroys the volume rather
+             than leaving an unverified one for Compose to pick up.
 USAGE
     exit 2
 }
@@ -44,17 +51,21 @@ USAGE
 target=""
 restore_volume=""
 keep=false
+promote=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --target) target="${2:?--target needs a value}"; shift 2 ;;
         --volume) restore_volume="${2:?--volume needs a value}"; shift 2 ;;
         --port) RESTORE_PORT="${2:?--port needs a value}"; shift 2 ;;
         --keep) keep=true; shift ;;
+        --promote) promote=true; shift ;;
         -h | --help) usage ;;
         *) die "unexpected argument: $1" ;;
     esac
 done
 [[ -n "$target" ]] || usage
+[[ "$promote" == true && -n "$restore_volume" ]] \
+    && die "--promote restores into $PRODUCTION_VOLUME; --volume cannot be combined with it"
 
 # Re-exec under the Bitwarden boundary rather than asking the caller to remember
 # to. The token is read here, on the host, and is not exported to the child.
@@ -121,23 +132,58 @@ if [[ -z "$restore_volume" ]]; then
 fi
 container="pitr-verify-$$"
 
-# The restore target must never be the production volume. Checked by name and
-# again by the volume's own labels, because a caller could pass a differently
-# named volume that Compose still owns.
-[[ "$restore_volume" != "$PRODUCTION_VOLUME" ]] \
-    || die "refusing to restore over the production volume $PRODUCTION_VOLUME"
-if docker volume inspect "$restore_volume" >/dev/null 2>&1; then
-    owner="$(docker volume inspect "$restore_volume" \
-        --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
-    [[ -z "$owner" || "$owner" == "<no value>" ]] \
-        || die "refusing to restore into a Compose-managed volume owned by $owner"
+if [[ "$promote" == true ]]; then
+    # Clean-host promotion. The verification runs against the volume Compose
+    # will actually adopt, rather than against a copy of it -- verifying one
+    # volume and starting another is how a restore gets declared good and then
+    # is not the thing that runs.
+    #
+    # Safe because the production volume must NOT already exist. That single
+    # precondition is what separates "rebuild a dead host" from "overwrite a
+    # live cluster", and it is checked rather than trusted to the operator.
+    restore_volume="$PRODUCTION_VOLUME"
+    if docker volume inspect "$restore_volume" >/dev/null 2>&1; then
+        die "$PRODUCTION_VOLUME already exists; --promote is for a host that has none.
+    To rebuild deliberately, stop the stack and remove the volume first, which is
+    a decision that should be explicit rather than a side effect of a restore."
+    fi
+    if [[ -n "$(docker ps -aq --filter "volume=$PRODUCTION_VOLUME")" ]]; then
+        die "containers are still attached to $PRODUCTION_VOLUME"
+    fi
+else
+    # The restore target must never be the production volume. Checked by name and
+    # again by the volume's own labels, because a caller could pass a differently
+    # named volume that Compose still owns.
+    [[ "$restore_volume" != "$PRODUCTION_VOLUME" ]] \
+        || die "refusing to restore over the production volume $PRODUCTION_VOLUME (use --promote on a clean host)"
+    if docker volume inspect "$restore_volume" >/dev/null 2>&1; then
+        owner="$(docker volume inspect "$restore_volume" \
+            --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
+        [[ -z "$owner" || "$owner" == "<no value>" ]] \
+            || die "refusing to restore into a Compose-managed volume owned by $owner"
+    fi
 fi
 
 # Loopback only. A recovered cluster holds production data at an arbitrary past
 # state and must not be reachable from the tailnet, let alone anywhere else.
 bind_address="127.0.0.1"
 
+verified=false
 cleanup() {
+    if [[ "$promote" == true ]]; then
+        # The container always goes; the volume's fate depends on whether the
+        # assertions passed. Keeping an unverified volume would leave Compose
+        # ready to adopt a restore nobody proved.
+        docker rm -f "$container" >/dev/null 2>&1 || true
+        if [[ "$verified" == true ]]; then
+            info "verified; $restore_volume is ready for Compose to adopt"
+            info "next: ./infra/scripts/compose-with-bitwarden.sh up -d"
+        else
+            docker volume rm "$restore_volume" >/dev/null 2>&1 || true
+            info "verification did not pass; removed $restore_volume so it cannot be adopted"
+        fi
+        return
+    fi
     if [[ "$keep" == true ]]; then
         info "--keep: leaving container $container and volume $restore_volume in place"
         return
@@ -148,7 +194,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker volume create "$restore_volume" >/dev/null
+if [[ "$promote" == true ]]; then
+    # Labelled as Compose labels its own, so `docker volume ls` and Compose
+    # tooling see it the same way after adoption.
+    docker volume create \
+        --label com.docker.compose.project="$COMPOSE_PROJECT_NAME" \
+        --label com.docker.compose.volume="$COMPOSE_VOLUME_NAME" \
+        "$restore_volume" >/dev/null
+else
+    docker volume create "$restore_volume" >/dev/null
+fi
 info "restoring into volume $restore_volume (target: $target)"
 
 # -e NAME, never -e NAME=value: the passphrase passes by reference from this
@@ -240,11 +295,22 @@ fi
 if printf '%s' "$assertions" | grep -qE ': false$|\(want 4\): [0-3]$'; then
     die "a recovery assertion failed"
 fi
+verified=true
 
 printf '\n===== isolation =====\n'
 printf 'restored volume : %s\n' "$restore_volume"
-printf 'production volume %s was not mounted: %s\n' "$PRODUCTION_VOLUME" \
-    "$(docker inspect "$container" --format '{{range .Mounts}}{{.Name}} {{end}}' \
-        | grep -qw "$PRODUCTION_VOLUME" && echo FALSE || echo true)"
+if [[ "$promote" == true ]]; then
+    # In promote mode the production volume is deliberately the target, so the
+    # "was not mounted" assertion would be both false and meaningless. What
+    # matters here is that it did not exist beforehand, checked before any
+    # restore began, and that verification ran against the very volume Compose
+    # will adopt rather than a copy of it.
+    printf 'mode            : promote (verified in isolation, then left for Compose)\n'
+    printf 'precondition    : %s did not exist before this run\n' "$PRODUCTION_VOLUME"
+else
+    printf 'production volume %s was not mounted: %s\n' "$PRODUCTION_VOLUME" \
+        "$(docker inspect "$container" --format '{{range .Mounts}}{{.Name}} {{end}}' \
+            | grep -qw "$PRODUCTION_VOLUME" && echo FALSE || echo true)"
+fi
 printf 'published on    : %s\n' \
     "$(docker port "$container" 5432/tcp 2>/dev/null || echo 'not published')"

@@ -22,19 +22,35 @@ info() { printf 'install-signing-helper: %s\n' "$*" >&2; }
 
 [[ "$(id -u)" -eq 0 ]] || die "must run as root to write $INSTALL_PATH"
 
-# Checked before the download tooling, so re-running on an already-provisioned
-# host succeeds without requiring curl to be present.
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+
+# Accept an existing binary only on its DIGEST, never on the version string it
+# prints. A version string is output from the very program whose integrity is in
+# question, so a replaced or corrupted binary that answers "1.8.4" would
+# otherwise be adopted without inspection -- for the executable that turns the
+# workload private key into AWS credentials.
+#
+# Digest-checked before the download tooling, so re-running on an
+# already-provisioned host still succeeds without curl present.
 if [[ -x "$INSTALL_PATH" ]]; then
-    installed="$("$INSTALL_PATH" version 2>/dev/null || true)"
-    if [[ "$installed" == "$SIGNING_HELPER_VERSION" ]]; then
-        info "$INSTALL_PATH already at $SIGNING_HELPER_VERSION"
+    existing_digest="$(sha256sum "$INSTALL_PATH" | cut -d' ' -f1)"
+    installed_version="$("$INSTALL_PATH" version 2>/dev/null || true)"
+    if [[ "$existing_digest" == "$SIGNING_HELPER_SHA256" ]]; then
+        info "$INSTALL_PATH already at $SIGNING_HELPER_VERSION (digest verified)"
         exit 0
     fi
-    info "replacing $INSTALL_PATH (found '${installed:-unknown}', want $SIGNING_HELPER_VERSION)"
+    if [[ "$installed_version" == "$SIGNING_HELPER_VERSION" ]]; then
+        # The dangerous case, called out explicitly: right version, wrong bytes.
+        info "$INSTALL_PATH reports $SIGNING_HELPER_VERSION but its digest does not match the pin"
+        info "  expected $SIGNING_HELPER_SHA256"
+        info "  found    $existing_digest"
+        info "replacing it"
+    else
+        info "replacing $INSTALL_PATH (found '${installed_version:-unknown}', want $SIGNING_HELPER_VERSION)"
+    fi
 fi
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
-command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
 # x86_64 only, matching the pinned digest. A different architecture needs its own
 # digest, so fail rather than install something unverified.

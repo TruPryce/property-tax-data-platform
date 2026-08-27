@@ -180,7 +180,24 @@ aws --profile boss rolesanywhere list-profiles \
 
 Confirm `enabled` reads `True` before continuing.
 
-### 1.4 Configure the VPS-local backup profile
+### 1.4 Configure the VPS-local profiles
+
+Both profile ARNs are discoverable rather than remembered. Run with administrator credentials and paste the results into `~/.aws/config`:
+
+```bash
+aws --profile boss rolesanywhere list-profiles \
+  --query "profiles[].{name:name,enabled:enabled,arn:profileArn}" --output table
+```
+
+The data profile is the one bound to `role/trupryce-data-platform-vps`; the backup profile is bound to `role/trupryce-data-platform-backup`. To resolve each by the role it grants rather than by name:
+
+```bash
+for role in trupryce-data-platform-vps trupryce-data-platform-backup; do
+  printf '%s -> ' "$role"
+  aws --profile boss rolesanywhere list-profiles \
+    --query "profiles[?contains(roleArns[0], '$role')].profileArn" --output text
+done
+```
 
 On the runtime host. The existing data profile is `trupryce-data-vps`; the new one is `trupryce-backup`. Both use `credential_process`, and neither stores a key:
 
@@ -298,7 +315,9 @@ systemctl list-timers 'pgbackrest-*'
 
 The installer resolves the service user, the repository path, and the Docker group; creates the certificate group at the GID Compose passes as a supplementary group; refuses to continue if any placeholder survives substitution; and **checks** that the service user can already reach the Docker socket rather than granting it — Docker group membership is root-equivalent and is an operator decision, not a side effect of installing a timer.
 
-Both timers are `Persistent=true`, so a run missed while the host was down fires at boot rather than waiting for the next window. That matters most for the weekly full: without it, a host down over a Sunday leaves the differentials with no base inside the retention window. The differential unit `Conflicts` with the full so the two never run together.
+Both timers are `Persistent=true`, so a run missed while the host was down fires at boot rather than waiting for the next window. That matters most for the weekly full: without it, a host down over a Sunday leaves the differentials with no base inside the retention window.
+
+The two never contend on schedule because the full runs Sunday and the differential Monday to Saturday. They are deliberately **not** joined by `Conflicts=`: that is a negative dependency, so starting the differential would *stop* a full backup still running rather than wait for it — destroying the base every restore in the window depends on. `After=` is kept for the catch-up case, where both may be queued in one transaction and the full must go first, and pgBackRest's own repository lock fails a genuinely concurrent second backup cleanly.
 
 The units select the container by Compose label, not by ID or name, because an ID changes on every recreate and a unit pinned to one keeps running while protecting nothing.
 
@@ -516,7 +535,7 @@ Nothing in that column is copied from the retired host. Every row is a command r
 Top to bottom on the new host. Each step depends on the one above it, and the ordering is the point: the identity must exist before anything tries to archive, and the isolation must be proven before anything is restored.
 
 ```text
- 1  install host dependencies         Docker Engine + Compose V2, bws, git, curl
+ 1  install host dependencies         see the table below -- all of them
  2  install pinned signing helper     sudo ./infra/scripts/install-signing-helper.sh
  3  bootstrap configuration           ./infra/scripts/bootstrap-env.sh
  4  fill + validate host identity     edit infra/.env: certificate paths for THIS
@@ -528,16 +547,43 @@ Top to bottom on the new host. Each step depends on the one above it, and the or
  8  configure local AWS profiles      ~/.aws/config: trupryce-data-vps, trupryce-backup
  9  prove identity isolation          STS + the four S3 assertions from §1.5
 10  build the PostgreSQL image        ./infra/scripts/compose-with-bitwarden.sh build postgres
-11  restore into a fresh volume       ./infra/scripts/pgbackrest-restore.sh --target ...
-12  verify the six assertions         before present, after absent, roles, databases
-13  start the restored cluster        promote and point the runtime at it
-14  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
-15  install and prove the timers      sudo SERVICE_USER=... ./infra/scripts/install-systemd-units.sh
+11  restore AND verify AND promote    ./infra/scripts/pgbackrest-restore.sh --promote --target ...
+12    (11 does all three: restores into the volume Compose will adopt, verifies
+13     it in isolation, and keeps it only if all six assertions pass)
+14  start the runtime                 ./infra/scripts/compose-with-bitwarden.sh up -d
+15  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
+16  install and prove the timers      sudo SERVICE_USER="$(id -un)" REPOSITORY_DIR="$PWD" \
+                                        ./infra/scripts/install-systemd-units.sh
                                       then systemctl start pgbackrest-diff.service
-16  cut over
-17  revoke the Akamai identity        remove its CN from both trust policies, revoke the
+17  cut over
+18  revoke the Akamai identity        remove its CN from both trust policies, revoke the
                                       certificate at the CA, destroy the key on the old host
 ```
+
+**Step 1 in full.** Every one of these is used by a later step, and a missing one fails somewhere that does not name it:
+
+| Dependency | Used by |
+|---|---|
+| Docker Engine + Compose V2 | the whole runtime, steps 10–14 |
+| AWS CLI v2 | steps 6, 9, and every `--profile` command in Part 1 |
+| `aws_signing_helper` (pinned) | step 2; every AWS CLI call resolves credentials through it |
+| `bws` (Bitwarden Secrets Manager CLI) | steps 3 and 11; the restore wrapper resolves the passphrase with it |
+| `git` | obtaining this repository |
+| `curl` | step 2 |
+| `openssl` | step 5, and the certificate-expiry check |
+| Tailscale | administrative access to the host and to Airflow, per the runtime contract |
+
+**Recover the Bitwarden bootstrap values before step 3.** `bootstrap-env.sh` refuses to run unless `BWS_ACCESS_TOKEN` and `BWS_PROJECT_ID` are already exported. They are the one credential pair that cannot come from Secrets Manager, so they come from the vault under [ADR-0003](../decisions/0003-bitwarden-environment-secret-recovery.md):
+
+```bash
+read -rsp "Bitwarden access token: " BWS_ACCESS_TOKEN && echo
+read -rp  "Bitwarden project ID: "   BWS_PROJECT_ID
+export BWS_ACCESS_TOKEN BWS_PROJECT_ID
+./infra/scripts/bootstrap-env.sh
+unset BWS_ACCESS_TOKEN BWS_PROJECT_ID
+```
+
+`read -rsp` keeps the token out of shell history.
 
 **Step 2 is easy to miss.** The PostgreSQL image installs its own signing helper for pgBackRest, but `~/.aws/config` invokes `/usr/local/bin/aws_signing_helper` on the *host*. Without step 2 every `aws --profile trupryce-backup …` command fails, including the step 9 checks that gate everything after them.
 
@@ -556,7 +602,16 @@ Top to bottom on the new host. Each step depends on the one above it, and the or
 }
 ```
 
-**Step 17 is the one that gets skipped.** A migration is not finished while a decommissioned machine can still write to the backup repository. Revoke *after* step 12 has passed, never before — revoking early leaves no working identity if the restore fails.
+**Step 11 is the promotion path, and it is deliberately a single command.**
+
+An ordinary `pgbackrest-restore.sh --target ...` restores into a throwaway `pitr-verify-*` volume and deletes it on exit — correct for a drill on a live host, useless for a rebuild. `--promote` restores into the volume Compose will actually adopt, verifies *that* volume in isolation on a loopback port, and then:
+
+- keeps it only if all six assertions pass, leaving it for `compose … up -d`;
+- **destroys it if any assertion fails**, so Compose can never adopt an unverified restore.
+
+It refuses to run at all if the production volume already exists, which is what makes it safe to type on the wrong host: rebuilding an existing cluster has to be a deliberate stop-and-remove, not a side effect of a restore.
+
+**Step 18 is the one that gets skipped.** A migration is not finished while a decommissioned machine can still write to the backup repository. Revoke *after* step 11 has passed, never before — revoking early leaves no working identity if the restore fails.
 
 ## Part 5 — Recorded evidence
 
@@ -639,6 +694,23 @@ Proven behaviourally, not by reading the YAML. With `init: true` in place, the p
 | accepting queries | intermittently | **yes, throughout** |
 
 Restoring the key drained the pending segment to S3 in **62 s** with no intervention, and `check` passed again. The archive subsystem can now fail, back up, and be repaired without touching database availability — which is the property that makes an archive failure an operational annoyance rather than an outage.
+
+### The promotion path, exercised
+
+Verifying a restore in an isolated volume and then starting Compose against a different one proves nothing about what actually runs. `--promote` was exercised end to end against a simulated clean host (`COMPOSE_PROJECT_NAME=cleanhost-probe`, no existing volume):
+
+| Stage | Result |
+|---|---|
+| precondition | production volume absent — required, or the run refuses |
+| restore target | `cleanhost-probe_postgres-data`, the volume Compose adopts |
+| six assertions | all passed, against that volume |
+| after verification | volume kept, labelled `com.docker.compose.project` / `.volume`; verification container removed |
+| Compose start | adopted the volume with no extra step |
+| restored content | `property_tax` + `airflow`, 4 runtime roles, marker `before` only |
+| `pg_is_in_recovery()` | false |
+| write test | `CREATE TABLE` + `INSERT` succeeded — a real promoted primary, not a replica |
+
+The failure direction was checked too: the run refuses outright while the production volume exists, and a failed assertion destroys the volume rather than leaving an unverified one for Compose to pick up.
 
 ### What this exercise cost, and what it caught
 

@@ -13,7 +13,6 @@ set -euo pipefail
 SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-}}"
 REPOSITORY_DIR="${REPOSITORY_DIR:-}"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
-CERTIFICATE_GID="${CERTIFICATE_GID:-2000}"
 
 die() { printf 'install-systemd-units: %s\n' "$*" >&2; exit 2; }
 
@@ -26,6 +25,10 @@ fi
 id "$SERVICE_USER" >/dev/null 2>&1 || die "no such user: $SERVICE_USER"
 [[ -x "$REPOSITORY_DIR/infra/scripts/pgbackrest-backup.sh" ]] \
     || die "not a repository checkout: $REPOSITORY_DIR"
+# Checked rather than created: on a real host this is /etc/systemd/system and
+# its absence means UNIT_DIR was mistyped, which should say so plainly instead
+# of failing later as a redirection error.
+[[ -d "$UNIT_DIR" ]] || die "unit directory does not exist: $UNIT_DIR"
 
 # The unit needs the Docker socket, so the service user must already be able to
 # reach it. Checked rather than granted: adding a user to the docker group is a
@@ -35,10 +38,22 @@ if ! id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx "$DOCKER_GROUP"; then
     die "$SERVICE_USER is not in the '$DOCKER_GROUP' group and could not reach the Docker socket"
 fi
 
-# The certificate group must exist with the GID the Compose file passes as a
-# supplementary group, or the container joins a GID that grants nothing. Shared
-# with install-certificate-identity.sh so the two cannot disagree, and fails
-# closed rather than adopting a GID that already belongs to another group.
+# The certificate GID comes from infra/.env, the same file
+# install-certificate-identity.sh reads, so the two installers cannot disagree.
+#
+# Reading a separate default here was a real bug: on a host where 2000 is taken,
+# the operator sets TRUPRYCE_AWS_GID=2500, the identity installer creates
+# trupryce-certificates at 2500, and this one then demanded 2000 and failed --
+# with the fail-closed helper faithfully reporting a contradiction this script
+# had invented.
+COMPOSE_ENV_FILE="${COMPOSE_ENV_FILE:-$REPOSITORY_DIR/infra/.env}"
+[[ -r "$COMPOSE_ENV_FILE" ]] || die "cannot read $COMPOSE_ENV_FILE"
+CERTIFICATE_GID="${CERTIFICATE_GID:-$(
+    line="$(grep -E '^TRUPRYCE_AWS_GID=' "$COMPOSE_ENV_FILE" | tail -n 1 || true)"
+    printf '%s' "${line#*=}"
+)}"
+[[ -n "$CERTIFICATE_GID" ]] || die "$COMPOSE_ENV_FILE does not define TRUPRYCE_AWS_GID"
+
 # shellcheck source=lib/certificate-group.sh
 source "$REPOSITORY_DIR/infra/scripts/lib/certificate-group.sh"
 require_certificate_group "$CERTIFICATE_GID" || die "certificate group contract not satisfied"

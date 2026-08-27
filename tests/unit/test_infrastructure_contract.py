@@ -1376,3 +1376,112 @@ def test_clean_host_procedure_orders_identity_before_archiving() -> None:
         "trupryce-data-platform-hostinger",
     ):
         assert step in runbook, step
+
+
+def test_restore_offers_a_promotion_path_that_cannot_overwrite_a_live_cluster() -> None:
+    """A verified restore has to become the cluster Compose runs.
+
+    Without this the runbook proved S3 -> isolated PostgreSQL and stopped: the
+    ordinary restore deletes its volume on exit, and Compose is wired to a
+    different one, so a rebuild had no supported way to finish.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "--promote" in script
+    # Safe by precondition, not by operator care.
+    assert "already exists; --promote is for a host that has none" in script
+    assert "--promote restores into" in script  # refuses a conflicting --volume
+    # Verification runs against the volume Compose adopts, not a copy of it.
+    assert 'restore_volume="$PRODUCTION_VOLUME"' in script
+    # An unverified restore must not survive for Compose to pick up.
+    assert "verified=true" in script
+    assert "so it cannot be adopted" in script
+    # Labelled the way Compose labels its own volumes.
+    assert "com.docker.compose.volume=" in script or 'com.docker.compose.volume"' in script
+
+
+def test_installers_read_the_certificate_gid_from_one_place() -> None:
+    """Two defaults for one number is a contradiction waiting for a non-2000 host.
+
+    The identity installer read TRUPRYCE_AWS_GID from infra/.env while the
+    systemd installer defaulted to 2000 independently, so an operator told by
+    the fail-closed helper to pick 2500 would satisfy one installer and be
+    rejected by the other -- for a disagreement the scripts invented.
+    """
+    systemd_installer = (INFRA_ROOT / "scripts" / "install-systemd-units.sh").read_text("utf-8")
+    identity_installer = (INFRA_ROOT / "scripts" / "install-certificate-identity.sh").read_text(
+        "utf-8"
+    )
+    for script in (systemd_installer, identity_installer):
+        assert "TRUPRYCE_AWS_GID" in script
+        assert "COMPOSE_ENV_FILE" in script
+    # No independent literal default in the systemd installer.
+    code = "\n".join(
+        line for line in systemd_installer.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "CERTIFICATE_GID:-2000" not in code
+    assert "does not define TRUPRYCE_AWS_GID" in systemd_installer
+
+
+def test_signing_helper_verifies_an_existing_binary_by_digest() -> None:
+    """A version string is output from the program whose integrity is in question.
+
+    Accepting it means a replaced binary that prints 1.8.4 is adopted without
+    inspection -- for the executable that turns the workload private key into
+    AWS credentials.
+    """
+    script = (INFRA_ROOT / "scripts" / "install-signing-helper.sh").read_text(encoding="utf-8")
+    assert 'existing_digest="$(sha256sum "$INSTALL_PATH"' in script
+    assert 'if [[ "$existing_digest" == "$SIGNING_HELPER_SHA256" ]]' in script
+    assert "digest verified" in script
+    # The dangerous case is named rather than silently handled.
+    assert "but its digest does not match the pin" in script
+    # Version alone must never be an accept condition: the branch that compares
+    # the reported version must lead to a replacement, never to an early exit.
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    version_branch = code.split('"$installed_version" == "$SIGNING_HELPER_VERSION"', 1)
+    assert len(version_branch) == 2, "no version comparison found"
+    after_version_check = version_branch[1].split("fi", 1)[0]
+    assert "exit 0" not in after_version_check, "accepts an existing binary on its version alone"
+    assert "replacing it" in after_version_check
+
+
+def test_clean_host_prerequisites_name_every_tool_the_procedure_uses() -> None:
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    # Anchored to the dependency table itself. A document-wide substring passes
+    # on any incidental mention elsewhere in the runbook, which is exactly how a
+    # row could be deleted from the table without the guard noticing.
+    table_start = runbook.index("| Dependency | Used by |")
+    table = runbook[table_start : runbook.index(chr(10) * 2, table_start)]
+    # First column only. "AWS CLI" also appears in the signing-helper row's
+    # description, so matching anywhere in a row would let the AWS CLI row
+    # itself be deleted while the guard still passed.
+    names = [
+        row.split("|")[1].strip()
+        for row in table.splitlines()
+        if row.startswith("|") and row.count("|") >= 3
+    ]
+    rows = [name for name in names if name and set(name) != {"-"} and name != "Dependency"]
+    assert len(rows) >= 8, f"dependency table has only {len(rows)} entries"
+    for dependency in (
+        "Docker Engine",
+        "AWS CLI",
+        "aws_signing_helper",
+        "bws",
+        "git",
+        "curl",
+        "openssl",
+        "Tailscale",
+    ):
+        assert any(dependency in row for row in rows), f"{dependency} missing from the table"
+    # The bootstrap values bootstrap-env.sh demands before it will run.
+    assert "BWS_ACCESS_TOKEN" in runbook and "BWS_PROJECT_ID" in runbook
+    assert "read -rsp" in runbook
+    # Profile ARNs are discovered, not left as placeholders to guess.
+    assert "rolesanywhere list-profiles" in runbook
+    assert "contains(roleArns[0]" in runbook
+    # The promotion path is what the procedure actually tells you to run.
+    assert "--promote --target" in runbook
+    # And the removed primitive is not still described as present.
+    assert "`Conflicts` with the full" not in runbook
