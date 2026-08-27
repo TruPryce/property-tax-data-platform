@@ -134,6 +134,22 @@ The restored cluster runs on a temporary Docker volume, on a loopback-only high 
 - **The AWS bootstrap needs administrative credentials.** Confirmed by probe: `iam:*` and `rolesanywhere:*` are denied from the runtime host. This is correct posture, and it means part of the procedure is an operator action rather than an automated one.
 - **The restore exercise competes for host memory.** A second PostgreSQL container runs alongside the production stack. It is given a small `mem_limit` and torn down immediately.
 
+## What running it changed in this design
+
+Four things in the sketch above were wrong in ways only execution revealed. They are recorded here because each is a property of the runtime rather than of the plan, and a future host will meet all four again.
+
+**The credential option name.** `repo1-s3-key-process` is not a pgBackRest option; `repo-s3-process-cmd` is. pgBackRest treats an unknown option in a configuration *file* as a warning and continues, so the wrong name parsed, was dropped, and left the repository unable to authenticate — while a test asserting the string was present passed, because the string was present. The gate is now the pinned binary parsing the committed file.
+
+**The `PGBACKREST_` prefix is not free.** pgBackRest maps every `PGBACKREST_<X>` variable onto its option `<x>`, so naming the identity variables `PGBACKREST_AWS_…` made them invalid options rather than configuration. They live under `TRUPRYCE_AWS_…` now.
+
+**Identity cannot come from inherited environment.** pgBackRest's asynchronous archive-push worker execs the credential process with a cleaned environment. The variables are present for `docker exec` and for `stanza-create`, and absent exactly where archiving happens, so the wrapper reads a non-secret identity file mounted beside the certificates, with environment as an override.
+
+**Supplementary groups do not survive the entrypoint.** This is the one worth remembering. Compose's `group_add` sets groups on the container's initial process, but the postgres entrypoint starts as root and re-derives supplementary groups from the image's `/etc/group` when it drops to `postgres`. `docker exec --user postgres` keeps the Docker-added group and reads the key; the archiver, a child of the postmaster, does not.
+
+The failure mode is not subtle once it happens: `archive-push` exits 103, PostgreSQL treats the dead archive command as a backend crash, and the postmaster reinitialises the whole cluster every ten seconds. It *is* subtle before it happens, because a green `pgbackrest check`, a successful `stanza-create`, and a successful full backup are all reachable while it is broken. The group is therefore created in the image with `postgres` as a member, and the GID is a build argument so image and host cannot drift.
+
+**Compose labels are image labels.** `docker compose build` writes `com.docker.compose.project` and `service` into the image, so every container started from it answers a project/service selector — including an isolated restore. The backup script's refuse-on-ambiguity behaviour turned that into a clean failure instead of a backup of the wrong cluster, and the selector now also requires `com.docker.compose.oneoff=False`.
+
 ## Migration
 
 Nothing to migrate. `archive_mode=on` requires a PostgreSQL restart, which is the only production impact: one restart of the `postgres` service, taken deliberately, with Airflow reconnecting afterwards. The five merged property-tax migrations remain unapplied, by instruction.

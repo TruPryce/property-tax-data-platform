@@ -39,6 +39,7 @@ services:
       dockerfile: infra/postgres/Dockerfile
       args:
         POSTGRES_VERSION: ${POSTGRES_VERSION:-16.11}
+        TRUPRYCE_AWS_GID: ${TRUPRYCE_AWS_GID:-2000}
     image: property-tax-postgres:${POSTGRES_VERSION:-16.11}
     # archive_mode is not reloadable, so it is set here rather than by ALTER
     # SYSTEM: turning it on always costs one restart and the restart should be
@@ -72,11 +73,11 @@ services:
       # Non-secret identity configuration, kept out of pgbackrest.conf so the
       # same committed file works on every host and a provider migration
       # changes environment rather than configuration.
-      PGBACKREST_AWS_CERTIFICATE: ${PGBACKREST_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}
-      PGBACKREST_AWS_PRIVATE_KEY: ${PGBACKREST_AWS_PRIVATE_KEY:-/etc/trupryce/aws/trupryce-data-platform-vps.key}
-      PGBACKREST_AWS_TRUST_ANCHOR_ARN: ${PGBACKREST_AWS_TRUST_ANCHOR_ARN:?PGBACKREST_AWS_TRUST_ANCHOR_ARN is required}
-      PGBACKREST_AWS_PROFILE_ARN: ${PGBACKREST_AWS_PROFILE_ARN:?PGBACKREST_AWS_PROFILE_ARN is required}
-      PGBACKREST_AWS_ROLE_ARN: ${PGBACKREST_AWS_ROLE_ARN:?PGBACKREST_AWS_ROLE_ARN is required}
+      TRUPRYCE_AWS_CERTIFICATE: ${TRUPRYCE_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}
+      TRUPRYCE_AWS_PRIVATE_KEY: ${TRUPRYCE_AWS_PRIVATE_KEY:-/etc/trupryce/aws/trupryce-data-platform-vps.key}
+      TRUPRYCE_AWS_TRUST_ANCHOR_ARN: ${TRUPRYCE_AWS_TRUST_ANCHOR_ARN:?TRUPRYCE_AWS_TRUST_ANCHOR_ARN is required}
+      TRUPRYCE_AWS_PROFILE_ARN: ${TRUPRYCE_AWS_PROFILE_ARN:?TRUPRYCE_AWS_PROFILE_ARN is required}
+      TRUPRYCE_AWS_ROLE_ARN: ${TRUPRYCE_AWS_ROLE_ARN:?TRUPRYCE_AWS_ROLE_ARN is required}
     ports:
       - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     # The container's postgres user is uid 999 and the host key is owned by the

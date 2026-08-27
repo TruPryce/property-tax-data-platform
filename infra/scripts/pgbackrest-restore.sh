@@ -100,11 +100,11 @@ certificate_directory="$(read_configuration_value TRUPRYCE_AWS_CERTIFICATE_DIR)"
 certificate_directory="${certificate_directory:-/etc/trupryce/aws}"
 certificate_gid="$(read_configuration_value TRUPRYCE_AWS_GID)"
 certificate_gid="${certificate_gid:-2000}"
-certificate="$(read_configuration_value PGBACKREST_AWS_CERTIFICATE)"
-private_key="$(read_configuration_value PGBACKREST_AWS_PRIVATE_KEY)"
-trust_anchor="$(read_configuration_value PGBACKREST_AWS_TRUST_ANCHOR_ARN)"
-profile_arn="$(read_configuration_value PGBACKREST_AWS_PROFILE_ARN)"
-role_arn="$(read_configuration_value PGBACKREST_AWS_ROLE_ARN)"
+certificate="$(read_configuration_value TRUPRYCE_AWS_CERTIFICATE)"
+private_key="$(read_configuration_value TRUPRYCE_AWS_PRIVATE_KEY)"
+trust_anchor="$(read_configuration_value TRUPRYCE_AWS_TRUST_ANCHOR_ARN)"
+profile_arn="$(read_configuration_value TRUPRYCE_AWS_PROFILE_ARN)"
+role_arn="$(read_configuration_value TRUPRYCE_AWS_ROLE_ARN)"
 
 # Named by their configuration key, not by the shell variable holding them: an
 # operator reading "does not define TRUST_ANCHOR" would grep the file for the
@@ -112,9 +112,9 @@ role_arn="$(read_configuration_value PGBACKREST_AWS_ROLE_ARN)"
 require_configured() {
     [[ -n "$2" ]] || die "$compose_environment_file does not define $1"
 }
-require_configured PGBACKREST_AWS_TRUST_ANCHOR_ARN "$trust_anchor"
-require_configured PGBACKREST_AWS_PROFILE_ARN "$profile_arn"
-require_configured PGBACKREST_AWS_ROLE_ARN "$role_arn"
+require_configured TRUPRYCE_AWS_TRUST_ANCHOR_ARN "$trust_anchor"
+require_configured TRUPRYCE_AWS_PROFILE_ARN "$profile_arn"
+require_configured TRUPRYCE_AWS_ROLE_ARN "$role_arn"
 
 if [[ -z "$restore_volume" ]]; then
     restore_volume="pitr-verify-$(date -u +%Y%m%d%H%M%S)-$$"
@@ -157,11 +157,11 @@ export PGBACKREST_REPO1_CIPHER_PASS="$PGBACKREST_CIPHER_PASS"
 
 identity_arguments=(
     -e PGBACKREST_REPO1_CIPHER_PASS
-    -e "PGBACKREST_AWS_CERTIFICATE=$certificate"
-    -e "PGBACKREST_AWS_PRIVATE_KEY=$private_key"
-    -e "PGBACKREST_AWS_TRUST_ANCHOR_ARN=$trust_anchor"
-    -e "PGBACKREST_AWS_PROFILE_ARN=$profile_arn"
-    -e "PGBACKREST_AWS_ROLE_ARN=$role_arn"
+    -e "TRUPRYCE_AWS_CERTIFICATE=$certificate"
+    -e "TRUPRYCE_AWS_PRIVATE_KEY=$private_key"
+    -e "TRUPRYCE_AWS_TRUST_ANCHOR_ARN=$trust_anchor"
+    -e "TRUPRYCE_AWS_PROFILE_ARN=$profile_arn"
+    -e "TRUPRYCE_AWS_ROLE_ARN=$role_arn"
     -v "$certificate_directory:/etc/trupryce/aws:ro"
     --group-add "$certificate_gid"
 )
@@ -179,7 +179,13 @@ info "restore complete; starting the isolated cluster on ${bind_address}:${RESTO
 # Same image, same certificate mount, same ARNs: recovery to the target runs
 # archive-get, which needs credentials. Without them PostgreSQL starts from the
 # base backup and stops short of the requested timestamp.
+# Overwrite the Compose labels inherited from the image so this container can
+# never be mistaken for the production service by a label selector -- including
+# the backup timers', which would otherwise see two candidates.
 docker run -d --name "$container" \
+    --label com.docker.compose.project=pitr-verify \
+    --label com.docker.compose.service=pitr-verify \
+    --label com.docker.compose.oneoff=True \
     -p "${bind_address}:${RESTORE_PORT}:5432" \
     -v "$restore_volume:/var/lib/postgresql/data" \
     "${identity_arguments[@]}" \
@@ -187,35 +193,50 @@ docker run -d --name "$container" \
     --memory 1g \
     "$RESTORE_IMAGE" >/dev/null
 
-for _ in $(seq 1 60); do
+# Readiness is not promotion. `pg_isready` reports OK while the cluster is
+# still replaying WAL toward the target, so a check made at that moment finds
+# pg_is_in_recovery() true and looks like a failed recovery. Wait for the
+# promotion --target-action=promote performs once the target is reached.
+promoted=false
+for _ in $(seq 1 90); do
     if docker exec "$container" pg_isready -U platform_admin >/dev/null 2>&1; then
-        break
+        in_recovery="$(docker exec "$container" psql -U platform_admin -d postgres -tAc \
+            'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"
+        if [[ "$in_recovery" == "f" ]]; then
+            promoted=true
+            break
+        fi
     fi
     sleep 2
 done
 
-docker exec "$container" pg_isready -U platform_admin >/dev/null 2>&1 \
-    || { docker logs --tail 40 "$container" >&2; die "isolated cluster did not become ready"; }
+if [[ "$promoted" != true ]]; then
+    docker logs --tail 40 "$container" >&2
+    die "isolated cluster did not finish recovery and promote within the timeout"
+fi
 
+# -c rather than a heredoc: `docker exec` without -i has no stdin, so a
+# heredoc reaches psql as an empty script and every assertion silently prints
+# nothing -- an exercise that looks like it ran and asserted zero things.
 printf '\n===== isolated recovery assertions =====\n'
-docker exec "$container" psql -U platform_admin -d postgres -v ON_ERROR_STOP=1 -At <<'SQL'
-SELECT 'property_tax database exists: ' ||
-       (EXISTS (SELECT 1 FROM pg_database WHERE datname = 'property_tax'))::text;
-SELECT 'airflow database exists:      ' ||
-       (EXISTS (SELECT 1 FROM pg_database WHERE datname = 'airflow'))::text;
-SELECT 'runtime roles present (4):    ' || count(*)::text
-  FROM pg_roles
- WHERE rolname IN ('airflow_metadata','property_tax_migrator',
-                   'property_tax_ingestion','property_tax_api');
-SELECT 'in recovery (want false):     ' || pg_is_in_recovery()::text;
-SQL
+assertions=$(docker exec "$container" psql -U platform_admin -d postgres -v ON_ERROR_STOP=1 -tAc "
+SELECT '  1. property_tax database exists : ' || (EXISTS (SELECT 1 FROM pg_database WHERE datname='property_tax'))::text
+UNION ALL SELECT '  2. airflow database exists      : ' || (EXISTS (SELECT 1 FROM pg_database WHERE datname='airflow'))::text
+UNION ALL SELECT '  3. runtime roles present (want 4): ' || (SELECT count(*) FROM pg_roles WHERE rolname IN ('airflow_metadata','property_tax_migrator','property_tax_ingestion','property_tax_api'))::text
+UNION ALL SELECT '  4. pg_is_in_recovery() is false : ' || (NOT pg_is_in_recovery())::text
+UNION ALL SELECT '  5. marker before present        : ' || (EXISTS (SELECT 1 FROM public.recovery_marker WHERE state='before'))::text
+UNION ALL SELECT '  6. marker after ABSENT          : ' || (NOT EXISTS (SELECT 1 FROM public.recovery_marker WHERE state='after'))::text
+")
+printf '%s\n' "$assertions"
 
-printf '\n===== marker table =====\n'
-docker exec "$container" psql -U platform_admin -d postgres -At -c "
-SELECT CASE WHEN to_regclass('public.recovery_marker') IS NULL
-            THEN 'recovery_marker absent'
-            ELSE 'markers: ' || (SELECT coalesce(string_agg(state, ',' ORDER BY state), '(none)')
-                                 FROM public.recovery_marker) END;"
+# An empty or short result means the assertions did not run. Fail loudly rather
+# than reporting a successful exercise that proved nothing.
+if [[ "$(printf '%s\n' "$assertions" | grep -c .)" -ne 6 ]]; then
+    die "recovery assertions did not execute; refusing to report a passing exercise"
+fi
+if printf '%s' "$assertions" | grep -qE ': false$|\(want 4\): [0-3]$'; then
+    die "a recovery assertion failed"
+fi
 
 printf '\n===== isolation =====\n'
 printf 'restored volume : %s\n' "$restore_volume"

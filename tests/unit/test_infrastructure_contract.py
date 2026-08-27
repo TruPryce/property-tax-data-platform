@@ -600,6 +600,12 @@ def test_backup_script_selects_the_container_by_compose_label() -> None:
     script = BACKUP_SCRIPT.read_text(encoding="utf-8")
     assert "label=com.docker.compose.project=${COMPOSE_PROJECT}" in script
     assert "label=com.docker.compose.service=${COMPOSE_SERVICE}" in script
+    # `docker compose build` writes project and service labels into the IMAGE,
+    # so every container started from it inherits them -- an isolated PITR
+    # restore included. Only a container Compose actually ran carries oneoff,
+    # and without it the selector matched two candidates during the recorded
+    # restore exercise.
+    assert "label=com.docker.compose.oneoff=False" in script
     # A container ID changes on every recreate, so a unit pinned to one keeps
     # running and protects nothing the first time the stack is rebuilt.
     assert "docker ps --quiet" in script
@@ -764,31 +770,40 @@ def test_workload_key_is_group_readable_but_never_world_readable() -> None:
     reason="requires docker and the host workload key",
 )
 def test_only_the_certificate_group_can_read_the_key_from_a_container() -> None:
-    """Group membership is the authorization boundary, not file mode alone."""
+    """Group membership is the authorization boundary, not file mode alone.
+
+    `postgres` reaches the key through the certificate group it belongs to in
+    the image. Any identity outside that group must not, which is what keeps
+    0640 meaningful: the key is readable by a named group and by nobody else.
+    """
     build_probe_image()
 
-    def readable(group_add: bool) -> bool:
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{CERTIFICATE_DIR}:/etc/trupryce/aws:ro",
-            "--user",
-            "postgres",
-        ]
-        if group_add:
-            command += ["--group-add", certificate_gid()]
-        command += [
-            PGBACKREST_PROBE_IMAGE,
-            "test",
-            "-r",
-            "/etc/trupryce/aws/trupryce-data-platform-vps.key",
-        ]
-        return subprocess.run(command, capture_output=True, timeout=300).returncode == 0
+    def readable(user: str) -> bool:
+        return (
+            subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "-v",
+                    f"{CERTIFICATE_DIR}:/etc/trupryce/aws:ro",
+                    "--user",
+                    user,
+                    PGBACKREST_PROBE_IMAGE,
+                    "test",
+                    "-r",
+                    "/etc/trupryce/aws/trupryce-data-platform-vps.key",
+                ],
+                capture_output=True,
+                timeout=300,
+            ).returncode
+            == 0
+        )
 
-    assert readable(group_add=True), "postgres cannot read the key with the certificate group"
-    assert not readable(group_add=False), "key is readable without the group, so it is too open"
+    assert readable("postgres"), "postgres cannot read the key; archiving would fail"
+    # An arbitrary uid with no group membership: the world bits are what would
+    # let this through, and they are not set.
+    assert not readable("12345:12345"), "key is readable outside the certificate group"
 
 
 def test_reported_secret_count_matches_what_is_actually_written(tmp_path: Path) -> None:
@@ -923,9 +938,9 @@ def test_restore_gives_the_recovered_cluster_what_archive_get_needs() -> None:
     assert "/etc/trupryce/aws:ro" in script
     assert "--group-add" in script
     for arn in (
-        "PGBACKREST_AWS_TRUST_ANCHOR_ARN",
-        "PGBACKREST_AWS_PROFILE_ARN",
-        "PGBACKREST_AWS_ROLE_ARN",
+        "TRUPRYCE_AWS_TRUST_ANCHOR_ARN",
+        "TRUPRYCE_AWS_PROFILE_ARN",
+        "TRUPRYCE_AWS_ROLE_ARN",
     ):
         assert arn in script, arn
 
@@ -986,3 +1001,130 @@ def test_certificate_expiry_check_exists_and_claims_no_automation() -> None:
     assert "check-certificate-expiry.sh" in runbook
     assert "2026-11-17" in runbook
     assert "Nothing alerts on this" in runbook
+
+
+def test_container_environment_does_not_squat_the_pgbackrest_namespace() -> None:
+    """pgBackRest parses every `PGBACKREST_*` variable as one of its own options.
+
+    An identity variable named `PGBACKREST_AWS_CERTIFICATE` is therefore read as
+    the option `aws-certificate`, rejected as invalid, and warned about on every
+    single command -- while still being visible to the wrapper, so nothing fails
+    outright and the warnings look cosmetic. Anything that is not a real
+    pgBackRest option belongs outside the namespace.
+    """
+    # Real pgBackRest options this deployment sets through the environment.
+    permitted = {"PGBACKREST_REPO1_CIPHER_PASS", "PGBACKREST_STANZA"}
+    environment = load_compose()["services"]["postgres"]["environment"]
+    squatters = {
+        name for name in environment if name.startswith("PGBACKREST_") and name not in permitted
+    }
+    assert not squatters, f"not pgBackRest options: {sorted(squatters)}"
+    # The identity variables live under the project's own prefix instead.
+    for name in (
+        "TRUPRYCE_AWS_CERTIFICATE",
+        "TRUPRYCE_AWS_PRIVATE_KEY",
+        "TRUPRYCE_AWS_TRUST_ANCHOR_ARN",
+        "TRUPRYCE_AWS_PROFILE_ARN",
+        "TRUPRYCE_AWS_ROLE_ARN",
+    ):
+        assert name in environment, name
+
+
+def test_pgbackrest_connects_as_the_clusters_actual_superuser() -> None:
+    """The image's OS user is `postgres`; this cluster's superuser is not.
+
+    Without pg1-user, pgBackRest connects as the OS user it runs as and fails
+    with `role "postgres" does not exist`, which reads like a pgBackRest fault
+    rather than a mismatch with the superuser name this deployment chose.
+    """
+    settings = [
+        line.strip()
+        for line in PGBACKREST_CONF.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert "pg1-user=platform_admin" in settings
+    bootstrap = (INFRA_ROOT / "postgres" / "init" / "10-create-runtime-databases.sh").read_text(
+        encoding="utf-8"
+    )
+    compose_user = load_compose()["services"]["postgres"]["environment"]["POSTGRES_USER"]
+    # Tied to the Compose value, so renaming the superuser cannot leave
+    # pgbackrest.conf pointing at a role that no longer exists.
+    assert compose_user == "platform_admin", compose_user
+    assert bootstrap  # bootstrap creates the other roles; the superuser comes from Compose
+
+
+def test_restore_container_cannot_masquerade_as_the_production_service() -> None:
+    """The restore container must not answer a production label selector.
+
+    It is started from the Compose-built image, so it inherits that image's
+    project and service labels. Left alone, the backup timers' own selector
+    would see two candidates while a restore is running.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "--label com.docker.compose.project=pitr-verify" in script
+    assert "--label com.docker.compose.service=pitr-verify" in script
+    assert "--label com.docker.compose.oneoff=True" in script
+
+
+def test_restore_waits_for_promotion_rather_than_readiness() -> None:
+    """`pg_isready` reports OK while the cluster is still replaying WAL.
+
+    Asserting recovery state at that moment finds pg_is_in_recovery() true and
+    reports a failed recovery for a restore that was merely still running.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "SELECT pg_is_in_recovery()" in script
+    assert "did not finish recovery and promote" in script
+    # An assertion block that silently produces nothing must fail, not pass.
+    assert "refusing to report a passing exercise" in script
+    # -c, not a heredoc: `docker exec` without -i has no stdin, so a heredoc
+    # reaches psql empty and every assertion prints nothing.
+    assert "<<'SQL'" not in script
+
+
+def test_image_grants_postgres_the_certificate_group() -> None:
+    """Compose `group_add` does not survive the entrypoint's switch to postgres.
+
+    The postgres entrypoint starts as root and re-derives supplementary groups
+    from the image's /etc/group, dropping anything Docker added. `docker exec
+    --user postgres` keeps the added group, so every hand-run check passes while
+    the archiver -- a child of the postmaster -- runs without it, cannot read the
+    key, and takes the cluster into a restart loop.
+    """
+    dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
+    assert "groupadd --gid" in dockerfile
+    assert "usermod --append --groups trupryce-certificates postgres" in dockerfile
+    assert "ARG TRUPRYCE_AWS_GID" in dockerfile
+    # Image and host must agree on the number, so Compose passes it as a build arg.
+    build_args = load_compose()["services"]["postgres"]["build"]["args"]
+    assert build_args["TRUPRYCE_AWS_GID"] == "${TRUPRYCE_AWS_GID:-2000}"
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None or not WORKLOAD_KEY.exists(),
+    reason="requires docker and the host workload key",
+)
+def test_postmaster_children_can_read_the_key_without_docker_group_add() -> None:
+    """The case that actually broke: no --group-add, as the archiver runs."""
+    build_probe_image()
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{CERTIFICATE_DIR}:/etc/trupryce/aws:ro",
+            "--user",
+            "postgres",
+            PGBACKREST_PROBE_IMAGE,
+            "test",
+            "-r",
+            "/etc/trupryce/aws/trupryce-data-platform-vps.key",
+        ],
+        capture_output=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, (
+        "postgres cannot read the key from image group membership alone; "
+        "the archiver would fail at runtime"
+    )

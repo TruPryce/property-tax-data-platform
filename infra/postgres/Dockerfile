@@ -34,6 +34,25 @@ RUN set -eux; \
     apt-get purge -y --auto-remove curl; \
     rm -rf /var/lib/apt/lists/*
 
+# The certificate group must exist INSIDE the image with postgres as a member.
+#
+# Compose's `group_add` sets supplementary groups on the container's initial
+# process, but the postgres entrypoint starts as root and then switches to the
+# postgres user, which re-derives supplementary groups from this image's
+# /etc/group and drops everything Docker added. The result is subtle: `docker
+# exec --user postgres` keeps the added group and can read the key, so every
+# check an operator runs by hand passes, while the archiver -- a child of the
+# postmaster -- runs without it and cannot read the certificate at all.
+#
+# That failure is not quiet. archive-push exits 103, PostgreSQL treats the dead
+# archive command as a crash, and the cluster enters a restart loop. Measured on
+# the deployed runtime before this line existed.
+ARG TRUPRYCE_AWS_GID=2000
+RUN set -eux; \
+    groupadd --gid "${TRUPRYCE_AWS_GID}" trupryce-certificates; \
+    usermod --append --groups trupryce-certificates postgres; \
+    id postgres
+
 # Owned by postgres because archive_command runs as a child of the backend, and
 # a directory root can write but postgres cannot is an archive that fails only
 # under load, when the spool is first actually used.

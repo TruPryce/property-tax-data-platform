@@ -12,7 +12,7 @@
 # unreadable, so it is usable from a timer or CI job once something watches it.
 set -euo pipefail
 
-CERTIFICATE="${PGBACKREST_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}"
+CERTIFICATE="${TRUPRYCE_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}"
 WARN_DAYS="${WARN_DAYS:-30}"
 
 if [[ ! -r "$CERTIFICATE" ]]; then

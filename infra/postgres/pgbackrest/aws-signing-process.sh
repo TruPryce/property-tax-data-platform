@@ -20,21 +20,46 @@
 # strong for every future file, which is worth more than a better name here.
 set -euo pipefail
 
+# Identity comes from a file, not from inherited environment.
+#
+# pgBackRest's asynchronous archive-push worker execs this command with a
+# cleaned environment. The variables are present for `docker exec` and for
+# stanza-create, and absent for archive-push -- so an environment-only wrapper
+# authenticates during every check an operator runs by hand and fails only in
+# the background, where the failure surfaces as PostgreSQL crash-looping on a
+# dead archive command rather than as a credential problem.
+#
+# Environment still wins where it is set, which is what lets the restore wrapper
+# and the tests point at a different identity without rewriting this file.
+IDENTITY_FILE="${TRUPRYCE_AWS_IDENTITY_FILE:-/etc/trupryce/aws/identity.env}"
+if [[ -r "$IDENTITY_FILE" ]]; then
+    while IFS= read -r identity_line; do
+        [[ "$identity_line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$identity_line" == *=* ]] || continue
+        identity_name="${identity_line%%=*}"
+        identity_name="${identity_name//[[:space:]]/}"
+        [[ "$identity_name" == TRUPRYCE_AWS_* ]] || continue
+        # Already-set environment wins.
+        [[ -n "${!identity_name:-}" ]] && continue
+        printf -v "$identity_name" '%s' "${identity_line#*=}"
+    done < "$IDENTITY_FILE"
+fi
+
 require() {
     local name="$1"
     if [[ -z "${!name:-}" ]]; then
-        printf 'pgbackrest-aws-signing: %s is required\n' "$name" >&2
+        printf 'pgbackrest-aws-signing: %s is required (env or %s)\n' "$name" "$IDENTITY_FILE" >&2
         exit 2
     fi
 }
 
-require PGBACKREST_AWS_CERTIFICATE
-require PGBACKREST_AWS_PRIVATE_KEY
-require PGBACKREST_AWS_TRUST_ANCHOR_ARN
-require PGBACKREST_AWS_PROFILE_ARN
-require PGBACKREST_AWS_ROLE_ARN
+require TRUPRYCE_AWS_CERTIFICATE
+require TRUPRYCE_AWS_PRIVATE_KEY
+require TRUPRYCE_AWS_TRUST_ANCHOR_ARN
+require TRUPRYCE_AWS_PROFILE_ARN
+require TRUPRYCE_AWS_ROLE_ARN
 
-for path in "$PGBACKREST_AWS_CERTIFICATE" "$PGBACKREST_AWS_PRIVATE_KEY"; do
+for path in "$TRUPRYCE_AWS_CERTIFICATE" "$TRUPRYCE_AWS_PRIVATE_KEY"; do
     if [[ ! -r "$path" ]]; then
         printf 'pgbackrest-aws-signing: cannot read %s\n' "$path" >&2
         exit 2
@@ -42,8 +67,8 @@ for path in "$PGBACKREST_AWS_CERTIFICATE" "$PGBACKREST_AWS_PRIVATE_KEY"; do
 done
 
 exec aws_signing_helper credential-process \
-    --certificate "$PGBACKREST_AWS_CERTIFICATE" \
-    --private-key "$PGBACKREST_AWS_PRIVATE_KEY" \
-    --trust-anchor-arn "$PGBACKREST_AWS_TRUST_ANCHOR_ARN" \
-    --profile-arn "$PGBACKREST_AWS_PROFILE_ARN" \
-    --role-arn "$PGBACKREST_AWS_ROLE_ARN"
+    --certificate "$TRUPRYCE_AWS_CERTIFICATE" \
+    --private-key "$TRUPRYCE_AWS_PRIVATE_KEY" \
+    --trust-anchor-arn "$TRUPRYCE_AWS_TRUST_ANCHOR_ARN" \
+    --profile-arn "$TRUPRYCE_AWS_PROFILE_ARN" \
+    --role-arn "$TRUPRYCE_AWS_ROLE_ARN"

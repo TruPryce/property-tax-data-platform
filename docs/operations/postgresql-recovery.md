@@ -483,6 +483,73 @@ Step 7 is the one that gets skipped. A migration is not finished while the old i
 
 Restore and verify **before** cutover, and revoke **after**. Revoking the Akamai identity before the Hostinger restore is verified leaves no working identity if the restore fails.
 
+## Part 5 — Recorded evidence
+
+Exercised on the Akamai host on 2026-08-27 against the live cluster. Recorded from actual command output; no credential, certificate material, passphrase, or production row is reproduced here.
+
+### Identity isolation
+
+| Assertion | Result |
+|---|---|
+| `trupryce-backup` STS identity | `arn:aws:sts::099427795947:assumed-role/trupryce-data-platform-backup/…` |
+| `trupryce-backup` lists the backup bucket | allowed |
+| `trupryce-data-vps` on the backup bucket | **AccessDenied** |
+| `trupryce-backup` on `s3://trupryce-property-tax-data/` | **AccessDenied** |
+| `trupryce-backup` outside `pgbackrest/platform/` | **AccessDenied** |
+| `trupryce-backup` PUT/GET/LIST/DELETE inside its prefix | allowed (delete is required for retention expiry) |
+| Long-lived keys anywhere on the host | none; no `~/.aws/credentials`, no `aws_access_key_id` |
+
+Both directions were tested rather than inferred.
+
+### Repository proof
+
+| Step | Result |
+|---|---|
+| Private key readable by container `postgres` | yes — uid 999, groups 999, 101, 2000 |
+| Credential exchange as `postgres` | exit 0, temporary `ASIA…` credentials, all fields present |
+| `stanza-create` | completed successfully |
+| `check` | completed successfully, WAL segment `000000010000000000000043` archived |
+| WAL reaches S3 | segment `000000010000000000000044` present, **3.61s** after `pg_switch_wal()` |
+| First full backup | label **`20260827-005558F`**, 40.8 MB database, 4.7 MB in repository |
+| `info` | `status: ok`, `cipher: aes-256-cbc` |
+| Backup objects in S3 | 1937 objects; `backup.manifest` begins `Salted__`, so the repository is encrypted before it leaves the host |
+| `pg_stat_archiver` | `archived=9 failed=0` |
+
+### Point-in-time restore
+
+| | |
+|---|---|
+| Backup restored from | `20260827-005558F` |
+| Target timestamp | `2026-08-27 00:57:48+00` |
+| `before` committed | 00:57:35.114187+00 |
+| `after` committed | 00:57:53.583189+00 |
+| Measured RPO | **3.61s** for a forced WAL switch; bounded at 300 s by `archive_timeout` when idle |
+| Measured RTO | **56s** end to end — restore, start, replay to target, promote, assert |
+
+All six assertions passed, through the committed wrapper:
+
+```text
+  1. property_tax database exists  : true
+  2. airflow database exists       : true
+  3. runtime roles present (want 4): 4
+  4. pg_is_in_recovery() is false  : true
+  5. marker before present         : true
+  6. marker after ABSENT           : true
+```
+
+Isolation: restored into `pitr-verify-20260827010147-…`; `property-tax-platform_postgres-data` was **not** among the container's mounts; published on `127.0.0.1:55432` only. Container and volume removed afterwards, and the disposable marker table dropped from production.
+
+### What this exercise cost, and what it caught
+
+Four defects surfaced only by running it, none of which any static check would have found:
+
+1. **`PGBACKREST_*` is pgBackRest's own option namespace.** Identity variables named `PGBACKREST_AWS_…` were parsed as pgBackRest options, rejected as invalid, and warned about on every command. Renamed to `TRUPRYCE_AWS_…`.
+2. **pgBackRest connects as the OS user it runs as.** This cluster's superuser is `platform_admin`, so `stanza-create` failed with `role "postgres" does not exist` until `pg1-user` was set.
+3. **Compose `group_add` does not survive the entrypoint.** The postgres entrypoint re-derives supplementary groups from the image's `/etc/group` when it switches from root, dropping what Docker added. `docker exec --user postgres` kept the group and read the key, so every hand-run check passed — while the archiver ran without it, could not read the certificate, and **took the cluster into a restart loop**: `archive-push` exits 103, PostgreSQL treats the dead archive command as a crash, and the postmaster reinitialises every ten seconds. Fixed by creating the group inside the image with `postgres` as a member.
+4. **Compose bakes project and service labels into the image.** Every container started from it inherits them, so the backup script's label selector matched both the production cluster and the temporary restore cluster. Its refuse-on-ambiguity guard turned that into a clean failure rather than a backup of the wrong cluster; the selector now also requires `com.docker.compose.oneoff=False`, and the restore container overwrites the inherited labels.
+
+Points 3 and 4 are the argument for this exercise being mandatory rather than optional: a green `check` and a successful backup were both true while the cluster was crash-looping, and neither would have revealed it.
+
 ## Related
 
 - [Operations](README.md)
