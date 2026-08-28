@@ -354,15 +354,20 @@ def _run_wrapper(arguments: list[str], tmp_path: Path, environment_body: str) ->
         ["config"],
         ["convert"],
         ["--profile", "debug", "config"],
-        ["-f", "infra/compose.yaml", "config"],
-        ["--project-name", "scratch", "config"],
         ["--dry-run", "config"],
     ],
 )
 def test_secret_rendering_guard_survives_global_compose_options(
     arguments: list[str], tmp_path: Path
 ) -> None:
-    """Compose accepts options before the subcommand, so `$1` is not the subcommand."""
+    """Compose accepts options before the subcommand, so `$1` is not the subcommand.
+
+    `-f` and `--project-name` were originally covered here too. They are now
+    refused earlier and more broadly, as topology overrides rather than as a
+    rendering risk, so they are asserted in
+    test_topology_overrides_are_refused_before_compose_runs. The options that
+    remain legal still have to reach this guard.
+    """
     completed = _run_wrapper(arguments, tmp_path, "POSTGRES_BIND_ADDRESS=127.0.0.1\n")
     assert completed.returncode == 2, arguments
     assert "it contains resolved secrets" in completed.stderr, arguments
@@ -1728,3 +1733,104 @@ def test_adr_describes_the_schedule_that_is_implemented() -> None:
     assert "Monday through Saturday" in adr
     diff_timer = (SYSTEMD_ROOT / "pgbackrest-diff.timer").read_text(encoding="utf-8")
     assert "Mon,Tue,Wed,Thu,Fri,Sat" in diff_timer
+
+
+def test_wrapper_refuses_caller_supplied_topology_overrides() -> None:
+    """The wrapper pins the project, compose file, and env file, then validates them.
+
+    A caller-supplied -p, -f, or --env-file is appended after those checks pass,
+    so it relocates what actually starts. Measured before this guard existed:
+    `--project-name bypass ps` ran the promotion preflight against
+    property-tax-platform_postgres-data and then operated on project `bypass`.
+    """
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    assert "refuse_topology_overrides" in wrapper
+    assert 'refuse_topology_overrides "$@"' in wrapper
+    rejected = wrapper.split("refuse_topology_overrides() {", 1)[1].split("esac", 1)[0]
+    for option in ("-f", "--file", "-p", "--project-name", "--project-directory", "--env-file"):
+        assert f"{option} " in rejected or f"{option})" in rejected, option
+    # Presentation-only options stay usable.
+    for option in ("--profile", "--parallel", "--progress", "--ansi"):
+        assert f"| {option} " not in rejected, f"{option} should remain allowed"
+    # Rejected before anything else runs, so it cannot be reached around.
+    assert wrapper.index('refuse_topology_overrides "$@"') < wrapper.index(
+        "require_private_bind_address POSTGRES_BIND_ADDRESS"
+    )
+    assert wrapper.index('refuse_topology_overrides "$@"') < wrapper.index(
+        "require_verified_promotion ;;"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("bws") is None or shutil.which("docker") is None,
+    reason="requires the bws and docker executables the wrapper preflights",
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--project-name", "other", "ps"],
+        ["-p", "other", "ps"],
+        ["--project-name=other", "ps"],
+        ["-f", "/tmp/alternate.yml", "ps"],
+        ["--file=/tmp/alternate.yml", "ps"],
+        ["--env-file", "/tmp/alternate.env", "ps"],
+        ["--project-directory", "/tmp", "ps"],
+    ],
+)
+def test_topology_overrides_are_refused_before_compose_runs(
+    arguments: list[str], tmp_path: Path
+) -> None:
+    completed = _run_wrapper(arguments, tmp_path, "POSTGRES_BIND_ADDRESS=127.0.0.1\n")
+    assert completed.returncode == 2, arguments
+    assert "would change the topology this wrapper validates" in completed.stderr, arguments
+
+
+def test_promotion_reports_whether_runtime_roles_can_authenticate() -> None:
+    """A fence becomes recovered state, so a promotion can hand over a fenced cluster.
+
+    NOLOGIN is a role attribute. A promotion after a planned migration verifies
+    perfectly -- roles present, writable as platform_admin, ledger valid -- and
+    Airflow still cannot authenticate. Existence is not readiness.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "rolcanlogin" in script
+    assert "runtime role activation" in script
+    assert "This cluster is FENCED" in script
+    # It points at the activation rather than leaving the operator to work it out.
+    assert "cutover-fence.sh --unfence" in script
+    assert "up -d postgres" in script
+
+
+def test_unfence_proves_authentication_and_archives_the_transition() -> None:
+    """Activation is a required step after promotion, not an undo.
+
+    Restoring LOGIN without proving it leaves the same failure one layer later,
+    and leaving the transition unarchived means the next restore of the new host
+    comes back fenced for no visible reason.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    activation = script.split("unfence() {", 1)[1].split("\n}", 1)[0]
+    assert "ALTER ROLE $role LOGIN" in activation
+    assert "prove each role can authenticate" in activation
+    assert "STILL CANNOT AUTHENTICATE" in activation
+    assert "activation incomplete" in activation
+    assert "archive the activation" in activation
+    assert "pg_switch_wal" in activation
+    # An unarchivable cluster is explained rather than left to time out.
+    assert "archive_mode is" in activation
+    assert "up -d postgres" in activation
+
+
+def test_runbook_orders_activation_between_promotion_and_the_runtime() -> None:
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    procedure = runbook.split("### Procedure", 1)[1].split("```", 2)[1]
+    promote = procedure.index("--promote")
+    postgres_only = procedure.index("up -d postgres")
+    activate = procedure.index("--unfence")
+    full_runtime = procedure.index("start the rest of the runtime")
+    assert promote < postgres_only < activate < full_runtime
+    assert "destination activation boundary" in runbook
+    # And the profiles row no longer says hand-written.
+    assert "hand-written per" not in runbook

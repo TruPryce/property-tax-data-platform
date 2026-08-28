@@ -11,7 +11,7 @@ The durable boundary is Amazon S3, not the host. Every storage device on the VPS
 | Repository | `s3://trupryce-property-tax-backups/pgbackrest/platform` |
 | Encryption | `aes-256-cbc`, passphrase from Bitwarden, applied before anything leaves the host |
 | Identity | `trupryce-data-platform-backup` via IAM Roles Anywhere, no stored keys |
-| Schedule | weekly full, daily differential, continuous WAL, `archive_timeout=300` |
+| Schedule | full on Sunday, differential Monday–Saturday, continuous WAL, `archive_timeout=300` |
 | Retention | 4 full cycles, counted |
 | Scheduled by | systemd on the host, never Airflow |
 
@@ -523,7 +523,7 @@ Moving to Hostinger is a **restore**, not a volume transfer. Nothing from the Ak
 | Leaf certificate and private key | issue from the CA **on the new host** | A private key that exists in two places has two ways to leak, and revoking one host revokes the other |
 | Host-specific certificate CN authorization | trust-policy edit, `--profile boss` | The trust policy pins a CN; a new host is a new subject |
 | Certificate GID, file modes, and `identity.env` | `sudo ./infra/scripts/install-certificate-identity.sh` | Host-local ownership; `identity.env` is derived from that host's `infra/.env` |
-| Local AWS CLI profiles (`~/.aws/config`) | hand-written per [§1.4](#14-configure-the-vps-local-backup-profile) | Points at host-local certificate paths |
+| Local AWS CLI profiles (`~/.aws/config`) | `./infra/scripts/install-aws-profiles.sh` | Rendered from this host's `infra/.env`; never hand-written |
 | `infra/.env` | `./infra/scripts/bootstrap-env.sh` | Holds this host's paths, bind addresses, and ARNs |
 | Bitwarden bootstrap (`infra/.bws.env`) | `./infra/scripts/bootstrap-env.sh` | The access token is host-only and never leaves it |
 | Docker runtime and images | `compose-with-bitwarden.sh build` | Host software, rebuilt from the repository |
@@ -555,13 +555,15 @@ Top to bottom on the new host. Each step depends on the one above it, and the or
 11  restore AND verify AND promote    ./infra/scripts/pgbackrest-restore.sh --promote
 12    (11 does all three: restores to the end of the archive into the volume
 13     Compose will adopt, verifies it in isolation, keeps it only if it passes)
-14  start the runtime                 ./infra/scripts/compose-with-bitwarden.sh up -d
-15  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
-16  install and prove the timers      sudo SERVICE_USER="$(id -un)" REPOSITORY_DIR="$PWD" \
+14  start PostgreSQL ONLY             ./infra/scripts/compose-with-bitwarden.sh up -d postgres
+15  activate the runtime roles        ./infra/scripts/cutover-fence.sh --unfence
+16  start the rest of the runtime     ./infra/scripts/compose-with-bitwarden.sh up -d
+17  verify asynchronous archiving     force a WAL switch, confirm it reaches S3
+18  install and prove the timers      sudo SERVICE_USER="$(id -un)" REPOSITORY_DIR="$PWD" \
                                         ./infra/scripts/install-systemd-units.sh
                                       then systemctl start pgbackrest-diff.service
-17  cut over
-18  revoke the Akamai identity        remove its CN from both trust policies, revoke the
+19  cut over
+20  revoke the Akamai identity        remove its CN from both trust policies, revoke the
                                       certificate at the CA, destroy the key on the old host
 ```
 
@@ -648,6 +650,22 @@ Do not run `--unfence` to "just check something" mid-migration: it lets Airflow 
 
 **For a disaster** — the old host is gone — there is nothing to fence. Promote to the end of the archive and accept that the recovery point is the last successfully archived WAL, which is what the archiver's `last_archived_wal` reports and what the observability requirement must eventually alert on.
 
+**Steps 14–16 are the destination activation boundary, and they are not optional.**
+
+`NOLOGIN` is a role attribute, so the fence on the source is part of the physical state the restore reproduces. A promotion after a planned migration therefore hands over a cluster that verifies perfectly — databases present, roles present, writable as `platform_admin`, ledger valid — and in which **Airflow still cannot authenticate**. Starting the whole runtime at that point fails service by service for a reason nothing in the promotion output explains.
+
+So PostgreSQL starts alone, the roles are activated and *proven* to authenticate, the transition is archived, and only then does the rest of the runtime start:
+
+```bash
+./infra/scripts/compose-with-bitwarden.sh up -d postgres
+./infra/scripts/cutover-fence.sh --unfence
+./infra/scripts/compose-with-bitwarden.sh up -d
+```
+
+`--unfence` refuses to report success unless all four roles actually authenticate, and it archives the `LOGIN` transition — without that, a later restore of the *new* host comes back fenced again for no visible reason.
+
+Run it unconditionally. After a disaster restore whose roles were never fenced it is a no-op, and the promotion output says so explicitly, which keeps one procedure for both cases.
+
 **Step 11 is the promotion path, and it is deliberately a single command.**
 
 An ordinary `pgbackrest-restore.sh --target ...` restores into a throwaway `pitr-verify-*` volume and deletes it on exit — correct for a drill on a live host, useless for a rebuild. `--promote` restores into the volume Compose will actually adopt, verifies *that* volume in isolation on a loopback port, and then:
@@ -657,7 +675,7 @@ An ordinary `pgbackrest-restore.sh --target ...` restores into a throwaway `pitr
 
 It refuses to run at all if the production volume already exists, which is what makes it safe to type on the wrong host: rebuilding an existing cluster has to be a deliberate stop-and-remove, not a side effect of a restore.
 
-**Step 18 is the one that gets skipped.** A migration is not finished while a decommissioned machine can still write to the backup repository. Revoke *after* step 11 has passed, never before — revoking early leaves no working identity if the restore fails.
+**Step 20 is the one that gets skipped.** A migration is not finished while a decommissioned machine can still write to the backup repository. Revoke *after* step 11 has passed, never before — revoking early leaves no working identity if the restore fails.
 
 ## Part 5 — Recorded evidence
 
@@ -808,6 +826,34 @@ Compose starts only when both nonces match. Verified live: a stale sentinel file
 An earlier version stopped the Airflow containers and checked `pg_stat_activity` for zero clients. That is an observation, not a fence: anything holding valid credentials reconnects immediately afterwards. The fence now removes login authority from all four runtime roles, terminates their sessions, and **proves** a fresh login fails before it will report a boundary. Exercised on a throwaway cluster: all four could log in, all four were refused after fencing, `platform_admin` kept working throughout, and `--unfence` restored all four.
 
 Writing that step is also what surfaced a bug in the first draft: `SELECT count(*) FROM pg_terminate_backend(pid) WHERE pid IN (…)` is invalid SQL — there is no `pid` column in scope — so step 3 would have errored having terminated nothing.
+
+### The fence becomes recovered state
+
+`NOLOGIN` is a role attribute, so fencing the source writes itself into the physical state a restore reproduces. Demonstrated by simulating exactly what a Hostinger promotion would hand over:
+
+| Step | Result |
+|---|---|
+| promote into a fresh project | verified; all six assertions passed |
+| set the four runtime roles `NOLOGIN` (what the fence leaves behind) | `runtime roles able to authenticate: 0 of 4` |
+| `cutover-fence.sh --unfence` | all four `LOGIN`, all four **proved** to authenticate |
+| archive step, on a cluster started without `archive_mode` | refused with `archive_mode is 'off'` and the command that fixes it |
+
+Promotion reports the activation state rather than failing on it, because a fenced restore is the *correct* outcome of the documented migration — what is wrong is starting the runtime on one. On an unfenced cluster it prints `4 of 4` and says the activation is a no-op, so one procedure covers both migration and disaster.
+
+Timelines were checked afterwards: the repository still contains only `00000001`. The isolated verification cluster is started without `archive_mode`, so a promoted probe cannot write divergent-timeline WAL into the production stanza.
+
+### The wrapper's own options were a way around it
+
+The wrapper pins the project, compose file, and environment file and then validates them — bind addresses, resolved-secret rendering, promotion state. A caller-supplied override is appended *after* those checks pass. Measured before the guard existed:
+
+```console
+$ ./infra/scripts/compose-with-bitwarden.sh --project-name bypass ps
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+```
+
+The preflight had checked `property-tax-platform_postgres-data` while Compose operated on project `bypass`, whose volume carried an unverified promotion label. `-f` was accepted too, which is enough to reopen a bind address the wrapper had just approved.
+
+`-f`, `--file`, `-p`, `--project-name`, `--project-directory`, and `--env-file` are now refused before anything else runs, in both `--opt value` and `--opt=value` forms. `--profile`, `--parallel`, `--progress`, and `--ansi` remain usable.
 
 ### What this exercise cost, and what it caught
 

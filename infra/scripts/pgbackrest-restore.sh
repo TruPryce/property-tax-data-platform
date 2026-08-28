@@ -442,6 +442,36 @@ if [[ "$promote" == true ]]; then
          DROP TABLE public.trupryce_promotion_probe;' >/dev/null \
         || die "restored cluster did not accept a write; not promoting it"
     info "write probe succeeded"
+
+    # A promotion after a planned migration restores a FENCED cluster: NOLOGIN
+    # is a role attribute, so the source fence is part of the physical state the
+    # restore reproduces. Existence of the roles is not enough to start the
+    # runtime, and a promotion that reported only existence would hand over a
+    # cluster where Airflow cannot authenticate.
+    #
+    # Reported rather than failed, because a fenced restore is the correct
+    # outcome of the documented migration -- what is wrong is starting the
+    # runtime on it without activating first.
+    login_capable="$(docker exec "$container" psql -U platform_admin -d postgres -tAc \
+        "SELECT count(*) FROM pg_roles
+          WHERE rolcanlogin
+            AND rolname IN ('airflow_metadata','property_tax_migrator',
+                            'property_tax_ingestion','property_tax_api')" \
+        2>/dev/null | tr -d '[:space:]')"
+    printf '\n===== runtime role activation =====\n'
+    printf '  runtime roles able to authenticate: %s of 4\n' "${login_capable:-0}"
+    if [[ "${login_capable:-0}" != "4" ]]; then
+        printf '\n'
+        printf '  This cluster is FENCED. That is expected after a planned migration:\n'
+        printf '  cutover-fence.sh set NOLOGIN on the source, and the restore reproduced it.\n'
+        printf '\n'
+        printf '  Start PostgreSQL alone, activate, then start the rest:\n'
+        printf '    ./infra/scripts/compose-with-bitwarden.sh up -d postgres\n'
+        printf '    ./infra/scripts/cutover-fence.sh --unfence\n'
+        printf '    ./infra/scripts/compose-with-bitwarden.sh up -d\n'
+    else
+        printf '  no activation needed; --unfence is still safe to run and is a no-op\n'
+    fi
 fi
 verified=true
 

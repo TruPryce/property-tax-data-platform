@@ -51,13 +51,71 @@ psql_query() {
     docker exec "$container" psql -U platform_admin -d postgres -tAc "$1"
 }
 
+# Destination activation, and the reason it is not merely the inverse of the fence.
+#
+# NOLOGIN is a role attribute, so it is part of the physical state the fence
+# leaves behind -- and therefore part of what a restore reproduces. A Hostinger
+# promotion restores a *fenced* cluster: verification passes, the database is
+# writable as platform_admin, and then Airflow cannot authenticate because
+# airflow_metadata still cannot log in.
+#
+# So activation is a required step after promotion, not an undo. It runs
+# unconditionally: on a disaster restore whose roles were never fenced,
+# ALTER ROLE ... LOGIN is a no-op and the procedure stays the same either way.
+#
+# It also archives the transition. Leaving the LOGIN change unarchived means the
+# next restore of this cluster is fenced again for no visible reason.
 unfence() {
-    printf '\n===== restoring login authority =====\n'
+    printf '\n===== 1. restore login authority =====\n'
     for role in "${RUNTIME_ROLES[@]}"; do
         psql_query "ALTER ROLE $role LOGIN" >/dev/null
-        printf '  %s: LOGIN restored\n' "$role"
+        printf '  %s: LOGIN\n' "$role"
     done
-    info "roles can log in again; restart the runtime with compose-with-bitwarden.sh up -d"
+
+    printf '\n===== 2. prove each role can authenticate =====\n'
+    local activated=true
+    for role in "${RUNTIME_ROLES[@]}"; do
+        if docker exec "$container" psql -U "$role" -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+            printf '  %s: authenticated\n' "$role"
+        else
+            printf '  %s: STILL CANNOT AUTHENTICATE\n' "$role"
+            activated=false
+        fi
+    done
+    $activated || die "activation incomplete; do not start the runtime while a role cannot log in"
+
+    printf '\n===== 3. archive the activation =====\n'
+    local segment deadline archived=false archive_mode
+    # Start PostgreSQL through Compose, which sets archive_mode=on. A cluster
+    # started by hand without it cannot archive anything, and this step would
+    # otherwise sit for five minutes before reporting a timeout that says
+    # nothing about the actual cause.
+    archive_mode="$(psql_query "SHOW archive_mode" | tr -d '[:space:]')"
+    if [[ "$archive_mode" != "on" ]]; then
+        die "archive_mode is '$archive_mode'; start PostgreSQL with
+    ./infra/scripts/compose-with-bitwarden.sh up -d postgres
+  so the activation can be archived, then run --unfence again."
+    fi
+    segment="$(psql_query "SELECT pg_walfile_name(pg_switch_wal())" | tr -d '[:space:]')"
+    printf '  switched: %s\n' "$segment"
+    deadline=$((SECONDS + 300))
+    while (( SECONDS < deadline )); do
+        if aws --profile "$AWS_PROFILE_NAME" s3 ls --recursive \
+            "s3://${BUCKET}/${REPO_PATH}/archive/${STANZA}/" 2>/dev/null | grep -q "$segment"; then
+            archived=true
+            break
+        fi
+        sleep 3
+    done
+    if $archived; then
+        printf '  confirmed in S3: %s\n' "$segment"
+    else
+        die "the activation was not archived within 300s; a later restore of this cluster would come back fenced"
+    fi
+
+    printf '\n'
+    info "activated; all four runtime roles can authenticate and the transition is archived"
+    info "now start the rest of the runtime: ./infra/scripts/compose-with-bitwarden.sh up -d"
     exit 0
 }
 
