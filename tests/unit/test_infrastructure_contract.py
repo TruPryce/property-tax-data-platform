@@ -1554,15 +1554,18 @@ def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
     """
     script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
     assert "set -euo pipefail" in script
-    steps = [line for line in script.splitlines() if line.startswith("printf '\\n===== ")]
+    fence = script.split('[[ "${1:-}" == "--unfence" ]] && unfence', 1)[1]
+    steps = [line for line in fence.splitlines() if line.startswith("printf '\\n===== ")]
     numbered = " | ".join(steps)
     for earlier, later in (
-        ("1. stop known writers", "2. revoke login authority"),
-        ("2. revoke login authority", "3. terminate existing sessions"),
-        ("3. terminate existing sessions", "4. prove a fresh login now fails"),
-        ("4. prove a fresh login now fails", "5. flush the final WAL segment"),
-        ("5. flush the final WAL segment", "6. wait for it to reach S3"),
-        ("6. wait for it to reach S3", "7. recoverable boundary"),
+        ("1. confirm the source backup schedule is stopped", "2. stop known writers"),
+        ("2. stop known writers", "3. revoke login authority"),
+        ("3. revoke login authority", "4. terminate existing sessions"),
+        ("4. terminate existing sessions", "5. prove a fresh login now fails"),
+        ("5. prove a fresh login now fails", "6. flush the final WAL segment"),
+        ("6. flush the final WAL segment", "7. wait for it to reach S3"),
+        ("7. wait for it to reach S3", "8. recoverable boundary"),
+        ("8. recoverable boundary", "9. stop the source cluster"),
     ):
         assert numbered.index(earlier) < numbered.index(later), f"{earlier} not before {later}"
     # Airflow is the writer that never stops on its own.
@@ -1570,8 +1573,9 @@ def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
         assert service in script, service
     assert "clients remain connected after fencing" in script
     assert "did not reach S3 within" in script
-    # It reports a boundary; it does not cut over.
-    assert "This host stays fenced" in script
+    # It reports a boundary and freezes the source; it does not cut over.
+    assert "This host is now frozen" in script
+    assert "Revoke its AWS identity only after the new host" in script
 
 
 def test_aws_profiles_are_rendered_from_the_host_configuration() -> None:
@@ -1811,9 +1815,14 @@ def test_unfence_proves_authentication_and_archives_the_transition() -> None:
     script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
     activation = script.split("unfence() {", 1)[1].split("\n}", 1)[0]
     assert "ALTER ROLE $role LOGIN" in activation
-    assert "prove each role can authenticate" in activation
-    assert "STILL CANNOT AUTHENTICATE" in activation
+    assert "prove LOGIN authority was restored" in activation
+    assert "STILL NOLOGIN" in activation
     assert "activation incomplete" in activation
+    assert "prove the stored credentials actually authenticate" in activation
+    # The call itself, not just its heading: replacing it with a no-op while
+    # keeping the section title must fail.
+    assert "prove_runtime_credentials \\" in activation
+    assert "a runtime credential was rejected" in activation
     assert "archive the activation" in activation
     assert "pg_switch_wal" in activation
     # An unarchivable cluster is explained rather than left to time out.
@@ -1834,3 +1843,72 @@ def test_runbook_orders_activation_between_promotion_and_the_runtime() -> None:
     assert "destination activation boundary" in runbook
     # And the profiles row no longer says hand-written.
     assert "hand-written per" not in runbook
+
+
+def test_fence_freezes_the_source_rather_than_only_fencing_it() -> None:
+    """A fenced source is not a frozen one.
+
+    A running postmaster keeps generating and archiving WAL, so the archive
+    moves past the boundary that was just reported. And once the backup timers
+    exist, a scheduled backup of the old primary can land in the same stanza
+    after the new host has branched onto its own timeline, becoming the newest
+    backup in the repository.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    fence = script.split('[[ "${1:-}" == "--unfence" ]] && unfence', 1)[1]
+
+    # The source's own schedule must be off before anything else happens.
+    assert "confirm the source backup schedule is stopped" in fence
+    assert "pgbackrest-*.timer" in fence
+    assert "disable --now pgbackrest-full.timer" in fence
+    # It must refuse, not merely mention. Asserting the die call itself, so
+    # removing the refusal while leaving the section header fails here.
+    assert "the source backup schedule is still active" in fence
+    schedule_section = fence.split("confirm the source backup schedule is stopped", 1)[1]
+    schedule_section = schedule_section.split("stop known writers", 1)[0]
+    assert "die " in schedule_section, "the schedule check does not refuse"
+    # Checked, not stopped: disabling a unit needs root this script lacks.
+    assert "systemctl disable" not in fence.split("die ", 1)[0]
+
+    # And it ends by stopping the cluster, not by leaving it running.
+    assert "stop the source cluster" in fence
+    assert 'docker stop "$container"' in fence
+    assert "still running for inspection" not in script
+
+    steps = [line for line in fence.splitlines() if line.startswith("printf '\\n===== ")]
+    order = " | ".join(steps)
+    assert order.index("confirm the source backup schedule is stopped") < order.index(
+        "stop known writers"
+    )
+    assert order.index("recoverable boundary") < order.index("stop the source cluster")
+
+
+def test_activation_proves_stored_credentials_not_only_login_authority() -> None:
+    """A socket connection inside the container is `trust` in pg_hba.
+
+    That proves NOLOGIN was lifted and nothing about the password. It cannot
+    detect a recovery point that predates a rotation, where rolcanlogin is true,
+    the cluster is healthy, and every runtime service still fails because
+    Bitwarden holds a newer secret the restored cluster never received.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    assert "prove_runtime_credentials()" in script
+    # Each role is tested against the database it actually uses.
+    for pair in (
+        "airflow_metadata:airflow:AIRFLOW_DB_PASSWORD",
+        "property_tax_migrator:property_tax:PROPERTY_TAX_MIGRATOR_PASSWORD",
+        "property_tax_ingestion:property_tax:PROPERTY_TAX_INGESTION_PASSWORD",
+        "property_tax_api:property_tax:PROPERTY_TAX_API_PASSWORD",
+    ):
+        assert pair in script, pair
+    # Non-loopback, so scram-sha-256 applies rather than the trust line.
+    assert "NetworkSettings.Networks" in script
+    assert 'psql -h "$address"' in script
+    # Password by reference, never in argv, and resolved through Bitwarden.
+    assert "-e PGPASSWORD " in script
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "-e PGPASSWORD=" not in code
+    assert "bws run" in code
+    assert "CREDENTIAL REJECTED" in script
+    # The failure names the cause an operator would otherwise hunt for.
+    assert "predates a rotation" in script

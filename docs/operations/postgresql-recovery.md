@@ -549,9 +549,12 @@ Top to bottom on the new host. Each step depends on the one above it, and the or
  8  render local AWS profiles         ./infra/scripts/install-aws-profiles.sh
  9  prove identity isolation          STS + the four S3 assertions from §1.5
 10  build the PostgreSQL image        ./infra/scripts/compose-with-bitwarden.sh build postgres
-10a fence the OLD host (planned move) ./infra/scripts/cutover-fence.sh   [on Akamai]
+10a freeze the OLD host (planned move) sudo systemctl disable --now pgbackrest-full.timer \
+                                                                 pgbackrest-diff.timer
+                                      ./infra/scripts/cutover-fence.sh   [on Akamai]
+                                      ends with the source PostgreSQL stopped;
                                       skip only for a disaster, where there is
-                                      nothing left to fence
+                                      nothing left to freeze
 11  restore AND verify AND promote    ./infra/scripts/pgbackrest-restore.sh --promote
 12    (11 does all three: restores to the end of the archive into the volume
 13     Compose will adopt, verifies it in isolation, keeps it only if it passes)
@@ -618,13 +621,15 @@ Restoring first and fencing afterwards leaves a window as long as verification t
 ```text
    Akamai serving normally
         │
-        ├─ fence every writer            ./infra/scripts/cutover-fence.sh
+        ├─ freeze the source             ./infra/scripts/cutover-fence.sh
+        │    refuses while any pgbackrest timer or service is active
         │    stops Airflow scheduler, triggerer, dag-processor, api-server
         │    ALTER ROLE ... NOLOGIN on all four runtime roles
         │    terminates their sessions
         │    PROVES a fresh login is now refused, and aborts if any succeeds
         │    pg_switch_wal(), then waits for that segment to appear in S3
         │    prints the recoverable boundary
+        │    STOPS PostgreSQL, so nothing can move past it
         │
         ├─ Akamai stays fenced ─────────────────────────────┐
         │                                                   │
@@ -639,10 +644,22 @@ Restoring first and fencing afterwards leaves a window as long as verification t
 
 Stopping the containers is not itself the fence. Anything that can still authenticate reconnects the moment after a zero-client check passes — a restart policy, an operator, a forgotten cron, a second host still pointed here — and its writes land after the boundary and vanish silently. So the fence removes the *authority*: `ALTER ROLE … NOLOGIN` on `airflow_metadata`, `property_tax_migrator`, `property_tax_ingestion`, and `property_tax_api`, existing sessions terminated, and then a fresh login attempted for each and required to fail. If any still succeeds the script aborts rather than reporting a boundary.
 
-`platform_admin` is deliberately untouched, so the operator is never locked out of their own cluster. The fence is reversible if the migration is abandoned:
+**Fenced is not frozen, so the fence finishes by stopping PostgreSQL.** A running postmaster keeps generating and archiving WAL — checkpoints, autovacuum, `platform_admin` sessions — so the archive moves on after the boundary is reported, and "restore to the end of the archive" on the new host would no longer mean the point that was printed. Worse, once the backup timers exist the old primary keeps its own schedule: after the new host promotes onto its own timeline, a scheduled Akamai backup can land in the same stanza on the old timeline and become the newest backup in the repository.
+
+So the fence refuses to start while any `pgbackrest-*` timer or service is active, and names the command that stops them:
 
 ```bash
+sudo systemctl disable --now pgbackrest-full.timer pgbackrest-diff.timer
+```
+
+It checks rather than stops them, because disabling a unit needs root the script does not hold and turning off an operator's backup schedule is their decision.
+
+`platform_admin` retains `LOGIN` throughout, so the operator is never locked out. Rollback, if the migration is abandoned, is the freeze in reverse:
+
+```bash
+./infra/scripts/compose-with-bitwarden.sh up -d postgres
 ./infra/scripts/cutover-fence.sh --unfence
+sudo systemctl enable --now pgbackrest-full.timer pgbackrest-diff.timer
 ./infra/scripts/compose-with-bitwarden.sh up -d
 ```
 
@@ -662,7 +679,14 @@ So PostgreSQL starts alone, the roles are activated and *proven* to authenticate
 ./infra/scripts/compose-with-bitwarden.sh up -d
 ```
 
-`--unfence` refuses to report success unless all four roles actually authenticate, and it archives the `LOGIN` transition — without that, a later restore of the *new* host comes back fenced again for no visible reason.
+`--unfence` proves two different things, and the distinction matters:
+
+1. **`LOGIN` authority was restored** — read from `rolcanlogin`.
+2. **The stored credentials actually authenticate** — a real connection per role to the database it uses, over the container's non-loopback address so `scram-sha-256` applies, with the password resolved from Bitwarden and passed by reference so it never enters argv.
+
+The second is the one that matters for disaster recovery. A socket connection inside the container is `trust` in `pg_hba.conf`, so it proves only that `NOLOGIN` was lifted. It cannot detect a recovery point that predates a password rotation — where `rolcanlogin` is true, the cluster is healthy, and every runtime service still fails because Bitwarden holds a newer secret the restored cluster never received. Verified by rotating one role's password in a restored cluster: `property_tax_api -> property_tax: CREDENTIAL REJECTED`, with rotation named as the likely cause.
+
+It also archives the `LOGIN` transition — without that, a later restore of the *new* host comes back fenced again for no visible reason.
 
 Run it unconditionally. After a disaster restore whose roles were never fenced it is a no-op, and the promotion output says so explicitly, which keeps one procedure for both cases.
 
@@ -854,6 +878,33 @@ NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
 The preflight had checked `property-tax-platform_postgres-data` while Compose operated on project `bypass`, whose volume carried an unverified promotion label. `-f` was accepted too, which is enough to reopen a bind address the wrapper had just approved.
 
 `-f`, `--file`, `-p`, `--project-name`, `--project-directory`, and `--env-file` are now refused before anything else runs, in both `--opt value` and `--opt=value` forms. `--profile`, `--parallel`, `--progress`, and `--ansi` remain usable.
+
+### Fenced was not frozen, and LOGIN was not authentication
+
+Two things only became visible once the fence and the activation existed together.
+
+**The source kept moving.** The fence left PostgreSQL running "for inspection", so checkpoints, autovacuum, and `platform_admin` sessions continued generating and archiving WAL past the boundary it had just reported. Worse, once the backup timers exist the old primary keeps its own schedule: after the new host promotes onto its own timeline, a scheduled Akamai backup can land in the same stanza on the old timeline and become the newest backup in the repository. The fence now refuses to start while any `pgbackrest-*` unit is active, and ends by stopping the cluster.
+
+**`LOGIN` is not a credential.** Activation proved authentication with `psql -U role` inside the container — a Unix-socket connection, which `pg_hba.conf` maps to `trust`. That proves `NOLOGIN` was lifted and nothing about the password, so it could not detect the case that matters most in a disaster: a recovery point that predates a password rotation, where `rolcanlogin` is true, the cluster is healthy, and every runtime service still fails because Bitwarden holds a newer secret the restored cluster never received.
+
+Activation now connects to the container's non-loopback address so `scram-sha-256` applies, one connection per role to the database it actually uses, with the password resolved from Bitwarden and passed by reference. Verified against a restored cluster:
+
+```text
+  airflow_metadata -> airflow: authenticated with the stored credential
+  property_tax_migrator -> property_tax: authenticated with the stored credential
+  property_tax_ingestion -> property_tax: authenticated with the stored credential
+  property_tax_api -> property_tax: authenticated with the stored credential
+```
+
+then, after rotating one role's password in the restored cluster so it no longer matched Bitwarden:
+
+```text
+  property_tax_api -> property_tax: CREDENTIAL REJECTED
+  cutover-fence: a runtime credential was rejected; the restored cluster's passwords
+  do not match Bitwarden, most likely because the recovery point predates a rotation.
+```
+
+The probe clusters were deliberately run without `archive_mode`, so none of this could write a divergent timeline into the production stanza. Confirmed afterwards: the repository still holds only `00000001`.
 
 ### What this exercise cost, and what it caught
 
