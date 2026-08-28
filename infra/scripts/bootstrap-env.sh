@@ -66,6 +66,12 @@ while IFS= read -r line; do
   value="${line#*=}"
   if [[ -z "$value" ]]; then
     needs_attention+=("$name (empty)")
+  elif [[ "$value" == *REPLACE* || "$value" == *CHANGEME* || "$value" == *TODO* \
+       || "$value" == *"<"*">"* || "$value" == *example.com* ]]; then
+    # A placeholder is worse than an empty value: it is non-empty, so every
+    # "is it set?" check passes and the failure surfaces later as an
+    # authorization error against an ARN that does not exist.
+    needs_attention+=("$name (placeholder: $value)")
   elif [[ "$value" == *trupryce-data-platform-vps* ]]; then
     needs_attention+=("$name (names the Akamai host identity)")
   fi

@@ -43,10 +43,23 @@ backup_role_arn="$(read_configuration_value TRUPRYCE_AWS_ROLE_ARN)"
 data_profile_arn="$(read_configuration_value TRUPRYCE_AWS_DATA_PROFILE_ARN)"
 data_role_arn="$(read_configuration_value TRUPRYCE_AWS_DATA_ROLE_ARN)"
 
+# Non-empty is not the same as configured. A template placeholder passes every
+# "is it set?" check and then fails later as an authorization error against an
+# ARN that does not exist, which is a much worse place to discover it.
+require_configured_value() {
+    local name="$1" value
+    value="$(read_configuration_value "$name")"
+    [[ -n "$value" ]] || die "$compose_environment_file does not define $name"
+    case "$value" in
+        *REPLACE* | *CHANGEME* | *TODO* | *"<"*">"* )
+            die "$name is still a placeholder in $compose_environment_file: $value" ;;
+    esac
+}
+
 for name in TRUPRYCE_AWS_CERTIFICATE TRUPRYCE_AWS_PRIVATE_KEY \
             TRUPRYCE_AWS_TRUST_ANCHOR_ARN TRUPRYCE_AWS_PROFILE_ARN TRUPRYCE_AWS_ROLE_ARN \
             TRUPRYCE_AWS_DATA_PROFILE_ARN TRUPRYCE_AWS_DATA_ROLE_ARN; do
-    [[ -n "$(read_configuration_value "$name")" ]] || die "$compose_environment_file does not define $name"
+    require_configured_value "$name"
 done
 
 for path in "$certificate" "$private_key"; do

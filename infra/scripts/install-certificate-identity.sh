@@ -56,6 +56,12 @@ IDENTITY_KEYS=(
 for key in "${IDENTITY_KEYS[@]}"; do
     value="$(read_configuration_value "$key")"
     [[ -n "$value" ]] || die "$compose_environment_file does not define $key"
+    # A placeholder is non-empty, so an is-it-set check passes and the failure
+    # arrives later as a credential error rather than here.
+    case "$value" in
+        *REPLACE* | *CHANGEME* | *TODO* | *"<"*">"* )
+            die "$key is still a placeholder in $compose_environment_file: $value" ;;
+    esac
     printf -v "resolved_$key" '%s' "$value"
 done
 

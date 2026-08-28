@@ -618,7 +618,9 @@ Restoring first and fencing afterwards leaves a window as long as verification t
         │
         ├─ fence every writer            ./infra/scripts/cutover-fence.sh
         │    stops Airflow scheduler, triggerer, dag-processor, api-server
-        │    refuses to continue while any client backend remains connected
+        │    ALTER ROLE ... NOLOGIN on all four runtime roles
+        │    terminates their sessions
+        │    PROVES a fresh login is now refused, and aborts if any succeeds
         │    pg_switch_wal(), then waits for that segment to appear in S3
         │    prints the recoverable boundary
         │
@@ -633,7 +635,16 @@ Restoring first and fencing afterwards leaves a window as long as verification t
         └─ only now revoke the Akamai identity ─────────────┘
 ```
 
-Nothing may be written on the old host between the fence and cutover. Restarting Airflow "just to check something" creates metadata writes the new primary will not have, and they are invisible afterwards.
+Stopping the containers is not itself the fence. Anything that can still authenticate reconnects the moment after a zero-client check passes — a restart policy, an operator, a forgotten cron, a second host still pointed here — and its writes land after the boundary and vanish silently. So the fence removes the *authority*: `ALTER ROLE … NOLOGIN` on `airflow_metadata`, `property_tax_migrator`, `property_tax_ingestion`, and `property_tax_api`, existing sessions terminated, and then a fresh login attempted for each and required to fail. If any still succeeds the script aborts rather than reporting a boundary.
+
+`platform_admin` is deliberately untouched, so the operator is never locked out of their own cluster. The fence is reversible if the migration is abandoned:
+
+```bash
+./infra/scripts/cutover-fence.sh --unfence
+./infra/scripts/compose-with-bitwarden.sh up -d
+```
+
+Do not run `--unfence` to "just check something" mid-migration: it lets Airflow reconnect and write past the boundary, and the new primary will not have those writes.
 
 **For a disaster** — the old host is gone — there is nothing to fence. Promote to the end of the archive and accept that the recovery point is the last successfully archived WAL, which is what the archiver's `last_archived_wal` reports and what the observability requirement must eventually alert on.
 
@@ -739,7 +750,7 @@ Verifying a restore in an isolated volume and then starting Compose against a di
 | precondition | production volume absent — required, or the run refuses |
 | restore target | `cleanhost-probe_postgres-data`, the volume Compose adopts |
 | six assertions | all passed, against that volume |
-| after verification | volume kept, labelled `com.docker.compose.project` / `.volume`; verification container removed |
+| after verification | volume kept; proof recorded in a nonce-bound sidecar volume, never in PGDATA; verification container removed |
 | Compose start | adopted the volume with no extra step |
 | restored content | `property_tax` + `airflow`, 4 runtime roles, marker `before` only |
 | `pg_is_in_recovery()` | false |
@@ -772,6 +783,31 @@ Restored to the end of the archive with no `--target`, then labelled `trupryce.p
 | volume with no promotion label (every pre-existing volume) | unaffected |
 
 The fence's own logic was validated against the live cluster without cutting over: the quiescence query named all four connected Airflow writers — so the fence would refuse to take a boundary — and the WAL flush and S3 confirmation completed in 5 s. The full fence is an operator action at actual cutover time and has not been run here, because it stops Airflow.
+
+### Why the promotion proof is not a file
+
+The first version of this mechanism wrote a `verified` sentinel into the restored data directory. That is captured by the next backup — measured directly:
+
+```text
+pgbackrest/platform/backup/platform/<label>/pg_data/.trupryce-promotion-probe.zst
+```
+
+and it comes back on a later restore, where it would vouch for a promotion nobody verified. It was still there in a subsequent test restore, which is as clear a demonstration as one could ask for.
+
+So the proof is Docker metadata, which no backup can capture and no restore can replay:
+
+| Written | When | By |
+|---|---|---|
+| `trupryce.promotion=managed` + a random `trupryce.promotion.nonce` on the data volume | at volume creation, before any data exists | Docker, atomically |
+| the same nonce on a `<volume>.verified` sidecar volume | only after every assertion and the write probe | Docker, atomically |
+
+Compose starts only when both nonces match. Verified live: a stale sentinel file restored into PGDATA is inert, a missing sidecar is refused, and a sidecar carrying a *different* nonce — an earlier promotion's — is refused with a distinct message.
+
+### Why the fence revokes rather than counts
+
+An earlier version stopped the Airflow containers and checked `pg_stat_activity` for zero clients. That is an observation, not a fence: anything holding valid credentials reconnects immediately afterwards. The fence now removes login authority from all four runtime roles, terminates their sessions, and **proves** a fresh login fails before it will report a boundary. Exercised on a throwaway cluster: all four could log in, all four were refused after fencing, `platform_admin` kept working throughout, and `--unfence` restored all four.
+
+Writing that step is also what surfaced a bug in the first draft: `SELECT count(*) FROM pg_terminate_backend(pid) WHERE pid IN (…)` is invalid SQL — there is no `pid` column in scope — so step 3 would have errored having terminated nothing.
 
 ### What this exercise cost, and what it caught
 

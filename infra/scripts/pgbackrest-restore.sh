@@ -22,7 +22,15 @@ compose_environment_file="${COMPOSE_ENV_FILE:-$infra_dir/.env}"
 bitwarden_environment_file="${BWS_ENV_FILE:-$infra_dir/.bws.env}"
 
 PROMOTION_LABEL="trupryce.promotion"
-PROMOTION_SENTINEL=".trupryce-promotion"
+PROMOTION_NONCE_LABEL="trupryce.promotion.nonce"
+# Verification state lives in a sidecar Docker volume, never inside PGDATA.
+# A file written into the data directory is captured by the next backup --
+# measured: a probe file appeared in the diff manifest as
+# pg_data/.trupryce-promotion-probe.zst -- so restoring that backup would
+# carry an old "verified" marker into a NEW, unverified promotion and defeat
+# the gate. The nonce binds the proof to one promotion, so a sidecar left
+# over from an earlier one does not authorise a later one either.
+PROMOTION_VERIFIED_SUFFIX=".verified"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-property-tax-platform}"
 COMPOSE_VOLUME_NAME="${COMPOSE_VOLUME_NAME:-postgres-data}"
 PRODUCTION_VOLUME="${PRODUCTION_VOLUME:-${COMPOSE_PROJECT_NAME}_${COMPOSE_VOLUME_NAME}}"
@@ -32,6 +40,56 @@ RESTORE_IMAGE="${RESTORE_IMAGE:-property-tax-postgres:${POSTGRES_VERSION:-16.11}
 
 die() { printf 'pgbackrest-restore: %s\n' "$*" >&2; exit 2; }
 info() { printf 'pgbackrest-restore: %s\n' "$*" >&2; }
+
+# Validate a restored migration ledger against this checkout.
+#
+# Reads "<version> <sha256>" lines on stdin and echoes a verdict beginning
+# "true" or "false". "Non-empty" is not a check: the ledger is the authority for
+# what was applied and carries file_sha256 precisely so the answer can be
+# verified. A gap means a migration is missing from the restored cluster; a hash
+# mismatch means the SQL that ran is not the SQL in the repository.
+#
+# A function so it can be exercised directly, which is how the contiguity and
+# mismatch paths are tested without applying migrations anywhere.
+validate_migration_ledger() {
+    local migrations_dir="$1"
+    local row version hash expected=1 candidate file_hash
+    local saw_row=false
+
+    while IFS= read -r row; do
+        [[ -n "$(printf '%s' "$row" | tr -d '[:space:]')" ]] || continue
+        saw_row=true
+        row="${row#"${row%%[![:space:]]*}"}"
+        version="${row%% *}"
+        hash="${row##* }"
+
+        if (( 10#$version != expected )); then
+            printf 'false (version %s breaks contiguity, expected %s)\n' "$version" "$expected"
+            return 0
+        fi
+
+        candidate="$(printf '%s/%04d_' "$migrations_dir" "$((10#$version))")"*.sql
+        # shellcheck disable=SC2086
+        set -- $candidate
+        if [[ ! -r "$1" ]]; then
+            printf 'false (no migration file for version %s in this checkout)\n' "$version"
+            return 0
+        fi
+
+        file_hash="$(sha256sum "$1" | cut -d' ' -f1)"
+        if [[ "$file_hash" != "$hash" ]]; then
+            printf 'false (version %s hash differs from %s)\n' "$version" "$(basename "$1")"
+            return 0
+        fi
+        expected=$((expected + 1))
+    done
+
+    if [[ "$saw_row" != true ]]; then
+        printf 'false (ledger present but empty)\n'
+        return 0
+    fi
+    printf 'true (%s contiguous, hashes match this checkout)\n' "$((expected - 1))"
+}
 
 usage() {
     cat >&2 <<'USAGE'
@@ -192,15 +250,19 @@ cleanup() {
         # ready to adopt a restore nobody proved.
         docker rm -f "$container" >/dev/null 2>&1 || true
         if [[ "$verified" == true ]]; then
-            # Written only here, after every assertion and the write probe. The
-            # Compose preflight refuses a promotion-labelled volume without it.
-            docker run --rm -v "$restore_volume:/v" alpine:3.20 \
-                sh -c "printf 'verified %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > /v/$PROMOTION_SENTINEL" >/dev/null 2>&1 \
-                || die "could not record verification on $restore_volume"
+            # Recorded only here, after every assertion and the write probe, and
+            # as Docker metadata rather than a file in PGDATA so no backup can
+            # capture it and no restore can replay it.
+            docker volume create \
+                --label "$PROMOTION_NONCE_LABEL=$promotion_nonce" \
+                --label "$PROMOTION_LABEL=verified" \
+                "${restore_volume}${PROMOTION_VERIFIED_SUFFIX}" >/dev/null \
+                || die "could not record verification for $restore_volume"
             info "verified; $restore_volume is ready for Compose to adopt"
             info "next: ./infra/scripts/compose-with-bitwarden.sh up -d"
         else
             docker volume rm "$restore_volume" >/dev/null 2>&1 || true
+            docker volume rm "${restore_volume}${PROMOTION_VERIFIED_SUFFIX}" >/dev/null 2>&1 || true
             info "verification did not pass; removed $restore_volume so it cannot be adopted"
         fi
         return
@@ -225,11 +287,15 @@ if [[ "$promote" == true ]]; then
     # still recognisably unverified, because the label says it was promoted and
     # no sentinel says it passed. A volume without the label, such as one that
     # predates this mechanism, is unaffected.
+    promotion_nonce="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     docker volume create \
         --label com.docker.compose.project="$COMPOSE_PROJECT_NAME" \
         --label com.docker.compose.volume="$COMPOSE_VOLUME_NAME" \
         --label "$PROMOTION_LABEL=managed" \
+        --label "$PROMOTION_NONCE_LABEL=$promotion_nonce" \
         "$restore_volume" >/dev/null
+    # A sidecar from a previous promotion must never vouch for this one.
+    docker volume rm "${restore_volume}${PROMOTION_VERIFIED_SUFFIX}" >/dev/null 2>&1 || true
 else
     docker volume create "$restore_volume" >/dev/null
 fi
@@ -337,17 +403,12 @@ if [[ "$promote" == true ]]; then
     # finished replay. 6 reports the migration ledger without requiring it:
     # absent is correct before task 3.4 is applied, and a present-but-empty
     # ledger would mean the restore lost it.
-    # Computed in two steps rather than one CASE. PostgreSQL plans every branch
-    # of a CASE, so naming platform.schema_migration inside an unreachable arm
-    # still raises "relation does not exist" on a cluster that predates the
-    # migrations -- which is every cluster today.
     if [[ "$(docker exec "$container" psql -U platform_admin -d property_tax -tAc \
              "SELECT to_regclass('platform.schema_migration') IS NOT NULL" 2>/dev/null \
              | tr -d '[:space:]')" == "t" ]]; then
         ledger="$(docker exec "$container" psql -U platform_admin -d property_tax -tAc \
-            "SELECT CASE WHEN count(*) > 0 THEN 'true (max version ' || max(version)::text || ')'
-                         ELSE 'false (ledger present but empty)' END FROM platform.schema_migration" \
-            2>/dev/null | sed 's/^[[:space:]]*//')"
+            "SELECT version || ' ' || file_sha256 FROM platform.schema_migration ORDER BY version" \
+            2>/dev/null | validate_migration_ledger "$(cd "$infra_dir/.." && pwd)/infra/postgres/migrations")"
     else
         ledger="true (absent; pre-migration cluster)"
     fi

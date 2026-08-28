@@ -1527,9 +1527,10 @@ def test_promoted_volume_is_unadoptable_until_verification_is_recorded() -> None
     """
     script = RESTORE_SCRIPT.read_text(encoding="utf-8")
     assert '--label "$PROMOTION_LABEL=managed"' in script
-    # Sentinel written after verification, never before.
+    assert '--label "$PROMOTION_NONCE_LABEL=$promotion_nonce"' in script
+    # Recorded after verification, never before.
     body = script.split('if [[ "$verified" == true ]]; then', 1)[1]
-    assert "$PROMOTION_SENTINEL" in body
+    assert "PROMOTION_VERIFIED_SUFFIX" in body
 
     wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
     assert "require_verified_promotion" in wrapper
@@ -1548,18 +1549,21 @@ def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
     """
     script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
     assert "set -euo pipefail" in script
-    order = [
-        script.index("1. fence writers"),
-        script.index("2. confirm the database is quiescent"),
-        script.index("3. flush the final WAL segment"),
-        script.index("4. wait for it to reach S3"),
-        script.index("5. recoverable boundary"),
-    ]
-    assert order == sorted(order), "fence steps are out of order"
+    steps = [line for line in script.splitlines() if line.startswith("printf '\\n===== ")]
+    numbered = " | ".join(steps)
+    for earlier, later in (
+        ("1. stop known writers", "2. revoke login authority"),
+        ("2. revoke login authority", "3. terminate existing sessions"),
+        ("3. terminate existing sessions", "4. prove a fresh login now fails"),
+        ("4. prove a fresh login now fails", "5. flush the final WAL segment"),
+        ("5. flush the final WAL segment", "6. wait for it to reach S3"),
+        ("6. wait for it to reach S3", "7. recoverable boundary"),
+    ):
+        assert numbered.index(earlier) < numbered.index(later), f"{earlier} not before {later}"
     # Airflow is the writer that never stops on its own.
     for service in ("airflow-scheduler", "airflow-triggerer", "airflow-dag-processor"):
         assert service in script, service
-    assert "clients are still connected" in script
+    assert "clients remain connected after fencing" in script
     assert "did not reach S3 within" in script
     # It reports a boundary; it does not cut over.
     assert "This host stays fenced" in script
@@ -1608,3 +1612,119 @@ def test_signing_helper_fast_path_requires_root_owned_and_unwritable() -> None:
     assert "(( (8#$existing_mode & 022) == 0 ))" in script
     assert "(( (8#$directory_mode & 022) == 0 ))" in script
     assert "weak permissions" in script
+
+
+def test_promotion_proof_lives_outside_the_data_directory() -> None:
+    """A marker inside PGDATA is captured by the next backup.
+
+    Measured: a probe file written into the data directory appeared in a diff
+    manifest as `pg_data/.trupryce-promotion-probe.zst`, and came back on a
+    later restore. A verified marker restored that way would vouch for a new,
+    unverified promotion -- so the proof is Docker metadata, which no backup
+    can capture and no restore can replay.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    # Nothing is written into the mounted data directory.
+    assert "/v/.trupryce" not in code
+    assert 'PROMOTION_SENTINEL=".trupryce-promotion"' not in code
+    # The proof is a sidecar volume, nonce-bound to this promotion.
+    assert 'PROMOTION_VERIFIED_SUFFIX=".verified"' in script
+    assert "promotion_nonce=" in code
+    assert "/dev/urandom" in code
+
+    wrapper = (INFRA_ROOT / "scripts" / "compose-with-bitwarden.sh").read_text(encoding="utf-8")
+    wrapper_code = "\n".join(
+        line for line in wrapper.splitlines() if not line.lstrip().startswith("#")
+    )
+    # The gate must not read anything out of the data volume.
+    assert ".trupryce-promotion" not in wrapper_code
+    assert "trupryce.promotion.nonce" in wrapper_code
+    assert '"${volume}.verified"' in wrapper_code
+    # A stale sidecar from an earlier promotion must not vouch for a later one.
+    assert '"$sidecar_nonce" == "$nonce"' in wrapper_code
+
+
+def test_cutover_fence_enforces_rather_than_observes() -> None:
+    """Stopping containers is not a fence.
+
+    Anything that can still authenticate reconnects the moment after a
+    zero-client check passes -- a restart policy, an operator, a second host
+    still pointed here -- and its writes land after the boundary and are lost
+    silently. The fence has to remove the authority, then prove it is gone.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    for role in (
+        "airflow_metadata",
+        "property_tax_migrator",
+        "property_tax_ingestion",
+        "property_tax_api",
+    ):
+        assert role in script.split("RUNTIME_ROLES=(", 1)[1].split(")", 1)[0], role
+    assert "ALTER ROLE $role NOLOGIN" in script
+    assert "pg_terminate_backend" in script
+    # The proof step: a fresh login must be refused, not merely absent.
+    assert "prove a fresh login now fails" in script
+    assert "STILL ABLE TO LOG IN" in script
+    assert "the fence does not hold" in script
+    # Reversible, and the operator is not locked out.
+    assert "--unfence" in script
+    assert "ALTER ROLE $role LOGIN" in script
+    assert "platform_admin is deliberately absent" in script
+    # Ordered: authority removed and proven gone before the boundary is taken.
+    # Anchored to the numbered step headers, because the file's own header
+    # comment mentions flushing WAL in its first three lines.
+    steps = [line for line in script.splitlines() if line.startswith("printf '\\n===== ")]
+    order = " | ".join(steps)
+    assert order.index("revoke login authority") < order.index("flush the final WAL")
+    assert order.index("prove a fresh login now fails") < order.index("flush the final WAL")
+    assert order.index("terminate existing sessions") < order.index("prove a fresh login now fails")
+
+
+def test_migration_ledger_is_validated_not_merely_counted() -> None:
+    """The ledger is authoritative and carries file_sha256 to be checked.
+
+    A non-empty ledger says nothing: a gap means a migration is missing from the
+    restored cluster, and a hash mismatch means the SQL that ran is not the SQL
+    in this checkout.
+    """
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "validate_migration_ledger()" in script
+    assert "breaks contiguity" in script
+    assert "hash differs from" in script
+    assert "no migration file for version" in script
+    assert "sha256sum" in script
+    assert "ledger present but empty" in script
+    # Ordered by version so contiguity is checkable.
+    assert "ORDER BY version" in script
+
+
+def test_placeholder_configuration_is_rejected_not_merely_non_empty() -> None:
+    """A placeholder passes every is-it-set check and fails much later."""
+    example = parse_environment_file(INFRA_ROOT / ".env.example")
+    for name, value in example.items():
+        if name.startswith("TRUPRYCE_AWS") or name.startswith("PGBACKREST"):
+            assert "REPLACE" not in value, f"{name} ships a placeholder value"
+            assert "CHANGEME" not in value, name
+
+    for script_name in ("install-aws-profiles.sh", "install-certificate-identity.sh"):
+        script = (INFRA_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        assert "*REPLACE*" in script, script_name
+        assert "is still a placeholder" in script, script_name
+
+    bootstrap = (INFRA_ROOT / "scripts" / "bootstrap-env.sh").read_text(encoding="utf-8")
+    assert "*REPLACE*" in bootstrap
+    assert "placeholder:" in bootstrap
+
+
+def test_adr_describes_the_schedule_that_is_implemented() -> None:
+    adr = (
+        REPOSITORY_ROOT
+        / "docs"
+        / "decisions"
+        / "0010-replaceable-local-storage-and-s3-backup-repository.md"
+    ).read_text(encoding="utf-8")
+    assert "daily differentials" not in adr
+    assert "Monday through Saturday" in adr
+    diff_timer = (SYSTEMD_ROOT / "pgbackrest-diff.timer").read_text(encoding="utf-8")
+    assert "Mon,Tue,Wed,Thu,Fri,Sat" in diff_timer

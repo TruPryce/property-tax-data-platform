@@ -18,7 +18,7 @@ Two further facts shaped this decision. The host already holds a working keyless
 
 **Attached Block Storage is optional expansion.** It may be provisioned when measured growth justifies capacity or performance, and its absence blocks nothing. Provisioning it later requires no further amendment.
 
-**S3 is the recovery boundary, implemented with pgBackRest.** Encrypted physical backups plus continuous WAL archiving to `s3://trupryce-property-tax-backups/pgbackrest/platform`, under stanza `platform`, with weekly full backups, daily differentials, four retained full cycles, and `archive_timeout=300`.
+**S3 is the recovery boundary, implemented with pgBackRest.** Encrypted physical backups plus continuous WAL archiving to `s3://trupryce-property-tax-backups/pgbackrest/platform`, under stanza `platform`, with a weekly full backup on Sunday, differentials Monday through Saturday, four retained full cycles, and `archive_timeout=300`. The two never overlap on schedule, which is what removes any need for a serialisation primitive between them.
 
 `archive_timeout=300` establishes the maximum idle WAL segment-switch interval while archiving is healthy. It is not a durability guarantee. The actual recovery point is the age of the most recent WAL segment **confirmed present in the archive**, which can exceed 300 seconds whenever archiving is failing or backlogged — a network partition, an expired certificate, an S3 authorization change, or an async queue that is not draining. That gap is precisely why [backup and recovery observability](#consequences) remains open: the alert that matters is on the age of the latest successfully archived WAL, not on the configured interval.
 

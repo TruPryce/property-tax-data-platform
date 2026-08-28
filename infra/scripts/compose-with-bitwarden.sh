@@ -142,14 +142,19 @@ fi
 # A promotion-labelled volume that never finished verification must not become
 # the next production primary.
 #
-# pgbackrest-restore.sh --promote labels the volume at creation, before any data
-# exists, and writes the verified sentinel only after every assertion and a real
-# write probe. An EXIT trap cleans up ordinary failures, but kill -9, a reboot,
-# or power loss cannot run a trap -- so the label survives and the sentinel does
-# not, and this refuses to start on it. A volume without the label, including
-# every volume predating this mechanism, is untouched.
+# The proof lives in a sidecar Docker volume, not in PGDATA. A marker file
+# inside the data directory is captured by the next backup -- measured: a probe
+# file appeared in a diff manifest as pg_data/.trupryce-promotion-probe.zst --
+# so restoring that backup would carry an old "verified" marker into a new,
+# unverified promotion and defeat this check entirely.
+#
+# The nonce is what stops a stale sidecar authorising a later promotion: it is
+# written to the data volume when the volume is created, before any data exists,
+# and to the sidecar only after every assertion passed. Both are atomic Docker
+# operations, so kill -9, a reboot, or power loss cannot leave the pair agreeing
+# when verification did not finish.
 require_verified_promotion() {
-    local project volume label sentinel
+    local project volume label nonce sidecar_nonce
     project="$(read_configuration_value COMPOSE_PROJECT_NAME "$compose_environment_file")"
     project="${project:-property-tax-platform}"
     volume="${project}_postgres-data"
@@ -160,16 +165,24 @@ require_verified_promotion() {
         --format '{{index .Labels "trupryce.promotion"}}' 2>/dev/null || true)"
     [[ "$label" == "managed" ]] || return 0
 
-    sentinel="$(docker run --rm -v "$volume:/v:ro" alpine:3.20 \
-        sh -c 'cat /v/.trupryce-promotion 2>/dev/null || true' 2>/dev/null || true)"
-    if [[ "$sentinel" == verified* ]]; then
+    nonce="$(docker volume inspect "$volume" \
+        --format '{{index .Labels "trupryce.promotion.nonce"}}' 2>/dev/null || true)"
+    sidecar_nonce="$(docker volume inspect "${volume}.verified" \
+        --format '{{index .Labels "trupryce.promotion.nonce"}}' 2>/dev/null || true)"
+
+    if [[ -n "$nonce" && "$sidecar_nonce" == "$nonce" ]]; then
         return 0
     fi
 
     echo "refusing to start: $volume was created by a promotion that did not complete" >&2
-    echo "it carries the promotion label but no verified sentinel, so no restore of it" >&2
-    echo "was ever proven. Remove it and re-run pgbackrest-restore.sh --promote:" >&2
-    echo "  docker volume rm $volume" >&2
+    if [[ -z "$sidecar_nonce" ]]; then
+        echo "no verification record exists for it, so no restore of it was ever proven." >&2
+    else
+        echo "its verification record belongs to a different promotion, so it does not" >&2
+        echo "vouch for the data currently on this volume." >&2
+    fi
+    echo "Remove it and re-run pgbackrest-restore.sh --promote:" >&2
+    echo "  docker volume rm $volume ${volume}.verified" >&2
     exit 2
 }
 
