@@ -20,8 +20,8 @@ remembers it. A rule stated in a shape is enforced by the shape.
 `property_tax_domain` gains the canonical appraisal vocabulary: an account
 identity distinct from an account snapshot, owner associations at their own
 grain, value observations that keep market, appraised, and assessed apart from
-taxable, and child observations for exemptions, taxing units, land,
-improvements, and geometry. Every type is classified — stable identity,
+taxable, child observations for exemptions, taxing units, land, and
+improvements, plus geometry enrichment. Every record type is classified — stable identity,
 release-scoped snapshot, child observation, association, or enrichment — and the
 classification is asserted by a test rather than described in a comment.
 

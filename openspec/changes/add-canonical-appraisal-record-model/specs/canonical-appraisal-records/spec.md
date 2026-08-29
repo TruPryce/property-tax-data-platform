@@ -195,7 +195,7 @@ No universal land or improvement natural key SHALL be invented. A sequence numbe
 ### Requirement: Geometry is enrichment carried without a geospatial dependency
 The system SHALL represent geometry as a `GeometryObservation` enrichment carrying its parent `AccountSnapshot`, a `GeometryEncoding` of exactly `wkb` or `wkt`, a payload of `bytes` for `wkb` or `str` for `wkt` that is non-empty and at most 8 MiB measured as the length of the `bytes` or of the `str` encoded as UTF-8, a required `crs` of 1 through 64 characters containing no control character and at least one non-whitespace character and stated as the source stated it, and `DomainProvenance`.
 
-The domain SHALL NOT parse, validate, reproject, or otherwise interpret geometry, and SHALL NOT import a geospatial library, a spatial database extension, or an object-store client. A coordinate reference SHALL be required, because geometry whose coordinate system is unknown cannot be placed. The presence of geometry for an account SHALL NOT be treated as evidence that a complete appraisal record exists for it.
+A snapshot MAY carry several geometry observations; geometry SHALL NOT be constrained to at most one per snapshot, because no accepted contract establishes that a county publishes only one. The domain SHALL NOT parse, validate, reproject, or otherwise interpret geometry, and SHALL NOT import a geospatial library, a spatial database extension, or an object-store client. A coordinate reference SHALL be required, because geometry whose coordinate system is unknown cannot be placed. The presence of geometry for an account SHALL NOT be treated as evidence that a complete appraisal record exists for it.
 
 #### Scenario: Geometry arrives without a coordinate reference
 - **WHEN** a geometry payload is recorded with no coordinate reference identifier
@@ -212,6 +212,10 @@ The domain SHALL NOT parse, validate, reproject, or otherwise interpret geometry
 #### Scenario: A payload disagrees with its encoding
 - **WHEN** a `wkb` encoding carries a `str` payload, or `wkt` carries `bytes`
 - **THEN** construction fails
+
+#### Scenario: One snapshot carries two geometries
+- **WHEN** two geometry observations reference the same account snapshot
+- **THEN** both are retained independently, each carrying its own lineage, and neither replaces nor excludes the other
 
 #### Scenario: A partial GIS source supplies geometry
 - **WHEN** geometry arrives from a source that is a GIS subset rather than a full appraisal roll

@@ -311,6 +311,21 @@ full appraisal roll, and its contract keeps Rockwall out of the complete
 six-county publication. A geometry attached to an account must not be read as
 evidence that a complete appraisal record exists for it.
 
+Geometry is **one-to-many** per snapshot, like every other parented record. That
+is a statement about cardinality, not about classification: `child_observation`
+and `enrichment` are distinct `RecordClassification` values, and geometry is an
+enrichment, so calling it a child here would blur two vocabularies that are
+deliberately apart.
+
+No accepted contract establishes that a county publishes at most one geometry for
+an account, and constraining it to zero-or-one would refuse a source that
+publishes several without any evidence that none does. Two geometry observations
+for one snapshot are two observations, each carrying its own lineage — nothing
+requires those lineages to differ.
+
+**Rejected — zero-or-one geometry per snapshot.** It reads as the common case and
+is an assumption about sources rather than a fact from one.
+
 **Rejected — a typed geometry object.** It requires a library, and this change
 adds no runtime dependency.
 
@@ -411,11 +426,11 @@ index, or DDL is chosen here.
 |---|---|
 | What is the parent key? | `AccountIdentity` — jurisdiction plus approved source account identifier |
 | What is snapshot grain? | `(AccountIdentity, ReleaseIdentity)`, published as the read-only `grain` property |
-| Which children are one-to-many? | owner associations, owner value allocations, appraisal values, taxable values, exemptions, taxing units, land, improvements |
+| Which parented records are one-to-many? | owner observations, owner associations, owner value allocations, appraisal values, taxable values, exemptions, taxing units, land, improvements, and geometries — every record parented by a snapshot or an association is one-to-many, whatever its classification, and none is constrained to at most one |
 | Which identities are stable? | `AccountIdentity` alone; everything else is snapshot, observation, association, or enrichment |
 | Which rows are observations only? | every `*Observation`, plus `OwnerAssociation` and `OwnerValueAllocation` |
 | Where does `DomainProvenance` attach? | every snapshot, observation, association, allocation, and enrichment — `OwnerValueAllocation` included; never an identity and never a composed value object |
-| What never enters canonical Silver? | unmapped source-native values and labels — Dallas `TOT_VAL` and components under #58, Tarrant's unapproved value fields, county exemption labels with no canonical classification, and any account whose county key is unapproved |
+| What never enters canonical Silver? | unmapped source-native **value fields** whose canonical meaning no accepted contract establishes — Dallas `TOT_VAL` and its components, Tarrant's unapproved value fields — and any account whose county key is unapproved. Source-native **labels** are a different case and do enter, carried verbatim by canonical observations that declare them source-native: exemption classification, taxing-unit code and name, taxable basis, and land and improvement classification |
 
 **Rejected — choosing surrogate keys or table shapes now.** That is task 3.4's
 work, and doing it here would reintroduce the coupling this task exists to
