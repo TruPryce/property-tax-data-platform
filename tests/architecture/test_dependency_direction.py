@@ -1,9 +1,14 @@
 """Import-level enforcement for the hexagonal dependency direction."""
 
 import ast
+import dataclasses
 import subprocess
 import sys
+import typing
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+from property_tax_domain import RECORD_CLASSIFICATIONS, GeometryObservation
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -16,6 +21,8 @@ FORBIDDEN_IMPORTS = {
         "property_tax_application",
         "property_tax_ingestion",
         "psycopg",
+        "pyproj",
+        "shapely",
     },
     "property_tax_application": {
         "airflow",
@@ -71,6 +78,12 @@ DOMAIN_TEST_MODULES = (
     "tests/unit/property_tax_domain/test_serialization.py",
     "tests/unit/property_tax_domain/test_provenance.py",
     "tests/unit/property_tax_domain/test_public_surface.py",
+    "tests/unit/property_tax_domain/test_account.py",
+    "tests/unit/property_tax_domain/test_owner.py",
+    "tests/unit/property_tax_domain/test_value.py",
+    "tests/unit/property_tax_domain/test_exemption.py",
+    "tests/unit/property_tax_domain/test_children.py",
+    "tests/unit/property_tax_domain/test_appraisal_provenance.py",
 )
 
 
@@ -147,6 +160,41 @@ def test_the_domain_names_no_county_in_code() -> None:
                 violations.append(f"{path.relative_to(ROOT)} mentions {county} in code")
 
     assert not violations, "County names outside the registry:\n" + "\n".join(violations)
+
+
+def test_appraisal_records_have_no_general_purpose_carrier() -> None:
+    """Every record field is a named fact with a declared bounded shape."""
+
+    forbidden_names = {
+        "annotation",
+        "annotations",
+        "detail",
+        "details",
+        "extra",
+        "extras",
+        "metadata",
+    }
+    violations: list[str] = []
+    for value_type in RECORD_CLASSIFICATIONS:
+        hints = typing.get_type_hints(value_type)
+        for field in dataclasses.fields(value_type):
+            if field.name in forbidden_names:
+                violations.append(f"{value_type.__name__}.{field.name} is a generic carrier")
+            if _carries_general_purpose_type(hints[field.name]):
+                violations.append(f"{value_type.__name__}.{field.name} carries {hints[field.name]}")
+            if field.name == "payload" and value_type is not GeometryObservation:
+                violations.append(f"{value_type.__name__}.payload is not geometry")
+
+    assert not violations, "General-purpose appraisal fields:\n" + "\n".join(violations)
+
+
+def _carries_general_purpose_type(annotation: object) -> bool:
+    if annotation is typing.Any or annotation is object:
+        return True
+    origin = typing.get_origin(annotation)
+    if origin in {dict, list, set, tuple, Mapping, Sequence}:
+        return True
+    return any(_carries_general_purpose_type(argument) for argument in typing.get_args(annotation))
 
 
 def test_the_new_domain_suites_are_collected_by_the_default_configuration() -> None:
