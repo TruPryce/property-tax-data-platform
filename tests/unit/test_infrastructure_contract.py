@@ -1564,8 +1564,8 @@ def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
         ("4. terminate existing sessions", "5. prove a fresh login now fails"),
         ("5. prove a fresh login now fails", "6. flush the final WAL segment"),
         ("6. flush the final WAL segment", "7. wait for it to reach S3"),
-        ("7. wait for it to reach S3", "8. recoverable boundary"),
-        ("8. recoverable boundary", "9. stop the source cluster"),
+        ("7. wait for it to reach S3", "8. stop the source cluster"),
+        ("8. stop the source cluster", "9. durable cutover boundary"),
     ):
         assert numbered.index(earlier) < numbered.index(later), f"{earlier} not before {later}"
     # Airflow is the writer that never stops on its own.
@@ -1573,9 +1573,9 @@ def test_cutover_fence_takes_the_boundary_after_fencing_writers() -> None:
         assert service in script, service
     assert "clients remain connected after fencing" in script
     assert "did not reach S3 within" in script
-    # It reports a boundary and freezes the source; it does not cut over.
-    assert "This host is now frozen" in script
-    assert "Revoke its AWS identity only after the new host" in script
+    # It freezes the source and then reports the boundary; it does not cut over.
+    assert "SOURCE FROZEN" in script
+    assert "Revoke this host's AWS identity only after the new host" in script
 
 
 def test_aws_profiles_are_rendered_from_the_host_configuration() -> None:
@@ -1880,7 +1880,9 @@ def test_fence_freezes_the_source_rather_than_only_fencing_it() -> None:
     assert order.index("confirm the source backup schedule is stopped") < order.index(
         "stop known writers"
     )
-    assert order.index("recoverable boundary") < order.index("stop the source cluster")
+    # The stop comes first: a boundary printed while the postmaster still ran
+    # would already be stale by the time it was read.
+    assert order.index("stop the source cluster") < order.index("durable cutover boundary")
 
 
 def test_activation_proves_stored_credentials_not_only_login_authority() -> None:
@@ -1912,3 +1914,49 @@ def test_activation_proves_stored_credentials_not_only_login_authority() -> None
     assert "CREDENTIAL REJECTED" in script
     # The failure names the cause an operator would otherwise hunt for.
     assert "predates a rotation" in script
+
+
+def test_boundary_is_the_archived_segment_and_is_reported_after_the_stop() -> None:
+    """A wall-clock reading taken while PostgreSQL still runs is not the boundary.
+
+    The archive can still advance at that moment, and the summary previously
+    announced "PostgreSQL is stopped" before `docker stop` had run. The boundary
+    is the last WAL segment confirmed in S3 while writers were fenced, which is
+    a fact about the archive rather than about a clock.
+    """
+    script = (INFRA_ROOT / "scripts" / "cutover-fence.sh").read_text(encoding="utf-8")
+    fence = script.split('[[ "${1:-}" == "--unfence" ]] && unfence', 1)[1]
+
+    # The stop is verified, not assumed from an exit status.
+    assert 'docker stop "$container"' in fence
+    assert "the source is NOT frozen" in fence
+    assert 'if [[ -n "$(postgres_container)" ]]; then' in fence
+
+    # The summary is emitted only after the stop is confirmed.
+    assert fence.index('docker stop "$container"') < fence.index("SOURCE FROZEN")
+    assert fence.index("confirmed stopped") < fence.index("SOURCE FROZEN")
+
+    # The segment is authoritative; the timestamp is explicitly not a target.
+    assert "durable boundary : $final_segment" in fence
+    assert "informational only" in fence
+    assert "NOT a safe" in fence
+    assert "recovery ended before configured recovery target was reached" in fence
+
+    # And the timestamp is no longer offered as a --target.
+    code = "\n".join(line for line in fence.splitlines() if not line.lstrip().startswith("#"))
+    assert '--target "$boundary"' not in code
+    assert "Do not pass --target for" in fence
+
+
+def test_migration_diagram_matches_the_numbered_procedure() -> None:
+    """An operator following the abbreviated flow must not skip activation."""
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "postgresql-recovery.md").read_text(
+        encoding="utf-8"
+    )
+    diagram = runbook.split("Akamai serving normally", 1)[1].split("```", 1)[0]
+    for step in ("up -d postgres", "--unfence", "start the rest of the runtime"):
+        assert step in diagram, f"the flow diagram omits {step}"
+    assert diagram.index("up -d postgres") < diagram.index("--unfence")
+    assert diagram.index("--unfence") < diagram.index("start the rest of the runtime")
+    # The source stop is described in the order it happens.
+    assert diagram.index("STOPS PostgreSQL") < diagram.index("reports the durable boundary")

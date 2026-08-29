@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fence every writer, flush the final WAL, and report the recoverable boundary.
+# Freeze the source: fence every writer, archive the final WAL, stop PostgreSQL,
+# and report the WAL segment that is now the durable cutover boundary.
 #
 # For a PLANNED provider move. A restore reproduces the archive, not the source:
 # anything committed on the old host after the last archived WAL simply is not
@@ -307,32 +308,57 @@ failed="$(psql_query "SELECT failed_count FROM pg_stat_archiver" | tr -d '[:spac
 last_archived="$(psql_query "SELECT coalesce(last_archived_wal,'none') FROM pg_stat_archiver" | tr -d '[:space:]')"
 printf '  archiver last_archived_wal: %s (lifetime failed_count %s)\n' "$last_archived" "$failed"
 
-printf '\n===== 8. recoverable boundary =====\n'
-boundary="$(psql_query "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')||'+00'")"
+# Read while the cluster is still up, and used only for correlating with logs.
+# The authoritative boundary is the segment above, not this.
+boundary_observed="$(psql_query "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')||'+00'")"
+
+printf '\n===== 8. stop the source cluster =====\n'
+# Stopped before the boundary is reported, not after. A running postmaster keeps
+# generating and archiving WAL -- checkpoints, autovacuum, platform_admin
+# sessions -- so any boundary printed while it still ran would already be stale
+# by the time it was read. Reporting "frozen" before the stop had succeeded was
+# the same mistake in miniature.
+docker stop "$container" >/dev/null || die "could not stop $container; the source is NOT frozen"
+printf '  stopped %s\n' "$container"
+
+# Prove it, rather than trusting the exit status of the stop.
+if [[ -n "$(postgres_container)" ]]; then
+    die "$container is still running; the source is NOT frozen"
+fi
+printf '  confirmed stopped; the archive can no longer advance\n'
+
+printf '\n===== 9. durable cutover boundary =====\n'
 cat <<SUMMARY
 
-  final archived segment : $final_segment
-  boundary timestamp     : $boundary
+  SOURCE FROZEN. PostgreSQL is stopped and the archive cannot advance.
 
-  Everything committed before this point is recoverable, and the runtime roles
-  can no longer authenticate, so nothing can add to it by accident.
+  durable boundary : $final_segment
+      This WAL segment is the boundary. It is the last segment confirmed present
+      in S3 while writers were fenced, and nothing can be added after it. It is
+      the boundary because it is a fact about the archive, not about a clock.
 
-  Do NOT run --unfence until the migration is abandoned. Restoring login
-  authority here lets Airflow reconnect and write past the boundary, and those
-  writes will not exist on the new primary.
+  observed at      : $boundary_observed   (informational only)
+      A wall-clock reading, useful for correlating with logs. It is NOT a safe
+      PITR target: a timestamp later than the last commit makes recovery fail
+      with "recovery ended before configured recovery target was reached", and
+      on a quiet database that is most timestamps.
 
-  On the new host:
+  On the new host, with no target at all:
 
     ./infra/scripts/pgbackrest-restore.sh --promote
 
-  with no --target, which restores to the end of the archive and therefore to
-  exactly this boundary. Use --target "$boundary" only if later WAL exists that
-  you deliberately want to exclude.
+  That restores to the end of the archive, which is now fixed at the segment
+  above because this source can no longer write to it. Do not pass --target for
+  a planned migration; it can only exclude data you meant to keep.
 
-  This host is now frozen: PostgreSQL is stopped, so nothing further can be
-  written or archived from it. Revoke its AWS identity only after the new host
-  is verified and serving -- the identity is still needed if the migration is
-  abandoned.
+  Then activate before starting the runtime:
+
+    ./infra/scripts/compose-with-bitwarden.sh up -d postgres
+    ./infra/scripts/cutover-fence.sh --unfence
+    ./infra/scripts/compose-with-bitwarden.sh up -d
+
+  Revoke this host's AWS identity only after the new host is verified and
+  serving -- it is still needed if the migration is abandoned.
 
   To abandon the migration and resume here, in this order:
 
@@ -342,13 +368,4 @@ cat <<SUMMARY
     ./infra/scripts/compose-with-bitwarden.sh up -d
 
 SUMMARY
-printf '\n===== 9. stop the source cluster =====\n'
-# The boundary is only a boundary if nothing can move past it. A running
-# postmaster keeps generating and archiving WAL -- checkpoints, autovacuum,
-# platform_admin sessions -- so "restore to the end of the archive" on the new
-# host would not mean the point reported above.
-docker stop "$container" >/dev/null
-printf '  stopped %s\n' "$container"
-printf '  the archive can no longer move; the boundary above is final\n'
-
-info "frozen; the source is stopped and the recoverable boundary is fixed"
+info "frozen; durable boundary is segment $final_segment"

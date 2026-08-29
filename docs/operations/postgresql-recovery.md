@@ -628,14 +628,18 @@ Restoring first and fencing afterwards leaves a window as long as verification t
         │    terminates their sessions
         │    PROVES a fresh login is now refused, and aborts if any succeeds
         │    pg_switch_wal(), then waits for that segment to appear in S3
-        │    prints the recoverable boundary
-        │    STOPS PostgreSQL, so nothing can move past it
+        │    STOPS PostgreSQL and confirms it stopped
+        │    only then reports the durable boundary: that WAL segment
         │
-        ├─ Akamai stays fenced ─────────────────────────────┐
+        ├─ Akamai stays frozen ─────────────────────────────┐
         │                                                   │
    Hostinger: --promote (no --target = end of archive)      │
         ├─ verify in isolation                              │
-        ├─ start the runtime                                │
+        ├─ start PostgreSQL ONLY          up -d postgres    │
+        ├─ activate the runtime roles     --unfence         │
+        │    restores LOGIN, proves the stored credentials, │
+        │    archives the transition                        │
+        ├─ start the rest of the runtime  up -d             │
         ├─ verify asynchronous archiving                    │
         ├─ cut traffic and workloads over                   │
         │                                                   │
