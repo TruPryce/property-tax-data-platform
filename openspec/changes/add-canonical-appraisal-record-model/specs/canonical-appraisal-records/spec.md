@@ -9,6 +9,7 @@ The system SHALL apply these rules wherever the requirements below name the corr
 | **label** | `str` of 1 through 256 characters, containing no control character and at least one non-whitespace character, preserved verbatim including case |
 | **address component** | `str` of 1 through 128 characters, containing no control character and at least one non-whitespace character |
 | **amount** | `Decimal` that is finite; `float`, `bool`, `NaN`, and infinity SHALL be rejected. No sign constraint is imposed, because no accepted contract establishes one and some rolls carry negative adjustments. `Decimal(0)` is a valid amount: counties publish zero values, and a constructor receiving a decimal cannot know whether a caller meant zero or meant absent |
+| **magnitude** | `Decimal` that is finite and not negative, for a physical quantity such as an area; `float`, `bool`, `NaN`, and infinity SHALL be rejected. Distinct from **amount** because a monetary figure may legitimately be negative and a measured area may not |
 | **percentage** | `Decimal` that is finite and from 0 through 100 inclusive; `float` and `bool` SHALL be rejected |
 | **instant** | timezone-aware `datetime`; a naive value SHALL be rejected |
 | **year** | `int` from 1600 through 2200 inclusive; `bool` SHALL be rejected |
@@ -32,19 +33,15 @@ The system SHALL identify a canonical appraisal account with an `AccountIdentity
 
 Whether a given source field is an **approved** account key is a fact about a county contract. The domain SHALL validate the identifier's lexical contract and SHALL NOT attempt to determine which source field supplied it: a generic constructor receiving a jurisdiction and a string cannot distinguish an approved account key from an owner-row discriminator carrying the same characters, and a rule it cannot enforce is not a rule.
 
-Enforcement of account-key approval SHALL therefore sit at the county-aware mapping boundary that knows the contract. That boundary SHALL NOT construct a canonical account identity for a county whose accepted contract has not approved an account key; such a county's records SHALL remain at source grain with their lineage. There SHALL be no provisional, partial, or nullable form of an account identity.
+Whether a given source field is an approved account key is county-specific knowledge, and county-specific knowledge stops at the adapter boundary. That decision therefore belongs to the county adapter under its accepted county contract, which this capability does not restate and does not assert scenarios about. There SHALL be no provisional, partial, or nullable form of an account identity, so an adapter that cannot construct one produces none.
 
 #### Scenario: Two counties publish one account identifier
 - **WHEN** two county adapters emit the same source account identifier
 - **THEN** the resulting account identities are not equal, because their jurisdictions differ
 
-#### Scenario: A county's account key is unapproved
-- **WHEN** records arrive from a county whose accepted contract has not approved an account key
-- **THEN** the county-aware mapping boundary produces no canonical account identity and no snapshot, and the records remain at source grain with their lineage
-
 #### Scenario: An identifier of unknown provenance reaches the domain
 - **WHEN** a well-formed identifier is supplied to the domain constructor
-- **THEN** it is accepted on its lexical contract alone, and the refusal for an unapproved county comes from the mapping boundary rather than from the domain
+- **THEN** it is accepted on its lexical contract alone, because a jurisdiction and a string carry no evidence of which source field produced them
 
 ### Requirement: One release authority per record
 Where a record carries lineage, its `DomainProvenance` SHALL be the single authority for the release it belongs to, and the record SHALL NOT carry a second `ReleaseIdentity` beside it. A record needing its release SHALL derive it from its provenance.
@@ -64,7 +61,7 @@ The system SHALL represent one account as one logical release observed it, as an
 
 The snapshot's account identity jurisdiction SHALL equal the jurisdiction of the release its provenance names, and construction SHALL fail otherwise. Without that invariant an account identity from one county is constructible under another county's release provenance, and every child then agrees with that invalid parent and satisfies the release-agreement rule — an internally consistent account tree that is wrong at its root.
 
-Snapshot **equality** SHALL be structural over every field except `source_as_of`, and the **grain** SHALL be published explicitly as the account identity and the release. Equal grain SHALL NOT imply equal snapshot: two snapshots of one account in one release observed in two different artifacts share a grain and carry different lineage, which is the divergence case and SHALL remain expressible rather than collapsed. Consumers keying by grain SHALL use the published grain rather than object equality.
+Snapshot **equality** SHALL be structural over every field except `source_as_of`. The **grain** SHALL be published as a read-only property named `grain` returning the tuple `(AccountIdentity, ReleaseIdentity)` in that order, exported on the package's public surface, so that consumers key on one published shape rather than each choosing an accessor. Equal grain SHALL NOT imply equal snapshot: two snapshots of one account in one release observed in two different artifacts share a grain and carry different lineage, which is the divergence case and SHALL remain expressible rather than collapsed. Consumers keying by grain SHALL use the published grain rather than object equality.
 
 A `source_as_of` **instant** SHALL be recorded as optional observation metadata excluded from equality, hashing, and grain, because a source as-of value is a property of the release rather than of one account within it: including it would discriminate nothing while storing a second copy of a release-level fact.
 
@@ -175,7 +172,7 @@ No canonical exemption vocabulary SHALL be defined, and a county label SHALL NOT
 - **THEN** construction fails
 
 ### Requirement: Land and improvement children survive without invented identity
-The system SHALL represent land and improvement records as separate child observations — `LandObservation` and `ImprovementObservation` — each carrying its parent `AccountSnapshot`, an optional `source_discriminator` meeting the **identifier** rule, an optional source-native `classification` meeting the **label** rule, an optional `area` **amount** with a `area_unit` meeting the **label** rule, and `DomainProvenance`. An improvement SHALL additionally carry an optional `year_built` meeting the **year** rule. An area SHALL be unconstructible without its unit, and a unit without an area SHALL be rejected.
+The system SHALL represent land and improvement records as separate child observations — `LandObservation` and `ImprovementObservation` — each carrying its parent `AccountSnapshot`, an optional `source_discriminator` meeting the **identifier** rule, an optional source-native `classification` meeting the **label** rule, an optional `area` meeting the **magnitude** rule with an `area_unit` meeting the **label** rule, and `DomainProvenance`. An improvement SHALL additionally carry an optional `year_built` meeting the **year** rule. An area SHALL be unconstructible without its unit, and a unit without an area SHALL be rejected.
 
 No universal land or improvement natural key SHALL be invented. A sequence number, row number, building number, or physical ordering SHALL NOT be treated as a stable business identity unless an accepted county contract establishes it. Where a source child key is unresolved the observation SHALL remain valid and its discriminator SHALL be absent rather than fabricated.
 
@@ -190,6 +187,10 @@ No universal land or improvement natural key SHALL be invented. A sequence numbe
 #### Scenario: An area arrives without a unit
 - **WHEN** an area magnitude is recorded with no unit, or a unit with no magnitude
 - **THEN** construction fails rather than assuming either
+
+#### Scenario: A negative area is offered
+- **WHEN** a negative area is recorded
+- **THEN** construction fails, while zero and positive areas are accepted, because a measured extent has no negative value even where a monetary adjustment does
 
 ### Requirement: Geometry is enrichment carried without a geospatial dependency
 The system SHALL represent geometry as a `GeometryObservation` enrichment carrying its parent `AccountSnapshot`, a `GeometryEncoding` of exactly `wkb` or `wkt`, a payload of `bytes` for `wkb` or `str` for `wkt` that is non-empty and at most 8 MiB measured as the length of the `bytes` or of the `str` encoded as UTF-8, a required `crs` of 1 through 64 characters containing no control character and at least one non-whitespace character and stated as the source stated it, and `DomainProvenance`.

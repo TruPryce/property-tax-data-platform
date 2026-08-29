@@ -3,7 +3,7 @@
 ## Context
 
 Issue #106 lists twelve decisions that must be settled before implementation.
-All are recorded here as D1 through D13, each with the evidence supporting it and
+All are recorded here as D1 through D14, each with the evidence supporting it and
 the alternatives rejected.
 
 **None is accepted yet.** The repository's approval event is the human merge of
@@ -348,8 +348,10 @@ model refuses everywhere else.
 `DomainProvenance` from task 2.1 is the only lineage model. This change adds none.
 
 Identities do not carry provenance: an identity is a name, not something observed
-at a moment. `AccountIdentity` and `ValueKind` have none. Every snapshot,
-observation, association, and enrichment carries one directly.
+at a moment. `AccountIdentity` and `ValueKind` have none, and neither do the
+composed value objects, which describe rather than record. Every snapshot,
+observation, association, **allocation**, and enrichment carries one directly —
+including `OwnerValueAllocation`, which an earlier enumeration here omitted.
 
 Several canonical facts derived from one source row hold provenance values that
 are *equal* — same release, same artifact, same member, same row number — so
@@ -403,10 +405,10 @@ index, or DDL is chosen here.
 | question | answer this model supplies |
 |---|---|
 | What is the parent key? | `AccountIdentity` — jurisdiction plus approved source account identifier |
-| What is snapshot grain? | `(AccountIdentity, ReleaseIdentity)` |
-| Which children are one-to-many? | owner associations, appraisal values, taxable values, exemptions, taxing units, land, improvements |
+| What is snapshot grain? | `(AccountIdentity, ReleaseIdentity)`, published as the read-only `grain` property |
+| Which children are one-to-many? | owner associations, owner value allocations, appraisal values, taxable values, exemptions, taxing units, land, improvements |
 | Which identities are stable? | `AccountIdentity` alone; everything else is snapshot, observation, association, or enrichment |
-| Which rows are observations only? | every `*Observation`, and every `OwnerAssociation` |
+| Which rows are observations only? | every `*Observation`, plus `OwnerAssociation` and `OwnerValueAllocation` |
 | Where does `DomainProvenance` attach? | every snapshot, observation, association, and enrichment; never an identity |
 | What never enters canonical Silver? | unmapped source-native values and labels — Dallas `TOT_VAL` and components under #58, Tarrant's unapproved value fields, county exemption labels with no canonical classification, and any account whose county key is unapproved |
 
@@ -414,36 +416,39 @@ index, or DDL is chosen here.
 work, and doing it here would reintroduce the coupling this task exists to
 prevent.
 
-### D14 (proposed by this change, requires human merge): this change delivers the domain half, and the mapping-boundary scenarios have a named owner
+### D14 (proposed by this change, requires human merge): account-key approval is county-adapter behaviour, stated in the county contract rather than here
 
-The capability requires the county-aware mapping boundary to refuse constructing
-an account identity for a county whose contract has not approved a key, and
-carries scenarios describing that refusal. Those scenarios are durable capability
-behaviour and belong there.
+An earlier revision put the account-key refusal in this capability as a scenario
+and assigned it to bootstrap task 2.4. Both halves were wrong.
 
-They are not implementable here. Every authorized path in this change is domain
-code, documentation, or domain and architecture tests, and issue #106 excludes
-ports and use cases. A change that archived claiming full implementation while
-one of its normative scenarios had no implementation path would be asserting
-something untrue about itself.
+Task 2.4 builds **use cases**, which the library guidance places in the
+application package: it "orchestrates domain behavior without importing
+implementations", while "source-specific fields stop at" the adapter boundary.
+Whether a county's `prop_id` is an approved account key is county-specific
+knowledge. Assigning it to the application layer reverses the accepted dependency
+direction, and would have required the generic use cases to import county
+contracts.
 
-So the split is stated: this change delivers the domain half — the lexical
-contract, the shapes, and the invariants a constructor can enforce. The
-mapping-boundary scenarios are satisfied by the county-aware use-case work in
-bootstrap task 2.4, which owns the layer that may read a county contract. The
-completion and archival pull request reconciles only what the tasks here deliver
-and does not record those scenarios as satisfied.
+And a capability that carries a scenario no task in its change can satisfy is a
+change that archives claiming something untrue about itself.
 
-No task is created for the deferred half, for the reason established previously:
-the implementation parser has no blocked state and would dispatch one as ordinary
-work.
+Both are fixed by putting the behaviour where it already lives. The refusal is
+adapter behaviour, so it is stated in the `county-appraisal-normalization`
+contract — the durable, adapter-facing contract that already governs account
+identity and already forbids assuming a documented key is sufficient without
+measured evidence. This capability states only what the domain enforces: the
+identifier's lexical shape, and that no provisional identity exists, so an
+adapter unable to construct one produces none.
 
-**Rejected — removing the scenarios from the capability.** They describe durable
-behaviour the platform requires, and deleting them because this change cannot
-implement them would lose the requirement rather than assign it.
+No scenario about the adapter's refusal appears here, and this change therefore
+has no normative behaviour it cannot implement.
 
-**Rejected — authorizing a use-case path here.** It exceeds the scope issue #106
-sets, and a boundary invented alongside a vocabulary tends to be shaped by it.
+**Rejected — keeping the scenario here and naming an owner.** It leaves this
+capability asserting behaviour it does not deliver, which is the condition that
+made the earlier revision unarchivable in honesty if not in mechanics.
+
+**Rejected — assigning it to bootstrap 2.4.** It inverts the dependency
+direction the repository enforces with an architecture test.
 
 ## Deliberately unresolved
 
