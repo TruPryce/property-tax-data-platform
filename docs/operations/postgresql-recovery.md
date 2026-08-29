@@ -830,6 +830,50 @@ Restored to the end of the archive with no `--target`, then labelled `trupryce.p
 
 The fence's own logic was validated against the live cluster without cutting over: the quiescence query named all four connected Airflow writers — so the fence would refuse to take a boundary — and the WAL flush and S3 confirmation completed in 5 s. The full fence is an operator action at actual cutover time and has not been run here, because it stops Airflow.
 
+### Operational gates: scheduled backups and bucket hardening
+
+**Scheduled backups (verified on this host).** Units installed with
+`sudo SERVICE_USER="$(id -un)" REPOSITORY_DIR="$PWD" ./infra/scripts/install-systemd-units.sh`:
+
+| | |
+|---|---|
+| Units installed | `pgbackrest-full.service/.timer`, `pgbackrest-diff.service/.timer` |
+| Timers | both `enabled`; full `Sun 02:00`, differential `Mon 03:31:25` (Mon–Sat plus `RandomizedDelaySec`) |
+| Substitution | `User=mike`, `Group=docker`, repository path resolved; **0** placeholders left |
+| Airflow dependencies | **0** ordering or requirement directives naming Airflow |
+| Certificate group | `trupryce-certificates:x:2000:` — created, not adopted from an existing group |
+
+The backup was then executed **through systemd**, not by calling the wrapper directly:
+
+```text
+systemctl show pgbackrest-diff.service
+  Result=success   ExecMainStatus=0   NRestarts=0
+  ExecMainStartTimestamp=Sat 2026-08-29 04:15:24 UTC
+
+journalctl -u pgbackrest-diff.service
+  04:15:33  INFO: new backup label = 20260827-005558F_20260829-041525D
+  04:15:33  INFO: diff backup size = 2.4MB, file total = 1935
+  04:15:34  INFO: expire command end: completed successfully
+```
+
+The label's timestamp matches the unit's start, which is what distinguishes a systemd-driven run from an earlier direct invocation. Confirmed independently in S3: 57 objects, 1,046,016 bytes under that backup set.
+
+**Bucket hardening (operator-supplied, `--profile boss`).** Not verifiable from the runtime host — the backup role is correctly denied every `s3:GetBucket*` call, which is the least-privilege posture this change chose. Recorded from an administrator run of §1.6:
+
+| Control | Result |
+|---|---|
+| Public access block | all four controls `true` |
+| Versioning | `Enabled` |
+| Default encryption | `AES256` (SSE-S3), SSE-C blocked |
+| Object ownership | `BucketOwnerEnforced` |
+| Incomplete multipart cleanup | abort after 7 days |
+| Noncurrent-version retention | expire after 60 days |
+| TLS-only policy | explicit `Deny` when `aws:SecureTransport=false` |
+
+`BucketKeyEnabled: false` is expected: bucket keys apply to SSE-KMS, and this bucket uses SSE-S3.
+
+Re-run §1.6 with `--profile boss` after any bucket change; a backup repository whose public-access block was removed is not detectable from the host that writes to it.
+
 ### Why the promotion proof is not a file
 
 The first version of this mechanism wrote a `verified` sentinel into the restored data directory. That is captured by the next backup — measured directly:
