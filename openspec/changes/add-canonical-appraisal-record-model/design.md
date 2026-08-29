@@ -80,11 +80,12 @@ is a sentence that will be believed.
 
 This is the boundary already settled for Tarrant release discrimination, and the
 same answer applies. The domain validates the identifier's lexical contract. The
-county-aware mapping boundary, which knows the contract, decides whether a county
-has an approved key and refuses to construct an identity where it does not — so a
-county without one produces no canonical account and no snapshot, and its rows
-stay at source grain with lineage. There is still no provisional or partial
-identity to reach for; what changed is which layer refuses.
+**county adapter** mapping boundary, which knows the contract, decides whether a
+county has an approved key and refuses to construct an identity where it does not
+— so a county without one produces no canonical account and no snapshot, and its
+rows stay at source grain with lineage. D14 settles why it is the adapter and not
+the application layer. There is still no provisional or partial identity to reach
+for; what changed is which layer refuses.
 
 **Rejected — a nullable or provisional account identity for unresolved counties.**
 It makes "we do not know this account's key" and "this account's key is X"
@@ -391,9 +392,13 @@ members, so the classification contract could not be satisfied as written. The
 exclusion is now explicit in the capability, the mapping, and the test that
 asserts it.
 
-The classification is exposed in the capability and asserted by a test rather
-than left in a comment, because its purpose is to stop a Silver primary key from
-becoming domain semantics later. A reader deciding whether a table needs a stable
+The classification is published as `RECORD_CLASSIFICATIONS`, a
+`Mapping[type[object], RecordClassification]` exported from the package root and
+backed by a read-only mapping, and asserted by a test rather than left in a
+comment. Its purpose is to stop a Silver primary key from becoming domain
+semantics later, and a mapping a consumer could edit would not serve it. Naming
+the exact shape here removes the same implementer's choice already removed from
+the snapshot's grain. A reader deciding whether a table needs a stable
 key must be able to read the answer rather than infer it.
 
 ### D12 (proposed by this change, requires human merge): the mapping to task 3.4 is documented, and no SQL is chosen
@@ -409,7 +414,7 @@ index, or DDL is chosen here.
 | Which children are one-to-many? | owner associations, owner value allocations, appraisal values, taxable values, exemptions, taxing units, land, improvements |
 | Which identities are stable? | `AccountIdentity` alone; everything else is snapshot, observation, association, or enrichment |
 | Which rows are observations only? | every `*Observation`, plus `OwnerAssociation` and `OwnerValueAllocation` |
-| Where does `DomainProvenance` attach? | every snapshot, observation, association, and enrichment; never an identity |
+| Where does `DomainProvenance` attach? | every snapshot, observation, association, allocation, and enrichment — `OwnerValueAllocation` included; never an identity and never a composed value object |
 | What never enters canonical Silver? | unmapped source-native values and labels — Dallas `TOT_VAL` and components under #58, Tarrant's unapproved value fields, county exemption labels with no canonical classification, and any account whose county key is unapproved |
 
 **Rejected — choosing surrogate keys or table shapes now.** That is task 3.4's

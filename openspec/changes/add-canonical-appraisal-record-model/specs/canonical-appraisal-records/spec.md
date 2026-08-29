@@ -248,13 +248,19 @@ Several canonical facts derived from one source row SHALL each carry their own p
 - **THEN** its originating jurisdiction, release, artifact, source member, row position, parser contract version, and layout identity are all recoverable from it
 
 ### Requirement: Every record declares its identity classification
-Every canonical appraisal **record** type SHALL be classified by a published `RecordClassification` as exactly one of a stable business identity, a release-scoped snapshot, a child observation, an association or allocation, or an enrichment, and the classification SHALL be published as data and assertable directly rather than described in commentary.
+Every canonical appraisal **record** type SHALL be classified by a published `RecordClassification` as exactly one of a stable business identity, a release-scoped snapshot, a child observation, an association or allocation, or an enrichment.
+
+The classification SHALL be published as a module-level mapping named `RECORD_CLASSIFICATIONS` of type `Mapping[type[object], RecordClassification]`, exported from the package root, and backed by a read-only mapping so that a consumer can neither add, replace, nor delete an entry. Naming the shape here rather than requiring "a mapping" leaves no accessor for an implementer to choose, which is the same choice already removed from the snapshot's grain.
 
 Composed value objects — situs address, mailing address, and legal description — are not records: they have no grain, carry no provenance, and SHALL be excluded from the classification consistently in the published mapping and in the tests that assert it. The mapping SHALL cover every record type and no non-record.
 
 #### Scenario: A consumer asks whether a record has stable identity
 - **WHEN** the classification of a canonical appraisal record type is inspected
 - **THEN** exactly one classification is returned, and a record classified as an observation asserts no stable cross-release identity
+
+#### Scenario: A consumer attempts to change a classification
+- **WHEN** a caller assigns, replaces, or deletes an entry in the published mapping
+- **THEN** the attempt fails, because a published classification a consumer can edit is not published
 
 #### Scenario: A value object is offered for classification
 - **WHEN** a composed value object is looked up in the classification mapping
