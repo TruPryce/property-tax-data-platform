@@ -31,7 +31,13 @@ AIRFLOW_FERNET_KEY
 AIRFLOW_API_SECRET_KEY
 AIRFLOW_JWT_SECRET
 AIRFLOW_ADMIN_PASSWORD
+PGBACKREST_CIPHER_PASS
 ```
+
+`PGBACKREST_CIPHER_PASS` encrypts the pgBackRest repository. It is recovery-critical
+rather than access-critical: rotating it does not re-encrypt backups already in S3, so
+the previous value stays required for every backup taken under it, and losing it makes
+those backups permanently unreadable.
 
 Generate the values rather than composing them by hand:
 
@@ -150,7 +156,29 @@ The PostgreSQL bootstrap creates no Silver or Gold tables. Schema, object privil
 
 ## Production Boundary
 
-This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, WAL archiving, physical backups, restore exercises, monitoring, or deployment automation. Those controls remain required before production promotion. Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
+This foundation does not configure TLS beyond the tailnet, S3 remote logs, Bronze storage, monitoring, or deployment automation. Those controls remain required before production promotion.
+
+The workload certificate and key are bind-mounted read-only from `/etc/trupryce/aws` and are never
+baked into an image. Because the container's `postgres` user is uid 999 and the key belongs to the
+operator, a read-only mount alone gives immutability without readability: the directory and key are
+owned by `TRUPRYCE_AWS_GID` (2000) at `0750`/`0640`, and the PostgreSQL service joins that GID as a
+supplementary group. The key is never world-readable. See
+[section 2.7 of the runbook](../docs/operations/postgresql-recovery.md#27-certificate-file-permissions).
+
+Backup timers are installed with `sudo SERVICE_USER=<user> ./infra/scripts/install-systemd-units.sh`,
+which resolves the service user, repository path, and Docker group at install time; the committed
+units are templates so a rebuilt host does not inherit this one's paths. A point-in-time restore runs
+through `./infra/scripts/pgbackrest-restore.sh --target "<timestamp>"`, which resolves the repository
+passphrase from Bitwarden itself and refuses to restore over the production volume.
+
+WAL archiving and physical backups **are** configured: PostgreSQL runs with `archive_mode=on`,
+`archive_command='pgbackrest --stanza=platform archive-push %p'`, and `archive_timeout=300`,
+writing to an encrypted pgBackRest repository in S3 reached by a dedicated keyless identity.
+The host workload certificate is bind-mounted read-only from `/etc/trupryce/aws` and is never
+baked into an image. Backup scheduling is systemd, never Airflow; **the units are implemented and
+their installation on the Akamai host remains pending**, so scheduled physical backups are not yet
+running. Manual backups and the recorded point-in-time restore exercise are in
+[PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md). Runtime values are fetched from Bitwarden Secrets Manager by a read-only machine account and injected through the host wrapper; they never belong in Git or images.
 
 The machine access token is a separate bootstrap credential. On the host it lives only in `.bws.env`, owned by the invoking user with mode `0600`; the wrapper refuses to run if that file grants any group or world permission. Because the token cannot bootstrap itself from Secrets Manager, a second copy belongs in the Bitwarden vault alongside the other escrowed recovery material, and the credentials guarding that vault belong in offline custody.
 
@@ -168,5 +196,6 @@ make infra-check
 - [Infrastructure agent guidance](AGENTS.md)
 - [PostgreSQL schema and migrations](postgres/README.md)
 - [Operations documentation](../docs/operations/README.md)
+- [PostgreSQL backup and recovery](../docs/operations/postgresql-recovery.md)
 - [Independent runtime decision](../docs/decisions/0001-independent-akamai-runtime.md)
 - [Airflow DAG guidance](../dags/README.md)

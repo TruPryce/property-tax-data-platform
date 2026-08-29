@@ -39,7 +39,41 @@ services:
       dockerfile: infra/postgres/Dockerfile
       args:
         POSTGRES_VERSION: ${POSTGRES_VERSION:-16.11}
+        TRUPRYCE_AWS_GID: ${TRUPRYCE_AWS_GID:-2000}
     image: property-tax-postgres:${POSTGRES_VERSION:-16.11}
+    # An init process as PID 1, so PostgreSQL is not PID 1.
+    #
+    # `archive-async=y` makes pgBackRest daemonize a worker. A daemonized worker
+    # is orphaned, and an orphan is reparented to PID 1. With PostgreSQL as PID 1
+    # the postmaster reaps a child it never forked, classifies the nonzero exit
+    # as a crashed backend, and runs full crash recovery -- so any archive-side
+    # failure becomes a database availability failure.
+    #
+    # Measured on this runtime: an `archive_command` spawning a detached child
+    # that exits 103 reproduces `server process (PID n) exited with exit code
+    # 103` followed by `reinitializing`, while an ordinary nonzero
+    # `archive_command` exit is merely logged and retried.
+    #
+    # docker-init reaps orphans instead, which decouples the two: archiving can
+    # fail, back up, and be repaired without restarting the database.
+    init: true
+    # archive_mode is not reloadable, so it is set here rather than by ALTER
+    # SYSTEM: turning it on always costs one restart and the restart should be
+    # visible in the topology rather than hidden in a running cluster's state.
+    # archive_timeout is the maximum idle segment-switch interval, not a
+    # durability guarantee: it bounds how long an idle database sits on a
+    # partially filled segment, while the real recovery point is the age of
+    # the latest segment confirmed present in the repository.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=platform archive-push %p
+      - -c
+      - archive_timeout=300
     environment:
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD is required}
@@ -48,10 +82,35 @@ services:
       PROPERTY_TAX_MIGRATOR_PASSWORD: ${PROPERTY_TAX_MIGRATOR_PASSWORD:?PROPERTY_TAX_MIGRATOR_PASSWORD is required}
       PROPERTY_TAX_INGESTION_PASSWORD: ${PROPERTY_TAX_INGESTION_PASSWORD:?PROPERTY_TAX_INGESTION_PASSWORD is required}
       PROPERTY_TAX_API_PASSWORD: ${PROPERTY_TAX_API_PASSWORD:?PROPERTY_TAX_API_PASSWORD is required}
+      # The only secret pgBackRest needs. Resolved from Bitwarden by the wrapper
+      # and read by pgBackRest as the repo1-cipher-pass option, so the committed
+      # pgbackrest.conf holds no passphrase. Losing this value makes every
+      # existing backup unrecoverable; it is escrowed under ADR-0003.
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS is required}
+      # Non-secret identity configuration, kept out of pgbackrest.conf so the
+      # same committed file works on every host and a provider migration
+      # changes environment rather than configuration.
+      TRUPRYCE_AWS_CERTIFICATE: ${TRUPRYCE_AWS_CERTIFICATE:-/etc/trupryce/aws/trupryce-data-platform-vps.pem}
+      TRUPRYCE_AWS_PRIVATE_KEY: ${TRUPRYCE_AWS_PRIVATE_KEY:-/etc/trupryce/aws/trupryce-data-platform-vps.key}
+      TRUPRYCE_AWS_TRUST_ANCHOR_ARN: ${TRUPRYCE_AWS_TRUST_ANCHOR_ARN:?TRUPRYCE_AWS_TRUST_ANCHOR_ARN is required}
+      TRUPRYCE_AWS_PROFILE_ARN: ${TRUPRYCE_AWS_PROFILE_ARN:?TRUPRYCE_AWS_PROFILE_ARN is required}
+      TRUPRYCE_AWS_ROLE_ARN: ${TRUPRYCE_AWS_ROLE_ARN:?TRUPRYCE_AWS_ROLE_ARN is required}
     ports:
       - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    # The container's postgres user is uid 999 and the host key is owned by the
+    # operator, so `:ro` alone gives immutability without readability and
+    # archive_command fails at runtime with a permission error. Membership of the
+    # certificate group is what grants the read; the key stays 0640 and is never
+    # world-readable. Numeric because the group has no name inside the image.
+    group_add:
+      - "${TRUPRYCE_AWS_GID:-2000}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Read-only, and mounted rather than baked: a private key inside an image
+      # is a private key in every layer cache and registry that image reaches.
+      - ${TRUPRYCE_AWS_CERTIFICATE_DIR:-/etc/trupryce/aws}:/etc/trupryce/aws:ro
+      - pgbackrest-log:/var/log/pgbackrest
+      - pgbackrest-spool:/var/spool/pgbackrest
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U platform_admin -d postgres"]
       interval: 10s
@@ -176,3 +235,5 @@ services:
 volumes:
   airflow-logs:
   postgres-data:
+  pgbackrest-log:
+  pgbackrest-spool:

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Generates the nine runtime secret values the Compose topology requires.
+# Generates every runtime secret value the Compose topology requires: one per
+# entry in SECRET_NAMES plus the Fernet key, which is generated differently.
 #
 # Values are alphanumeric apart from the Fernet key. That is not decoration:
 # Compose interpolates AIRFLOW_DB_PASSWORD into a SQLAlchemy URL, where a
@@ -31,6 +32,10 @@ SECRET_NAMES=(
   AIRFLOW_API_SECRET_KEY
   AIRFLOW_JWT_SECRET
   AIRFLOW_ADMIN_PASSWORD
+  # pgBackRest repository encryption. Recovery-critical rather than
+  # access-critical: rotating it does not re-encrypt existing backups, and
+  # losing it makes every backup already in S3 permanently unreadable.
+  PGBACKREST_CIPHER_PASS
 )
 
 # 64 characters because AIRFLOW_JWT_SECRET is the HMAC key for HS512, which
@@ -74,6 +79,14 @@ alphanumeric_secret() {
 # validates before it will decrypt any stored connection.
 fernet_key() {
   head -c 32 /dev/urandom | base64 | tr '+/' '-_'
+}
+
+# Derived from the same arrays emit_secrets writes from, so a reported count
+# cannot drift from the number of secrets actually produced. A literal here is
+# a number that goes stale silently the next time a secret is added, which is
+# exactly what happened when the pgBackRest cipher passphrase was introduced.
+secret_count() {
+  printf '%s' "$(( ${#SECRET_NAMES[@]} + 1 ))"
 }
 
 emit_secrets() {
@@ -139,7 +152,7 @@ case "$output_mode" in
       emit_secrets >"$output_path"
     )
     chmod 0600 "$output_path"
-    echo "wrote 9 secrets to $output_path with mode 0600" >&2
+    echo "wrote $(secret_count) secrets to $output_path with mode 0600" >&2
     echo "load them into Bitwarden, then remove the file" >&2
     ;;
   bws)

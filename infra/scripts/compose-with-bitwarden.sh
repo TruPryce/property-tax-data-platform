@@ -48,6 +48,41 @@ count_configuration_definitions() {
   grep -c -E "^${variable_name}=" "$configuration_file" || true
 }
 
+# Refuse Compose options that would move the topology out from under every
+# check below.
+#
+# This wrapper pins the project, the compose file, and the environment file, and
+# then validates them: bind addresses, resolved-secret rendering, and the
+# promotion state of the project's data volume. A caller-supplied -p, -f, or
+# --env-file is appended after those checks have already passed, so it
+# relocates the thing being started without re-validating anything.
+#
+# Measured before this guard existed: `compose-with-bitwarden.sh --project-name
+# bypass ps` ran the preflight against property-tax-platform_postgres-data and
+# then operated on project `bypass`, whose volume carried an unverified
+# promotion label; and `-f extra.yml` was accepted, which is enough to reopen a
+# bind address the wrapper had just approved.
+#
+# Options that only affect presentation or selection within the pinned topology
+# -- --profile, --parallel, --progress, --ansi, --log-level, --dry-run -- stay
+# allowed.
+refuse_topology_overrides() {
+  local argument
+  for argument in "$@"; do
+    case "${argument%%=*}" in
+      -f | --file | -p | --project-name | --project-directory | --env-file)
+        echo "refusing to run: ${argument%%=*} would change the topology this wrapper validates" >&2
+        echo "the project, compose file, and environment file are pinned here on purpose;" >&2
+        echo "overriding one moves the running stack away from the configuration whose" >&2
+        echo "bind addresses and promotion state were just checked." >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+refuse_topology_overrides "$@"
+
 # Administrative ports must stay on loopback or the Tailscale CGNAT range
 # (100.64.0.0/10). Docker publishes ports through its own iptables chain ahead of
 # the host INPUT rules, so ufw will not contain a mistake here.
@@ -138,6 +173,57 @@ if [[ "$renders_full_configuration" == true && "$config_output_is_bounded" == fa
   echo "use 'config --quiet' to validate, or '--services'/'--volumes' to inspect names" >&2
   exit 2
 fi
+
+# A promotion-labelled volume that never finished verification must not become
+# the next production primary.
+#
+# The proof lives in a sidecar Docker volume, not in PGDATA. A marker file
+# inside the data directory is captured by the next backup -- measured: a probe
+# file appeared in a diff manifest as pg_data/.trupryce-promotion-probe.zst --
+# so restoring that backup would carry an old "verified" marker into a new,
+# unverified promotion and defeat this check entirely.
+#
+# The nonce is what stops a stale sidecar authorising a later promotion: it is
+# written to the data volume when the volume is created, before any data exists,
+# and to the sidecar only after every assertion passed. Both are atomic Docker
+# operations, so kill -9, a reboot, or power loss cannot leave the pair agreeing
+# when verification did not finish.
+require_verified_promotion() {
+    local project volume label nonce sidecar_nonce
+    project="$(read_configuration_value COMPOSE_PROJECT_NAME "$compose_environment_file")"
+    project="${project:-property-tax-platform}"
+    volume="${project}_postgres-data"
+
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+
+    label="$(docker volume inspect "$volume" \
+        --format '{{index .Labels "trupryce.promotion"}}' 2>/dev/null || true)"
+    [[ "$label" == "managed" ]] || return 0
+
+    nonce="$(docker volume inspect "$volume" \
+        --format '{{index .Labels "trupryce.promotion.nonce"}}' 2>/dev/null || true)"
+    sidecar_nonce="$(docker volume inspect "${volume}.verified" \
+        --format '{{index .Labels "trupryce.promotion.nonce"}}' 2>/dev/null || true)"
+
+    if [[ -n "$nonce" && "$sidecar_nonce" == "$nonce" ]]; then
+        return 0
+    fi
+
+    echo "refusing to start: $volume was created by a promotion that did not complete" >&2
+    if [[ -z "$sidecar_nonce" ]]; then
+        echo "no verification record exists for it, so no restore of it was ever proven." >&2
+    else
+        echo "its verification record belongs to a different promotion, so it does not" >&2
+        echo "vouch for the data currently on this volume." >&2
+    fi
+    echo "Remove it and re-run pgbackrest-restore.sh --promote:" >&2
+    echo "  docker volume rm $volume ${volume}.verified" >&2
+    exit 2
+}
+
+case "$(compose_subcommand "$@")" in
+    up | start | run | create) require_verified_promotion ;;
+esac
 
 BWS_ACCESS_TOKEN="$(read_configuration_value BWS_ACCESS_TOKEN "$bitwarden_environment_file")"
 BWS_PROJECT_ID="$(read_configuration_value BWS_PROJECT_ID "$bitwarden_environment_file")"

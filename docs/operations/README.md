@@ -1,6 +1,8 @@
 # Operations
 
-The initial [runtime infrastructure foundation](../../infra/README.md) provides a version-pinned Airflow 3.3 and PostgreSQL 16 Compose topology for local validation and the future independent Akamai runtime. It is not production-ready: Tailscale provisioning, S3 remote logs, Bronze storage, backup and WAL archiving, restore exercises, monitoring, TLS, and deployment automation remain open infrastructure tasks.
+The initial [runtime infrastructure foundation](../../infra/README.md) provides a version-pinned Airflow 3.3 and PostgreSQL 16 Compose topology for local validation and the future independent Akamai runtime. It is not production-ready: Tailscale provisioning, S3 remote logs, Bronze storage, monitoring, TLS, and deployment automation remain open infrastructure tasks.
+
+PostgreSQL backup and recovery is defined and implemented in [PostgreSQL backup and recovery](postgresql-recovery.md): a pinned pgBackRest repository in S3, continuous WAL archiving, and the point-in-time and clean-host restore procedures. The repository is live and a point-in-time restore has been exercised and recorded there. **systemd backup units are implemented; installation on the Akamai host remains pending**, so scheduled physical backups are not yet running.
 
 Production runbooks will cover connection names, scheduled discovery, explicit backfills, release state inspection, quarantine review, publication promotion, rollback, and recovery as those controls are implemented.
 

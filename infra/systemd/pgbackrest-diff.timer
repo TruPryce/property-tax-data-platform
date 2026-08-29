@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily pgBackRest differential backup
+Documentation=https://github.com/TruPryce/property-tax-data-platform/blob/main/docs/operations/postgresql-recovery.md
+
+[Timer]
+# Mon-Sat only. The weekly full runs Sunday, so the two never contend on
+# schedule however long the full takes -- which is what removes the need for a
+# serialisation primitive between them.
+OnCalendar=Mon,Tue,Wed,Thu,Fri,Sat *-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=pgbackrest-diff.service
+
+[Install]
+WantedBy=timers.target

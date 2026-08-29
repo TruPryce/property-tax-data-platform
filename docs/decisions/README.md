@@ -14,6 +14,8 @@ An ADR records context, decision, alternatives, consequences, status, date, and 
 | [ADR-0006](0006-github-native-countyforge-control-plane.md) | Accepted | Use GitHub Actions, two trusted/target roots, and canonical bot-owned state for CountyForge commands. |
 | [ADR-0007](0007-issue-to-openspec-planning.md) | Accepted | Produce bounded, human-approved OpenSpec planning drafts through trusted publication. |
 | [ADR-0008](0008-isolated-openspec-to-code-implementation.md) | Accepted | Execute approved OpenSpec tasks in an isolated workspace with trusted validation and draft-only publication. |
+| [ADR-0009](0009-maintainer-decision-input-and-planning-semantics.md) | Accepted | Treat maintainer decision input as authoritative planning material with explicit conformance and supersession semantics. |
+| [ADR-0010](0010-replaceable-local-storage-and-s3-backup-repository.md) | Accepted | Treat local VPS storage as replaceable, make Block Storage optional expansion, and back PostgreSQL up to a segregated, keyless S3 repository. |
 
 ## Related
 

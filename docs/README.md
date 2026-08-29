@@ -17,6 +17,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [CountyForge planning agent](engineering/countyforge-planning-agent.md) | Bounded issue context, strict planning results, trusted OpenSpec materialization, and human approval |
 | [CountyForge implementation agent](engineering/countyforge-implementation-agent.md) | Accepted-plan eligibility, isolated workspace execution, trusted validation, and draft-only publication |
 | [Operations](operations/README.md) | Runtime, release, recovery, and backfill guidance |
+| [PostgreSQL backup and recovery](operations/postgresql-recovery.md) | pgBackRest repository, WAL archiving, point-in-time restore, and clean-host rebuild |
 | [CountyForge GitHub operations](operations/countyforge-github-operations.md) | Control-plane enablement, verification, cancellation, retry, and stale recovery |
 | [Contributing](../CONTRIBUTING.md) | Local setup and delivery workflow |
 | [Data licensing](../DATA_LICENSE.md) | Synthetic fixture and third-party source-data terms |
