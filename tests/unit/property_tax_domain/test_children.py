@@ -109,6 +109,30 @@ def test_geometry_payload_type_must_agree_with_its_encoding(
         GeometryObservation(SNAPSHOT, encoding, payload, "EPSG:2276", PROVENANCE)
 
 
+def test_one_snapshot_carries_two_geometries_independently() -> None:
+    """Geometry is one-to-many per snapshot, like every other parented record.
+
+    No accepted contract establishes that a county publishes at most one
+    geometry for an account, so an implementation that quietly enforced a
+    singleton would satisfy every other geometry test here. Nothing requires the
+    two to differ in lineage; each simply carries its own.
+    """
+
+    first = GeometryObservation(
+        SNAPSHOT, GeometryEncoding.WKB, b"first-polygon", "EPSG:2276", PROVENANCE
+    )
+    second = GeometryObservation(
+        SNAPSHOT, GeometryEncoding.WKT, "POINT(0 0)", "EPSG:4326", PROVENANCE
+    )
+
+    assert first.snapshot is second.snapshot
+    assert first != second
+    assert len({first, second}) == 2
+    assert first.payload == b"first-polygon"
+    assert second.payload == "POINT(0 0)"
+    assert first.provenance == second.provenance, "identical lineage is permitted, not required"
+
+
 def test_geometry_is_retained_opaquely_without_interpretation() -> None:
     malformed_but_opaque = b"not valid geometry"
     subject = GeometryObservation(

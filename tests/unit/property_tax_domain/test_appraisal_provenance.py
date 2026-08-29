@@ -251,6 +251,12 @@ def test_record_classification_is_exact_complete_and_read_only() -> None:
         RECORD_CLASSIFICATIONS[AccountIdentity] = RecordClassification.ENRICHMENT  # type: ignore[index]
     with pytest.raises(TypeError):
         del RECORD_CLASSIFICATIONS[AccountIdentity]  # type: ignore[attr-defined]
+    # Replacement and deletion are not the whole surface: a mapping that refuses
+    # both while accepting a new key is still editable, and a classification a
+    # consumer can extend is not the published one.
+    with pytest.raises(TypeError):
+        RECORD_CLASSIFICATIONS[SitusAddress] = RecordClassification.CHILD_OBSERVATION  # type: ignore[index]
+    assert SitusAddress not in RECORD_CLASSIFICATIONS
 
 
 def test_no_record_carries_publication_or_visibility_permission() -> None:

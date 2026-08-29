@@ -37,13 +37,21 @@ artifacts in one logical release share a grain but retain distinct provenance
 and remain unequal. `source_as_of` is observation metadata and is excluded from
 equality, hashing, and grain.
 
-The following collections are one-to-many from an account snapshot:
+Cardinality is stated over **parented records** rather than over children of a
+snapshot, because not every parented record hangs from one: an
+`OwnerValueAllocation` is parented by an `OwnerAssociation`. "Parented" is a
+statement about relation, not about classification — `child_observation` and
+`enrichment` remain distinct.
 
-- owner observations and associations;
-- owner-scoped value allocations;
+Every parented record is one-to-many, and none is constrained to at most one:
+
+- owner observations and owner associations, parented by a snapshot;
+- owner-scoped value allocations, parented by an owner association;
 - appraisal-value and taxing-unit-qualified taxable-value observations;
 - taxing-unit and exemption observations;
-- land, improvement, and geometry observations.
+- land and improvement observations;
+- geometry enrichments — one snapshot may carry several, each with its own
+  lineage, and nothing requires those lineages to differ.
 
 Every observation, association, allocation, and enrichment carries its own
 `DomainProvenance`. Its release must equal the parent snapshot's release. An
@@ -67,15 +75,30 @@ The domain accepts only the closed `ValueKind` values `market`, `appraised`, and
 enter those shapes only after a county contract has established semantic
 equivalence; the domain exposes no mapping function.
 
-These concepts do not enter canonical storage through this model:
+Two different things get called source-native, and only one of them stays out.
 
-- Dallas `TOT_VAL` and components while their semantics remain unresolved;
+**Unmapped source-native _value fields_ do not enter canonical storage**, because
+no accepted contract establishes what they mean:
+
+- Dallas `TOT_VAL` and its components while their semantics remain unresolved;
 - Tarrant value fields without an accepted canonical equivalence;
-- county exemption labels as a canonical vocabulary;
 - a property-wide taxable value without a taxing unit;
 - account totals assembled from owner allocations;
 - a canonical account for a county whose source key is unapproved;
-- source table names, families, statuses, field vectors, and arbitrary extras.
+- source table names, families, statuses, field vectors, and arbitrary extras;
+- a canonical exemption vocabulary, which no accepted contract establishes.
+
+**Source-native _labels_ that a canonical observation is defined to carry do
+enter, verbatim**, and preserving them is the purpose of those fields:
+
+- `ExemptionObservation.classification`, the county's own exemption label;
+- `TaxingUnitObservation.unit_code` and `unit_name`;
+- `TaxableValueObservation.basis`;
+- `LandObservation.classification` and `ImprovementObservation.classification`.
+
+Carrying a county's label is not canonicalizing it. Each of these is declared
+source-native and is never mapped into a canonical vocabulary without an accepted
+contract establishing equivalence.
 
 Account-key approval is county-adapter behavior governed by the
 [`county-appraisal-normalization` contract](../../openspec/changes/bootstrap-six-county-appraisal-platform/specs/county-appraisal-normalization/spec.md).
@@ -98,7 +121,7 @@ request owns those mutations.
 
 | gate | result |
 |---|---|
-| `pytest` through `make check` | 1,478 passed, 146 skipped |
+| `pytest` through `make check` | 1,479 passed, 146 skipped |
 | `ruff format --check .` and `ruff check .` | pass, 179 files formatted |
 | `mypy` | pass, 92 source files |
 | documentation links | pass, 61 documents |
@@ -115,7 +138,7 @@ The six new suites are collected by the default configuration:
 | `tests/unit/property_tax_domain/test_owner.py` | 10 |
 | `tests/unit/property_tax_domain/test_value.py` | 11 |
 | `tests/unit/property_tax_domain/test_exemption.py` | 6 |
-| `tests/unit/property_tax_domain/test_children.py` | 14 |
+| `tests/unit/property_tax_domain/test_children.py` | 15 |
 | `tests/unit/property_tax_domain/test_appraisal_provenance.py` | 21 |
 
 ## Related
