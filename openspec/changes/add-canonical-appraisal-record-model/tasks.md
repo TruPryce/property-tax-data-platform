@@ -39,8 +39,8 @@ Restating a bound here would be a second copy of it.
 
 ## 2. Public surface
 
-- [ ] 2.1 Extend the public domain surface — Extend `__all__` in `libs/property-tax-domain/src/property_tax_domain/__init__.py` with the canonical appraisal record vocabulary, retaining every name already exported: removing one breaks the county adapters and identity consumers importing from the package root. Export the record types, the composed value objects, the closed vocabularies, `RecordClassification`, and `RECORD_CLASSIFICATIONS`. The snapshot's `grain` property is part of that public surface. Export no private helper, no wildcard, and no mapping function.
-<!-- countyforge-task: 2.1 paths=libs/property-tax-domain/src/property_tax_domain/__init__.py checks=repo.check risk=normal prerequisites=D11,1.10 -->
+- [ ] 2.1 Extend the public domain surface — Extend `__all__` in `libs/property-tax-domain/src/property_tax_domain/__init__.py` with the canonical appraisal record vocabulary, retaining every name already exported: removing one breaks the county adapters and identity consumers importing from the package root. Update `tests/unit/property_tax_domain/test_public_surface.py`, whose existing exact export-set assertion must enumerate the newly approved names or the public-surface change cannot satisfy `repo.check`. Export the record types, the composed value objects, the closed vocabularies, `RecordClassification`, and `RECORD_CLASSIFICATIONS`. The snapshot's `grain` property is part of that public surface. Export no private helper, no wildcard, and no mapping function.
+<!-- countyforge-task: 2.1 paths=libs/property-tax-domain/src/property_tax_domain/__init__.py,tests/unit/property_tax_domain/test_public_surface.py checks=repo.check risk=normal prerequisites=D11,1.10 -->
 
 ## 3. Documentation for the Silver mapping
 
