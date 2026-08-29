@@ -213,6 +213,10 @@ A snapshot MAY carry several geometry observations; geometry SHALL NOT be constr
 - **WHEN** a `wkb` encoding carries a `str` payload, or `wkt` carries `bytes`
 - **THEN** construction fails
 
+#### Scenario: One snapshot carries two geometries
+- **WHEN** two geometry observations reference the same account snapshot
+- **THEN** both are retained independently, each carrying its own lineage, and neither replaces nor excludes the other
+
 #### Scenario: A partial GIS source supplies geometry
 - **WHEN** geometry arrives from a source that is a GIS subset rather than a full appraisal roll
 - **THEN** the enrichment is recorded and no completeness of the appraisal record is implied by it
