@@ -71,11 +71,16 @@ numbers or inferred keys.
 ## Canonical boundaries
 
 The domain accepts only the closed `ValueKind` values `market`, `appraised`, and
-`assessed`. Taxable values exist only at taxing-unit grain. Source-native labels
-enter those shapes only after a county contract has established semantic
-equivalence; the domain exposes no mapping function.
+`assessed`. Mapping a source-native *value field* into one of those canonical
+kinds requires an accepted county contract establishing semantic equivalence, and
+the domain exposes no mapping function. Taxable values exist only at taxing-unit
+grain.
 
-Two different things get called source-native, and only one of them stays out.
+Source-native descriptive *labels* that a canonical observation is defined to
+carry require no such equivalence. They are preserved verbatim as source-native
+values, and preserving one is not canonicalizing it.
+
+That distinction decides what reaches storage.
 
 **Unmapped source-native _value fields_ do not enter canonical storage**, because
 no accepted contract establishes what they mean:
