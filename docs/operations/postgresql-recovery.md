@@ -989,6 +989,19 @@ The archiver's `archive command was terminated by signal 3: Quit` appears 150 ms
 
 Practical consequence for a rebuild: any archive-side failure that leaves a daemonized pgBackRest worker exiting nonzero will present as cluster restarts rather than as archive errors, for as long as the postmaster runs as PID 1.
 
+## A known non-green repository gate
+
+`make prepr-no-ai` does not complete for a change that touches `infra/scripts/generate-runtime-secrets.sh`. Its first two stages pass; the third refuses:
+
+```text
+ERROR: refusing to emit raw diff because sensitive path(s) are present:
+- infra/scripts/generate-runtime-secrets.sh
+```
+
+`build-review-packet.sh` decides sensitivity from the filename, so a generator that *produces* secrets is treated as one that *contains* them. The guard predates every prior edit to that file, so this has never worked; it went unnoticed because with `RUN_CODEX_REVIEW=0` nothing consumes the packet.
+
+The accepted disposition is to leave the guard alone and fix the tooling separately, tracked in [issue #109](https://github.com/TruPryce/property-tax-data-platform/issues/109). Weakening a blunt security guard to make one change green is the wrong trade, and a path-keyed exemption is the pattern that issue exists to remove.
+
 ## Related
 
 - [Operations](README.md)
