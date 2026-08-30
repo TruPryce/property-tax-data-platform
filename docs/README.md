@@ -9,6 +9,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [Decisions](decisions/README.md) | Stable architecture decision records |
 | [Airflow implementation](engineering/airflow-implementation.md) | Runtime limits, memory budget, test collection, and definition of done for Airflow-executed work |
 | [Canonical identity and provenance](engineering/canonical-identity.md) | Domain identity vocabulary, release-kind mappings, serialization, and what existing layers map onto |
+| [Canonical appraisal records](engineering/canonical-appraisal-records.md) | Domain appraisal vocabulary, record grain, parent relationships, and Silver mapping inputs |
 | [Engineering review](engineering/pre-pr-review-contract.md) | Pre-PR review loop, severity, and verdict contract |
 | [Review artifacts](engineering/review-artifact-contract.md) | Immutable per-run evidence and pointer rules |
 | [Runner observability](engineering/codex-runner-observability.md) | Local event, metrics, and validation contract |
