@@ -2,7 +2,7 @@
 
 The infrastructure-free domain vocabulary that task 3.4 consumes when mapping
 canonical appraisal facts into Silver. Normative behavior remains in the
-[active capability change](../../openspec/changes/add-canonical-appraisal-record-model/specs/canonical-appraisal-records/spec.md);
+[promoted capability](../../openspec/specs/canonical-appraisal-records/spec.md);
 this page records the implemented shape and its storage-facing consequences
 without choosing SQL.
 
@@ -151,4 +151,4 @@ The six new suites are collected by the default configuration:
 - [Engineering documentation](../README.md)
 - [Property tax domain](../../libs/property-tax-domain/README.md)
 - [Canonical identity and provenance](canonical-identity.md)
-- [Canonical appraisal record capability change](../../openspec/changes/add-canonical-appraisal-record-model/specs/canonical-appraisal-records/spec.md)
+- [Canonical appraisal records capability](../../openspec/specs/canonical-appraisal-records/spec.md)
