@@ -119,7 +119,9 @@ A generated database key MAY exist as a persistence locator and SHALL NOT be, or
 ### Requirement: Snapshot grain admits divergent evidence
 The system SHALL persist an account snapshot at the grain of its account identity and the release its provenance names, and SHALL preserve two snapshots that share that grain while carrying different provenance.
 
-That grain SHALL NOT be expressed as a uniqueness constraint, because a constraint over it would collapse the divergence case the canonical record contract preserves. It SHALL be expressed as a non-unique access path, and a persisted snapshot's row identity SHALL include its provenance.
+That grain SHALL NOT be expressed as a uniqueness constraint, because a constraint over it would collapse the divergence case the canonical record contract preserves. It SHALL be expressed as a non-unique access path.
+
+The snapshot relation SHALL carry no uniqueness constraint other than a composite foreign-key target. Snapshot equality is structural over every field except the source as-of value, so two snapshots sharing an account, a release, and a provenance while differing in a composed situs address or legal description are distinct values at one grain, and persistence SHALL retain both. Any uniqueness over the load, account, and provenance together would refuse the second and SHALL NOT be introduced; the retry key already answers, once and at the load, the question such a constraint would be asking a second time.
 
 The system SHALL NOT permit an existing snapshot to be overwritten or removed by the loading role. Where the shape alone cannot prevent it, the privilege SHALL: the loading role SHALL be granted insert and select and SHALL NOT be granted update or delete, so a conflicting write that would overwrite divergent evidence fails rather than succeeding silently.
 
@@ -128,6 +130,10 @@ The snapshot's account jurisdiction SHALL equal the jurisdiction of the release 
 #### Scenario: One account in one release is observed in two artifacts
 - **WHEN** two snapshots are persisted sharing an account and a release and carrying different provenance
 - **THEN** both are retained, each keeps its own lineage, and neither overwrites nor excludes the other
+
+#### Scenario: Two snapshots differ only in a composed value object
+- **WHEN** two snapshots sharing one load, account, release, and provenance are persisted, differing only in a valid situs address, and again differing only in a valid legal description
+- **THEN** both persist each time, because they are unequal values at one grain
 
 #### Scenario: A conflicting write attempts to overwrite a snapshot
 - **WHEN** the loading role attempts to update an existing snapshot, or to resolve an insert conflict by updating it
@@ -202,7 +208,7 @@ No column, generated column, view, materialized view, trigger, or default in the
 ### Requirement: Closed vocabularies are exact and falsifiable
 The system SHALL persist the canonical release kind, appraisal value kind, exemption scope, and geometry encoding vocabularies as closed sets enforced by the database, admitting exactly the accepted members and no others, and SHALL express the admitted set so that it is readable from the database catalog and changeable only by a reviewed migration.
 
-The system SHALL NOT define a canonical exemption vocabulary or a canonical cross-county taxing-unit registry. Source-native labels that a canonical observation is defined to carry — exemption classification, taxing unit code and name, taxable basis, and land and improvement classification — SHALL be persisted verbatim as bounded source-native text with no vocabulary constraint.
+The system SHALL NOT define a canonical exemption vocabulary or a canonical cross-county taxing-unit registry. Source-native labels that a canonical observation is defined to carry SHALL be persisted verbatim as bounded source-native text with no vocabulary constraint. Those labels are exactly six — exemption classification, taxing unit code, taxing unit name, taxable basis, land classification, and improvement classification — and the openness of each SHALL be asserted individually, because a vocabulary added to any one of them is the same defect whichever one it is.
 
 #### Scenario: A value outside a closed set is offered
 - **WHEN** a value kind, exemption scope, geometry encoding, or release kind outside its accepted set is written
@@ -212,9 +218,9 @@ The system SHALL NOT define a canonical exemption vocabulary or a canonical cros
 - **WHEN** the admitted members of a closed vocabulary are read from the database catalog
 - **THEN** they are exactly the accepted members, and widening them requires a migration
 
-#### Scenario: An unknown county exemption label arrives
-- **WHEN** an exemption classification no accepted contract has classified is persisted
-- **THEN** it is stored verbatim and no canonical vocabulary is widened to admit it
+#### Scenario: An unknown county label arrives in any carried field
+- **WHEN** a previously unseen county value is persisted into each of the six carried source-native label fields in turn
+- **THEN** every one is stored verbatim, and none of those columns carries a vocabulary constraint
 
 ### Requirement: Scalar values are stored exactly and absence is preserved
 The system SHALL persist canonical scalar values so that no value is altered to fit:
@@ -377,6 +383,10 @@ Where two distinct runs load one canonical release, both loads and both sets of 
 Every canonical migration SHALL be forward-only with no inverse script, SHALL carry one logical concern, SHALL run as a single transaction, SHALL refuse to run without its file digest, SHALL refuse to apply twice, SHALL refuse to apply when its prerequisite has not been applied, SHALL record itself in the migration ledger with that digest, and SHALL set a lock timeout and a statement timeout wherever it touches or references a relation that may hold rows.
 
 Applying the canonical migrations to an empty database and applying them to a database already carrying the earlier migrations and their rows SHALL produce the same schema. No canonical migration SHALL establish over pre-existing rows a constraint those rows could violate, and no data backfill SHALL canonicalize an existing source-native value by inference. Where a canonical migration must alter a pre-existing relation to provide a key target, it SHALL add only a constraint that cannot fail against existing rows, and SHALL alter no row.
+
+#### Scenario: The contract is proved against a running server
+- **WHEN** the persistence suites are run as evidence that this contract holds
+- **THEN** they run against the pinned PostgreSQL server with no test skipped, because a skipped suite proves nothing about a constraint
 
 #### Scenario: A migration is applied twice
 - **WHEN** a canonical migration is applied to a database that already records it

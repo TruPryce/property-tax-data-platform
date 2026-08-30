@@ -163,10 +163,29 @@ snapshots share a published grain, are not equal, and each retains its own linea
 canonical.account_snapshot (
     snapshot_key   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,   -- locator
     account_key, load_key, release_key, provenance_key, jurisdiction_code, ...
-    UNIQUE (load_key, account_key, provenance_key)      -- one row per evidence, per load
+    UNIQUE (snapshot_key, release_key)                  -- parent key target, nothing more
 )
 CREATE INDEX account_snapshot_grain ON canonical.account_snapshot (account_key, release_key);
 ```
+
+**The snapshot carries no uniqueness of its own beyond that key target.** An earlier draft added
+`UNIQUE (load_key, account_key, provenance_key)`, reasoning that one load reading one source row
+yields one snapshot. That is narrower than the promoted contract, and measured against the merged
+domain rather than argued: snapshot equality is structural over every field except `source_as_of`, so
+two snapshots sharing an identity and a provenance but carrying different `situs` — or different
+`legal_description` — are **unequal** values at one grain, and the domain constructs both.
+
+```
+a = AccountSnapshot(identity=I, provenance=P, situs=SitusAddress(street_address="100 MAIN ST"))
+b = AccountSnapshot(identity=I, provenance=P, situs=SitusAddress(street_address="102 MAIN ST"))
+a == b            -> False
+a.grain == b.grain -> True
+```
+
+Under that constraint the second row is refused, so the schema would reject a value the domain
+produces. It is removed. Nothing is lost by removing it: the retry boundary lives at
+`canonical.release_load (release_key, run_id)`, so a repeated load never reaches the snapshot insert
+at all, and a second invented retry identity here would only re-narrow what D4 exists to keep open.
 
 The grain is an **index**, not a constraint. Two observations of one account in one release from two
 artifacts belong to two loads, have two provenance rows, and are two snapshot rows; neither excludes
@@ -270,9 +289,10 @@ rule is that every generated key is a locator, not that every relation has one.
 
 **No relation carries a `UNIQUE` derived from its payload or its kind.** Nothing in the promoted
 capability establishes that one snapshot has at most one market value, at most one owner, at most one
-improvement, or at most one geometry, so no constraint says it. The only uniqueness on a parented
-relation is its per-load evidence identity from D17, which is composed of locators and never of
-observed values. Deduplicating by resemblance has no representation here rather than being merely
+improvement, or at most one geometry, so no constraint says it. **No parented relation, and not the
+snapshot either, carries a uniqueness constraint of its own**: the only `UNIQUE`s present are
+composite foreign-key targets, each including the relation's own locator, so none constrains how many
+rows exist. Deduplicating by resemblance has no representation here rather than being merely
 discouraged.
 
 The falsification suite inserts two of each — owner observations, owner associations, allocations,
@@ -314,7 +334,7 @@ Lexical kinds are named, not restated: **identifier**, **label**, **address comp
 | record | relation | columns beyond the shared set | null | SQL type | parent FK | domain grain | allowed UNIQUE | checks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `AccountIdentity` | `canonical.account` | `account_key` as a locator, plus `jurisdiction_code`, `source_account_id`, and `first_recorded_at`; no snapshot, load, or provenance columns | NOT NULL | `bigint`, `text`, `text`, `timestamptz` | none | `(Jurisdiction, source_account_id)` | `(jurisdiction_code, source_account_id)` **identity**; `(account_key, jurisdiction_code)` | account id is an **identifier**; `jurisdiction_code` references `canonical.jurisdiction` |
-| `AccountSnapshot` | `canonical.account_snapshot` | `account_key` as the account reference, then `release_key`; `jurisdiction_code`; `source_as_of`; the five `situs_*` columns; `legal_text`, `legal_subdivision`, `legal_block`, `legal_lot` | `source_as_of` and all situs/legal nullable | `bigint`, `text`, `timestamptz`, `text` | `(account_key, jurisdiction_code) -> canonical.account`; `(provenance_key, jurisdiction_code) -> canonical.provenance`; `(provenance_key, release_key, load_key) -> canonical.provenance` | `(AccountIdentity, ReleaseIdentity)`, as a **non-unique** index on `(account_key, release_key)` | `(load_key, account_key, provenance_key)`; `(snapshot_key, release_key)` | `source_as_of` is an **instant**; situs components are **address components**; `legal_text` is a **label**, its parts **address components**; a legal part without `legal_text` is refused |
+| `AccountSnapshot` | `canonical.account_snapshot` | `account_key` as the account reference, then `release_key`; `jurisdiction_code`; `source_as_of`; the five `situs_*` columns; `legal_text`, `legal_subdivision`, `legal_block`, `legal_lot` | `source_as_of` and all situs/legal nullable | `bigint`, `text`, `timestamptz`, `text` | `(account_key, jurisdiction_code) -> canonical.account`; `(provenance_key, jurisdiction_code) -> canonical.provenance`; `(provenance_key, release_key, load_key) -> canonical.provenance` | `(AccountIdentity, ReleaseIdentity)`, as a **non-unique** index on `(account_key, release_key)` | `(snapshot_key, release_key)` (FK target) and nothing else | `source_as_of` is an **instant**; situs components are **address components**; `legal_text` is a **label**, its parts **address components**; a legal part without `legal_text` is refused |
 | `OwnerObservation` | `canonical.owner_observation` | `owner_name`; `mailing_addressee`, `mailing_street_address`, `mailing_unit`, `mailing_city`, `mailing_state_code`, `mailing_postal_code`, `mailing_country_code` | name NOT NULL, mailing all nullable | `text` | shared | none — an observation | `(owner_key, snapshot_key)` (FK target) | name is a **label**; mailing fields are **address components** |
 | `OwnerAssociation` | `canonical.owner_association` | `owner_key`; `ownership_percentage`; `source_discriminator` | last two nullable | `bigint`, `numeric`, `text` | shared, plus `(owner_key, snapshot_key) -> canonical.owner_observation` | none | `(association_key, snapshot_key)`; `(association_key, release_key)` (FK targets) | percentage is a **percentage**; discriminator is an **identifier** |
 | `OwnerValueAllocation` | `canonical.owner_value_allocation` | `association_key`; `release_key`; `kind`; `amount` — and **no `snapshot_key`**, because its parent is the association | NOT NULL | `bigint`, `text`, `numeric` | `(association_key, release_key) -> canonical.owner_association`; `(provenance_key, release_key, load_key) -> canonical.provenance` | none | none | kind in the closed three; amount is an **amount** |
@@ -634,7 +654,9 @@ Four concepts, kept apart:
 | **persistence surrogate** | a locator for foreign-key mechanics | every `*_key` identity column, commented as such |
 | **retry / idempotency key** | has this release already been loaded by this run? | `canonical.release_load (release_key, run_id)` |
 
-None is the others, and no relation collapses them into one "primary key" concept.
+None is the others, and no relation collapses them into one "primary key" concept. In particular the
+snapshot has no retry identity of its own: retry is answered once, at the load, and pushing a second
+copy of that question down to the snapshot is what produced the constraint D4 removes.
 
 **The contract task 3.5 codes against.** A canonical load is one transaction. It begins with
 
@@ -787,6 +809,7 @@ migration passes for a constraint that was written and never took effect.
 | --- | --- |
 | the same `source_account_id` in two counties collides | insert both; assert two rows and two distinct `account_key`s; assert no unique index covers `source_account_id` alone |
 | the same snapshot grain with different provenance is overwritten | insert two snapshots sharing `(account_key, release_key)` with different `provenance_key`; assert both persist; assert no unique index covers exactly `(account_key, release_key)` |
+| **two unequal snapshots sharing one load, account, release, and provenance are collapsed** | insert two snapshots identical but for a valid `situs_street_address`, and again but for a valid `legal_text`; assert both persist each time; assert no unique index on the snapshot covers `(load_key, account_key, provenance_key)` or any subset that would refuse them |
 | a child relation accidentally enforces at-most-one | insert two of every parented record under one snapshot; assert all survive; assert no unique index on a parented relation includes an observed value |
 | two geometries for one snapshot collapse | insert two; assert both persist with their own lineage |
 | owner allocations are rolled up | assert no generated column, no view, and no undeclared trigger exists in `canonical`; assert no column name matches a total/sum/aggregate vocabulary |
