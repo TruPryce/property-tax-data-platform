@@ -19,10 +19,13 @@ This change selects them.
 already-promoted canonical domain into durable Silver **without changing the domain model and without
 rewriting migration history**.
 
-Ten forward migrations, `0006` through `0015`, add a `canonical` schema holding release identity, the
-artifact–release association, provenance, account identity, the account snapshot, and the ten parented
-record relations, each with its constraints, indexes, and privileges. Migrations `0001`–`0005` are
-untouched. This planning change writes none of that SQL; it decides it.
+Eleven forward migrations, `0006` through `0016`, add a `canonical` schema holding the jurisdiction
+registry, release identity, the artifact–release association, the release load that ties a canonical
+release to the run and artifact it came from, provenance, account identity, the account snapshot, and
+the ten parented record relations, each with its constraints, indexes, and privileges. Migrations
+`0001`–`0005` are not edited; `0009` adds one constraint to `bronze.release_manifest`, which adds an
+index and nothing else and cannot fail against existing rows. This planning change writes none of that
+SQL; it decides it.
 
 The result is a `canonical` schema whose shape a loader cannot argue with: an account identity that is
 county-qualified, a snapshot grain that admits divergent evidence rather than collapsing it, every
@@ -48,7 +51,7 @@ of these. Nothing is left unclassified, and nothing old is changed to resolve a 
 | --- | --- |
 | `platform.schema_migration`, `platform.is_named` | The ledger and the one place the whitespace definition is written down. New migrations use both. |
 | `bronze.artifact` | Content-keyed by SHA-256 — exactly `ArtifactIdentity`. Canonical provenance references it rather than repeating a digest. |
-| `bronze.release_manifest`, `bronze.release_redirect`, `bronze.diverged_release` | Acquisition evidence and derived divergence. Canonical storage adds nothing here. |
+| `bronze.release_redirect`, `bronze.diverged_release` | Acquisition evidence and derived divergence. Canonical storage adds nothing here. |
 | `ingestion.run` and its two composite unique keys | A run already carries all four canonical release components and the manifest. Its `UNIQUE (run_id, jurisdiction_code, release_identifier, tax_year, release_kind)` is the exact target the canonical bridge needs. |
 | `ingestion.release_outcome`, `release_diagnostic`, `release_notice`, and the deferred seal | Issue #43's bounded diagnostic contract, already implemented: a closed twelve-code vocabulary, four columns and no fifth, and an outcome sealed against its evidence. |
 | `quality.rule`, `quality.evaluation`, `quality.blocking_failure` | Rules as rows, evaluations bound to a run. Canonical loads bind to a run, so canonical-grain rules evaluate through the existing model. |
@@ -64,11 +67,12 @@ of these. Nothing is left unclassified, and nothing old is changed to resolve a 
 
 ### C — missing canonical persistence, added by `0006`+
 
-Canonical release identity; the artifact–release association; canonical provenance; account identity;
-the account snapshot with its composed situs and legal description; and the ten parented record
-relations — owner observation and association, owner value allocation, appraisal value, taxing unit,
-taxable value, exemption, land, improvement, and geometry — with their constraints, indexes, and
-privileges.
+The jurisdiction registry; canonical release identity; the artifact–release association; the release
+load that binds a canonical release to one run and the one artifact that run read; canonical
+provenance; account identity; the account snapshot with its composed situs and legal description; and
+the ten parented record relations — owner observation and association, owner value allocation,
+appraisal value, taxing unit, taxable value, exemption, land, improvement, and geometry — with their
+constraints, indexes, and privileges.
 
 ### D — existing structure that needs a forward-compatible bridge
 
@@ -79,11 +83,21 @@ privileges.
    enforces the canonical grammar itself, joined to the run by a composite key over all four
    components. A run whose components fall outside the canonical contract simply has no canonical
    release, and therefore no canonical rows. **It fails closed; nothing is derived.**
-2. **`silver.source_record.source_member_name` is only "not blank"** where canonical provenance
+2. **The jurisdiction code is constrained only by grammar**, everywhere it appears. `tx-madeup`
+   matches it, and no domain `Jurisdiction` can be constructed for it, because registry validation
+   refuses a slug the version-controlled registry does not describe. The bridge is a persisted
+   `canonical.jurisdiction` registry seeded from that same source, which every canonical relation
+   naming a county references.
+3. **Nothing ties a record's artifact to the run that read it.** `ingestion.run` names a manifest and
+   `bronze.release_manifest` names that manifest's artifact, but the pair is not a key, so canonical
+   provenance could reference any artifact at all. The bridge is one `UNIQUE (manifest_id,
+   artifact_sha256)` on `bronze.release_manifest` — an index and nothing else — which the canonical
+   load keys into, and which every record then inherits through its load.
+4. **`silver.source_record.source_member_name` is only "not blank"** where canonical provenance
    requires the identifier grammar. Canonical provenance enforces its own rule rather than inheriting
    the looser one.
 
-Neither is solved by touching an old migration.
+None is solved by editing an old migration.
 
 ## What this change deliberately does not do
 
@@ -102,7 +116,10 @@ Neither is solved by touching an old migration.
 - **It enables no publication.** No canonical relation carries a publication, visibility, permission,
   or redaction-override column, and `property_tax_api` is granted nothing in the canonical schema —
   not even schema usage.
-- **It modifies `0001`–`0005` in no way**, and does not check bootstrap task 3.4.
+- **It edits no existing migration file.** The one alteration to a pre-existing relation is a single
+  `UNIQUE` added by a new migration, which creates an index, adds no column or check, and cannot fail
+  against existing rows because the leading column is already that relation's primary key.
+- It does not check bootstrap task 3.4.
 
 ## Constraints
 
