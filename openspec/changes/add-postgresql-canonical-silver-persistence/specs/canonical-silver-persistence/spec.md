@@ -154,14 +154,20 @@ The system SHALL NOT deduplicate source observations by resemblance. No uniquene
 - **WHEN** two child records carrying equal observed values arrive with distinct lineage
 - **THEN** both are persisted, because resemblance is not identity
 
-### Requirement: A child's lineage always equals its parent's
-The system SHALL enforce by key, rather than by trigger or by loader discipline, that a persisted child's provenance belongs to the same load as its parent's — and therefore names the same release, the same processing run, and the same artifact — and that a reference from one record to another — an association to its owner observation, an allocation to its association, a taxable value to its taxing unit, an owner-scoped exemption to its association — stays within the same snapshot.
+### Requirement: A child's lineage agrees with its parent at release grain
+The system SHALL enforce by key, rather than by trigger or by loader discipline, that a persisted child's provenance names the same release as its parent's provenance, and that a reference from one record to another — an association to its owner observation, an allocation to its association, a taxable value to its taxing unit, an owner-scoped exemption to its association — stays within the same snapshot or parent release as its domain relationship requires.
 
-Both directions SHALL be closed: a child SHALL NOT reach provenance outside its parent's load, and SHALL NOT reach a parent outside its own load.
+Each record's own provenance SHALL additionally be tied to that record's own load, so its artifact is the artifact its run read. Parent and child SHALL NOT be required to share one load or artifact: the accepted canonical contract permits enrichment or another child observation from a second artifact of the same release.
 
-#### Scenario: A child names another load
-- **WHEN** a child record is persisted whose provenance belongs to a load other than its parent snapshot's, or which changes its own load to match that provenance
+Both directions of a cross-release attempt SHALL be closed: a child SHALL NOT retain its parent's release while naming provenance from another release, and SHALL NOT change its release to match that provenance while retaining a parent from the first release.
+
+#### Scenario: A child names another release
+- **WHEN** a child record under a release-A parent names release-B provenance, or changes its release to B to match that provenance
 - **THEN** both writes are refused
+
+#### Scenario: A child arrives from another artifact of the same release
+- **WHEN** a geometry enrichment or another child carries provenance from a second load and artifact of its parent's same release
+- **THEN** it is retained with its own artifact lineage and is not forced onto the parent's load
 
 #### Scenario: A reference crosses snapshots
 - **WHEN** a taxable value references a taxing unit observed on a different snapshot, or an owner association references an owner observation of a different snapshot
@@ -315,9 +321,11 @@ The consuming read role SHALL be granted nothing on the canonical schema, includ
 - **THEN** the query is refused, and the refusal comes from the schema rather than from a table grant that was forgotten
 
 ### Requirement: The loading role holds the narrowest privilege that works
-The system SHALL grant the loading role usage on the canonical schema and select and insert on its relations, and SHALL NOT grant it update or delete. Default privileges for the canonical schema SHALL grant exactly those privileges, so a relation added by a later migration is reachable without inheriting the ability to overwrite.
+The system SHALL grant the loading role usage on the canonical schema and select and insert on canonical evidence relations, and SHALL NOT grant it update or delete. Default privileges for the canonical schema SHALL grant exactly select and insert, so a relation added by a later migration is reachable without inheriting the ability to overwrite.
 
-Every canonical object SHALL have its privileges granted in the migration that creates it. No canonical migration SHALL require superuser.
+The jurisdiction registry SHALL be the one read-only exception: its creating migration SHALL revoke the insert privilege inherited from the schema default, leaving the loading role select only. Merely granting select SHALL NOT be treated as removing the inherited insert privilege.
+
+Every canonical object SHALL have its final privileges established in the migration that creates it. No canonical migration SHALL require superuser.
 
 #### Scenario: The loading role attempts to overwrite
 - **WHEN** the loading role attempts an update, a delete, or an insert that resolves a conflict by updating
@@ -326,6 +334,10 @@ Every canonical object SHALL have its privileges granted in the migration that c
 #### Scenario: A relation is added by a later migration
 - **WHEN** a canonical relation created by a later migration is queried by the loading role
 - **THEN** it is readable and insertable and not updatable, without a further grant
+
+#### Scenario: The loading role attempts to modify the registry
+- **WHEN** the loading role attempts to insert a jurisdiction that the migrator did not seed
+- **THEN** the attempt is refused because the registry's inherited insert privilege was explicitly revoked
 
 ### Requirement: Existing diagnostic, quality, and publication models are reused rather than replaced
 The system SHALL evaluate quality, record processing outcomes, and record publication for canonical data through the existing run-bound models, and SHALL NOT create a parallel diagnostic, quality, or publication model for canonical records.

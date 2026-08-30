@@ -174,9 +174,9 @@ the other. A `UNIQUE (account_key, release_key)` would collapse exactly the dive
 preserves, and its absence is asserted by a catalog test rather than by intention. Measured: with the
 final key set, two snapshots sharing one grain and carrying distinct provenance both persist.
 
-`release_key` is carried on the snapshot only so the grain index can exist. It is not a second
-authority: `FOREIGN KEY (load_key, release_key)` into `canonical.release_load` pins it to the load's
-release, and the load's release is pinned to the provenance's through the shared `load_key`.
+`release_key` is carried on the snapshot only so the grain index and parent-release keys can exist. It
+is not a second authority: `FOREIGN KEY (provenance_key, release_key, load_key)` into
+`canonical.provenance` pins both the release and load to the snapshot's own provenance.
 
 Overwriting is prevented by privilege as well as by shape. `property_tax_ingestion` is granted
 `SELECT, INSERT` and **not** `UPDATE` or `DELETE`. Measured: under that grant
@@ -185,10 +185,10 @@ with `permission denied`, as are `UPDATE` and `DELETE`. A merge in task 3.5 that
 divergent evidence fails loudly instead of destroying it.
 
 *Rejected — a normalized `snapshot_grain` relation with `snapshot_observation` children.* It invents a
-grain entity the domain does not have, and it forces every child to choose a parent: hang children off
-the grain row and an observation from artifact A acquires children from artifact B, which is the
-cross-wiring this design exists to prevent. The domain has one `AccountSnapshot` type; the schema has
-one relation.
+grain entity the domain does not have and makes a child name a grain rather than one concrete
+`AccountSnapshot`. The domain has one `AccountSnapshot` type; the schema has one relation, and each
+child names the particular snapshot that is its parent even where its own same-release provenance
+comes from another artifact.
 
 *Rejected — `UNIQUE (account_key, release_key)` with a "latest wins" update.* It is the defect.
 
@@ -202,13 +202,15 @@ kind, release identifier, artifact digest, member, row, parser contract version,
 is recoverable from any record without its parent, by joining that one key.
 
 Normalizing rather than inlining puts the anti-cross-wiring rule in **one** place instead of eleven.
-Records derived from one source row share equal provenance values, which is what the capability says
-they carry; equal values are one row.
+Records derived from one source row in one load share one provenance row. If a distinct run reads the
+same artifact and produces an equal domain provenance value, it receives a distinct persistence row
+because the load is operational evidence the domain value does not contain; reading either row yields
+the same domain value without erasing which run wrote the canonical record.
 
 **One release authority.** `canonical.provenance` is the only place a canonical record's release is
 stated. No record relation carries a release identifier, tax year, or kind of its own.
 
-**`load_key` is the pivot every record shares**, and it carries more than the release:
+**`load_key` binds each record to its own evidence**, and it carries more than the release:
 
 ```
 FOREIGN KEY (load_key, release_key)       REFERENCES canonical.release_load (load_key, release_key)
@@ -217,16 +219,17 @@ FOREIGN KEY (load_key, jurisdiction_code) REFERENCES canonical.release_load (loa
 ```
 
 A provenance row's release, artifact, and county are therefore its load's own rather than three
-independently supplied values, and its load's artifact is the artifact its run read. Records reach
-provenance through `FOREIGN KEY (provenance_key, load_key)`, and reach their parent through
-`FOREIGN KEY (snapshot_key, load_key)` — two composite keys over one shared column.
+independently supplied values, and its load's artifact is the artifact its run read. A record reaches
+its own provenance through `FOREIGN KEY (provenance_key, release_key, load_key)`, so its release and
+load cannot be changed independently of that provenance. A parented record reaches its parent through
+`FOREIGN KEY (snapshot_key, release_key)`, so the accepted parent rule — same release — is structural.
 
-Pivoting on `load_key` rather than `release_key` is what closes the artifact hole. Release agreement
-alone let a child name a different artifact than its parent; load agreement means one release, one
-run, and one artifact. It is strictly stronger than the domain rule, which compares only releases, and
-it forbids nothing the domain allows within a load: a load processes one artifact, so every record it
-writes came from that artifact anyway. What it forbids is a record in one load hanging off a snapshot
-in another, which release atomicity already forbids.
+The two keys deliberately answer different questions. The provenance key closes the artifact hole for
+the record itself; the parent key prevents a child crossing releases. They do **not** require parent and
+child to share one load or artifact. The promoted canonical capability permits two snapshots at one
+grain with different artifact lineage and permits geometry from a partial GIS source. Requiring a
+child's load to equal its parent's would silently strengthen that accepted contract and make a
+same-release enrichment from a second artifact unrepresentable.
 
 **Anti-cross-wiring, stated as the keys that enforce it, each measured:**
 
@@ -235,13 +238,13 @@ in another, which release atomicity already forbids.
 | a load naming a run that read a different artifact | `(manifest_id, artifact_sha256)` into `bronze.release_manifest` | `foreign_key_violation` |
 | a load naming an artifact not bound to its release | `(artifact_sha256, release_key)` into `canonical.artifact_release_binding` | key present |
 | provenance claiming an artifact other than its load's | `(load_key, artifact_sha256)` into `canonical.release_load` | `foreign_key_violation` |
-| a child whose provenance belongs to another load | `(provenance_key, load_key)` into `canonical.provenance` | `foreign_key_violation` |
-| the same child, switching its load to match its provenance | `(snapshot_key, load_key)` into `canonical.account_snapshot` | `foreign_key_violation` |
+| a record claiming provenance from another load while retaining its own load | `(provenance_key, release_key, load_key)` into `canonical.provenance` | `foreign_key_violation` |
+| a child switching its release to match provenance from another release | `(snapshot_key, release_key)` into `canonical.account_snapshot` | `foreign_key_violation` |
 | an account of one county under another county's release | the snapshot's `(account_key, jurisdiction_code)` and `(provenance_key, jurisdiction_code)` keys | key present |
 | a load for one county naming another county's run | `(run_id, manifest_id, jurisdiction_code, release_identifier)` into `ingestion.run` | `foreign_key_violation` |
 
-Both directions of the child attack are closed, which is what makes the pair of keys a fence rather
-than a speed bump.
+Both directions of the cross-release attack are closed without forbidding a child whose own load and
+provenance name a second artifact of the same release.
 
 **The provenance natural key** is `UNIQUE NULLS NOT DISTINCT (load_key, source_member_name,
 parser_contract_version, source_row_number, layout_fingerprint)`. Release and artifact are functionally
@@ -277,17 +280,19 @@ land records, improvements, geometries — under one snapshot and asserts all su
 reads `pg_index` and asserts no unique index over a parented relation includes an observed value.
 
 `UNIQUE` constraints that *do* exist on parented relations exist only as composite foreign-key targets
-that keep a reference inside its own snapshot or its own load — `(owner_key, snapshot_key)`,
-`(association_key, snapshot_key)`, `(association_key, load_key)`, `(taxing_unit_key, snapshot_key)`,
-`(snapshot_key, load_key)`. Each includes the relation's own locator, so it constrains nothing about
-how many rows exist.
+that keep a reference inside its own snapshot or release — `(owner_key, snapshot_key)`,
+`(association_key, snapshot_key)`, `(association_key, release_key)`,
+`(taxing_unit_key, snapshot_key)`, `(snapshot_key, release_key)`. Each includes the relation's own
+locator, so it constrains nothing about how many rows exist.
 
 ### D7 — Record-to-relation mapping
 
 Shared by every parented canonical relation unless stated: `<x>_key bigint GENERATED ALWAYS AS IDENTITY
-PRIMARY KEY` (locator); `snapshot_key`, `load_key`, `provenance_key`, all `bigint NOT NULL`; the two
-composite foreign keys `(snapshot_key, load_key) -> canonical.account_snapshot` and
-`(provenance_key, load_key) -> canonical.provenance`; write role `property_tax_ingestion` with
+PRIMARY KEY` (locator); `snapshot_key`, `release_key`, `load_key`, `provenance_key`, all
+`bigint NOT NULL`; the two composite foreign keys
+`(snapshot_key, release_key) -> canonical.account_snapshot` and
+`(provenance_key, release_key, load_key) -> canonical.provenance`; write role
+`property_tax_ingestion` with
 `SELECT, INSERT` and no `UPDATE` or `DELETE`; read role **none** — `property_tax_api` is granted
 nothing, including schema usage.
 
@@ -302,17 +307,17 @@ Lexical kinds are named, not restated: **identifier**, **label**, **address comp
 | `canonical.release` | `release_key`; `jurisdiction_code`; `tax_year`; `release_kind`; `release_identifier`; `first_recorded_at` | all NOT NULL | `ReleaseIdentity` | `release_key` (locator) | `(jurisdiction_code, tax_year, release_kind, release_identifier)` **business identity**; `(release_key, jurisdiction_code)`; `(release_key, jurisdiction_code, tax_year, release_kind, release_identifier)` | `tax_year` 1900–2200; kind in the closed four; identifier is an **identifier**; `jurisdiction_code` references `canonical.jurisdiction` |
 | `canonical.artifact_release_binding` | `artifact_sha256`; `release_key`; `first_recorded_at` | all NOT NULL | `ArtifactReleaseBinding` | `(artifact_sha256, release_key)` — **natural, no surrogate** | — | references `bronze.artifact` and `canonical.release`; many-to-many both ways |
 | `canonical.release_load` | `load_key`; `release_key`; `run_id`; `manifest_id`; `artifact_sha256`; `jurisdiction_code`; `tax_year`; `release_kind`; `release_identifier`; `loaded_at` | all NOT NULL | none — a load event | `load_key` (locator) | `(release_key, run_id)` **retry anchor**; `(load_key, release_key)`; `(load_key, artifact_sha256)`; `(load_key, jurisdiction_code)` | the five composite keys of D2; deferred accepted-outcome gate |
-| `canonical.provenance` | `provenance_key`; `load_key`; `release_key`; `jurisdiction_code`; `artifact_sha256`; `source_member_name`; `parser_contract_version`; `source_row_number`; `layout_fingerprint` | last two nullable, rest NOT NULL | `DomainProvenance` | `provenance_key` (locator) | `NULLS NOT DISTINCT (load_key, source_member_name, parser_contract_version, source_row_number, layout_fingerprint)`; `(provenance_key, load_key)`; `(provenance_key, jurisdiction_code)` | member name is an **identifier**; version `>= 1`; row number `>= 1`; fingerprint 64 lowercase hex; the three `load_key` keys of D5 |
+| `canonical.provenance` | `provenance_key`; `load_key`; `release_key`; `jurisdiction_code`; `artifact_sha256`; `source_member_name`; `parser_contract_version`; `source_row_number`; `layout_fingerprint` | last two nullable, rest NOT NULL | `DomainProvenance` | `provenance_key` (locator) | `NULLS NOT DISTINCT (load_key, source_member_name, parser_contract_version, source_row_number, layout_fingerprint)`; `(provenance_key, release_key, load_key)`; `(provenance_key, jurisdiction_code)` | member name is an **identifier**; version `>= 1`; row number `>= 1`; fingerprint 64 lowercase hex; the three `load_key` keys of D5 |
 
 #### Record relations
 
 | record | relation | columns beyond the shared set | null | SQL type | parent FK | domain grain | allowed UNIQUE | checks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `AccountIdentity` | `canonical.account` | `account_key` as a locator, plus `jurisdiction_code`, `source_account_id`, and `first_recorded_at`; no snapshot, load, or provenance columns | NOT NULL | `bigint`, `text`, `text`, `timestamptz` | none | `(Jurisdiction, source_account_id)` | `(jurisdiction_code, source_account_id)` **identity**; `(account_key, jurisdiction_code)` | account id is an **identifier**; `jurisdiction_code` references `canonical.jurisdiction` |
-| `AccountSnapshot` | `canonical.account_snapshot` | `account_key` as the account reference, then `release_key`; `jurisdiction_code`; `source_as_of`; the five `situs_*` columns; `legal_text`, `legal_subdivision`, `legal_block`, `legal_lot` | `source_as_of` and all situs/legal nullable | `bigint`, `text`, `timestamptz`, `text` | `(account_key, jurisdiction_code) -> canonical.account`; `(provenance_key, jurisdiction_code) -> canonical.provenance`; `(provenance_key, load_key) -> canonical.provenance`; `(load_key, release_key) -> canonical.release_load` | `(AccountIdentity, ReleaseIdentity)`, as a **non-unique** index on `(account_key, release_key)` | `(load_key, account_key, provenance_key)`; `(snapshot_key, load_key)` | `source_as_of` is an **instant**; situs components are **address components**; `legal_text` is a **label**, its parts **address components**; a legal part without `legal_text` is refused |
+| `AccountSnapshot` | `canonical.account_snapshot` | `account_key` as the account reference, then `release_key`; `jurisdiction_code`; `source_as_of`; the five `situs_*` columns; `legal_text`, `legal_subdivision`, `legal_block`, `legal_lot` | `source_as_of` and all situs/legal nullable | `bigint`, `text`, `timestamptz`, `text` | `(account_key, jurisdiction_code) -> canonical.account`; `(provenance_key, jurisdiction_code) -> canonical.provenance`; `(provenance_key, release_key, load_key) -> canonical.provenance` | `(AccountIdentity, ReleaseIdentity)`, as a **non-unique** index on `(account_key, release_key)` | `(load_key, account_key, provenance_key)`; `(snapshot_key, release_key)` | `source_as_of` is an **instant**; situs components are **address components**; `legal_text` is a **label**, its parts **address components**; a legal part without `legal_text` is refused |
 | `OwnerObservation` | `canonical.owner_observation` | `owner_name`; `mailing_addressee`, `mailing_street_address`, `mailing_unit`, `mailing_city`, `mailing_state_code`, `mailing_postal_code`, `mailing_country_code` | name NOT NULL, mailing all nullable | `text` | shared | none — an observation | `(owner_key, snapshot_key)` (FK target) | name is a **label**; mailing fields are **address components** |
-| `OwnerAssociation` | `canonical.owner_association` | `owner_key`; `ownership_percentage`; `source_discriminator` | last two nullable | `bigint`, `numeric`, `text` | shared, plus `(owner_key, snapshot_key) -> canonical.owner_observation` | none | `(association_key, snapshot_key)`; `(association_key, load_key)` (FK targets) | percentage is a **percentage**; discriminator is an **identifier** |
-| `OwnerValueAllocation` | `canonical.owner_value_allocation` | `association_key`; `kind`; `amount` — and **no `snapshot_key`**, because its parent is the association | NOT NULL | `bigint`, `text`, `numeric` | `(association_key, load_key) -> canonical.owner_association`; `(provenance_key, load_key)` as shared | none | none | kind in the closed three; amount is an **amount** |
+| `OwnerAssociation` | `canonical.owner_association` | `owner_key`; `ownership_percentage`; `source_discriminator` | last two nullable | `bigint`, `numeric`, `text` | shared, plus `(owner_key, snapshot_key) -> canonical.owner_observation` | none | `(association_key, snapshot_key)`; `(association_key, release_key)` (FK targets) | percentage is a **percentage**; discriminator is an **identifier** |
+| `OwnerValueAllocation` | `canonical.owner_value_allocation` | `association_key`; `release_key`; `kind`; `amount` — and **no `snapshot_key`**, because its parent is the association | NOT NULL | `bigint`, `text`, `numeric` | `(association_key, release_key) -> canonical.owner_association`; `(provenance_key, release_key, load_key) -> canonical.provenance` | none | none | kind in the closed three; amount is an **amount** |
 | `AppraisalValueObservation` | `canonical.appraisal_value_observation` | `kind`; `amount` | NOT NULL | `text`, `numeric` | shared | none | none | kind in the closed three; amount is an **amount** |
 | `TaxingUnitObservation` | `canonical.taxing_unit_observation` | `unit_code`; `unit_name` | name nullable | `text` | shared | none | `(taxing_unit_key, snapshot_key)` (FK target) | code is an **identifier**; name is a **label**; both source-native |
 | `TaxableValueObservation` | `canonical.taxable_value_observation` | `taxing_unit_key`; `amount`; `basis` | **all NOT NULL** | `bigint`, `numeric`, `text` | shared, plus `(taxing_unit_key, snapshot_key) -> canonical.taxing_unit_observation` | none | none | amount is an **amount**; `basis` is a source-native **label**; the NOT NULL unit is what makes a property-wide taxable value unrepresentable |
@@ -687,8 +692,12 @@ changing the rule for the adapter-grain relations too. A separate schema makes t
 `README` already draws in prose — "`silver` here … is **not** the canonical Silver model" — structural,
 and gives the canonical relations a privilege slate set once and set correctly.
 
-`canonical.jurisdiction` is granted `SELECT` only: the registry is the migrator's reference data and a
-loader reads it, exactly as `quality.rule` is read but not written.
+`canonical.jurisdiction` is the one intentional exception to the table default. Migration `0007`
+explicitly `REVOKE INSERT ON canonical.jurisdiction FROM property_tax_ingestion` after the relation
+inherits the `0006` defaults, leaving `SELECT` only: the registry is the migrator's reference data and
+a loader reads it, exactly as `quality.rule` is read but not written. A grant of `SELECT` alone would
+not remove the inherited `INSERT`, so the revoke is part of the contract rather than an implementation
+detail.
 
 No sequence grants are needed: every generated key is `GENERATED ALWAYS AS IDENTITY`, whose implicit
 sequence is covered by `INSERT` on the relation.
@@ -784,9 +793,9 @@ migration passes for a constraint that was written and never took effect.
 | a taxable value exists without its taxing unit | attempt the insert with `NULL`; assert `not_null_violation`; attempt with a unit from another snapshot; assert `foreign_key_violation` |
 | an unresolved source-native value enters a canonical `ValueKind` | insert every string outside `{market, appraised, assessed}`; assert each is refused |
 | a county exemption label is forced into a canonical enum | assert `exemption_observation.classification` has no vocabulary constraint and accepts an arbitrary county label verbatim |
-| a parented record is linked to provenance from another release | insert a child whose `provenance_key` belongs to another load; assert `foreign_key_violation` |
+| a parented record is linked to provenance from another release | insert a child with release A and provenance/load B for release B; then switch the child's release to B while keeping its release-A parent; assert both are `foreign_key_violation` |
 | **a record claims an artifact its run did not read** | bind two artifacts to one release; load run A which read artifact A; write provenance under that load naming artifact B; assert `foreign_key_violation`. Then attempt the load itself with a mismatched `(manifest_id, artifact_sha256)`; assert `foreign_key_violation` |
-| **a child escapes into another load in either direction** | a child under a load-A snapshot carrying load-B provenance, and the same child switching its own load to match; assert both are refused |
+| **a valid same-release child from another artifact is overconstrained** | under a load-A snapshot, insert geometry whose own provenance and load are B for the same release; assert it persists with artifact B lineage. Repeat with release B and assert it is refused |
 | **a legitimate two-artifact release is broken by the above** | assert two loads, one per run and artifact, both persist, and both snapshot rows survive at one grain |
 | artifact or release provenance can be cross-wired | attempt provenance whose jurisdiction differs from its load's; attempt a `release_load` whose run processed another release or another county; assert each is refused |
 | **an unregistered jurisdiction is persisted** | insert a release and an account for `tx-madeup`; assert both are refused; assert the seeded registry equals `INITIAL_COUNTIES` exactly |

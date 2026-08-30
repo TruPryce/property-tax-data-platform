@@ -92,7 +92,10 @@ constraints, indexes, and privileges.
    `bronze.release_manifest` names that manifest's artifact, but the pair is not a key, so canonical
    provenance could reference any artifact at all. The bridge is one `UNIQUE (manifest_id,
    artifact_sha256)` on `bronze.release_manifest` — an index and nothing else — which the canonical
-   load keys into, and which every record then inherits through its load.
+   load keys into, and which every record's own provenance then inherits through its load. Parented
+   records agree at the accepted release grain rather than being forced onto one load: the canonical
+   domain permits a child from a second artifact of the same release, including partial GIS
+   enrichment, while still requiring that each record's own artifact is the one its own run read.
 4. **`silver.source_record.source_member_name` is only "not blank"** where canonical provenance
    requires the identifier grammar. Canonical provenance enforces its own rule rather than inheriting
    the looser one.
