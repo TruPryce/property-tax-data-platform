@@ -163,7 +163,7 @@ snapshots share a published grain, are not equal, and each retains its own linea
 canonical.account_snapshot (
     snapshot_key   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,   -- locator
     account_key, load_key, release_key, provenance_key, jurisdiction_code, ...
-    UNIQUE (snapshot_key, release_key)                  -- parent key target, nothing more
+    UNIQUE (snapshot_key, release_key)                  -- parent key target; no other UNIQUE
 )
 CREATE INDEX account_snapshot_grain ON canonical.account_snapshot (account_key, release_key);
 ```
@@ -289,10 +289,12 @@ rule is that every generated key is a locator, not that every relation has one.
 
 **No relation carries a `UNIQUE` derived from its payload or its kind.** Nothing in the promoted
 capability establishes that one snapshot has at most one market value, at most one owner, at most one
-improvement, or at most one geometry, so no constraint says it. **No parented relation, and not the
-snapshot either, carries a uniqueness constraint of its own**: the only `UNIQUE`s present are
-composite foreign-key targets, each including the relation's own locator, so none constrains how many
-rows exist. Deduplicating by resemblance has no representation here rather than being merely
+improvement, or at most one geometry, so no constraint says it. **Apart from its surrogate primary key and the
+composite keys required as foreign-key targets, no parented relation — and not the snapshot either —
+carries an additional `UNIQUE`.** Each of those composite keys includes the relation's own locator, so
+none constrains how many rows exist. The identity relations are the deliberate exception:
+`canonical.release` and `canonical.account` each carry their natural key, and `canonical.release_load`
+carries the retry anchor of D17. Deduplicating by resemblance has no representation here rather than being merely
 discouraged.
 
 The falsification suite inserts two of each — owner observations, owner associations, allocations,

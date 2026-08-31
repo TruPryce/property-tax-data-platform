@@ -121,7 +121,7 @@ The system SHALL persist an account snapshot at the grain of its account identit
 
 That grain SHALL NOT be expressed as a uniqueness constraint, because a constraint over it would collapse the divergence case the canonical record contract preserves. It SHALL be expressed as a non-unique access path.
 
-The snapshot relation SHALL carry no uniqueness constraint other than a composite foreign-key target. Snapshot equality is structural over every field except the source as-of value, so two snapshots sharing an account, a release, and a provenance while differing in a composed situs address or legal description are distinct values at one grain, and persistence SHALL retain both. Any uniqueness over the load, account, and provenance together would refuse the second and SHALL NOT be introduced; the retry key already answers, once and at the load, the question such a constraint would be asking a second time.
+Apart from its surrogate primary key and the composite key required as a foreign-key target, the snapshot relation SHALL carry no additional `UNIQUE` constraint. Snapshot equality is structural over every field except the source as-of value, so two snapshots sharing an account, a release, and a provenance while differing in a composed situs address or legal description are distinct values at one grain, and persistence SHALL retain both. Any uniqueness over the load, account, and provenance together would refuse the second and SHALL NOT be introduced; the retry key already answers, once and at the load, the question such a constraint would be asking a second time.
 
 The system SHALL NOT permit an existing snapshot to be overwritten or removed by the loading role. Where the shape alone cannot prevent it, the privilege SHALL: the loading role SHALL be granted insert and select and SHALL NOT be granted update or delete, so a conflicting write that would overwrite divergent evidence fails rather than succeeding silently.
 
@@ -383,10 +383,6 @@ Where two distinct runs load one canonical release, both loads and both sets of 
 Every canonical migration SHALL be forward-only with no inverse script, SHALL carry one logical concern, SHALL run as a single transaction, SHALL refuse to run without its file digest, SHALL refuse to apply twice, SHALL refuse to apply when its prerequisite has not been applied, SHALL record itself in the migration ledger with that digest, and SHALL set a lock timeout and a statement timeout wherever it touches or references a relation that may hold rows.
 
 Applying the canonical migrations to an empty database and applying them to a database already carrying the earlier migrations and their rows SHALL produce the same schema. No canonical migration SHALL establish over pre-existing rows a constraint those rows could violate, and no data backfill SHALL canonicalize an existing source-native value by inference. Where a canonical migration must alter a pre-existing relation to provide a key target, it SHALL add only a constraint that cannot fail against existing rows, and SHALL alter no row.
-
-#### Scenario: The contract is proved against a running server
-- **WHEN** the persistence suites are run as evidence that this contract holds
-- **THEN** they run against the pinned PostgreSQL server with no test skipped, because a skipped suite proves nothing about a constraint
 
 #### Scenario: A migration is applied twice
 - **WHEN** a canonical migration is applied to a database that already records it
