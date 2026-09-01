@@ -618,6 +618,75 @@ def test_every_canonical_migration_refuses_without_its_predecessor(
             execute(connection, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
+README = MIGRATIONS.parent / "README.md"
+
+
+def documented_apply_command() -> str:
+    """The apply loop exactly as the migration contract publishes it.
+
+    Extracted rather than restated: a regression that runs a copy of the command
+    proves nothing about the one an operator will paste.
+    """
+    body = README.read_text().split("## Applying", 1)[1]
+    return body.split("```sh", 1)[1].split("```", 1)[0].strip()
+
+
+@pytest.mark.skipif(shutil.which("psql") is None, reason="requires the psql client")
+def test_the_documented_apply_command_reports_a_failure_as_one(connection: Any) -> None:
+    """`... || break` reads like fail-fast and is its opposite: break succeeds, so the
+    loop exits 0 and an operator reading the status is told a failed apply worked."""
+
+    dsn = _dsn()
+    completed = subprocess.run(
+        ["bash", "-c", documented_apply_command()],
+        cwd=str(MIGRATIONS.parents[2]),
+        env={**os.environ, "DATABASE_URL": dsn},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # This database already carries every migration, so 0001 refuses immediately.
+    assert completed.returncode != 0
+    assert "already applied" in completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("psql") is None, reason="requires the psql client")
+def test_the_documented_apply_command_applies_every_migration(connection: Any) -> None:
+    """And the other half: on a fresh database it succeeds and applies all of them.
+
+    A command that only ever fails loudly would satisfy the test above.
+    """
+
+    dsn = _dsn()
+    base = dsn.rsplit("/", 1)[0]
+    name = "ptdp_documented_apply"
+    execute(connection, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    execute(connection, f'CREATE DATABASE "{name}"')
+    try:
+        completed = subprocess.run(
+            ["bash", "-c", documented_apply_command()],
+            cwd=str(MIGRATIONS.parents[2]),
+            env={**os.environ, "DATABASE_URL": f"{base}/{name}"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        handle = psycopg.connect(f"{base}/{name}", connect_timeout=5)
+        handle.autocommit = True
+        try:
+            with handle.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM platform.schema_migration")
+                applied = int(cursor.fetchone()[0])
+        finally:
+            handle.close()
+    finally:
+        execute(connection, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert applied == len(migration_files())
+
+
 @pytest.mark.skipif(shutil.which("psql") is None, reason="requires the psql client")
 def test_a_canonical_migration_refuses_without_its_checksum() -> None:
     """Not \\quit: psql treats that as normal termination and exits 0, so a script

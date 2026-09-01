@@ -78,10 +78,14 @@ CREATE TABLE canonical.provenance (
         FOREIGN KEY (load_key, jurisdiction_code)
         REFERENCES canonical.release_load (load_key, jurisdiction_code),
 
-    -- One source row resolves to one provenance row on retry. Release and artifact
-    -- are omitted because the load already determines them; NULLS NOT DISTINCT
-    -- because an absent row number is a value here, not an unknown, so two loads
-    -- of a member with no row grain collide rather than quietly becoming two.
+    -- One source row resolves to one provenance row within its load. Release and
+    -- artifact are omitted because load_key already determines them, and load_key
+    -- leads the key, so two *different* loads never collide here: their evidence
+    -- is distinct on purpose, which is what keeps a second run's observations
+    -- from overwriting a first run's. NULLS NOT DISTINCT because an absent row
+    -- number is a value rather than an unknown, so within one load two attempts
+    -- at the same member with no row grain collide instead of quietly becoming
+    -- two provenance rows.
     CONSTRAINT provenance_source_position
         UNIQUE NULLS NOT DISTINCT (load_key, source_member_name, parser_contract_version,
                                    source_row_number, layout_fingerprint),

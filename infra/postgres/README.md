@@ -55,17 +55,26 @@ content, and baking them in would invite the belief that starting a container ap
 ## Applying
 
 ```sh
-cd infra/postgres/migrations
-for f in $(ls -1 [0-9][0-9][0-9][0-9]_*.sql | sort); do
-    psql "$DATABASE_URL" --set ON_ERROR_STOP=on \
-        -v file_sha256="$(sha256sum "$f" | cut -d' ' -f1)" -f "$f" || break
-done
+(
+    set -e
+    cd infra/postgres/migrations
+    for f in [0-9][0-9][0-9][0-9]_*.sql; do
+        psql "$DATABASE_URL" --set ON_ERROR_STOP=on \
+            -v file_sha256="$(sha256sum "$f" | cut -d' ' -f1)" -f "$f"
+    done
+)
 ```
 
-The glob is sorted rather than enumerated, so adding a migration needs no edit here.
-`|| break` matters: each file refuses to run when its immediate predecessor has not,
-and without it the loop would walk the whole set printing that same refusal once per
-file.
+The glob is matched rather than enumerated, so adding a migration needs no edit here,
+and four-digit zero padding is what makes its lexicographic order the apply order.
+
+The subshell and `set -e` are the fail-fast part, and the shape matters more than it
+looks. `... || break` reads like fail-fast and is the opposite: `break` succeeds, so
+the loop exits with status 0 and an operator or a script reading `$?` is told a failed
+apply was a successful one. Ending the subshell on the first non-zero status propagates
+psql's own exit code — 3 under `ON_ERROR_STOP` — while leaving the calling shell alive.
+A test applies this block verbatim, against a fresh database and against one that would
+fail, and asserts the status both times.
 
 Each file carries its own `BEGIN`/`COMMIT`, so `--single-transaction` is not used: it opens a second
 transaction, warns on every file, and the file's own `COMMIT` closes things first anyway.

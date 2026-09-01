@@ -13,10 +13,19 @@ the other, and the [migration contract](../../infra/postgres/README.md) has the 
 
 ## Record to relation
 
-Every parented relation carries the same four lineage columns — `snapshot_key`, `release_key`,
-`load_key`, `provenance_key` — with two composite foreign keys: `(snapshot_key, release_key)` into
-the snapshot, and `(provenance_key, release_key, load_key)` into provenance. Every `*_key` generated
-column is a persistence locator and says so in its comment.
+Every **snapshot-parented** relation carries the same four lineage columns — `snapshot_key`,
+`release_key`, `load_key`, `provenance_key` — with two composite foreign keys:
+`(snapshot_key, release_key)` into the snapshot, and `(provenance_key, release_key, load_key)` into
+provenance.
+
+`canonical.owner_value_allocation` is the one exception, and deliberately: the domain parents an
+allocation on the owner association rather than on the snapshot, so it carries `association_key`,
+`release_key`, `load_key`, and `provenance_key` and **no `snapshot_key`**. Its parent key is
+`(association_key, release_key)` into the association, and the snapshot is reached through that. A
+loader writing allocations therefore resolves an association first; it has no snapshot column to fill
+and must not invent one.
+
+Every `*_key` generated column is a persistence locator and says so in its comment.
 
 | record | relation | notes |
 | --- | --- | --- |

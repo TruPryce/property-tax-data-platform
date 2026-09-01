@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import unicodedata
 from collections.abc import Iterator
 from decimal import Decimal
@@ -791,26 +792,65 @@ VOCABULARIES = {
 }
 
 
+def admitted_members(connection: Any, relation: str, column: str) -> set[str]:
+    """The members a closed-vocabulary constraint actually admits.
+
+    Parsed from the constraint rather than tested for membership: a set that
+    contains every expected value *and one more* passes a membership check and is
+    exactly the defect this has to catch. PostgreSQL renders `IN (...)` as
+    `= ANY (ARRAY['a'::text, ...])`, so the literals are the admitted set.
+    """
+    definitions = [
+        definition
+        for (definition,) in fetch(
+            connection,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            " WHERE conrelid = %s::regclass AND contype='c' "
+            "   AND pg_get_constraintdef(oid) LIKE %s",
+            relation,
+            f"%{column}%",
+        )
+        if "= ANY (ARRAY[" in definition
+    ]
+    assert len(definitions) == 1, f"{relation}.{column} has {len(definitions)} vocabularies"
+    body = definitions[0].split("= ANY (ARRAY[", 1)[1].split("]", 1)[0]
+    return set(re.findall(r"'([^']*)'::text", body))
+
+
 def test_each_closed_vocabulary_admits_exactly_its_accepted_members(
     connection: Any,
 ) -> None:
-    """Read from the catalog, so widening one needs a migration someone reviews."""
+    """Read from the catalog and compared as a set, so widening one needs a
+    migration someone reviews rather than passing unnoticed."""
 
-    for (relation, column), members in VOCABULARIES.items():
-        definitions = " ".join(
-            definition
-            for (definition,) in fetch(
-                connection,
-                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                " WHERE conrelid = %s::regclass AND contype='c' "
-                "   AND pg_get_constraintdef(oid) LIKE %s",
-                f"canonical.{relation}",
-                f"%{column}%",
-            )
-        )
-        found = {member for member in members if f"'{member}'" in definitions}
+    actual = {
+        (relation, column): admitted_members(connection, f"canonical.{relation}", column)
+        for relation, column in VOCABULARIES
+    }
 
-        assert found == members, f"{relation}.{column} does not admit exactly {members}"
+    assert actual == VOCABULARIES
+
+
+def test_the_vocabulary_check_notices_an_extra_member(connection: Any) -> None:
+    """Mutation, because a test that only ever sees the correct schema cannot say
+    whether it would notice the wrong one.
+
+    `taxable` is the plausible widening: it is the member the promoted capability
+    deliberately excludes, and the one a reader who has not read it would add.
+    """
+
+    execute(
+        connection,
+        "CREATE TEMP TABLE widened_vocabulary "
+        "(kind text CHECK (kind IN ('market','appraised','assessed','taxable')))",
+    )
+    try:
+        widened = admitted_members(connection, "widened_vocabulary", "kind")
+    finally:
+        execute(connection, "DROP TABLE IF EXISTS widened_vocabulary")
+
+    assert widened == {"market", "appraised", "assessed", "taxable"}
+    assert widened != VOCABULARIES[("appraisal_value_observation", "kind")]
 
 
 def test_a_value_outside_a_closed_vocabulary_is_refused(connection: Any, rows: Any) -> None:
