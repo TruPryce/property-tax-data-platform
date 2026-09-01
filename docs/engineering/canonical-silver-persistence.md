@@ -118,19 +118,34 @@ and any bounded projection built on it, belongs to the Gold boundary rather than
 
 ## Validated state
 
-Recorded from the default repository configuration, plus one run against a real server. OpenSpec task
-checkboxes and bootstrap task 3.4 remain untouched; the separate completion and archival pull request
-owns those mutations.
+Measured on the final candidate — rebased onto `main` at `51642fd` — rather than on an earlier one.
+OpenSpec task checkboxes and bootstrap task 3.4 remain untouched; the separate completion and
+archival pull request owns those mutations.
 
-| gate | result |
+Three environments produce three different totals, so each is named rather than left to be inferred
+from one number. What varies is whether a PostgreSQL server is reachable through
+`PTDP_TEST_DATABASE_URL`, and whether a `psql` client is on `PATH` — three of the twenty-one
+migration-contract tests run the documented apply command and the checksum guard, both of which are
+client-side and cannot be exercised through the wire protocol.
+
+| `make check` | passed | skipped |
+| --- | ---: | ---: |
+| no database — the default configuration, and what continuous integration sees today | 1,482 | 252 |
+| database, no `psql` client | 1,725 | 9 |
+| database and `psql` client | 1,729 | 5 |
+
+Under the last of those the five remaining skips are none of this work's: four are
+`tests/unit/test_infrastructure_contract.py` cases needing Docker or a host identity file, and one is
+a pre-existing intentional skip recorded in `test_migrations.py` itself.
+
+| other gate | result |
 | --- | --- |
 | `ruff format --check .` and `ruff check .` | pass |
 | `mypy` | pass, 92 source files |
-| `pytest` through `make check` | 1,482 passed, 249 skipped |
 | documentation links | pass, 62 documents |
 | `openspec validate --all --strict` and `openspec doctor` | 17 passed, 0 failed; doctor ok |
 | repository artifact policy | pass, 532 files |
-| `make infra-check` | pass, 83 passed, 4 skipped — the four need Docker or a host identity file and are unrelated to this work |
+| `make infra-check` | pass, 83 passed, 4 skipped — the same four environment cases |
 | `make prepr-no-ai` | pass; paid provider review skipped by policy |
 
 ### Against a real server
@@ -142,25 +157,31 @@ rather than asserted from the SQL text.
 | --- | --- |
 | image | `postgres:16.11-bookworm`, the tag the runtime pins |
 | server | `PostgreSQL 16.11 (Debian 16.11-1.pgdg12+1) on x86_64-pc-linux-gnu` |
-| client | `psql (PostgreSQL) 16.8`, for the checksum-guard case, which is a client-side meta-command |
+| client | `psql (PostgreSQL) 16.8` |
 
 | suite | passed | skipped |
 | --- | ---: | ---: |
 | `tests/integration/postgres/test_canonical_identity.py` | 14 | 0 |
 | `tests/integration/postgres/test_canonical_cardinality.py` | 13 | 0 |
-| `tests/integration/postgres/test_canonical_values.py` | 27 | 0 |
+| `tests/integration/postgres/test_canonical_values.py` | 28 | 0 |
 | `tests/integration/postgres/test_canonical_privileges.py` | 14 | 0 |
-| `tests/integration/postgres/test_canonical_migrations.py` | 19 | 0 |
+| `tests/integration/postgres/test_canonical_migrations.py` | 21 | 0 |
 | `tests/integration/postgres/test_canonical_release_load.py` | 8 | 0 |
-| **total** | **95** | **0** |
+| **total** | **98** | **0** |
 
 A skipped suite is not passing evidence, which is why zero is the number that matters. The whole
-directory, including the pre-existing `test_migrations.py`, is 261 passed and 1 skipped; that one skip
-is a pre-existing intentional one recorded in `test_migrations.py` itself.
+directory, including the pre-existing `test_migrations.py`, is 264 passed and 1 skipped — that one
+pre-existing intentional skip.
 
-Without `PTDP_TEST_DATABASE_URL` the six suites are 3 passed and 92 skipped — the three that read the
-migration files rather than a database. Continuous integration has no PostgreSQL service, so that is
-what it sees today; wiring one is bootstrap task 3.6 and is deliberately not attempted here.
+The same six suites are 95 passed and 3 skipped with a database but no `psql`, and 3 passed and 95
+skipped with neither: the three that pass are the ones reading the migration files rather than a
+server. Continuous integration has no PostgreSQL service, so the last of those is what it sees;
+wiring one is bootstrap task 3.6 and is deliberately not attempted here.
+
+The no-database deltas against `main` reconcile exactly: `+3` passed are those three file-reading
+tests, `+95` skips are the rest of the canonical suites, and a further `+11` skips are the
+pre-existing `test_applying_a_migration_twice_is_refused`, which parametrizes over the migration files
+and so now covers `0006`–`0016` as well.
 
 ## Related
 
