@@ -122,21 +122,33 @@ Measured on the final candidate — rebased onto `main` at `51642fd` — rather 
 OpenSpec task checkboxes and bootstrap task 3.4 remain untouched; the separate completion and
 archival pull request owns those mutations.
 
-Three environments produce three different totals, so each is named rather than left to be inferred
-from one number. What varies is whether a PostgreSQL server is reachable through
-`PTDP_TEST_DATABASE_URL`, and whether a `psql` client is on `PATH` — three of the twenty-one
-migration-contract tests run the documented apply command and the checksum guard, both of which are
-client-side and cannot be exercised through the wire protocol.
+`make check` produces a different total in each environment it runs in, so every count below is
+labelled with the environment that actually produced it rather than one being presented as the
+default:
 
 | `make check` | passed | skipped |
 | --- | ---: | ---: |
-| no database — the default configuration, and what continuous integration sees today | 1,482 | 252 |
-| database, no `psql` client | 1,725 | 9 |
-| database and `psql` client | 1,729 | 5 |
+| **GitHub Actions**, no PostgreSQL — what continuous integration actually sees | **1,468** | **266** |
+| local host, no PostgreSQL | 1,482 | 252 |
+| local host, PostgreSQL, no `psql` client | 1,725 | 9 |
+| local host, PostgreSQL and `psql` client | 1,729 | 5 |
 
-Under the last of those the five remaining skips are none of this work's: four are
-`tests/unit/test_infrastructure_contract.py` cases needing Docker or a host identity file, and one is
-a pre-existing intentional skip recorded in `test_migrations.py` itself.
+Three axes move those numbers, and only the first two are about this work:
+
+- **A reachable PostgreSQL** through `PTDP_TEST_DATABASE_URL`. Continuous integration has none, so
+  every database-backed test skips there.
+- **A `psql` client on `PATH`.** Three of the twenty-one migration-contract tests run the documented
+  apply command and the checksum guard, both client-side behaviour the wire protocol cannot reach.
+- **Host-only infrastructure prerequisites**, which have nothing to do with canonical persistence and
+  are the entire difference between the first two rows. Those fourteen tests are
+  `tests/unit/test_infrastructure_contract.py` cases at lines 347, 376, 413, 438, and 1768, which skip
+  with *"requires the bws and docker executables the wrapper preflights"* and pass on a host carrying
+  both. The psql-related skips cancel between those two rows — the same tests skip locally for a
+  missing client and in CI for a missing database — so the fourteen are the whole delta.
+
+Under the last row the five remaining skips are none of this work's: four are the same
+infrastructure-contract cases needing Docker or a host identity file, and one is a pre-existing
+intentional skip recorded in `test_migrations.py` itself.
 
 | other gate | result |
 | --- | --- |
@@ -178,10 +190,11 @@ skipped with neither: the three that pass are the ones reading the migration fil
 server. Continuous integration has no PostgreSQL service, so the last of those is what it sees;
 wiring one is bootstrap task 3.6 and is deliberately not attempted here.
 
-The no-database deltas against `main` reconcile exactly: `+3` passed are those three file-reading
-tests, `+95` skips are the rest of the canonical suites, and a further `+11` skips are the
-pre-existing `test_applying_a_migration_twice_is_refused`, which parametrizes over the migration files
-and so now covers `0006`–`0016` as well.
+The deltas this work adds reconcile exactly, measured on the local host with no database so the
+infrastructure axis is held still: `+3` passed are those three file-reading tests, `+95` skips are the
+rest of the canonical suites, and a further `+11` skips are the pre-existing
+`test_applying_a_migration_twice_is_refused`, which parametrizes over the migration files and so now
+covers `0006`–`0016` as well.
 
 ## Related
 
