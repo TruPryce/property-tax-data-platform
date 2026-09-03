@@ -6,6 +6,26 @@ The application package owns two ports. `ArtifactSink` takes acquired bytes one 
 
 That is why 3.5 is blocked in a specific way. It could implement COPY-to-staging against no contract at all and be internally consistent, and the mismatch would only surface when 2.4 tried to coordinate it.
 
+## The order of the seams
+
+One sequence, and every port sits at a named point in it:
+
+```text
+  discovery evidence ──promote──► complete ReleaseIdentity
+                                          │
+  acquisition ──► BronzeStore ──► ManifestIndex ──► ManifestRef
+                                          │
+                          ProcessingRunRepository.start(identity, manifest_ref)
+                                          │
+                                          ▼
+                                  ProcessingRunRef
+                                          │
+                          canonical load ─┼─ quality evaluations
+                                          └─ publication attempt
+```
+
+Promotion happens once, before the run, and the run is where the promoted identity and the indexed acquisition are bound together.
+
 ## The shape of the boundary
 
 ```text
@@ -63,6 +83,25 @@ open(release, run, outcome)      one logical release load
 A third idiom for this problem would itself be the defect.
 
 `ReleaseStage` is not reused directly, and the reason is vocabulary rather than convenience: it carries `AppraisalSourceRecord`, the vendor-neutral *source* record at physical-row grain, and lives in adapters as part of the bounded-processing boundary. `ReleaseLoadSession` carries promoted canonical records — account snapshots, owner associations, value observations. Parse produces the first; normalise produces the second. Same shape, different stage, different layer.
+
+## From an acquisition to a run
+
+`BronzeStore.record()` returns a storage locator — in the S3 adapter, `s3://<bucket>/<sha>.manifest.json`. `ingestion.run.manifest_id` needs something else entirely: a `bigint` that `bronze.release_manifest` generates, on a table that holds no column containing that URI and carries no unique constraint on the artifact checksum either. There is no path from one to the other, and nothing in the first draft produced the value `start()` was specified to take.
+
+Left alone, 3.5 would have had to choose — parse the S3 locator, insert a second manifest row, query by evidence that is not unique, or reach across adapters — and whichever it chose would have become the contract by default. That is the outcome 2.3 exists to prevent.
+
+So manifest persistence produces the reference:
+
+```text
+  ArtifactSink ──► bytes durable
+  BronzeStore  ──► immutable evidence in the object store, returns a storage locator
+  ManifestIndex ─► the relational record a run binds to, returns a ManifestRef
+  ProcessingRunRepository.start(release, manifest_ref) ──► ProcessingRunRef
+```
+
+`ManifestIndex` is a second manifest port and needs its reason. `BronzeStore` writes immutable acquisition evidence to the object store and classifies a repeat checksum against it; the relational row is an index over that acquisition, holding a subset — jurisdiction, acquisition instant, source URL, artifact checksum — so that runs and partitions can reference it. Two stores, two guarantees, two lifetimes. `BronzeStore` also cannot simply gain a method: adding one to the Protocol would stop `S3BronzeStore` from satisfying it, and round one settled that its behaviour is retained.
+
+Registration is idempotent per acquisition, which is what makes one artifact carrying two logical releases bind both runs to one manifest rather than to two copies of it.
 
 ## Who creates a run
 
@@ -122,7 +161,7 @@ This is the single most consequential decision in the change, because it is invi
 
 The fourth component enters at the run and nowhere earlier. A Bronze acquisition can legitimately know only that an archive holds "Collin, 2025, certified" — the release identifier is established by page evidence or verified content, and sometimes not at all.
 
-The canonical port takes `ReleaseIdentity`. It does not take `ReleasePartition` and does not accept a partition plus a hint. Where the source has not established an identifier, opening a load fails with a named error, because the alternative is worse than failing: a synthesised identifier from a filename or checksum would be accepted by every constraint in the database and would silently define a release that does not exist.
+The canonical port takes `ReleaseIdentity`. It does not take `ReleasePartition` and does not accept a partition plus a hint. Where the source has not established an identifier, **promotion** fails with a named error — see the promotion seam below — and the load is never reached. The alternative is worse than failing: a synthesised identifier from a filename or checksum would be accepted by every constraint in the database and would silently define a release that does not exist.
 
 ## Retry, and the shape of the answer
 
@@ -143,11 +182,9 @@ So the application defines its own outcome value carrying the facts the database
 
 This is a mapping, not a second model. The alternative, moving `ReleaseOutcome` inward, would edit the public surface of a promoted capability (`bounded-release-processing`) to serve a consumer that does not exist yet, and would drag `ReleaseDiagnostic` and `ReleaseNotice` with it.
 
-## Why a batch is closed over account groups
+## How a child finds its parent
 
-The canonical record types reference their parents **by object**: `OwnerAssociation.owner` is an `OwnerObservation`, `OwnerValueAllocation.association` is an `OwnerAssociation`, `TaxableValueObservation.taxing_unit` is a `TaxingUnitObservation`. The database gives none of those a natural key; it generates `owner_key`, `association_key`, and the rest as identity columns.
-
-So if a child could arrive in a later batch than its parent, an implementation would need the parent's generated key at that point, and every way of getting it is closed:
+The canonical record types reference their parents **by object**: `OwnerAssociation.owner` is an `OwnerObservation`, `OwnerValueAllocation.association` is an `OwnerAssociation`, `TaxableValueObservation.taxing_unit` is a `TaxingUnitObservation`. The database gives none of those a natural key; it generates `owner_key`, `association_key`, and the rest as identity columns. So when a child is written after its parent, an implementation needs the parent's generated key, and every obvious way of finding it is closed:
 
 ```text
   key by observed values      forbidden — that is the natural key this boundary rejects
@@ -156,13 +193,25 @@ So if a child could arrive in a later batch than its parent, an implementation w
   re-insert the parent        manufactures a second observation
 ```
 
-The way out is structural rather than mechanical. Every canonical relation carries `snapshot_key`, and `TaxingUnitObservation.snapshot` is an `AccountSnapshot`, so the whole graph roots at the account snapshot. A batch is therefore a tuple of **account groups**, each one snapshot with its complete descent, and a child separated from its parent is refused at the boundary.
+The first draft answered this by requiring a batch to carry whole account groups — one snapshot with its complete descent — so parent resolution never crossed a batch. That solved correlation and quietly gave up the bound it was meant to protect. The canonical model places **no maximum** on how many owners, allocations, values, exemptions, land records, improvements, or geometries an account may carry, so a tuple of complete account groups is bounded only by the largest account in the release. One pathological account is enough to break it, and the honest fix is not to invent a maximum child count that no accepted contract establishes.
 
-Parent resolution never crosses a batch, so no correlation mechanism is needed at all. Session-local correlation handles were the alternative; they work, and they add a second identifier vocabulary to carry, validate, and explain, to solve a problem the graph's own shape already solves.
+That draft also rested on a claim that is simply false: *every canonical relation carries `snapshot_key`*. `canonical.owner_value_allocation` deliberately does not, and the migration says so — "Parented by the association, not by the snapshot: there is deliberately no `snapshot_key` here, because the domain gives this record one parent and it is the association." An allocation reaches its snapshot through its association, so the graph is not the flat star the claim implied.
 
-The group's validation compares by object identity rather than by value, for the same reason the boundary defines no natural key: two equal-looking observations are distinct records, and a value comparison would silently treat one as the other.
+So correlation is explicit and its lifetime is stated:
 
-## Quality and publication are different units of work
+```text
+  account opened   ─┐
+    write(batch)    │  a parent written here can be named by a child written later
+    write(batch)    │  correlation is session-local, account-scoped, and opaque
+    write(batch)    │
+  account complete ─┘  correlation released; naming it afterwards is refused
+```
+
+An account may span as many batches as it needs, so neither side holds a whole account. The implementation's correlation state is bounded by the accounts currently open — normally one — rather than by the release, which is the property the session exists to provide.
+
+The correlation value is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
+
+## Quality and publication are different units of work## Quality and publication are different units of work
 
 Quality evaluates loaded canonical data — required-key completeness, uniqueness, child relationships, row-count drift — so it necessarily runs after the load has committed. A blocking failure prevents *publication* and quarantines the release; it does not retract the load, and `validated-data-publication` says exactly that.
 

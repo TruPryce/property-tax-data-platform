@@ -60,6 +60,23 @@ No general-purpose object-store create/read/update/delete port SHALL be introduc
 - **WHEN** a checksum is classified against a release partition
 - **THEN** the classification is returned to the caller and is not persisted as a verdict
 
+### Requirement: A manifest reference is produced by manifest persistence
+The system SHALL provide an application-owned reference identifying a recorded acquisition manifest, produced where that manifest is recorded, and SHALL NOT require a caller to derive it from an object-store locator, a checksum, or any other evidence.
+
+Recording the same acquisition again SHALL yield the same reference, so that several logical releases carried by one artifact bind their runs to one acquisition rather than to duplicates of it. The reference SHALL be an opaque locator on the same terms as any other persistence-generated handle.
+
+#### Scenario: A manifest is recorded and referenced
+- **WHEN** an acquisition manifest is recorded
+- **THEN** a reference to it is returned, and no caller derives that reference from a storage locator or a checksum
+
+#### Scenario: One artifact carries two releases
+- **WHEN** two runs process two logical releases carried by one artifact
+- **THEN** both bind to the same manifest reference
+
+#### Scenario: The same acquisition is recorded again
+- **WHEN** an acquisition already recorded is recorded again
+- **THEN** the same reference is returned and no duplicate acquisition is created
+
 ### Requirement: A processing run is created through the boundary
 The system SHALL provide an application-owned contract that creates a processing run from the release identity and the manifest it will read, and returns the reference by which that run is named. A caller SHALL NOT be required to construct a run reference itself, because the value that identifies a run is generated where the run is recorded.
 
@@ -69,9 +86,13 @@ The contract SHALL also record that a run has finished.
 - **WHEN** a use case begins processing a release it has acquired
 - **THEN** it obtains a run reference from the boundary, and the reference identifies a run that has been recorded
 
-#### Scenario: A caller attempts to name a run it did not start
-- **WHEN** the boundary is examined
-- **THEN** no operation accepts a caller-constructed run reference as a substitute for starting a run
+#### Scenario: A run reference is required somewhere
+- **WHEN** any port requiring a run reference is examined
+- **THEN** it accepts the reference type and no raw persistence value in its place, so a caller is never required to invent one
+
+#### Scenario: A reference that names no run is used
+- **WHEN** a reference that does not resolve to a started run is passed to a port that requires one
+- **THEN** the operation is refused rather than creating a run implicitly
 
 ### Requirement: Canonical release identity is promoted from evidence and fails closed
 The system SHALL provide one promotion from discovered release facts to canonical release identity, and that promotion SHALL be the only place where an incomplete release becomes a complete one. Where the source established fewer than all four canonical components, promotion SHALL fail with a named error naming what was missing.
@@ -107,22 +128,30 @@ A session that aborts, or whose completion fails, SHALL leave zero canonical rec
 - **WHEN** the session contract is examined
 - **THEN** no operation requires a complete release as a single in-memory collection
 
-### Requirement: A batch carries the complete ancestry of every record in it
-A canonical batch SHALL be composed of whole account groups: one account snapshot together with every record that descends from it in that batch. A record whose parent is not present in the same batch SHALL be rejected by the boundary.
+### Requirement: Parent linkage is resolved by bounded, account-scoped correlation
+The canonical persistence boundary SHALL allow one account's records to span more than one bounded batch, and SHALL provide a correlation mechanism by which a record names a parent written in an earlier batch.
 
-This SHALL hold so that an implementation can resolve every parent relationship within one batch, without correlating records across batches, without keying on observed values, and without retaining a release-wide mapping that would grow with the release.
+That correlation SHALL be session-local and scoped to one account: it SHALL be established when the account's records begin, and it SHALL cease to be valid once the account is declared complete. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value.
 
-#### Scenario: A complete account group is written
-- **WHEN** a batch carries an account snapshot with its owners, associations, allocations, values, taxing units, exemptions, land, improvements, and geometries
-- **THEN** the batch is accepted and every parent relationship is resolvable within it
+An implementation's correlation state SHALL therefore be bounded by the accounts currently open rather than by the size of the release. The boundary SHALL NOT require a caller to hold one account's complete descent in memory, because the canonical model places no maximum on the number of owners, allocations, values, exemptions, land records, improvements, or geometries an account may carry.
 
-#### Scenario: A child is separated from its parent
-- **WHEN** a batch carries a record whose parent record is absent from that batch
-- **THEN** the batch is rejected, naming the record whose ancestry is incomplete
+Using a correlation value after its account is complete, or one never established, SHALL be refused.
 
-#### Scenario: An account is split across batches
-- **WHEN** the boundary is examined for whether one account's records may span two batches
-- **THEN** the contract prohibits it structurally rather than leaving the correlation to the implementation
+#### Scenario: One account spans several batches
+- **WHEN** an account's owners are written in one batch and its allocations in a later batch of the same account
+- **THEN** the later records resolve their parents through the correlation the earlier batch established
+
+#### Scenario: An account with very many children is loaded
+- **WHEN** an account carries far more children than one batch should hold
+- **THEN** it is written across several bounded batches, and neither the caller nor the implementation is required to hold the whole account
+
+#### Scenario: A correlation value outlives its account
+- **WHEN** a record names a correlation value whose account has been declared complete
+- **THEN** the write is refused
+
+#### Scenario: Correlation state is examined for growth
+- **WHEN** the boundary is examined
+- **THEN** nothing requires an implementation to retain correlation state for accounts already complete, so the state is bounded by open accounts rather than by the release
 
 ### Requirement: The processing outcome and the canonical load complete as one unit of work
 The canonical load session SHALL own the relationship between the processing run, its accepted or rejected outcome with bounded diagnostics and notices, and the canonical load, such that the outcome and the load become durable together at one completion point.
@@ -144,6 +173,8 @@ The boundary SHALL NOT require an implementation to make the accepted outcome du
 ### Requirement: The outcome crossing the boundary is a lossless representation
 The processing outcome the boundary accepts SHALL carry every fact the accepted outcome record requires: the disposition, the boundary contract version, the parser contract version and layout fingerprint where the release was prepared, the processed, staged, committed, and rejected counts, and the bounded diagnostics and notices with their totals and truncation flags.
 
+A diagnostic code SHALL be one the accepted closed vocabulary admits, so a value valid at this boundary is a value that can be recorded.
+
 An implementation SHALL be able to record the accepted outcome from this value alone, without obtaining any of those facts from outside the boundary. The paired invariants the accepted record enforces SHALL be enforced here, so a violation is refused at the boundary rather than at commit.
 
 #### Scenario: A prepared release reports its parser evidence
@@ -157,6 +188,10 @@ An implementation SHALL be able to record the accepted outcome from this value a
 #### Scenario: An implementation records the outcome
 - **WHEN** an implementation records the accepted outcome from the value the boundary supplied
 - **THEN** every required fact is present and none is obtained from elsewhere
+
+#### Scenario: A diagnostic carries a code outside the accepted vocabulary
+- **WHEN** an outcome carries a diagnostic whose code is not one the accepted vocabulary admits
+- **THEN** the outcome is refused at the boundary, rather than accepted here and rejected when written
 
 ### Requirement: Retry is scoped to one release and one processing run
 The retry key SHALL be the pairing of a canonical release with the processing run that loaded it. Completing a load for a pairing that has already completed SHALL persist nothing further and SHALL return a bounded, machine-readable result stating that the load had already happened, rather than raising an error the caller must interpret.
