@@ -131,15 +131,29 @@ A session that aborts, or whose completion fails, SHALL leave zero canonical rec
 ### Requirement: Parent linkage is resolved by bounded, account-scoped correlation
 The canonical persistence boundary SHALL allow one account's records to span more than one bounded batch, and SHALL provide a correlation mechanism by which a record names a parent written in an earlier batch.
 
-That correlation SHALL be session-local and scoped to one account: it SHALL be established when the account's records begin, and it SHALL cease to be valid once the account is declared complete. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value.
+That correlation SHALL be carried by the batch rather than by the canonical records, which hold their parents directly and SHALL NOT gain a correlation field. A batch entry SHALL pair one canonical record with the correlation value it can later be named by, where it may be a parent, and with the correlation value of its parent. A parent SHALL be named the same way whether it appears in the same batch or an earlier one, so there is one linkage mechanism rather than two.
 
-An implementation's correlation state SHALL therefore be bounded by the accounts currently open rather than by the size of the release. The boundary SHALL NOT require a caller to hold one account's complete descent in memory, because the canonical model places no maximum on the number of owners, allocations, values, exemptions, land records, improvements, or geometries an account may carry.
+Correlation SHALL be session-local and scoped to one account. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value.
 
-Using a correlation value after its account is complete, or one never established, SHALL be refused.
+Every account a batch introduces SHALL be complete at the end of that batch, except at most one, which the batch SHALL name as continuing into the next. An implementation SHALL therefore retain, beyond a single bounded batch, only the correlation values of one continuing account, and only for records actually named as parents. Correlation SHALL NOT require memory proportional to the release, to the number of accounts in it, or to a continuing account's complete descent.
+
+A correlation value that duplicates one already open, that names a parent never introduced, or that names one whose account is complete, SHALL be refused.
+
+#### Scenario: A record is paired with its correlation
+- **WHEN** a batch entry is examined
+- **THEN** it pairs the canonical record with the value it may be named by and the value naming its parent, and the canonical record itself carries no correlation field
 
 #### Scenario: One account spans several batches
 - **WHEN** an account's owners are written in one batch and its allocations in a later batch of the same account
-- **THEN** the later records resolve their parents through the correlation the earlier batch established
+- **THEN** the later records name their parents by the values the earlier batch introduced
+
+#### Scenario: A batch leaves two accounts incomplete
+- **WHEN** a batch would leave more than one account continuing into the next
+- **THEN** it is refused, so at most one account is ever open across a batch boundary
+
+#### Scenario: A duplicate correlation value is introduced
+- **WHEN** a batch introduces a correlation value already open
+- **THEN** the write is refused
 
 #### Scenario: An account with very many children is loaded
 - **WHEN** an account carries far more children than one batch should hold
@@ -151,7 +165,7 @@ Using a correlation value after its account is complete, or one never establishe
 
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
-- **THEN** nothing requires an implementation to retain correlation state for accounts already complete, so the state is bounded by open accounts rather than by the release
+- **THEN** nothing requires an implementation to retain correlation beyond one bounded batch except for the single continuing account, so the state grows with neither the release nor the number of accounts in it
 
 ### Requirement: The processing outcome and the canonical load complete as one unit of work
 The canonical load session SHALL own the relationship between the processing run, its accepted or rejected outcome with bounded diagnostics and notices, and the canonical load, such that the outcome and the load become durable together at one completion point.

@@ -38,11 +38,12 @@ Promotion happens once, before the run, and the run is where the promoted identi
               │                                                          │
   bytes       │  ArtifactSink        (retained, unchanged)               │
   manifests   │  BronzeStore         (retained, unchanged)               │
+              │  ManifestIndex ──────────► ManifestRef                   │
               │                                                          │
   run         │  ProcessingRunRepository.start(…) ─► ProcessingRunRef    │
               │                                                          │
   canonical   │  CanonicalReleaseRepository ──► ReleaseLoadSession       │
-              │        write(batch of account groups)…                   │
+              │        write(CanonicalRecordBatch)…                      │
               │        commit() ─► ReleaseLoadCompletion   abort()       │
               │                                                          │
   quality     │  QualityRepository   (run-bound)                         │
@@ -107,7 +108,7 @@ Registration is idempotent per acquisition, which is what makes one artifact car
 
 The run is the spine, so every port names one — and until this correction nothing created one. That gap could not be pushed to 2.4: `ingestion.run.run_id` is `GENERATED ALWAYS AS IDENTITY`, so a use case cannot construct a correct reference without reaching past the boundary into the database, which is exactly what the boundary exists to prevent.
 
-`ProcessingRunRepository.start(release, manifest)` returns the reference, and nothing else in the boundary accepts a caller-constructed one. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
+`ProcessingRunRepository.start(release, manifest_ref)` returns the reference, and nothing else in the boundary accepts a caller-constructed one. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
 
 ## Where an incomplete release fails
 
@@ -197,21 +198,27 @@ The first draft answered this by requiring a batch to carry whole account groups
 
 That draft also rested on a claim that is simply false: *every canonical relation carries `snapshot_key`*. `canonical.owner_value_allocation` deliberately does not, and the migration says so — "Parented by the association, not by the snapshot: there is deliberately no `snapshot_key` here, because the domain gives this record one parent and it is the association." An allocation reaches its snapshot through its association, so the graph is not the flat star the claim implied.
 
-So correlation is explicit and its lifetime is stated. A `CorrelationHandle` lets a record name a parent written in an earlier batch of the same account:
+So correlation is explicit, and it rides on the batch rather than on the records. The canonical types hold their parents directly and gain no correlation field — they are domain types this change does not modify — so a batch entry pairs a record with the handle it may be named by and the handle naming its parent:
 
 ```text
-  account opened   ─┐
-    write(batch)    │  a parent written here can be named by a child written later
-    write(batch)    │  correlation is session-local, account-scoped, and opaque
-    write(batch)    │
-  account complete ─┘  correlation released; naming it afterwards is refused
+  CorrelatedRecord(record=owner,       handle=h1,   parent=h0)
+  CorrelatedRecord(record=association, handle=h2,   parent=h1)
+  CorrelatedRecord(record=allocation,  handle=None, parent=h2)   ← a leaf needs no handle
 ```
 
-An account may span as many batches as it needs, so neither side holds a whole account. The implementation's correlation state is bounded by the accounts currently open — normally one — rather than by the release, which is the property the session exists to provide.
+A parent is named the same way whether it sits in this batch or an earlier one, so there is one linkage mechanism and not two, and the caller mints handles that need only be unique within an open account. The batch also names the one account, if any, left open at its end:
+
+```text
+  write(batch)  ─┐  many accounts, each complete within the batch
+                 │  …except at most one, named as continuing
+  write(batch)  ─┘  that one account's handles stay resolvable; the rest are released
+```
+
+"Bounded by open accounts" would be no bound at all if arbitrarily many could stay open, so a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
 
 `CorrelationHandle` is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
 
-## Quality and publication are different units of work## Quality and publication are different units of work
+## Quality and publication are different units of work
 
 Quality evaluates loaded canonical data — required-key completeness, uniqueness, child relationships, row-count drift — so it necessarily runs after the load has committed. A blocking failure prevents *publication* and quarantines the release; it does not retract the load, and `validated-data-publication` says exactly that.
 
@@ -244,7 +251,7 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 
 - **The session can be implemented as a lie.** Nothing in a Protocol forces an implementation to honour atomicity; a `commit()` that writes eagerly conforms structurally. The same is true of `ReleaseStage` today, and the answer is the same: 3.6's containerised integration tests are where atomicity is actually proven. This change states the obligation and the falsification tests assert the contract's shape, not the storage behaviour.
 - **`ProcessingRunRef` invites misuse.** It is an opaque locator that will be a `bigint` in practice, and someone will eventually sort by it. The contract names it, a test asserts it carries no ordering guarantee, and that is the extent of what a type can do here.
-- **The port count could still be wrong.** Eight contracts for seven named responsibilities is a judgement, defended in the proposal by the two accepted requirements behind "source discovery". If 2.4 finds the registry/discovery split artificial in practice, merging them is a smaller change than splitting a merged one.
+- **The port count could still be wrong.** Eleven contracts for seven named responsibilities is a judgement, defended in the proposal by the two accepted requirements behind "source discovery". If 2.4 finds the registry/discovery split artificial in practice, merging them is a smaller change than splitting a merged one.
 - **`Clock` may sit unused until 2.4.** Defining a port with no consumer risks it drifting from what the use cases actually need. Mitigated by keeping it minimal — one method — so there is little to drift.
 
 ## Migration
@@ -253,9 +260,9 @@ None. No existing signature changes, no data moves, no migration is added. `Arti
 
 ## Handoffs
 
-**To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. None of that appears in the application contract, and 3.5 may not add it there.
+**To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
 
-**To bootstrap 2.4.** The discover, acquire, parse, normalize, validate, and publish use cases coordinate `SourceRegistry`, `ReleaseDiscovery`, `ArtifactSink`, `BronzeStore`, `CanonicalReleaseRepository`, `QualityRepository`, `PublicationRepository`, and `Clock` — never an adapter type. 2.4 also owns retiring the S3 adapter's `utc_now()` in favour of the injected clock.
+**To bootstrap 2.4.** The discover, acquire, parse, normalize, validate, and publish use cases coordinate `SourceRegistry`, `ReleaseDiscovery`, `ArtifactSink`, `BronzeStore`, `ManifestIndex`, `ProcessingRunRepository`, `CanonicalReleaseRepository`, `QualityRepository`, `PublicationRepository`, and `Clock` — never an adapter type. 2.4 owns minting correlation handles as it walks parsed records, since it is the only layer holding both a record and its parent. It also owns retiring the S3 adapter's `utc_now()` in favour of the injected clock.
 
 ## Unresolved questions
 
