@@ -12,17 +12,21 @@ That is why 3.5 is blocked in a specific way. It could implement COPY-to-staging
               ┌──────────────── property_tax_application ────────────────┐
               │                                                          │
   registry    │  SourceRegistry ─────────► CountySourceDefinition        │
-  discovery   │  ReleaseDiscovery ───────► ReleaseCandidate              │
+  discovery   │  ReleaseDiscovery ───────► ReleaseCandidate | Unchanged  │
+  promotion   │      promote(candidate) ─► ReleaseIdentity               │
+              │              or IncompleteReleaseIdentity                │
               │                                                          │
   bytes       │  ArtifactSink        (retained, unchanged)               │
   manifests   │  BronzeStore         (retained, unchanged)               │
               │                                                          │
+  run         │  ProcessingRunRepository.start(…) ─► ProcessingRunRef    │
+              │                                                          │
   canonical   │  CanonicalReleaseRepository ──► ReleaseLoadSession       │
-              │        write(batch)…  commit() ─► ReleaseLoadCompletion  │
-              │                       abort()                            │
+              │        write(batch of account groups)…                   │
+              │        commit() ─► ReleaseLoadCompletion   abort()       │
               │                                                          │
   quality     │  QualityRepository   (run-bound)                         │
-  publication │  PublicationRepository ─────► PublicationSession         │
+  publication │  PublicationRepository ─────► PublicationAttempt         │
   time        │  Clock                                                   │
               └──────────────────────────────────────────────────────────┘
                                         ▲
@@ -59,6 +63,30 @@ open(release, run, outcome)      one logical release load
 A third idiom for this problem would itself be the defect.
 
 `ReleaseStage` is not reused directly, and the reason is vocabulary rather than convenience: it carries `AppraisalSourceRecord`, the vendor-neutral *source* record at physical-row grain, and lives in adapters as part of the bounded-processing boundary. `ReleaseLoadSession` carries promoted canonical records — account snapshots, owner associations, value observations. Parse produces the first; normalise produces the second. Same shape, different stage, different layer.
+
+## Who creates a run
+
+The run is the spine, so every port names one — and until this correction nothing created one. That gap could not be pushed to 2.4: `ingestion.run.run_id` is `GENERATED ALWAYS AS IDENTITY`, so a use case cannot construct a correct reference without reaching past the boundary into the database, which is exactly what the boundary exists to prevent.
+
+`ProcessingRunRepository.start(release, manifest)` returns the reference, and nothing else in the boundary accepts a caller-constructed one. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
+
+## Where an incomplete release fails
+
+The first draft put a `MissingReleaseIdentifier` on the canonical repository. That error was unreachable: `ReleaseIdentity.__post_init__` calls `require_identifier`, so an incomplete `ReleaseIdentity` cannot be constructed, and a method taking one can never receive the state it claimed to reject.
+
+The failure belongs one step earlier, at the only place a partial release becomes a whole one:
+
+```text
+  ReleaseCandidate                      promote()            ReleaseIdentity
+    jurisdiction                            │                  jurisdiction
+    tax_year                 ──────────────►│                  tax_year
+    release_kind                            │                  release_kind
+    release_identifier?  ← may be absent    │                  release_identifier
+                                            ▼
+                              IncompleteReleaseIdentity
+```
+
+Downstream of promotion no port carries a "maybe complete" identity, and `ReleaseIdentity` is not weakened to make the error expressible. The alternative — a nullable fourth component threaded through the canonical port — is precisely how a filename ends up as a release identifier under schedule pressure.
 
 ## The transaction seam
 
@@ -115,11 +143,32 @@ So the application defines its own outcome value carrying the facts the database
 
 This is a mapping, not a second model. The alternative, moving `ReleaseOutcome` inward, would edit the public surface of a promoted capability (`bounded-release-processing`) to serve a consumer that does not exist yet, and would drag `ReleaseDiagnostic` and `ReleaseNotice` with it.
 
+## Why a batch is closed over account groups
+
+The canonical record types reference their parents **by object**: `OwnerAssociation.owner` is an `OwnerObservation`, `OwnerValueAllocation.association` is an `OwnerAssociation`, `TaxableValueObservation.taxing_unit` is a `TaxingUnitObservation`. The database gives none of those a natural key; it generates `owner_key`, `association_key`, and the rest as identity columns.
+
+So if a child could arrive in a later batch than its parent, an implementation would need the parent's generated key at that point, and every way of getting it is closed:
+
+```text
+  key by observed values      forbidden — that is the natural key this boundary rejects
+  structural equality         wrong — two equal-looking observations are legitimately distinct
+  release-wide object→key map grows with the release, undoing the boundedness
+  re-insert the parent        manufactures a second observation
+```
+
+The way out is structural rather than mechanical. Every canonical relation carries `snapshot_key`, and `TaxingUnitObservation.snapshot` is an `AccountSnapshot`, so the whole graph roots at the account snapshot. A batch is therefore a tuple of **account groups**, each one snapshot with its complete descent, and a child separated from its parent is refused at the boundary.
+
+Parent resolution never crosses a batch, so no correlation mechanism is needed at all. Session-local correlation handles were the alternative; they work, and they add a second identifier vocabulary to carry, validate, and explain, to solve a problem the graph's own shape already solves.
+
+The group's validation compares by object identity rather than by value, for the same reason the boundary defines no natural key: two equal-looking observations are distinct records, and a value comparison would silently treat one as the other.
+
 ## Quality and publication are different units of work
 
 Quality evaluates loaded canonical data — required-key completeness, uniqueness, child relationships, row-count drift — so it necessarily runs after the load has committed. A blocking failure prevents *publication* and quarantines the release; it does not retract the load, and `validated-data-publication` says exactly that.
 
-Publication is atomic on its own terms: build, then activate or fail. `publication.publication` carries the state machine (`building`, `current`, `superseded`, `failed`) and the supersession pointer. `PublicationSession.fail()` leaves the previously current publication current, which is the accepted requirement that consumers keep reading the last good build.
+Publication is atomic on its own terms: attempt, then activate or fail. `publication.publication` carries the state machine (`building`, `current`, `superseded`, `failed`) and the supersession pointer, and `PublicationAttempt.fail()` leaves the previously current publication current, which is the accepted requirement that consumers keep reading the last good build.
+
+The boundary stops there deliberately. Migration `0005` says task 6.2 owns the promotion path, and this port has no operation that stages or writes published content — so scoping it to attempt, lineage, and activation describes what it can actually do. A requirement promising an atomic Gold build would be a promise no task in this change makes representable.
 
 So there are three transactions in the pipeline, not one, and the boundary makes the seams explicit:
 
@@ -138,6 +187,9 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Taking `ReleasePartition` on the canonical port with an optional identifier.** Makes the missing fourth component look like a nullable field rather than a refusal, and the first adapter under schedule pressure fills it in.
 - **A generic object-store CRUD port.** `ArtifactSink` and `BronzeStore` already express what is needed with tighter guarantees; a general `put`/`get` would be a weaker contract replacing a stronger one.
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
+- **Session-local correlation handles for cross-batch parents.** Sound, and unnecessary: closing the batch over account groups removes the problem instead of managing it, and avoids a second identifier vocabulary alongside `ProcessingRunRef` and `PublicationRef`.
+- **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
+- **Deferring run creation to 2.4.** The reference is database-generated; a use case cannot construct a correct one without reaching through the boundary, so deferring it would have made the first implementation invent the contract.
 
 ## Risks
 
