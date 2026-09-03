@@ -31,7 +31,9 @@ That definition SHALL carry the expected media types for the source, so acquisit
 - **THEN** it does so through one uniform call and contains no county-specific branch
 
 ### Requirement: Discovery carries bounded evidence and distinguishes a new release from an unchanged one
-Release discovery SHALL return, for each observed release, either a candidate or a no-change result. A candidate SHALL carry the source locator, the remote metadata, the source as-of evidence, the page evidence the source published, and the release facts the source established. A no-change result SHALL be returned where remote metadata and content identity match a release already acquired, and SHALL NOT require the artifact to be downloaded again.
+Release discovery SHALL return, for each observed source, either a source candidate or a no-change result. A source candidate SHALL carry the jurisdiction, the source locator, the remote metadata, the source as-of evidence, and the page evidence the source published. A no-change result SHALL be returned where remote metadata and content identity match a release already acquired, and SHALL NOT require the artifact to be downloaded again.
+
+Discovery SHALL NOT be required to establish a tax year or a release kind. Where the publisher's page establishes those facts, the source candidate SHALL carry the resulting logical release evidence, one entry per logical release; where they are established only by verified source content, the candidate SHALL carry none and that evidence SHALL be produced during parsing instead. One source candidate SHALL therefore be able to yield several logical releases backed by one artifact.
 
 Every evidence carrier SHALL be bounded. Discovery SHALL NOT return credentials, arbitrary source content, or an unbounded payload, and SHALL NOT perform county parsing or county field mapping.
 
@@ -44,8 +46,16 @@ Every evidence carrier SHALL be bounded. Discovery SHALL NOT return credentials,
 - **THEN** a no-change result is returned, distinguishable from a candidate, and no download is required
 
 #### Scenario: A source establishes only partial release facts
-- **WHEN** the source's evidence establishes a jurisdiction, tax year, and release kind but no release identifier
-- **THEN** the candidate records exactly what was established and does not manufacture the missing component
+- **WHEN** the source's page establishes a jurisdiction, tax year, and release kind but no release identifier
+- **THEN** the evidence records exactly what was established and does not manufacture the missing component
+
+#### Scenario: Release facts live only in source content
+- **WHEN** a publisher offers one mutable export whose tax years and release kinds appear only in its content
+- **THEN** discovery returns one source candidate carrying no logical release evidence, and is not required to invent a tax year or a release kind
+
+#### Scenario: One artifact carries two logical releases
+- **WHEN** parsing an acquired artifact establishes a current release for one tax year and a certified release for another
+- **THEN** two logical release evidences are produced from that one artifact, and neither requires re-acquiring it
 
 ### Requirement: Existing artifact and manifest contracts are retained
 The streaming artifact contract and the manifest contract SHALL be retained with their current behaviour. The distinction between streaming bytes and a durable object, between an artifact and a manifest, between one artifact and one or more logical release partitions, and between a read-time conflict classification and a persisted verdict SHALL be preserved.
@@ -95,16 +105,20 @@ The contract SHALL also record that a run has finished.
 - **THEN** the operation is refused rather than creating a run implicitly
 
 ### Requirement: Canonical release identity is promoted from evidence and fails closed
-The system SHALL provide one promotion from discovered release facts to canonical release identity, and that promotion SHALL be the only place where an incomplete release becomes a complete one. Where the source established fewer than all four canonical components, promotion SHALL fail with a named error naming what was missing.
+The system SHALL provide one promotion from logical release evidence to canonical release identity, and that promotion SHALL be the only place where an incomplete release becomes a complete one. That evidence SHALL be the single input to promotion whether it was established by the publisher's page during discovery or by verified source content during parsing, so there is one promotion seam rather than one per origin. Where fewer than all four canonical components were established, promotion SHALL fail with a named error naming what was missing.
 
 Canonical release identity SHALL NOT be derived from a filename, a checksum, an acquisition instant, a source field name, a row ordering, or a persistence surrogate. The canonical persistence boundary SHALL accept only a complete canonical release identity, and SHALL NOT accept a Bronze release partition or a partition accompanied by a hint.
 
 #### Scenario: Complete evidence is promoted
-- **WHEN** a candidate whose four identity components are established is promoted
+- **WHEN** logical release evidence whose four identity components are established is promoted
 - **THEN** a canonical release identity is returned
 
+#### Scenario: Evidence from parsing is promoted the same way
+- **WHEN** logical release evidence established by source content rather than by a page is promoted
+- **THEN** it passes through the same promotion and yields a canonical release identity on the same terms
+
 #### Scenario: A release identifier was never established
-- **WHEN** a candidate lacking a release identifier is promoted
+- **WHEN** logical release evidence lacking a release identifier is promoted
 - **THEN** promotion fails with a named error and no identifier is synthesised
 
 #### Scenario: A Bronze partition is offered as canonical identity

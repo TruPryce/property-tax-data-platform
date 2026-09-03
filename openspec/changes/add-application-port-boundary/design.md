@@ -11,7 +11,9 @@ That is why 3.5 is blocked in a specific way. It could implement COPY-to-staging
 One sequence, and every port sits at a named point in it:
 
 ```text
-  discovery evidence ──promote──► complete ReleaseIdentity
+  page evidence ─┐
+                 ├─► LogicalReleaseEvidence ──promote──► ReleaseIdentity
+  parsed content ┘
                                           │
   acquisition ──► BronzeStore ──► ManifestIndex ──► ManifestRef
                                           │
@@ -32,8 +34,8 @@ Promotion happens once, before the run, and the run is where the promoted identi
               ┌──────────────── property_tax_application ────────────────┐
               │                                                          │
   registry    │  SourceRegistry ─────────► CountySourceDefinition        │
-  discovery   │  ReleaseDiscovery ───────► ReleaseCandidate | Unchanged  │
-  promotion   │      promote(candidate) ─► ReleaseIdentity               │
+  discovery   │  ReleaseDiscovery ─────► SourceCandidate | Unchanged     │
+  promotion   │      promote(evidence) ─► ReleaseIdentity                │
               │              or IncompleteReleaseIdentity                │
               │                                                          │
   bytes       │  ArtifactSink        (retained, unchanged)               │
@@ -110,6 +112,33 @@ The run is the spine, so every port names one — and until this correction noth
 
 `ProcessingRunRepository.start(release, manifest_ref)` returns the reference, and nothing else in the boundary accepts a caller-constructed one. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
 
+## What discovery can be required to know
+
+A source candidate is not a release. The accepted ingestion contract permits an artifact whose tax years and release kinds are not known from discovery metadata, and says what happens then: "discovery records one source candidate and parsing creates separately identified logical release partitions backed by the same immutable artifact."
+
+Collin is that case, and it is not hypothetical. The published source is one mutable Access export; its current and certified releases are established by `curr_val_yr`, `cert_val_yr`, and `property_status` — content fields, readable only after acquisition. A discovery contract requiring a tax year and a release kind would make Collin inexpressible, and the only ways to satisfy it would be the ones this boundary forbids: guess from a filename, or assume the current year.
+
+So the two grains are separated, and the evidence is the thing promotion consumes:
+
+```text
+  SourceCandidate ──acquire──► artifact ──► ManifestRef M
+        │                                        │
+        │ page established the facts?            │
+        ├── yes ──► LogicalReleaseEvidence       ├──────────────┐
+        └── no  ──► parsing establishes them ────┘              │
+                              │                                 │
+                   ┌──────────┴──────────┐                      │
+                   ▼                     ▼                      │
+          evidence (current)     evidence (certified)           │
+                   │                     │                      │
+              ReleaseIdentity A    ReleaseIdentity B            │
+                   │                     │                      │
+                 run A(M) ◄──────────────┴──────────────────────┘
+                 run B(M)        both runs bind the same manifest
+```
+
+One promotion seam serves both origins, so evidence established by a page and evidence established by content are indistinguishable downstream — which is what keeps the six counties on one contract rather than two. The many-to-many artifact/release model this preserves is already accepted: `canonical-identity-and-provenance` requires the association to "support one artifact carrying several logical releases and one logical release observed in several artifacts."
+
 ## Where an incomplete release fails
 
 The first draft put a `MissingReleaseIdentifier` on the canonical repository. That error was unreachable: `ReleaseIdentity.__post_init__` calls `require_identifier`, so an incomplete `ReleaseIdentity` cannot be constructed, and a method taking one can never receive the state it claimed to reject.
@@ -117,7 +146,7 @@ The first draft put a `MissingReleaseIdentifier` on the canonical repository. Th
 The failure belongs one step earlier, at the only place a partial release becomes a whole one:
 
 ```text
-  ReleaseCandidate                      promote()            ReleaseIdentity
+  LogicalReleaseEvidence                promote()            ReleaseIdentity
     jurisdiction                            │                  jurisdiction
     tax_year                 ──────────────►│                  tax_year
     release_kind                            │                  release_kind
@@ -160,7 +189,7 @@ This is the single most consequential decision in the change, because it is invi
   canonical.release          jurisdiction, tax_year, release_kind, identifier     4 components
 ```
 
-The fourth component enters at the run and nowhere earlier. A Bronze acquisition can legitimately know only that an archive holds "Collin, 2025, certified" — the release identifier is established by page evidence or verified content, and sometimes not at all.
+The fourth component enters at the run and nowhere earlier. A Bronze acquisition can legitimately know less than the three Bronze components too: a Dallas archive may be published as "2025, certified" while the Collin export announces neither, and both are acquired before anything establishes a tax year. Tax year and release kind come from page evidence or verified content; the release identifier comes from the same two places, and sometimes from neither.
 
 The canonical port takes `ReleaseIdentity`. It does not take `ReleasePartition` and does not accept a partition plus a hint. Where the source has not established an identifier, **promotion** fails with a named error — see the promotion seam below — and the load is never reached. The alternative is worse than failing: a synthesised identifier from a filename or checksum would be accepted by every constraint in the database and would silently define a release that does not exist.
 
@@ -245,6 +274,8 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
 - **Batches closed over whole account groups.** This was the first draft's answer, and it is rejected now: it resolves every parent inside one batch, but the canonical model sets no maximum on an account's children, so the batch is bounded only by the largest account in the release. Bounding it would mean inventing a maximum child count no accepted contract establishes. `CorrelationHandle` manages the problem instead of hiding it, and pays for that with one more opaque value — a cost `ProcessingRunRef` and `PublicationRef` already establish the shape of.
 - **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
+- **Requiring discovery to establish the tax year and release kind.** It makes the common case tidy and the Collin case impossible: one mutable export whose releases live in `curr_val_yr` and `cert_val_yr` cannot be classified before it is read. The contract already anticipated this — one source candidate, and parsing creates the logical release partitions — so requiring it here would have contradicted an accepted requirement to save a field.
+- **A second promotion seam for parsed evidence.** Two entry points for one transition, differing only in where the facts came from, and the second would be written under schedule pressure by whoever implements the first county whose releases are in content. One evidence type with one promotion keeps them indistinguishable downstream.
 - **Deferring run creation to 2.4.** The reference is database-generated; a use case cannot construct a correct one without reaching through the boundary, so deferring it would have made the first implementation invent the contract.
 
 ## Risks
