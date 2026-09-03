@@ -197,7 +197,7 @@ The first draft answered this by requiring a batch to carry whole account groups
 
 That draft also rested on a claim that is simply false: *every canonical relation carries `snapshot_key`*. `canonical.owner_value_allocation` deliberately does not, and the migration says so — "Parented by the association, not by the snapshot: there is deliberately no `snapshot_key` here, because the domain gives this record one parent and it is the association." An allocation reaches its snapshot through its association, so the graph is not the flat star the claim implied.
 
-So correlation is explicit and its lifetime is stated:
+So correlation is explicit and its lifetime is stated. A `CorrelationHandle` lets a record name a parent written in an earlier batch of the same account:
 
 ```text
   account opened   ─┐
@@ -209,7 +209,7 @@ So correlation is explicit and its lifetime is stated:
 
 An account may span as many batches as it needs, so neither side holds a whole account. The implementation's correlation state is bounded by the accounts currently open — normally one — rather than by the release, which is the property the session exists to provide.
 
-The correlation value is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
+`CorrelationHandle` is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
 
 ## Quality and publication are different units of work## Quality and publication are different units of work
 
@@ -236,7 +236,7 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Taking `ReleasePartition` on the canonical port with an optional identifier.** Makes the missing fourth component look like a nullable field rather than a refusal, and the first adapter under schedule pressure fills it in.
 - **A generic object-store CRUD port.** `ArtifactSink` and `BronzeStore` already express what is needed with tighter guarantees; a general `put`/`get` would be a weaker contract replacing a stronger one.
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
-- **Session-local correlation handles for cross-batch parents.** Sound, and unnecessary: closing the batch over account groups removes the problem instead of managing it, and avoids a second identifier vocabulary alongside `ProcessingRunRef` and `PublicationRef`.
+- **Batches closed over whole account groups.** This was the first draft's answer, and it is rejected now: it resolves every parent inside one batch, but the canonical model sets no maximum on an account's children, so the batch is bounded only by the largest account in the release. Bounding it would mean inventing a maximum child count no accepted contract establishes. `CorrelationHandle` manages the problem instead of hiding it, and pays for that with one more opaque value — a cost `ProcessingRunRef` and `PublicationRef` already establish the shape of.
 - **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
 - **Deferring run creation to 2.4.** The reference is database-generated; a use case cannot construct a correct one without reaching through the boundary, so deferring it would have made the first implementation invent the contract.
 
