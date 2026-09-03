@@ -1,8 +1,11 @@
 # Canonical Silver persistence
 
 How the promoted canonical domain maps into PostgreSQL. Normative behaviour stays in the promoted
-capabilities — [canonical appraisal records](../../openspec/specs/canonical-appraisal-records/spec.md)
-and [canonical identity and provenance](../../openspec/specs/canonical-identity-and-provenance/spec.md)
+capabilities — this schema's own
+[canonical Silver persistence](../../openspec/specs/canonical-silver-persistence/spec.md), and the
+domain vocabulary it carries in
+[canonical appraisal records](../../openspec/specs/canonical-appraisal-records/spec.md) and
+[canonical identity and provenance](../../openspec/specs/canonical-identity-and-provenance/spec.md)
 — and this page records the relations that carry them and the consequences a loader has to know.
 Where the two disagree the capability wins; nothing here restates a domain rule as though this were
 the place it lives.
@@ -199,6 +202,7 @@ covers `0006`–`0016` as well.
 ## Related
 
 - [Engineering documentation](../README.md)
+- [Canonical Silver persistence capability](../../openspec/specs/canonical-silver-persistence/spec.md)
 - [Canonical appraisal records](canonical-appraisal-records.md)
 - [Canonical identity and provenance](canonical-identity.md)
 - [PostgreSQL schema and migrations](../../infra/postgres/README.md)
