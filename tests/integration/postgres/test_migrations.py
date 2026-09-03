@@ -32,7 +32,7 @@ import pytest
 psycopg = pytest.importorskip("psycopg", reason="psycopg is required to talk to PostgreSQL")
 
 MIGRATIONS = Path(__file__).resolve().parents[3] / "infra" / "postgres" / "migrations"
-SCHEMAS = ("publication", "quality", "ingestion", "silver", "bronze", "platform")
+SCHEMAS = ("canonical", "publication", "quality", "ingestion", "silver", "bronze", "platform")
 ROLES = ("property_tax_migrator", "property_tax_ingestion", "property_tax_api")
 
 

@@ -28,6 +28,17 @@ infra/postgres/
   migrations/0003_release_diagnostics.sql
   migrations/0004_quality_results.sql
   migrations/0005_publication_metadata.sql
+  migrations/0006_canonical_schema.sql
+  migrations/0007_canonical_jurisdiction_registry.sql
+  migrations/0008_canonical_release_identity.sql
+  migrations/0009_canonical_release_load.sql
+  migrations/0010_canonical_provenance.sql
+  migrations/0011_canonical_accounts.sql
+  migrations/0012_canonical_owners.sql
+  migrations/0013_canonical_values.sql
+  migrations/0014_canonical_exemptions.sql
+  migrations/0015_canonical_land_and_improvements.sql
+  migrations/0016_canonical_geometry.sql
 ```
 
 `NNNN_snake_case_description.sql`, applied in ascending filename order.
@@ -44,12 +55,26 @@ content, and baking them in would invite the belief that starting a container ap
 ## Applying
 
 ```sh
-cd infra/postgres/migrations
-for f in 0001_*.sql 0002_*.sql 0003_*.sql 0004_*.sql 0005_*.sql; do
-    psql "$DATABASE_URL" --set ON_ERROR_STOP=on \
-        -v file_sha256="$(sha256sum "$f" | cut -d' ' -f1)" -f "$f"
-done
+(
+    set -e
+    cd infra/postgres/migrations
+    for f in [0-9][0-9][0-9][0-9]_*.sql; do
+        psql "$DATABASE_URL" --set ON_ERROR_STOP=on \
+            -v file_sha256="$(sha256sum "$f" | cut -d' ' -f1)" -f "$f"
+    done
+)
 ```
+
+The glob is matched rather than enumerated, so adding a migration needs no edit here,
+and four-digit zero padding is what makes its lexicographic order the apply order.
+
+The subshell and `set -e` are the fail-fast part, and the shape matters more than it
+looks. `... || break` reads like fail-fast and is the opposite: `break` succeeds, so
+the loop exits with status 0 and an operator or a script reading `$?` is told a failed
+apply was a successful one. Ending the subshell on the first non-zero status propagates
+psql's own exit code — 3 under `ON_ERROR_STOP` — while leaving the calling shell alive.
+A test applies this block verbatim, against a fresh database and against one that would
+fail, and asserts the status both times.
 
 Each file carries its own `BEGIN`/`COMMIT`, so `--single-transaction` is not used: it opens a second
 transaction, warns on every file, and the file's own `COMMIT` closes things first anyway.
@@ -69,16 +94,25 @@ is 16.11.
 
 ## What these are not
 
-`silver` here persists the shared adapter source-record shape: one row per physical source row,
-identifiers and values under their exact source names. It is **not** the canonical Silver model. There
-is no account snapshot and no owner, allocation, exemption, jurisdiction, land, improvement, or
-geometry child table, and `source_account_id` is nullable because Collin publishes no single account
-identifier.
+Two schemas hold county data and they are not interchangeable.
 
-Those belong to the canonical record types in task 2.2, which is unstarted, and to a migration that
-follows an approved canonical contract. Bootstrap task **3.4 is therefore not complete** and stays
-unchecked: this is the persistence the adapters and the release boundary need, not the model the
-publication contract requires.
+`silver` persists the shared adapter source-record shape: **one row per physical source row**,
+identifiers and values under their exact source names, with `source_account_id` nullable because
+Collin publishes no single account identifier. It is acquisition-shaped evidence, and it is where an
+unmapped source-native value field stays — Dallas `TOT_VAL` while its semantics are unresolved, a
+value with no accepted canonical equivalence, a county whose account key is unapproved.
+
+`canonical` persists the promoted domain: account identity, the release-scoped snapshot, and the ten
+parented records the canonical capability defines. Nothing in it is derived from `silver` by these
+migrations, and neither replaces the other. The distinction is structural rather than a naming
+convention: they are different schemas with different privileges, and `canonical`'s default
+privileges grant exactly `SELECT` and `INSERT` so a relation added later cannot inherit the ability to
+overwrite.
+
+A canonical row exists only where a loader created one from evidence. No migration backfills one, and
+a release whose kind, identifier, or county falls outside the canonical contract has no canonical
+identity at all — the evidence stays in `bronze` and in `silver` with its lineage rather than being
+canonicalized by a guess.
 
 ## What is applied
 
@@ -99,6 +133,17 @@ file raises `migration 000N is already applied` and changes nothing.
 | 0003 | `ingestion` | Processing runs, one verdict per run with its counts, and diagnostics and notices in the closed vocabulary. |
 | 0004 | `quality` | Rules as rows with configurable thresholds, and one result per rule evaluated against a run. |
 | 0005 | `publication` | The three Gold products, every publication attempt with its lineage, and the current-publication pointer. |
+| 0006 | `canonical` | The schema, and the lexical vocabulary every relation in it uses: the identifier alphabet, the control-character rule, one bounded-text predicate, and finiteness for a `numeric`. |
+| 0007 | `canonical` | The county registry, seeded from the version-controlled one the domain validates against, and read-only to the loader. |
+| 0008 | `canonical` | Canonical release identity, and its many-to-many association with the artifacts that carry it. |
+| 0009 | `canonical`, `bronze` | One canonical load — one release, one run, one artifact — gated on an accepted outcome. **The only migration that alters a pre-existing relation:** it adds `UNIQUE (manifest_id, artifact_sha256)` to `bronze.release_manifest`, an index and nothing else, which cannot fail on existing rows because `manifest_id` is already that relation's primary key. Without it there is nothing to key a load's artifact to, and a record could claim bytes its run never opened. |
+| 0010 | `canonical` | Bounded provenance, tied to its load's release, artifact, and county. |
+| 0011 | `canonical` | Account identity, and one account as one logical release observed it. |
+| 0012 | `canonical` | Owner observations, their associations, and owner-scoped value allocations. |
+| 0013 | `canonical` | Market, appraised, and assessed values; taxing units; and taxable values that exist only for one. |
+| 0014 | `canonical` | Exemptions, with the county's own classification and an explicit scope. |
+| 0015 | `canonical` | Land and improvement children at their own grain. |
+| 0016 | `canonical` | Geometry as an enrichment, carried opaquely and with no geospatial dependency. |
 
 ## Things the schema decides, so a loader cannot
 
@@ -171,6 +216,41 @@ reject data that looks reasonable:
 
 - **Publishing a sensitive field requires a named approver, an approval time, and a review
   reference.** Permission cannot be granted by a default or by a migration.
+
+- **Divergent snapshots are kept, never collapsed.** One account observed in one release through two
+  acquisitions is two loads, two provenance rows, and two snapshots. The grain — account and release —
+  is a plain index and deliberately not a constraint, because a `UNIQUE` over it would discard the
+  second observation. There is no uniqueness over load, account, and provenance either: snapshot
+  equality is structural over every field but the source as-of value, so two snapshots differing only
+  in a situs or legal value are distinct and both belong.
+
+- **A record's lineage is one authority.** No canonical relation carries a release identifier, tax
+  year, release kind, or artifact of its own; each reaches all of them through `canonical.provenance`,
+  whose release, artifact, and county are its load's own by composite key. A record therefore cannot
+  claim bytes its processing run never opened, and both directions of that escape are closed.
+
+- **Parent agreement is at release grain, not load grain.** A child must hang from a snapshot of its
+  own release, and may legitimately come from a second artifact of that release — a GIS enrichment
+  acquired separately is the case this permits. Crossing a release is refused.
+
+- **A canonical release either rests on evidence or does not exist.** `canonical.release` enforces the
+  closed four-kind vocabulary, the identifier alphabet, and membership of the persisted county
+  registry. A Denton `preliminary` roll, an identifier carrying whitespace, and `tx-madeup` each have
+  no canonical release, and without one there is no load and no canonical record. Nothing derives an
+  identifier from a filename, a digest, a year, a kind, row order, or an acquisition time.
+
+- **A rejected release commits no canonical record.** A deferred constraint trigger requires, at
+  `COMMIT`, that the load's run carries an accepted `ingestion.release_outcome`. Deferred so a loader
+  may write the records and the outcome in one transaction in either order.
+
+- **Canonical rows are insert-only to the loader.** `property_tax_ingestion` holds `SELECT` and
+  `INSERT` and neither `UPDATE` nor `DELETE`, so `ON CONFLICT DO NOTHING` is available and
+  `ON CONFLICT DO UPDATE` is not: the unsafe half of a merge is unavailable rather than discouraged.
+  Retry is answered once, at `canonical.release_load (release_key, run_id)`.
+
+- **`property_tax_api` is granted nothing in `canonical`, not even `USAGE`**, so a table grant added
+  by mistake is still unreachable. The canonical relations hold owner names and addresses, and
+  representing a field is not permission to publish it.
 
 ## There is no rollback
 
@@ -249,8 +329,11 @@ Also outstanding:
 
 ## Verifying a Migration Before It Ships
 
-`tests/integration/postgres/test_migrations.py` applies every file against a real PostgreSQL and then attacks
-each invariant above. It needs a database and skips without one:
+`tests/integration/postgres/` applies every file against a real PostgreSQL and then attacks each
+invariant above: `test_migrations.py` for `0001`-`0005`, and six canonical suites for `0006`-`0016` —
+identity and grain, cardinality and cross-wiring, scalars and vocabularies and geometry, privileges,
+the migration contract and both upgrade paths, and release atomicity. They need a database and skip
+without one:
 
 ```sh
 export PGPASSWORD="$(openssl rand -hex 16)"
@@ -280,5 +363,6 @@ that wiring.
 
 - [Infrastructure overview](../README.md)
 - [PostgreSQL migration agent guidance](AGENTS.md)
+- [Canonical Silver persistence](../../docs/engineering/canonical-silver-persistence.md)
 - [ADR-0002: S3 durable recovery boundary](../../docs/decisions/0002-s3-durable-recovery-boundary.md)
 - [PostgreSQL backup and recovery](../../docs/operations/postgresql-recovery.md)
