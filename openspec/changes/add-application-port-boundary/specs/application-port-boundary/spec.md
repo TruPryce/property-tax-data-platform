@@ -14,21 +14,33 @@ The application package SHALL remain importable and its ports constructible with
 - **THEN** the import succeeds and every port remains usable as a type
 
 ### Requirement: Source resolution fails before network acquisition and describes expected media
-The system SHALL resolve a supported county and release kind to a source definition without performing network acquisition, and SHALL represent an unregistered county or release kind as a named, actionable unsupported-source failure rather than an absent result or a generic error.
+Source resolution SHALL resolve a jurisdiction to its registered source definition without performing network access, and SHALL fail with a named, actionable error where the jurisdiction is not registered.
 
-That definition SHALL carry the expected media types for the source, so acquisition can reject an unexpected representation without a county-specific branch in its caller.
+A requested release kind SHALL be optional. Where a caller supplies one, resolution SHALL reject an unregistered kind before any network acquisition. Where a caller cannot supply one — because the source establishes its release kinds only in acquired content — resolution SHALL succeed on the jurisdiction alone rather than requiring the caller to name a kind it has not yet learned.
 
-#### Scenario: A registered source is resolved
-- **WHEN** a run requests a registered county and release kind
-- **THEN** a source definition carrying its endpoint, acquisition method, parser identifier, and expected media types is returned, and no network request has been made
+The system SHALL additionally provide validation of a release kind once it is known, and a kind established only by parsing SHALL be validated after parsing and before promotion. Rejecting such a kind before network acquisition is not possible, and the boundary SHALL NOT require a caller to invent one to proceed.
 
-#### Scenario: An unregistered source is requested
-- **WHEN** a run requests a county or release kind the registry does not describe
-- **THEN** a named unsupported-source failure is raised before acquisition, identifying what was requested
+A resolved definition SHALL describe the expected media types of the source, and SHALL NOT carry a credential or a secret value.
 
-#### Scenario: A consumer resolves several counties
-- **WHEN** a caller resolves sources for more than one county
-- **THEN** it does so through one uniform call and contains no county-specific branch
+#### Scenario: A registered jurisdiction is resolved without a kind
+- **WHEN** a caller resolves a registered jurisdiction without naming a release kind
+- **THEN** its source definition is returned and no network access is performed
+
+#### Scenario: An unregistered jurisdiction is requested
+- **WHEN** a caller requests a jurisdiction that is not registered
+- **THEN** resolution fails before network acquisition with a named error identifying what was requested
+
+#### Scenario: An unregistered release kind is requested
+- **WHEN** a caller requests a registered jurisdiction together with a release kind that is not registered for it
+- **THEN** resolution fails before network acquisition with a named error
+
+#### Scenario: A release kind is established only by content
+- **WHEN** a source's release kinds are established only in acquired content
+- **THEN** the jurisdiction resolves without one, and the kind is validated after parsing establishes it and before promotion
+
+#### Scenario: A resolved definition is inspected
+- **WHEN** a source definition is resolved
+- **THEN** it describes the expected media types of the source and carries no credential
 
 ### Requirement: Discovery carries bounded evidence and distinguishes a new release from an unchanged one
 Release discovery SHALL return, for each observed source, either a source candidate or a no-change result. A source candidate SHALL carry the jurisdiction, the source locator, the remote metadata, the source as-of evidence, and the page evidence the source published. A no-change result SHALL be returned where remote metadata and content identity match a release already acquired, and SHALL NOT require the artifact to be downloaded again.
