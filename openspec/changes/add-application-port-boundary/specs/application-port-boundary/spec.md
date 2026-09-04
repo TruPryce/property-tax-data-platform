@@ -85,7 +85,7 @@ No general-purpose object-store create/read/update/delete port SHALL be introduc
 ### Requirement: An acquisition is manifested before its releases are known
 Every successfully acquired artifact SHALL have its acquisition manifested, whether or not any logical release has yet been established. An acquisition manifest SHALL therefore be recordable carrying no release partition, and SHALL carry the jurisdiction explicitly rather than deriving it from partitions it may not have.
 
-A release partition established later SHALL be attachable to that recorded acquisition, in the object store and in the queryable index alike, without altering the immutable acquisition record. Where partitions are present, each SHALL name the same jurisdiction the manifest names.
+A release partition established later SHALL be attachable without altering the immutable acquisition record. The two stores associate it at deliberately different grains: the object store associates a partition with the **artifact**, whose identity is content alone, while the queryable index associates it with the **acquisition** the run binds to. The contract SHALL keep those distinct rather than describing them as one association. Where partitions are present, each SHALL name the same jurisdiction the manifest names.
 
 No partition SHALL be fabricated to make an acquisition recordable, and an artifact that fails inspection before any release is established SHALL still have a durable record of what was acquired.
 
@@ -99,7 +99,7 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 
 #### Scenario: A release established by parsing is attached
 - **WHEN** parsing establishes a logical release for an already-recorded acquisition
-- **THEN** its partition is attached to that acquisition without altering the immutable acquisition record
+- **THEN** its partition is associated with the artifact in the object store and with the acquisition in the queryable index, and the recorded acquisition manifest is unaltered
 
 #### Scenario: An acquisition manifest is written to durable storage
 - **WHEN** an acquisition manifest carrying no partition is written
@@ -112,6 +112,31 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 #### Scenario: A partition disagrees with its acquisition
 - **WHEN** a partition naming a different jurisdiction than its acquisition manifest is offered
 - **THEN** it is refused
+
+### Requirement: An acquisition manifest is stored at acquisition grain
+An acquisition manifest SHALL be stored so that it is identified by the acquisition it records, not by the artifact that acquisition obtained. Artifact identity is content alone, and the same bytes may legitimately be acquired from different jurisdictions, different source locations, and at different instants; storing one manifest per artifact would let the first such acquisition silently discard the provenance of every later one.
+
+The storage contract SHALL therefore hold: recording the same acquisition again SHALL resolve to the same manifest, so a retry writes no duplicate; recording a different acquisition of the same artifact SHALL resolve to a different manifest, so neither displaces the other; and an already-recorded manifest SHALL NOT be overwritten.
+
+A manifest already recorded in an earlier serialized shape SHALL remain immutable and SHALL NOT prevent a later acquisition of the same artifact from being recorded in the current shape. The artifact bytes themselves SHALL remain content-addressed, since artifact identity is unchanged by any of this.
+
+The mechanism that satisfies these properties is an implementation decision and SHALL NOT be fixed by the port contract.
+
+#### Scenario: One artifact is acquired by two jurisdictions
+- **WHEN** the same bytes are acquired for two different jurisdictions from two different sources
+- **THEN** two acquisition manifests are recorded, neither displacing the other, and both jurisdictions remain recoverable
+
+#### Scenario: One acquisition is recorded twice
+- **WHEN** an acquisition already recorded is recorded again
+- **THEN** it resolves to the manifest already stored and no duplicate is written
+
+#### Scenario: An artifact already carries a manifest in the earlier shape
+- **WHEN** an artifact whose stored manifest predates the current shape is acquired again
+- **THEN** the earlier manifest is left untouched and the new acquisition is still recorded in the current shape
+
+#### Scenario: Artifact storage is examined
+- **WHEN** the stored artifact bytes are examined
+- **THEN** they remain identified by content alone, unaffected by how many acquisitions reference them
 
 ### Requirement: A manifest reference is produced by manifest persistence
 The system SHALL provide an application-owned reference identifying a recorded acquisition manifest, produced where that manifest is recorded, and SHALL NOT require a caller to derive it from an object-store locator, a checksum, or any other evidence.

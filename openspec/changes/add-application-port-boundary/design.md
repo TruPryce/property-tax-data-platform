@@ -198,6 +198,41 @@ Stored v1 objects are immutable and stay exactly as they are. Nothing in the rep
 
 One claim in the first draft of this task was simply wrong: that adding `jurisdiction` was a widening leaving every existing construction valid. Relaxing `partitions` is; adding a required field is not. `from_acquisition` takes `partitions` keyword-only and would take `jurisdiction` the same way, so the four constructions are updated. The alternative — inferring the county from a non-empty partition tuple and requiring it only when empty — gives one fact two sources of truth and quietly restores the derivation this lifecycle removes.
 
+### The grain the manifest is stored at
+
+Adding the jurisdiction exposed something older. Two docstrings in this repository contradict each other:
+
+```text
+  manifest_key      "The manifest describes an artifact, so it is keyed like one."
+                    bronze/artifacts/<sha>.manifest.json
+  ReleaseManifest   "The immutable record of one acquisition."
+```
+
+Both cannot be true. The value is acquisition-grain — it carries `acquired_at`, the source URL, response metadata, redirects — and the database agrees, giving `bronze.release_manifest` no unique constraint on `artifact_sha256` precisely so one artifact can carry several acquisitions. The object store keys it by artifact anyway, and `record()` justifies treating an existing object as success because "it describes the same artifact by construction". That reasoning was sound while a manifest was artifact-grain. It is wrong now.
+
+The accepted artifact contract makes the collision reachable rather than theoretical: identity is "the SHA-256 content digest alone", and the same digest under two source URLs compares equal. So:
+
+```text
+  acquisition A   tx-dallas, Dallas URL, T1  ─┐
+                                              ├─► one key: bronze/artifacts/X.manifest.json
+  acquisition B   tx-collin, Collin URL, T2  ─┘   B is silently discarded
+```
+
+The v1→v2 case is worse because it needs no second county. A stored v1 manifest occupies the key, the conditional put finds it, `record()` reports success — and the v2 acquisition's explicit jurisdiction is never written. Retaining v1, which is right, would permanently prevent v2 for those bytes.
+
+So the manifest gets an acquisition-grain locator while the artifact bytes stay content-addressed, and the plan states properties rather than a scheme:
+
+```text
+  same artifact, same acquisition       ─► same manifest, no duplicate written
+  same artifact, different acquisition  ─► different manifest, neither displaced
+  already recorded                      ─► never overwritten
+  stored v1 object                      ─► immutable, and does not block v2
+```
+
+A digest over the canonical serialized manifest would satisfy all four, but that is the adapter's decision and the port contract does not fix it.
+
+The two partition associations differ in the same way and should not be flattened. `reference_partition(partition, sha256)` takes a checksum, so in the object store a partition is associated with the artifact; `ManifestIndex` associates it with the acquisition a run binds to. Content identity on one side, acquisition identity on the other — deliberate, and worth saying out loud.
+
 The manifest still exists before normalisation, which is what the accepted contract asks. Deriving a partition stays a projection rather than a decision: `ReleasePartition` is `LogicalReleaseEvidence` with the release identifier dropped.
 
 One promotion seam serves both origins, so evidence established by a page and evidence established by content are indistinguishable downstream — which is what keeps the six counties on one contract rather than two. The many-to-many artifact/release model this preserves is already accepted: `canonical-identity-and-provenance` requires the association to "support one artifact carrying several logical releases and one logical release observed in several artifacts."
@@ -337,6 +372,8 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
 - **Batches closed over whole account groups.** This was the first draft's answer, and it is rejected now: it resolves every parent inside one batch, but the canonical model sets no maximum on an account's children, so the batch is bounded only by the largest account in the release. Bounding it would mean inventing a maximum child count no accepted contract establishes. `CorrelationHandle` manages the problem instead of hiding it, and pays for that with one more opaque value — a cost `ProcessingRunRef` and `PublicationRef` already establish the shape of.
 - **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
+- **Keying the acquisition manifest by artifact digest.** It is what the adapter does today, and it was coherent while the manifest was artifact-grain. Once the value carries a jurisdiction, a source URL, and an acquisition instant, one key per artifact discards every acquisition after the first and lets a stored v1 object block v2 forever.
+- **Fixing the manifest keying scheme in the port contract.** The application would be naming an object-store layout, which is exactly the infrastructure vocabulary this boundary keeps out. The contract states the four properties and leaves the mechanism to the adapter.
 - **Changing the manifest value without changing the serializer.** Keeps the plan's no-adapter rule intact and writes an object-store record with no county — the exact defect the change is meant to fix.
 - **Keeping the manifest at version 1 while adding a field.** The version is pinned so a consumer can identify the shape; two shapes sharing a number make it useless for the one job it has.
 - **Inferring the jurisdiction from a non-empty partition tuple.** Avoids updating four constructions, at the price of one fact having two sources of truth and the derivation returning by the back door.
