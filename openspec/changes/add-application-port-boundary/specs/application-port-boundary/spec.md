@@ -82,6 +82,29 @@ No general-purpose object-store create/read/update/delete port SHALL be introduc
 - **WHEN** a checksum is classified against a release partition
 - **THEN** the classification is returned to the caller and is not persisted as a verdict
 
+### Requirement: An acquisition is manifested before its releases are known
+Every successfully acquired artifact SHALL have its acquisition manifested, whether or not any logical release has yet been established. An acquisition manifest SHALL therefore be recordable carrying no release partition, and SHALL carry the jurisdiction explicitly rather than deriving it from partitions it may not have.
+
+A release partition established later SHALL be attachable to that recorded acquisition, in the object store and in the queryable index alike, without altering the immutable acquisition record. Where partitions are present, each SHALL name the same jurisdiction the manifest names.
+
+No partition SHALL be fabricated to make an acquisition recordable, and an artifact that fails inspection before any release is established SHALL still have a durable record of what was acquired.
+
+#### Scenario: An artifact is acquired before anything is known about its releases
+- **WHEN** an artifact is acquired from a source whose release facts live only in its content
+- **THEN** its acquisition manifest is recorded carrying the jurisdiction and no partition, and a reference to it is returned
+
+#### Scenario: Inspection fails before any release is established
+- **WHEN** archive or schema inspection fails before a tax year or release kind is established
+- **THEN** the acquired bytes still have a recorded acquisition manifest, and no partition is invented to produce one
+
+#### Scenario: A release established by parsing is attached
+- **WHEN** parsing establishes a logical release for an already-recorded acquisition
+- **THEN** its partition is attached to that acquisition without altering the immutable acquisition record
+
+#### Scenario: A partition disagrees with its acquisition
+- **WHEN** a partition naming a different jurisdiction than its acquisition manifest is offered
+- **THEN** it is refused
+
 ### Requirement: A manifest reference is produced by manifest persistence
 The system SHALL provide an application-owned reference identifying a recorded acquisition manifest, produced where that manifest is recorded, and SHALL NOT require a caller to derive it from an object-store locator, a checksum, or any other evidence.
 

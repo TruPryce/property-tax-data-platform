@@ -135,7 +135,7 @@ Collin is that case, and it is not hypothetical. The published source is one mut
 So the two grains are separated, and the evidence is the thing promotion consumes:
 
 ```text
-  SourceCandidate ──acquire──► artifact ──► manifest ──► ManifestRef M
+  SourceCandidate ──acquire──► artifact ──► acquisition manifest ──► ManifestRef M
         │                                        │
         │ page established the facts?            │
         ├── yes ──► LogicalReleaseEvidence       ├──────────────┐
@@ -151,18 +151,34 @@ So the two grains are separated, and the evidence is the thing promotion consume
                  run B(M)        both runs bind the same manifest
 ```
 
-`ReleaseManifest` requires a non-empty tuple of `ReleasePartition`, so the ordering is forced and worth stating rather than leaving 2.4 to rediscover it: a candidate carrying no evidence cannot be recorded straight after acquisition.
+The previous draft ordered this parse-first, because `ReleaseManifest` required a non-empty tuple of partitions. That ordering has a hole. An artifact can be acquired successfully — bytes durable, checksum final — and then fail archive or schema inspection before any tax year or release kind is established. Parse-first leaves those immutable bytes with no manifest at all: nothing records what was acquired, which is the one thing Bronze exists to guarantee, and the release is quarantined with no provenance to quarantine it *by*.
+
+The database already models it the other way round. `bronze.release_manifest` carries its own `jurisdiction_code NOT NULL`, and migration `0001` adds `release_manifest_identity UNIQUE (manifest_id, jurisdiction_code)` for the sole purpose of letting `bronze.release_partition` reference it compositely:
+
+```text
+  bronze.release_manifest        the acquisition event, jurisdiction its own column
+        │
+        ├── release_partition A  (tax_year, release_kind)   attached when established
+        └── release_partition B
+```
+
+The manifest owns the jurisdiction; a partition inherits it and adds only tax year and release kind. So the acquisition is manifested first, and partitions attach as they become known:
 
 ```text
   acquire bytes
-    └─► establish LogicalReleaseEvidence      (page evidence, or parsing)
-          └─► derive ReleasePartition each     (the three Bronze components)
-                └─► build + record ReleaseManifest
-                      └─► ManifestIndex ─► ManifestRef
-                            └─► promote ─► ReleaseIdentity ─► start(run)
+    └─► record acquisition manifest      jurisdiction known, zero partitions
+          └─► ManifestIndex ─► ManifestRef
+                └─► establish LogicalReleaseEvidence   (page evidence, or parsing)
+                      └─► derive ReleasePartition each  (three Bronze components)
+                            └─► attach to the recorded acquisition
+                                  └─► promote ─► ReleaseIdentity ─► start(run)
 ```
 
-The manifest still exists before normalisation, which is what the accepted contract asks. Deriving the partition is a projection, not a decision: `ReleasePartition` is `LogicalReleaseEvidence` with the release identifier dropped.
+`BronzeStore` needs no redesign: `reference_partition` already exists precisely to attach a partition discovered after acquisition without touching the immutable manifest. What was missing is the relational half, so `ManifestIndex` gains the matching attachment.
+
+Two bounded changes to a retained value follow. `ReleaseManifest.partitions` admits an empty tuple — a widening, so every existing construction stays valid — and `ReleaseManifest` gains an explicit `jurisdiction`, because with partitions possibly absent it can no longer derive one from them, and because the database makes it the manifest's own column anyway. The alternative, passing the jurisdiction beside the manifest only at registration, leaves the manifest value unable to describe itself and the object-store record without a county. Fabricating a partition to carry it is the one thing not on the table.
+
+The manifest still exists before normalisation, which is what the accepted contract asks. Deriving a partition stays a projection rather than a decision: `ReleasePartition` is `LogicalReleaseEvidence` with the release identifier dropped.
 
 One promotion seam serves both origins, so evidence established by a page and evidence established by content are indistinguishable downstream — which is what keeps the six counties on one contract rather than two. The many-to-many artifact/release model this preserves is already accepted: `canonical-identity-and-provenance` requires the association to "support one artifact carrying several logical releases and one logical release observed in several artifacts."
 
@@ -301,6 +317,8 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
 - **Batches closed over whole account groups.** This was the first draft's answer, and it is rejected now: it resolves every parent inside one batch, but the canonical model sets no maximum on an account's children, so the batch is bounded only by the largest account in the release. Bounding it would mean inventing a maximum child count no accepted contract establishes. `CorrelationHandle` manages the problem instead of hiding it, and pays for that with one more opaque value — a cost `ProcessingRunRef` and `PublicationRef` already establish the shape of.
 - **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
+- **Keeping `ReleaseManifest.partitions` non-empty and ordering parse before the manifest.** It preserves a retained value untouched at the cost of leaving a successfully acquired artifact unmanifested whenever inspection fails first — the case Bronze exists for. `reference_partition` already anticipates later attachment, and the database's composite `release_manifest_identity` key shows the intended shape.
+- **Passing the jurisdiction beside the manifest at registration instead of on the value.** Avoids touching `ReleaseManifest`, and leaves a manifest that cannot say which county it belongs to — including in the object-store record, where nothing is passing anything beside it.
 - **Requiring a release kind to resolve a source.** It would make Collin unresolvable one step before it is undiscoverable, since the definition must exist before the source can be probed and the kinds are inside the artifact. Today's `source_for_county(county)` already resolves by county alone, and the accepted scenarios are about what a caller *requests*, so making the kind optional keeps both intact.
 - **Requiring discovery to establish the tax year and release kind.** It makes the common case tidy and the Collin case impossible: one mutable export whose releases live in `curr_val_yr` and `cert_val_yr` cannot be classified before it is read. The contract already anticipated this — one source candidate, and parsing creates the logical release partitions — so requiring it here would have contradicted an accepted requirement to save a field.
 - **A second promotion seam for parsed evidence.** Two entry points for one transition, differing only in where the facts came from, and the second would be written under schedule pressure by whoever implements the first county whose releases are in content. One evidence type with one promotion keeps them indistinguishable downstream.
