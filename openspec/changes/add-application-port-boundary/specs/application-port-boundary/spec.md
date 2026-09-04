@@ -101,6 +101,14 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 - **WHEN** parsing establishes a logical release for an already-recorded acquisition
 - **THEN** its partition is attached to that acquisition without altering the immutable acquisition record
 
+#### Scenario: An acquisition manifest is written to durable storage
+- **WHEN** an acquisition manifest carrying no partition is written
+- **THEN** the written record carries the jurisdiction, so the county is recoverable without a partition to read it from
+
+#### Scenario: A consumer identifies the manifest shape
+- **WHEN** a written manifest is inspected
+- **THEN** its pinned version distinguishes the shape carrying an explicit jurisdiction and possibly no partition from the earlier shape whose county was recoverable only from a non-empty partition tuple
+
 #### Scenario: A partition disagrees with its acquisition
 - **WHEN** a partition naming a different jurisdiction than its acquisition manifest is offered
 - **THEN** it is refused

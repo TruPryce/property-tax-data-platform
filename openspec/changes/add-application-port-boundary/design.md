@@ -178,6 +178,26 @@ The manifest owns the jurisdiction; a partition inherits it and adds only tax ye
 
 Two bounded changes to a retained value follow. `ReleaseManifest.partitions` admits an empty tuple — a widening, so every existing construction stays valid — and `ReleaseManifest` gains an explicit `jurisdiction`, because with partitions possibly absent it can no longer derive one from them, and because the database makes it the manifest's own column anyway. The alternative, passing the jurisdiction beside the manifest only at registration, leaves the manifest value unable to describe itself and the object-store record without a county. Fabricating a partition to carry it is the one thing not on the table.
 
+Changing what the value carries is only half of it. `serialize_manifest` in the S3 adapter enumerates fields by hand, so a new field is not written unless the serializer is changed, and the only county in the JSON today is the `jurisdiction_code` inside each partition — which a zero-partition acquisition has none of. Leaving the adapter alone would produce precisely the record this change exists to prevent:
+
+```text
+  ReleaseManifest(jurisdiction=tx-collin, partitions=())
+        └─► <sha>.manifest.json     no partition, and no county either
+```
+
+So this one change reaches into the adapter, and the plan says so rather than forbidding what it requires. The surface is the serializer and its tests, nothing else.
+
+The pinned `BRONZE_MANIFEST_VERSION` then has to move. It exists so a consumer identifies the shape rather than inferring it from which fields are present, and two shapes both claiming version 1 would defeat that:
+
+```text
+  v1   non-empty partitions; county recoverable only from them
+  v2   explicit jurisdiction; partitions may be empty
+```
+
+Stored v1 objects are immutable and stay exactly as they are. Nothing in the repository deserializes a manifest today — they are write-only evidence — so no stored object is re-read, rewritten, or migrated.
+
+One claim in the first draft of this task was simply wrong: that adding `jurisdiction` was a widening leaving every existing construction valid. Relaxing `partitions` is; adding a required field is not. `from_acquisition` takes `partitions` keyword-only and would take `jurisdiction` the same way, so the four constructions are updated. The alternative — inferring the county from a non-empty partition tuple and requiring it only when empty — gives one fact two sources of truth and quietly restores the derivation this lifecycle removes.
+
 The manifest still exists before normalisation, which is what the accepted contract asks. Deriving a partition stays a projection rather than a decision: `ReleasePartition` is `LogicalReleaseEvidence` with the release identifier dropped.
 
 One promotion seam serves both origins, so evidence established by a page and evidence established by content are indistinguishable downstream — which is what keeps the six counties on one contract rather than two. The many-to-many artifact/release model this preserves is already accepted: `canonical-identity-and-provenance` requires the association to "support one artifact carrying several logical releases and one logical release observed in several artifacts."
@@ -317,6 +337,9 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 - **Letting use cases call `datetime.now`.** Makes every use case untestable at the one point where determinism matters most, which is why the clock is a port at all.
 - **Batches closed over whole account groups.** This was the first draft's answer, and it is rejected now: it resolves every parent inside one batch, but the canonical model sets no maximum on an account's children, so the batch is bounded only by the largest account in the release. Bounding it would mean inventing a maximum child count no accepted contract establishes. `CorrelationHandle` manages the problem instead of hiding it, and pays for that with one more opaque value — a cost `ProcessingRunRef` and `PublicationRef` already establish the shape of.
 - **A nullable release identifier on the canonical port.** Makes the missing fourth component look like an optional field rather than a refusal, which is how a filename becomes a release identifier.
+- **Changing the manifest value without changing the serializer.** Keeps the plan's no-adapter rule intact and writes an object-store record with no county — the exact defect the change is meant to fix.
+- **Keeping the manifest at version 1 while adding a field.** The version is pinned so a consumer can identify the shape; two shapes sharing a number make it useless for the one job it has.
+- **Inferring the jurisdiction from a non-empty partition tuple.** Avoids updating four constructions, at the price of one fact having two sources of truth and the derivation returning by the back door.
 - **Keeping `ReleaseManifest.partitions` non-empty and ordering parse before the manifest.** It preserves a retained value untouched at the cost of leaving a successfully acquired artifact unmanifested whenever inspection fails first — the case Bronze exists for. `reference_partition` already anticipates later attachment, and the database's composite `release_manifest_identity` key shows the intended shape.
 - **Passing the jurisdiction beside the manifest at registration instead of on the value.** Avoids touching `ReleaseManifest`, and leaves a manifest that cannot say which county it belongs to — including in the object-store record, where nothing is passing anything beside it.
 - **Requiring a release kind to resolve a source.** It would make Collin unresolvable one step before it is undiscoverable, since the definition must exist before the source can be probed and the kinds are inside the artifact. Today's `source_for_county(county)` already resolves by county alone, and the accepted scenarios are about what a caller *requests*, so making the kind optional keeps both intact.
