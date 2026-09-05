@@ -116,11 +116,15 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 ### Requirement: An acquisition manifest is stored at acquisition grain
 An acquisition manifest SHALL be stored so that it is identified by the acquisition it records, not by the artifact that acquisition obtained. Artifact identity is content alone, and the same bytes may legitimately be acquired from different jurisdictions, different source locations, and at different instants; storing one manifest per artifact would let the first such acquisition silently discard the provenance of every later one.
 
-Two recordings SHALL be the same acquisition exactly when their acquisition manifests are equal in every field describing the acquisition — the jurisdiction, the artifact identity, the acquisition instant, the source location, the response metadata, the redirect chain, the serialized shape version, and the recorded tool versions. The partition tuple SHALL be excluded from that comparison, because partitions are attached after an acquisition is recorded and including them would make an acquisition look new merely for having gained one.
+Two recordings SHALL be the same acquisition exactly when their retained acquisition evidence is equal. That evidence is the jurisdiction, the complete stored-artifact evidence, the acquisition instant, the source location, the response metadata, the redirect chain, the serialized shape version, and the recorded tool versions. The partition tuple SHALL be excluded, because partitions are attached after an acquisition is recorded and including them would make an acquisition look new merely for having gained one.
+
+The stored-artifact evidence SHALL be compared in full — its locator, content digest, byte count, and media type — and not by content digest alone. Byte identity alone SHALL NOT collapse two recordings whose remaining retained evidence differs.
 
 This rule SHALL be evaluated on the immutable manifest value alone. It SHALL NOT depend on a storage locator, an object key, a lock, a digest choice, a query, or any other adapter mechanism, and no acquisition identifier separate from that value SHALL be required.
 
-A repeated network acquisition SHALL therefore be a new acquisition rather than a retry, because it is performed at a different instant and reports its own response metadata, even where it obtains byte-identical content. Artifact identity SHALL remain the content digest alone, so those two acquisitions SHALL name one artifact and two acquisitions.
+Recordings whose retained evidence differs SHALL be different acquisitions even where the artifact content is byte-identical. Artifact identity SHALL remain the content digest alone, so two such acquisitions SHALL name one artifact and two acquisitions.
+
+Where two physical fetches produce identical retained evidence in every compared component, they SHALL be observationally equivalent and MAY coalesce into one acquisition. The model carries no independent physical-attempt identifier, and this contract SHALL NOT claim that a repeated fetch necessarily yields a distinct acquisition: a fixed or finite-resolution clock and an unchanged response can make two fetches indistinguishable in the evidence retained. This change SHALL NOT introduce an acquisition identifier, a schema migration, or a persistence column to distinguish them.
 
 The storage contract SHALL therefore hold: recording the same acquisition again SHALL resolve to the same manifest, so a retry writes no duplicate; recording a different acquisition of the same artifact SHALL resolve to a different manifest, so neither displaces the other; and an already-recorded manifest SHALL NOT be overwritten.
 
@@ -136,9 +140,17 @@ The mechanism that satisfies these properties is an implementation decision and 
 - **WHEN** the same completed acquisition is registered again, carrying the same acquisition manifest value
 - **THEN** it resolves to the manifest already stored, the same reference is returned, and no duplicate is written
 
-#### Scenario: The same bytes are acquired a second time
-- **WHEN** the source is fetched again at a later instant and returns byte-identical content
-- **THEN** the two recordings differ in their acquisition instant and response metadata, so they are two acquisitions of one artifact and both are recorded
+#### Scenario: The same bytes are acquired again with differing evidence
+- **WHEN** the source is fetched again, returns byte-identical content, and any component of the retained acquisition evidence differs
+- **THEN** they are two acquisitions of one artifact and both are recorded, neither displacing the other
+
+#### Scenario: Two fetches leave identical evidence
+- **WHEN** two physical fetches produce retained acquisition evidence identical in every compared component
+- **THEN** they are observationally equivalent and may coalesce, because nothing retained distinguishes them and no physical-attempt identifier exists
+
+#### Scenario: Only the media type differs
+- **WHEN** two recordings carry the same content digest but differing stored-artifact evidence
+- **THEN** they are different acquisitions, because byte identity alone does not collapse differing evidence
 
 #### Scenario: A retry is distinguished from a re-acquisition without consulting storage
 - **WHEN** two acquisition manifests are compared
@@ -147,6 +159,10 @@ The mechanism that satisfies these properties is an implementation decision and 
 #### Scenario: A partition is attached and the acquisition is registered again
 - **WHEN** an acquisition that has since gained a partition is registered again
 - **THEN** it is still the same acquisition, because partitions take no part in the comparison
+
+#### Scenario: Each acquisition-defining component is mutated in turn
+- **WHEN** exactly one declared acquisition-defining component is changed and every other is held equal
+- **THEN** the recordings are different acquisitions, for every such component in turn
 
 #### Scenario: An artifact already carries a manifest in the earlier shape
 - **WHEN** an artifact whose stored manifest predates the current shape is acquired again

@@ -185,7 +185,7 @@ Changing what the value carries is only half of it. `serialize_manifest` in the 
         └─► <sha>.manifest.json     no partition, and no county either
 ```
 
-So this one change reaches into the adapter, and the plan says so rather than forbidding what it requires. The surface is the serializer and its tests, nothing else.
+So this one change reaches into the adapter, and the plan says so rather than forbidding what it requires. The surface is the manifest serialization, the manifest-storage mechanics that the acquisition grain requires, and their tests — in `objectstore/s3.py` and `test_s3_bronze.py`, and nothing else. No new or general object-store capability is added beyond that bounded correction to what already exists.
 
 The pinned `BRONZE_MANIFEST_VERSION` then has to move. It exists so a consumer identifies the shape rather than inferring it from which fields are present, and two shapes both claiming version 1 would defeat that:
 
@@ -231,7 +231,9 @@ Before any of that, something has to say when two recordings are *one* acquisiti
 
 That is decidable from the value alone — no locator, key, lock, digest choice, or query — and it needs no acquisition identifier beside the manifest, which is the second identifier vocabulary D2a and D2c already refused.
 
-It also gives the distinction the storage grain exists for. A repeated network fetch of byte-identical content is a **new acquisition**, not a retry, because it happens at a different instant and reports its own response metadata. Artifact identity is the digest alone and cannot see that difference — correctly, since the bytes are the same — so the manifest is where it has to live:
+The comparison is over the *complete* stored-artifact evidence — locator, digest, byte count, media type — not the digest alone. Comparing by digest would collapse two recordings that agree on the bytes and disagree on everything else about how they were obtained, which is the opposite of what acquisition grain is for.
+
+It also gives the distinction the storage grain exists for, with one honest limit. Two recordings whose retained evidence differs are different acquisitions even when the bytes are identical; artifact identity is the digest alone and cannot see that, which is why the manifest has to carry it. But the contract stops there and does not promise that a repeated fetch is *always* a new acquisition. It cannot: under a fixed or coarse clock with an unchanged response, two fetches can leave evidence identical in every compared component, and then nothing retained distinguishes them. They are observationally equivalent and may coalesce. Inventing a physical-attempt identifier to force them apart would mean a new identifier, a column, and a migration to record something no consumer can act on:
 
 ```text
   register(M)  then  register(M)      one acquisition, one manifest, one ManifestRef
@@ -248,7 +250,7 @@ So the manifest gets an acquisition-grain locator while the artifact bytes stay 
   stored v1 object                      ─► immutable, and does not block v2
 ```
 
-A digest over the canonical serialized manifest would satisfy all four, but that is the adapter's decision and the port contract does not fix it.
+A digest over a canonical **acquisition-equivalence preimage** — the compared components, with partitions excluded — is one possible implementation. A digest over the full serialized manifest is not, because that serialization carries the partitions, so attaching one afterwards would change the digest and manufacture a second acquisition out of the same one. Either way the adapter chooses, and the port contract fixes nothing.
 
 The two partition associations differ in the same way and should not be flattened. `reference_partition(partition, sha256)` takes a checksum, so in the object store a partition is associated with the artifact; `ManifestIndex` associates it with the acquisition a run binds to. Content identity on one side, acquisition identity on the other — deliberate, and worth saying out loud.
 
@@ -423,7 +425,9 @@ So there are three transactions in the pipeline, not one, and the boundary makes
 
 ## Migration
 
-None. No existing signature changes, no data moves, no migration is added. `ArtifactSink` and `BronzeStore` keep their contracts, and every new port is additive.
+No data moves and no migration is added. `ArtifactSink` keeps its signatures and semantics, the `BronzeStore` Protocol keeps its operations and their signatures, and every new port is additive.
+
+One construction signature does change: `ReleaseManifest` gains a required `jurisdiction`, so `ReleaseManifest(...)` and `ReleaseManifest.from_acquisition(...)` take one more keyword argument. The four call sites are all in `libs/property-tax-adapters/tests/objectstore/test_s3_bronze.py` and are updated with it. Stored v1 manifest objects are untouched and are not re-read or rewritten.
 
 ## Handoffs
 
