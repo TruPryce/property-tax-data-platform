@@ -25,7 +25,7 @@ Every task-2.3 responsibility, classified against what the repository contains t
 | Official source registry | `CountySourceDefinition`, `AcquisitionMethod` (application); `source_for_county` (adapters, a module function) | **(2) extend** — the vocabulary is right, the lookup is not injectable and does not key on release kind |
 | Release discovery | nothing | **(3) new** |
 | Artifact storage | `ArtifactSink` — `__enter__`/`write`/`commit`/`abort`/`__exit__` | **(1) retained unchanged** |
-| Manifest | `BronzeStore` — `classify`/`record`/`reference_partition` | **(1) retained unchanged** |
+| Manifest | `BronzeStore` — `classify`/`record`/`reference_partition` | **(1) Protocol retained unchanged**; `ReleaseManifest` and the S3 manifest mechanics take a bounded correction |
 | Canonical repository | nothing | **(3) new** |
 | Quality | nothing in the application; the run-bound database model exists | **(3) new** |
 | Publication | nothing in the application; the run-bound database model exists | **(3) new** |
@@ -38,7 +38,9 @@ Every task-2.3 responsibility, classified against what the repository contains t
 
 Seven responsibilities resolve to **eleven contracts**: two retained — one of them bounded-extended so an acquisition can be manifested before its releases are known — and nine added. The count differs from seven for one reason, stated rather than glossed: `source-release-ingestion` carries *two* accepted requirements here — "Official source registry" and "Release discovery" — and they are not the same responsibility. The registry resolves a county and release kind with no network access, because the accepted scenario requires an unsupported source to "fail before network acquisition". Discovery probes remote metadata. Collapsing them would make the pre-network failure inexpressible.
 
-`ArtifactSink` and `BronzeStore` are not touched. No new object-store CRUD port is introduced; the existing bounded contracts already express the behaviour.
+`ArtifactSink` is unchanged. The `BronzeStore` Protocol and its signatures are unchanged. No new object-store CRUD port and no new S3 adapter are introduced; the existing bounded contracts already express the behaviour.
+
+Two bounded corrections do reach existing code, and the scope is exactly this and nothing more. `ReleaseManifest` takes the value-shape correction of D2f and D2g — a required `jurisdiction`, an admissible empty partition tuple, version `2`. `S3BronzeStore`'s manifest serialization and manifest-storage mechanics take the matching correctness correction of D2g and D2h, in `objectstore/s3.py` and its tests, because a value that says it carries a jurisdiction and a serializer that never writes one would be worse than either alone. PostgreSQL, HTTP, clock, quality, publication, county, and every other adapter implementation stay out of scope.
 
 ## Three facts from the code that shape the design
 
@@ -74,9 +76,9 @@ Seven responsibilities resolve to **eleven contracts**: two retained — one of 
 ## Constraints
 
 - `property_tax_application` gains no dependency on `boto3`, `psycopg`, Airflow, an object-store SDK, or any county module. The existing dependency-direction test is extended to prove it.
-- `ArtifactSink` and `BronzeStore` keep their current signatures and semantics.
+- `ArtifactSink` keeps its signatures and semantics, and so does the `BronzeStore` Protocol. `ReleaseManifest` and the S3 manifest serialization and storage mechanics take the bounded corrections named above, and nothing else in any adapter changes.
 - No migration is added or modified. The database contract is read, not changed.
-- No adapter is implemented. This change defines contracts and the values that cross them.
+- No adapter is implemented. This change defines contracts and the values that cross them, plus the one bounded correction to existing S3 manifest mechanics that the `ReleaseManifest` change requires to be durable.
 - No canonical record type is added or altered; 2.2's promoted model is used as-is.
 - Bootstrap 2.4, 2.5, 3.5, and 3.6 are untouched, and 2.3 stays unchecked until a separate reconciliation verifies the implementation by substance.
 
@@ -91,5 +93,5 @@ Seven responsibilities resolve to **eleven contracts**: two retained — one of 
 
 ## Unresolved decisions
 
-- **The S3 adapter's `utc_now()` stays where it is.** Defining `Clock` does not by itself retire it, and rewiring the acquisition path to an injected clock touches adapter code this change excludes. It is recorded here so the residue is visible rather than assumed gone; 2.4 owns the migration when it composes the use cases.
+- **The S3 adapter's `utc_now()` stays where it is.** Defining `Clock` does not by itself retire it, and rewiring the acquisition path to an injected clock reaches beyond the manifest serialization and storage mechanics that are the only adapter code this change corrects. It is recorded here so the residue is visible rather than assumed gone; 2.4 owns the migration when it composes the use cases.
 - **`SourceRegistry` keying on release kind is an extension, not a correction.** `source_for_county` resolves a county alone, while the accepted registry requirement speaks of "a registered county and release kind". The port carries release kind; whether any current county actually varies its definition by kind is a question for the county contracts, not for this boundary.

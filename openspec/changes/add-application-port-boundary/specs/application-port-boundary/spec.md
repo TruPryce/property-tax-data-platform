@@ -70,7 +70,7 @@ Every evidence carrier SHALL be bounded. Discovery SHALL NOT return credentials,
 - **THEN** two logical release evidences are produced from that one artifact, and neither requires re-acquiring it
 
 ### Requirement: Existing artifact and manifest contracts are retained
-The streaming artifact contract and the manifest contract SHALL be retained with their current behaviour. The distinction between streaming bytes and a durable object, between an artifact and a manifest, between one artifact and one or more logical release partitions, and between a read-time conflict classification and a persisted verdict SHALL be preserved.
+The streaming artifact contract SHALL be retained unchanged, and the manifest contract SHALL retain its current operations and their behaviour. The manifest *value* takes the bounded corrections this capability specifies — an explicit jurisdiction, an admissible empty partition tuple, and a serialized shape version distinguishing it from the earlier one — and no manifest operation is added, removed, or re-signed. The distinction between streaming bytes and a durable object, between an artifact and a manifest, between one artifact and one or more logical release partitions, and between a read-time conflict classification and a persisted verdict SHALL be preserved.
 
 No general-purpose object-store create/read/update/delete port SHALL be introduced.
 
@@ -116,6 +116,12 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 ### Requirement: An acquisition manifest is stored at acquisition grain
 An acquisition manifest SHALL be stored so that it is identified by the acquisition it records, not by the artifact that acquisition obtained. Artifact identity is content alone, and the same bytes may legitimately be acquired from different jurisdictions, different source locations, and at different instants; storing one manifest per artifact would let the first such acquisition silently discard the provenance of every later one.
 
+Two recordings SHALL be the same acquisition exactly when their acquisition manifests are equal in every field describing the acquisition — the jurisdiction, the artifact identity, the acquisition instant, the source location, the response metadata, the redirect chain, the serialized shape version, and the recorded tool versions. The partition tuple SHALL be excluded from that comparison, because partitions are attached after an acquisition is recorded and including them would make an acquisition look new merely for having gained one.
+
+This rule SHALL be evaluated on the immutable manifest value alone. It SHALL NOT depend on a storage locator, an object key, a lock, a digest choice, a query, or any other adapter mechanism, and no acquisition identifier separate from that value SHALL be required.
+
+A repeated network acquisition SHALL therefore be a new acquisition rather than a retry, because it is performed at a different instant and reports its own response metadata, even where it obtains byte-identical content. Artifact identity SHALL remain the content digest alone, so those two acquisitions SHALL name one artifact and two acquisitions.
+
 The storage contract SHALL therefore hold: recording the same acquisition again SHALL resolve to the same manifest, so a retry writes no duplicate; recording a different acquisition of the same artifact SHALL resolve to a different manifest, so neither displaces the other; and an already-recorded manifest SHALL NOT be overwritten.
 
 A manifest already recorded in an earlier serialized shape SHALL remain immutable and SHALL NOT prevent a later acquisition of the same artifact from being recorded in the current shape. The artifact bytes themselves SHALL remain content-addressed, since artifact identity is unchanged by any of this.
@@ -126,9 +132,21 @@ The mechanism that satisfies these properties is an implementation decision and 
 - **WHEN** the same bytes are acquired for two different jurisdictions from two different sources
 - **THEN** two acquisition manifests are recorded, neither displacing the other, and both jurisdictions remain recoverable
 
-#### Scenario: One acquisition is recorded twice
-- **WHEN** an acquisition already recorded is recorded again
-- **THEN** it resolves to the manifest already stored and no duplicate is written
+#### Scenario: Registration of one completed acquisition is retried
+- **WHEN** the same completed acquisition is registered again, carrying the same acquisition manifest value
+- **THEN** it resolves to the manifest already stored, the same reference is returned, and no duplicate is written
+
+#### Scenario: The same bytes are acquired a second time
+- **WHEN** the source is fetched again at a later instant and returns byte-identical content
+- **THEN** the two recordings differ in their acquisition instant and response metadata, so they are two acquisitions of one artifact and both are recorded
+
+#### Scenario: A retry is distinguished from a re-acquisition without consulting storage
+- **WHEN** two acquisition manifests are compared
+- **THEN** whether they describe one acquisition is decided from the manifest values alone, with no locator, key, lock, or query consulted
+
+#### Scenario: A partition is attached and the acquisition is registered again
+- **WHEN** an acquisition that has since gained a partition is registered again
+- **THEN** it is still the same acquisition, because partitions take no part in the comparison
 
 #### Scenario: An artifact already carries a manifest in the earlier shape
 - **WHEN** an artifact whose stored manifest predates the current shape is acquired again
@@ -215,11 +233,13 @@ The canonical persistence boundary SHALL allow one account's records to span mor
 
 That correlation SHALL be carried by the batch rather than by the canonical records, which hold their parents directly and SHALL NOT gain a correlation field. A batch entry SHALL pair one canonical record with the correlation value it can later be named by, where it may be a parent, and with the correlation value of its parent. A parent SHALL be named the same way whether it appears in the same batch or an earlier one, so there is one linkage mechanism rather than two.
 
-Correlation SHALL be session-local and scoped to one account. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value.
+A correlation value SHALL be unique within one load session. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value. An implementation SHALL retain a mapping only for values still needed as parents, releasing those whose account is complete.
+
+Validation authority SHALL be split according to what each party can know. A batch is an immutable value and knows only itself, so it SHALL validate its own shape alone: well-formed entries, no value introduced twice within it, parents named within it resolving within it, and at most one account named as continuing. Everything requiring session history SHALL be validated by the session on write and on account completion — whether a value duplicates one already live, whether a named parent was ever introduced, whether its account has since completed, and whether the continuing-account state is consistent with the previous batch. A batch SHALL NOT be required to know handles opened by earlier batches or accounts already completed, because it cannot.
 
 Every account a batch introduces SHALL be complete at the end of that batch, except at most one, which the batch SHALL name as continuing into the next. An implementation SHALL therefore retain, beyond a single bounded batch, only the correlation values of one continuing account, and only for records actually named as parents. Correlation SHALL NOT require memory proportional to the release, to the number of accounts in it, or to a continuing account's complete descent.
 
-A correlation value that duplicates one already open, that names a parent never introduced, or that names one whose account is complete, SHALL be refused.
+A correlation value that duplicates one already live, that names a parent never introduced, or that names one whose account is complete, SHALL be refused by the session.
 
 #### Scenario: A record is paired with its correlation
 - **WHEN** a batch entry is examined
@@ -234,8 +254,16 @@ A correlation value that duplicates one already open, that names a parent never 
 - **THEN** it is refused, so at most one account is ever open across a batch boundary
 
 #### Scenario: A duplicate correlation value is introduced
-- **WHEN** a batch introduces a correlation value already open
-- **THEN** the write is refused
+- **WHEN** a batch introduces a correlation value already live in the session
+- **THEN** the session refuses the write
+
+#### Scenario: A batch is validated on its own
+- **WHEN** a batch is constructed
+- **THEN** it rejects only what it can see — a value introduced twice within it, a parent named within it that resolves nowhere in it, or more than one account named as continuing — and does not attempt to judge handles from earlier batches
+
+#### Scenario: A batch names a parent from an earlier batch
+- **WHEN** a batch names a parent it does not itself contain
+- **THEN** the batch accepts it as well-formed, and the session decides whether that parent is live
 
 #### Scenario: An account with very many children is loaded
 - **WHEN** an account carries far more children than one batch should hold
@@ -269,7 +297,7 @@ The boundary SHALL NOT require an implementation to make the accepted outcome du
 ### Requirement: The outcome crossing the boundary is a lossless representation
 The processing outcome the boundary accepts SHALL carry every fact the accepted outcome record requires: the disposition, the boundary contract version, the parser contract version and layout fingerprint where the release was prepared, the processed, staged, committed, and rejected counts, and the bounded diagnostics and notices with their totals and truncation flags.
 
-A diagnostic code SHALL be one the accepted closed vocabulary admits, so a value valid at this boundary is a value that can be recorded.
+A diagnostic code SHALL be one the accepted closed vocabulary admits. A notice code SHALL NOT be closed to that vocabulary; it SHALL satisfy the bounded lowercase identifier grammar the accepted notice contract admits. Either way a value valid at this boundary SHALL be a value that can be recorded.
 
 An implementation SHALL be able to record the accepted outcome from this value alone, without obtaining any of those facts from outside the boundary. The paired invariants the accepted record enforces SHALL be enforced here, so a violation is refused at the boundary rather than at commit.
 
@@ -288,6 +316,14 @@ An implementation SHALL be able to record the accepted outcome from this value a
 #### Scenario: A diagnostic carries a code outside the accepted vocabulary
 - **WHEN** an outcome carries a diagnostic whose code is not one the accepted vocabulary admits
 - **THEN** the outcome is refused at the boundary, rather than accepted here and rejected when written
+
+#### Scenario: A notice carries a code outside the closed diagnostic vocabulary
+- **WHEN** an outcome carries a notice whose code is a well-formed bounded lowercase identifier that the diagnostic vocabulary does not contain
+- **THEN** the outcome is accepted, because the notice vocabulary is open where the diagnostic vocabulary is closed
+
+#### Scenario: A notice carries a malformed code
+- **WHEN** an outcome carries a notice whose code does not satisfy the bounded lowercase identifier grammar
+- **THEN** the outcome is refused
 
 ### Requirement: Retry is scoped to one release and one processing run
 The retry key SHALL be the pairing of a canonical release with the processing run that loaded it. Completing a load for a pairing that has already completed SHALL persist nothing further and SHALL return a bounded, machine-readable result stating that the load had already happened, rather than raising an error the caller must interpret.

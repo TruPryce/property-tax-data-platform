@@ -220,6 +220,25 @@ The accepted artifact contract makes the collision reachable rather than theoret
 
 The v1→v2 case is worse because it needs no second county. A stored v1 manifest occupies the key, the conditional put finds it, `record()` reports success — and the v2 acquisition's explicit jurisdiction is never written. Retaining v1, which is right, would permanently prevent v2 for those bytes.
 
+Before any of that, something has to say when two recordings are *one* acquisition — "idempotent per acquisition" is not a contract until it does. The manifest is already the answer: it is immutable, application-owned, and describes exactly one acquisition. Two recordings are the same acquisition when their manifests agree on every acquisition-describing field, with the partition tuple excluded:
+
+```text
+  compared    jurisdiction · artifact identity · acquired_at · source_url
+              response metadata · redirects · manifest_version · tool_versions
+  excluded    partitions        attached after recording; including them would make
+                                an acquisition look new for having gained one
+```
+
+That is decidable from the value alone — no locator, key, lock, digest choice, or query — and it needs no acquisition identifier beside the manifest, which is the second identifier vocabulary D2a and D2c already refused.
+
+It also gives the distinction the storage grain exists for. A repeated network fetch of byte-identical content is a **new acquisition**, not a retry, because it happens at a different instant and reports its own response metadata. Artifact identity is the digest alone and cannot see that difference — correctly, since the bytes are the same — so the manifest is where it has to live:
+
+```text
+  register(M)  then  register(M)      one acquisition, one manifest, one ManifestRef
+  fetch → M1;  later fetch → M2       same digest, different acquired_at
+                                      two acquisitions, two manifests, neither displaced
+```
+
 So the manifest gets an acquisition-grain locator while the artifact bytes stay content-addressed, and the plan states properties rather than a scheme:
 
 ```text
@@ -333,7 +352,7 @@ So correlation is explicit, and it rides on the batch rather than on the records
   CorrelatedRecord(record=allocation,  handle=None, parent=h2)   ← a leaf needs no handle
 ```
 
-A parent is named the same way whether it sits in this batch or an earlier one, so there is one linkage mechanism and not two, and the caller mints handles that need only be unique within an open account. The batch also names the one account, if any, left open at its end:
+A parent is named the same way whether it sits in this batch or an earlier one, so there is one linkage mechanism and not two, and the caller mints handles unique within the session. The batch also names the one account, if any, left open at its end:
 
 ```text
   write(batch)  ─┐  many accounts, each complete within the batch
@@ -342,6 +361,17 @@ A parent is named the same way whether it sits in this batch or an earlier one, 
 ```
 
 "Bounded by open accounts" would be no bound at all if arbitrarily many could stay open, so a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
+
+Who validates what follows from who can know what. `CanonicalRecordBatch` is a frozen value: it sees itself and nothing else, so asking it to reject a parent opened three batches ago is asking for a rule it cannot enforce.
+
+```text
+  CanonicalRecordBatch   well-formed entries · no handle introduced twice here
+                         a parent named here resolves here · one continuing account
+  ReleaseLoadSession     handle already live · parent never introduced
+                         parent whose account completed · continuing state vs last batch
+```
+
+A handle is unique within the **session** rather than within an account, so one value never means two things at two moments. That costs nothing in memory, because the bound comes from retention and not from numbering: the implementation keeps a mapping only for handles still needed as parents and drops them when their account completes.
 
 `CorrelationHandle` is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
 
