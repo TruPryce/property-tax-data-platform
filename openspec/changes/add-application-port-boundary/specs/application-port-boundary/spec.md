@@ -253,9 +253,13 @@ The canonical persistence boundary SHALL allow one account's records to span mor
 
 That correlation SHALL be carried by the batch rather than by the canonical records, which hold their parents directly and SHALL NOT gain a correlation field. A batch entry SHALL pair one canonical record with the correlation value it can later be named by, where it may be a parent, and with the correlation value of its parent. A parent SHALL be named the same way whether it appears in the same batch or an earlier one, so there is one linkage mechanism rather than two.
 
-A correlation value SHALL be unique within one load session. It SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value. An implementation SHALL retain a mapping only for values still needed as parents, releasing those whose account is complete.
+A correlation value SHALL be unique within one load session, and SHALL NOT be reused once its account is complete. Because the session releases the mapping for a completed account, uniqueness SHALL be enforced by requiring values to increase strictly over the session and by retaining the highest value yet introduced: any value not exceeding it SHALL be refused unless it is currently live. That state is a single value, so the bound is unaffected, and a late record naming a released value SHALL be refused rather than silently retargeted at a later account.
 
-Validation authority SHALL be split according to what each party can know. A batch is an immutable value and knows only itself, so it SHALL validate its own shape alone: well-formed entries, no value introduced twice within it, parents named within it resolving within it, and at most one account named as continuing. Everything requiring session history SHALL be validated by the session on write and on account completion — whether a value duplicates one already live, whether a named parent was ever introduced, whether its account has since completed, and whether the continuing-account state is consistent with the previous batch. A batch SHALL NOT be required to know handles opened by earlier batches or accounts already completed, because it cannot.
+A correlation value SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value. An implementation SHALL retain a parent mapping only for values still needed as parents, releasing those whose account is complete.
+
+Validation authority SHALL be split according to what each party can know. A batch is an immutable value and knows only itself, so it SHALL validate its own shape alone: well-formed entries, no value introduced twice within it, parents named within it resolving within it, and at most one account named as continuing. Everything requiring session history SHALL be validated by the session on write and on account completion — whether a value duplicates one already live, whether a named parent was ever introduced, whether its account has since completed, and whether the continuing-account state is consistent with the previous batch.
+
+A resolved correlation value SHALL denote the very parent the canonical record already holds. Resolving is not sufficient: a record whose embedded parent is one observation SHALL NOT be accepted paired with a correlation value denoting a different one, because the record would then be persisted under a parent its own domain value does not name. Where the parent appears in the same batch, the batch SHALL enforce this; where it was introduced earlier, the session SHALL, since it already retains what each live value denotes. A batch SHALL NOT be required to know handles opened by earlier batches or accounts already completed, because it cannot.
 
 Every account a batch introduces SHALL be complete at the end of that batch, except at most one, which the batch SHALL name as continuing into the next. An implementation SHALL therefore retain, beyond a single bounded batch, only the correlation values of one continuing account, and only for records actually named as parents. Correlation SHALL NOT require memory proportional to the release, to the number of accounts in it, or to a continuing account's complete descent.
 
@@ -281,6 +285,10 @@ A correlation value that duplicates one already live, that names a parent never 
 - **WHEN** a batch is constructed
 - **THEN** it rejects only what it can see — a value introduced twice within it, a parent named within it that resolves nowhere in it, or more than one account named as continuing — and does not attempt to judge handles from earlier batches
 
+#### Scenario: A correlation value denotes a parent the record does not hold
+- **WHEN** a record embedding one parent is paired with a correlation value denoting a different parent of the same kind
+- **THEN** the write is refused, even though the value resolves
+
 #### Scenario: A batch names a parent from an earlier batch
 - **WHEN** a batch names a parent it does not itself contain
 - **THEN** the batch accepts it as well-formed, and the session decides whether that parent is live
@@ -292,6 +300,10 @@ A correlation value that duplicates one already live, that names a parent never 
 #### Scenario: A correlation value outlives its account
 - **WHEN** a record names a correlation value whose account has been declared complete
 - **THEN** the write is refused
+
+#### Scenario: A completed correlation value is minted again
+- **WHEN** a later batch introduces a value already used by an account that has completed
+- **THEN** it is refused, because values must exceed the highest yet introduced, so a released value cannot be silently retargeted
 
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
@@ -317,6 +329,8 @@ The boundary SHALL NOT require an implementation to make the accepted outcome du
 ### Requirement: The outcome crossing the boundary is a lossless representation
 The processing outcome the boundary accepts SHALL carry every fact the accepted outcome record requires: the disposition, the boundary contract version, the parser contract version and layout fingerprint where the release was prepared, the processed, staged, committed, and rejected counts, and the bounded diagnostics and notices with their totals and truncation flags.
 
+The outcome SHALL also satisfy the evidence seal the accepted outcome record enforces at completion, so that a value the boundary accepts cannot abort the canonical transaction. The number of retained diagnostics SHALL equal the smaller of the declared diagnostic total and the retention bound, and the number of retained notices SHALL equal the smaller of the declared notice total and that bound. Each truncation flag SHALL be true exactly when its declared total exceeds the bound. Every retained diagnostic SHALL carry the same layout fingerprint the outcome carries, including where the outcome carries none.
+
 A diagnostic code SHALL be one the accepted closed vocabulary admits. A notice code SHALL NOT be closed to that vocabulary; it SHALL satisfy the bounded lowercase identifier grammar the accepted notice contract admits. Either way a value valid at this boundary SHALL be a value that can be recorded.
 
 An implementation SHALL be able to record the accepted outcome from this value alone, without obtaining any of those facts from outside the boundary. The paired invariants the accepted record enforces SHALL be enforced here, so a violation is refused at the boundary rather than at commit.
@@ -332,6 +346,22 @@ An implementation SHALL be able to record the accepted outcome from this value a
 #### Scenario: An implementation records the outcome
 - **WHEN** an implementation records the accepted outcome from the value the boundary supplied
 - **THEN** every required fact is present and none is obtained from elsewhere
+
+#### Scenario: An outcome declares more evidence than it retains
+- **WHEN** an outcome declares a diagnostic total below the retention bound but retains a different number of diagnostics
+- **THEN** it is refused at the boundary, rather than accepted here and rejected when the load completes
+
+#### Scenario: An outcome exceeds the retention bound
+- **WHEN** an outcome declares a total above the retention bound
+- **THEN** it is accepted only if it retains exactly the bound and its truncation flag is true, and refused otherwise
+
+#### Scenario: A truncation flag disagrees with its total
+- **WHEN** a truncation flag is set on an outcome whose declared total does not exceed the retention bound, or is unset on one whose total does
+- **THEN** the outcome is refused
+
+#### Scenario: A retained diagnostic names another layout
+- **WHEN** an outcome retains a diagnostic whose layout fingerprint differs from the outcome's, including where the outcome carries none
+- **THEN** the outcome is refused
 
 #### Scenario: A diagnostic carries a code outside the accepted vocabulary
 - **WHEN** an outcome carries a diagnostic whose code is not one the accepted vocabulary admits
@@ -404,6 +434,21 @@ A recorded failing evaluation SHALL carry the measured and expected values.
 #### Scenario: The boundary is examined for a parallel model
 - **WHEN** the quality boundary is examined
 - **THEN** it records against the accepted rule and evaluation model rather than a second one
+
+### Requirement: Release-level source freshness reaches publication through the boundary
+Where discovery establishes a source as-of instant for a release, the boundary SHALL carry it to the publication attempt, so published lineage can state the freshness of what it exposes.
+
+That instant SHALL be supplied as the release-level evidence it is, and SHALL NOT be derived from loaded canonical records: the canonical model admits several account snapshots for one release carrying different source as-of values, so any derivation would need a selection rule the accepted contracts do not define.
+
+Where the source establishes no such instant, the attempt SHALL record its absence rather than substituting the acquisition instant or any other available time.
+
+#### Scenario: A release carries a source as-of instant
+- **WHEN** discovery establishes a source as-of instant and the release is later published
+- **THEN** the publication attempt receives that instant through the boundary rather than deriving it from canonical records
+
+#### Scenario: A release establishes no source as-of instant
+- **WHEN** no source as-of instant was established
+- **THEN** the attempt records its absence, and no other available time is substituted
 
 ### Requirement: The publication boundary owns attempt, lineage, and activation
 The publication boundary SHALL record a publication attempt, its lineage to the release and run it rests on, and its transition to current or to failed. Activation SHALL make the new publication current and record the publication it supersedes. A failed attempt SHALL NOT become current and SHALL NOT supersede the publication that is already current.
