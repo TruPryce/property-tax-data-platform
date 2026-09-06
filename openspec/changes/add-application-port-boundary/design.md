@@ -223,15 +223,30 @@ The v1→v2 case is worse because it needs no second county. A stored v1 manifes
 Before any of that, something has to say when two recordings are *one* acquisition — "idempotent per acquisition" is not a contract until it does. The manifest is already the answer: it is immutable, application-owned, and describes exactly one acquisition. Two recordings are the same acquisition when their manifests agree on every acquisition-describing field, with the partition tuple excluded:
 
 ```text
-  compared    jurisdiction · artifact identity · acquired_at · source_url
-              response metadata · redirects · manifest_version · tool_versions
-  excluded    partitions        attached after recording; including them would make
-                                an acquisition look new for having gained one
+  compared    jurisdiction · artifact content identity (sha256) · acquired_at
+              source_url · response metadata · redirects · manifest_version
+              tool_versions
+  excluded    partitions              attached after recording; including them would
+                                      make an acquisition look new for having gained one
+              locator, byte_count,    artifact-grain evidence, held once per artifact
+              media_type              and not per acquisition
 ```
 
 That is decidable from the value alone — no locator, key, lock, digest choice, or query — and it needs no acquisition identifier beside the manifest, which is the second identifier vocabulary D2a and D2c already refused.
 
-The comparison is over the *complete* stored-artifact evidence — locator, digest, byte count, media type — not the digest alone. Comparing by digest would collapse two recordings that agree on the bytes and disagree on everything else about how they were obtained, which is the opposite of what acquisition grain is for.
+The artifact takes part by its content identity alone, and the database settles why. `bronze.artifact` is keyed by `sha256` and carries the locator, byte count, and media type **once per artifact**; `bronze.release_manifest` references it by `artifact_sha256` and persists none of the three:
+
+```text
+  bronze.artifact          sha256 PK · locator · byte_count · media_type    per artifact
+  bronze.release_manifest  jurisdiction_code · artifact_sha256 · acquired_at
+                           source_url · response_status/headers
+                           manifest_version · tool_versions                 per acquisition
+  bronze.release_redirect  the redirect chain                               per acquisition
+```
+
+A rule making two same-digest acquisitions distinct because their locators or media types differed would be one `ManifestIndex` could not honour: there is nowhere at acquisition grain to record the difference, and nowhere to read it back from when the acquisition is registered again. Honouring it would take a migration, or hidden cross-adapter state, and both are out of scope. So those three are named for what they are — storage evidence, integrity evidence, and metadata about the bytes — and a disagreement about them for a digest already known is an artifact-consistency concern, not a second acquisition.
+
+Read the other way, the rule is exactly implementable: every acquisition-defining component already has an acquisition-grain home, `jurisdiction_code` through `tool_versions` with the redirect chain in its own table. Nothing in the comparison has to be invented, and nothing has to be stored that is not stored today.
 
 It also gives the distinction the storage grain exists for, with one honest limit. Two recordings whose retained evidence differs are different acquisitions even when the bytes are identical; artifact identity is the digest alone and cannot see that, which is why the manifest has to carry it. But the contract stops there and does not promise that a repeated fetch is *always* a new acquisition. It cannot: under a fixed or coarse clock with an unchanged response, two fetches can leave evidence identical in every compared component, and then nothing retained distinguishes them. They are observationally equivalent and may coalesce. Inventing a physical-attempt identifier to force them apart would mean a new identifier, a column, and a migration to record something no consumer can act on:
 

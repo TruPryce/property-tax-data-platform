@@ -116,11 +116,11 @@ No partition SHALL be fabricated to make an acquisition recordable, and an artif
 ### Requirement: An acquisition manifest is stored at acquisition grain
 An acquisition manifest SHALL be stored so that it is identified by the acquisition it records, not by the artifact that acquisition obtained. Artifact identity is content alone, and the same bytes may legitimately be acquired from different jurisdictions, different source locations, and at different instants; storing one manifest per artifact would let the first such acquisition silently discard the provenance of every later one.
 
-Two recordings SHALL be the same acquisition exactly when their retained acquisition evidence is equal. That evidence is the jurisdiction, the complete stored-artifact evidence, the acquisition instant, the source location, the response metadata, the redirect chain, the serialized shape version, and the recorded tool versions. The partition tuple SHALL be excluded, because partitions are attached after an acquisition is recorded and including them would make an acquisition look new merely for having gained one.
+Two recordings SHALL be the same acquisition exactly when their retained acquisition evidence is equal. That evidence is the jurisdiction, the artifact content identity, the acquisition instant, the source location, the response metadata, the redirect chain, the serialized shape version, and the recorded tool versions. The partition tuple SHALL be excluded, because partitions are attached after an acquisition is recorded and including them would make an acquisition look new merely for having gained one.
 
-The stored-artifact evidence SHALL be compared in full — its locator, content digest, byte count, and media type — and not by content digest alone. Byte identity alone SHALL NOT collapse two recordings whose remaining retained evidence differs.
+The artifact SHALL take part in that comparison by its content identity alone. The storage locator, byte count, and media type SHALL NOT be acquisition-defining: each is artifact-grain evidence — the locator is where the bytes were stored, the byte count is integrity evidence about them, and the media type is metadata describing them — and each is recorded once per artifact rather than once per acquisition. Two recordings agreeing on every acquisition-defining component SHALL therefore remain one acquisition even where such artifact evidence differs between them, and that difference SHALL be treated as an artifact-consistency concern rather than as a second acquisition identity.
 
-This rule SHALL be evaluated on the immutable manifest value alone. It SHALL NOT depend on a storage locator, an object key, a lock, a digest choice, a query, or any other adapter mechanism, and no acquisition identifier separate from that value SHALL be required.
+This rule SHALL be evaluated on the immutable manifest value alone. It SHALL NOT depend on a storage locator, an object key, a lock, a digest choice, a query, or any other adapter mechanism, and no acquisition identifier separate from that value SHALL be required. Every acquisition-defining component SHALL be one already retained at acquisition grain, so that a recorded acquisition can be recognised again from what was persisted rather than from state held elsewhere.
 
 Recordings whose retained evidence differs SHALL be different acquisitions even where the artifact content is byte-identical. Artifact identity SHALL remain the content digest alone, so two such acquisitions SHALL name one artifact and two acquisitions.
 
@@ -148,9 +148,9 @@ The mechanism that satisfies these properties is an implementation decision and 
 - **WHEN** two physical fetches produce retained acquisition evidence identical in every compared component
 - **THEN** they are observationally equivalent and may coalesce, because nothing retained distinguishes them and no physical-attempt identifier exists
 
-#### Scenario: Only the media type differs
-- **WHEN** two recordings carry the same content digest but differing stored-artifact evidence
-- **THEN** they are different acquisitions, because byte identity alone does not collapse differing evidence
+#### Scenario: Only artifact-grain evidence differs
+- **WHEN** two recordings agree on every acquisition-defining component and differ only in storage locator, byte count, or media type
+- **THEN** they remain one acquisition, and the difference is an artifact-consistency concern rather than a second acquisition identity
 
 #### Scenario: A retry is distinguished from a re-acquisition without consulting storage
 - **WHEN** two acquisition manifests are compared
@@ -163,6 +163,10 @@ The mechanism that satisfies these properties is an implementation decision and 
 #### Scenario: Each acquisition-defining component is mutated in turn
 - **WHEN** exactly one declared acquisition-defining component is changed and every other is held equal
 - **THEN** the recordings are different acquisitions, for every such component in turn
+
+#### Scenario: Every acquisition-defining component has a retained home
+- **WHEN** the declared components are compared against what is retained at acquisition grain
+- **THEN** each one is already persisted there, so recognising a recorded acquisition requires no additional column and no state outside that record
 
 #### Scenario: An artifact already carries a manifest in the earlier shape
 - **WHEN** an artifact whose stored manifest predates the current shape is acquired again
