@@ -432,6 +432,32 @@ So there are three transactions in the pipeline, not one, and the boundary makes
   [ publication build → activate ]     atomic, over completed loads
 ```
 
+## Cross-spec contract matrix
+
+The change carries six capability specs. Every shared concept is defined in exactly one of them or in an accepted spec, and the others cite the owner by name rather than restating it. A reviewer's first sweep after any fix is this table: two review rounds on this change found one fact stated two ways in two places, and a split into several files makes that the likeliest defect rather than the rarest.
+
+| Concept | Owning spec | Cited by |
+| --- | --- | --- |
+| No infrastructure vocabulary in any port | `application-port-boundary` | every other spec; proven by task 7.1 |
+| Opaque persistence locators (`ProcessingRunRef`, `ManifestRef`, `PublicationRef`) | `application-port-boundary` | `processing-run`, `acquisition-manifest-index`, `run-bound-quality-and-publication` |
+| `ReleaseIdentity`, four components | accepted `canonical-identity-and-provenance` | `source-registry-and-discovery` (promotion), `processing-run`, `canonical-load-session` |
+| Promotion from `LogicalReleaseEvidence`; `IncompleteReleaseIdentity` | `source-registry-and-discovery` | `processing-run` (`start` takes the promoted identity), `canonical-load-session` |
+| `SourceCandidate`, `PageEvidence`, source as-of evidence, `UnchangedRelease` | `source-registry-and-discovery` | `acquisition-manifest-index` (a `ReleasePartition` is the evidence with the identifier dropped), `run-bound-quality-and-publication` (the as-of instant at the attempt) |
+| `CountySourceDefinition`, `AcquisitionMethod`, expected media types, `SourceRegistry` | `source-registry-and-discovery` | — |
+| `ArtifactSink`, `BronzeStore`, `ReleaseManifest`, `ReleasePartition`, `StoredArtifact` | `acquisition-manifest-index` (retained; bounded corrections) | `source-registry-and-discovery` |
+| Acquisition equivalence, acquisition-grain storage, the manifest shape version | `acquisition-manifest-index` | — |
+| `ManifestIndex`, `ManifestRef` | `acquisition-manifest-index` | `processing-run` |
+| `ProcessingRunRef`, `ProcessingRunRepository`, the active-run refusal | `processing-run` | `canonical-load-session`, `run-bound-quality-and-publication` |
+| `ReleaseProcessingOutcome`, `ReleaseDiagnosticRecord`, `ReleaseNoticeRecord`, `ReleaseDisposition`, the evidence seal | `processing-run` | `canonical-load-session` (the session accepts it at `open`) |
+| The closed diagnostic vocabulary; the bounded notice grammar | accepted `bounded-release-processing` | `processing-run` (validates against them; defines no second enum) |
+| Outcome, diagnostic, notice, quality, and publication records reused rather than replaced | accepted `canonical-silver-persistence` | `processing-run`, `run-bound-quality-and-publication` |
+| `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, `still_needed`, adoption, `ReleaseLoadCompletion` | `canonical-load-session` | — |
+| Account snapshot grain (deliberately non-unique), one-to-many children, cross-load lineage, release-scoped retry | accepted `canonical-silver-persistence` | `canonical-load-session` (adoption names the grain; review round 4 records that the grain is not a key) |
+| The canonical record types | accepted `canonical-appraisal-records` | `canonical-load-session` |
+| `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityRepository` | `run-bound-quality-and-publication` | — |
+| `PublicationProduct`, `PublicationRef`, `PublicationAttempt`, `PublicationRepository` | `run-bound-quality-and-publication` | — |
+| `Clock` | `run-bound-quality-and-publication` | — |
+
 ## Alternatives rejected
 
 - **One `Repository` per database schema.** Mirrors the tables, which is precisely the problem: `canonical.*`, `ingestion.*`, `quality.*`, and `publication.*` would become application vocabulary, and 3.5's freedom to choose staging mechanics would evaporate.

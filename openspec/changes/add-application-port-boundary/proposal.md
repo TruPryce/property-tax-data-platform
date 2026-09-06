@@ -13,8 +13,21 @@ Establish the application-owned port boundary for bootstrap task 2.3, adding onl
 ## Scope
 
 - Originating issue: #119
-- Affected capabilities: application-port-boundary (ADDED)
+- Affected capabilities: six, all ADDED — `application-port-boundary`, `processing-run`, `source-registry-and-discovery`, `acquisition-manifest-index`, `canonical-load-session`, `run-bound-quality-and-publication`. Issue #119 named one capability; the plan resolves it to six so that each accepted spec stays small enough for 2.4, 3.5, and 6.2 to delta against, and so that every shared concept has exactly one owning spec, listed below.
 - Affected decisions: none. Hexagonal ownership is settled in the root `AGENTS.md`; this change works inside it.
+
+### Capabilities
+
+One owner per shared concept; the others cite it by name and never restate its values. The full concept-level matrix is in `design.md`.
+
+| Capability | Owns | Cites |
+| --- | --- | --- |
+| `application-port-boundary` | the rule that no port names infrastructure vocabulary; the opaque-locator rule for every persistence-generated handle | — |
+| `processing-run` | `ProcessingRunRef`, `ProcessingRunRepository`, `ReleaseProcessingOutcome` with its diagnostic and notice records and the evidence seal | `application-port-boundary`; `source-registry-and-discovery` for the promoted identity; `acquisition-manifest-index` for `ManifestRef`; accepted `bounded-release-processing` for the diagnostic vocabulary |
+| `source-registry-and-discovery` | `SourceRegistry`, expected media types, `ReleaseDiscovery`, `SourceCandidate`, `PageEvidence`, `LogicalReleaseEvidence`, promotion to `ReleaseIdentity` | accepted `canonical-identity-and-provenance` for `ReleaseIdentity` |
+| `acquisition-manifest-index` | the retained `ArtifactSink` and `BronzeStore` contracts, the bounded `ReleaseManifest` corrections, acquisition equivalence and storage grain, `ManifestIndex` and `ManifestRef` | `application-port-boundary`; `source-registry-and-discovery` for the evidence a partition is derived from |
+| `canonical-load-session` | `CanonicalReleaseRepository`, `ReleaseLoadSession`, batches, correlation, adoption, completion, the retry key, the no-natural-key rule | `processing-run` for the run reference and the outcome; accepted `canonical-silver-persistence` for the snapshot grain, cross-load lineage, and release-scoped retry |
+| `run-bound-quality-and-publication` | `QualityRepository` and its values, `PublicationRepository`, `PublicationAttempt`, the source as-of instant at the attempt, `Clock` | `processing-run`; `source-registry-and-discovery` for the source as-of evidence; accepted `canonical-silver-persistence` for the reused quality and publication models |
 
 ## Inventory and disposition
 
