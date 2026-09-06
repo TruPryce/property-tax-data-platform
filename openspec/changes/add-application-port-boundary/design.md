@@ -42,7 +42,7 @@ Promotion happens once, before the run, and the run is where the promoted identi
   manifests   │  BronzeStore         (retained, unchanged)               │
               │  ManifestIndex ──────────► ManifestRef                   │
               │                                                          │
-  run         │  ProcessingRunRepository.start(…) ─► ProcessingRunRef    │
+  run         │  ProcessingRunRepository.start(…) ─► ProcessingRunStart  │
               │                                                          │
   canonical   │  CanonicalReleaseRepository ──► ReleaseLoadSession       │
               │        write(CanonicalRecordBatch)…                      │
@@ -112,7 +112,17 @@ The run is the spine, so every port names one — and until this correction noth
 
 `ProcessingRunRepository.start(release, manifest_ref)` returns the reference, and nothing else in the boundary accepts a caller-constructed one.
 
-Starting is also where concurrency has to be settled, because nothing below it settles concurrency. The accepted workflow requires that "overlapping active runs for the same county and release are prevented", and `ingestion.run` carries no constraint expressing it — its UNIQUE keys all include `run_id`, so each holds trivially for a single row. Two workers starting the same release would both get a run and both go on to create canonical loads. So `start` refuses an overlapping active run by name, and refuses it atomically; which mechanism provides that atomicity is 3.5's to choose. The rule is about overlap, not repetition: once the previous run is no longer active, the next one starts normally. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
+Starting is also where concurrency has to be settled, because nothing below it settles concurrency. The accepted workflow requires that "overlapping active runs for the same county and release are prevented", and `ingestion.run` carries no constraint expressing it — its UNIQUE keys all include `run_id`, so each holds trivially for a single row. Two workers starting the same release would both get a run and both go on to create canonical loads. So `start` refuses by name, and refuses atomically, while a run is *held*; which mechanism provides that atomicity is 3.5's to choose. The rule is about overlap, not repetition: once the previous run has finished, the next one starts normally. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
+
+Refusing every *unfinished* run would settle concurrency and wedge recovery. A worker that dies after `start` commits and before `finish` leaves `finished_at` null forever — nothing else marks a run over — so every retry would meet the refusal, and the release would wait for someone to edit the run row by hand, which is the out-of-band repair the accepted retry scenario forbids. The rule is therefore about holding, not about `finished_at`:
+
+```text
+  run held by a live worker       ─► start refuses, by name, atomically
+  run unfinished, holder gone     ─► start resumes it: same reference, resumed
+  run finished                    ─► start creates a new run
+```
+
+Resuming rather than creating is what keeps the retry honest on both sides of the load. Before the load committed, the session that died left zero canonical records, and the resumed run simply loads. After it committed, the retried worker's `commit()` returns `already_complete=True` (D4), and quality and publication bind to the run that actually holds the load, instead of a second run loading the whole release again to reach them. What "held" means is the mechanism 3.5 chooses — a lock scoped to the worker's connection releases itself when the worker dies; a lease with a deadline needs renewing — and the contract fixes only the property, exactly as it does for atomicity.
 
 ## What the registry can be required to know
 
@@ -338,6 +348,8 @@ The canonical port takes `ReleaseIdentity`. It does not take `ReleasePartition` 
 
 Returning a result rather than raising is deliberate. A retry is an ordinary orchestration event — Airflow will re-run a task after a transient failure, and the accepted contract requires it to "resume from the last verified stage without duplicating canonical records". An exception would force every caller to catch a specific type and decide it was benign, and a caller that got that wrong would turn a successful retry into a failed DAG run.
 
+The run-level answer has the same shape. `start` on an unfinished run whose holder is gone returns the existing reference in a `ProcessingRunStart` that says it resumed, so the two results compose: resume the run, then let the load say whether it already happened.
+
 ## The outcome cannot be the adapters' outcome
 
 The session accepts the run's processing outcome, and the obvious candidate is `ReleaseOutcome` from `property_tax_adapters.release.outcome` — it already carries the disposition, the four counts, and the truncation flags, and `ingestion.release_outcome` mirrors it column for column.
@@ -480,6 +492,8 @@ The change carries six capability specs. Every shared concept is defined in exac
 - **Requiring discovery to establish the tax year and release kind.** It makes the common case tidy and the Collin case impossible: one mutable export whose releases live in `curr_val_yr` and `cert_val_yr` cannot be classified before it is read. The contract already anticipated this — one source candidate, and parsing creates the logical release partitions — so requiring it here would have contradicted an accepted requirement to save a field.
 - **A second promotion seam for parsed evidence.** Two entry points for one transition, differing only in where the facts came from, and the second would be written under schedule pressure by whoever implements the first county whose releases are in content. One evidence type with one promotion keeps them indistinguishable downstream.
 - **Deferring run creation to 2.4.** The reference is database-generated; a use case cannot construct a correct one without reaching through the boundary, so deferring it would have made the first implementation invent the contract.
+- **Refusing every unfinished run.** It prevents overlap and also prevents recovery: a dead worker never finishes its run, and the boundary offered no way to obtain or retire it, so the release waited for a database edit. Holding is what distinguishes a live worker from a dead one, and it is worth the mechanism.
+- **Returning the existing run to any caller.** It recovers from a crash by letting two live workers share one run, so the accepted overlap scenario fails and one run carries two workers' outcomes.
 
 ## Risks
 
@@ -487,6 +501,7 @@ The change carries six capability specs. Every shared concept is defined in exac
 - **`ProcessingRunRef` invites misuse.** It is an opaque locator that will be a `bigint` in practice, and someone will eventually sort by it. The contract names it, a test asserts it carries no ordering guarantee, and that is the extent of what a type can do here.
 - **The port count could still be wrong.** Eleven contracts for seven named responsibilities is a judgement, defended in the proposal by the two accepted requirements behind "source discovery". If 2.4 finds the registry/discovery split artificial in practice, merging them is a smaller change than splitting a merged one.
 - **`Clock` may sit unused until 2.4.** Defining a port with no consumer risks it drifting from what the use cases actually need. Mitigated by keeping it minimal — one method — so there is little to drift.
+- **A held run needs a liveness mechanism.** A lease that a live but stalled worker fails to renew looks abandoned, and a retry would resume a run its first worker later continues. A lock scoped to the worker's connection has no such window; if 3.5 chooses a lease instead, the holder must re-verify it still holds the run before every durable write, and the contract test for two racing retries is what pins that only one wins.
 
 ## Migration
 
@@ -496,7 +511,7 @@ One construction signature does change: `ReleaseManifest` gains a required `juri
 
 ## Handoffs
 
-**To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
+**To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands — including whatever represents a held run, since `ingestion.run` carries no such column. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
 
 **To bootstrap 2.4.** The discover, acquire, parse, normalize, validate, and publish use cases coordinate `SourceRegistry`, `ReleaseDiscovery`, `ArtifactSink`, `BronzeStore`, `ManifestIndex`, `ProcessingRunRepository`, `CanonicalReleaseRepository`, `QualityRepository`, `PublicationRepository`, and `Clock` — never an adapter type. 2.4 owns minting correlation handles as it walks parsed records, since it is the only layer holding both a record and its parent. It also owns retiring the S3 adapter's `utc_now()` in favour of the injected clock.
 

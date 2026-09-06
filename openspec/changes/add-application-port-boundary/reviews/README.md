@@ -11,8 +11,8 @@ Rounds 1–4 reconstruct the four automated reviews GitHub posted on
 [PR #120](https://github.com/TruPryce/property-tax-data-platform/pull/120)
 before this ledger existed, each pinned to the commit it reviewed. Round 5 is a
 read-only review of the same head. None of the five was scope-bound, so each is
-a **transition record** carrying one machine block per scope it touched; from
-round 6 on, one scope per round.
+a **transition record** carrying one machine block per scope it touched. Round 6
+is the first round whose findings fall in one scope.
 
 ## Verdict semantics
 
@@ -109,15 +109,15 @@ next round file and file each finding under its scope.
 
 | Scope                       | Status                                                                                                                           | Last round | Commit                                     |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------ |
-| `run-and-manifest`          | REVISE (rounds 1–3 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)       | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
+| `run-and-manifest`          | REVISE (round 6 P1 resolved in the same commit; round 5: adapter and county write roots have no scope-policy entry — decision needed) | 6          | `e960fe6972ca6348e3b60312e56cae55d7f03d7f` |
 | `registry-and-discovery`    | REVISE (round 4: `PageEvidence` fields unspecified — UNRESOLVED)                                                                  | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
 | `canonical-load`            | REVISE (round 4: adoption is ambiguous at a non-unique grain; oversized parent sets have no bounded path — two P1s UNRESOLVED)    | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
 | `quality-publication-clock` | REVISE (round 4: the source as-of instant is not durable across independently retried stages — UNRESOLVED)                       | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
 | `surface-and-proof`         | REVISE (round 5: task prerequisites cite decisions that do not exist; seven tasks exceed the 2,048-character task bound)          | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
 
-**Change status:** OPEN — no scope has had a scope-bound round; four P1s and
-several P2/P3s are unresolved at the reviewed commit. Do not infer overall
-completion from the PR body or from any single scope.
+**Change status:** OPEN — no scope has an accepting round; three P1s (all in
+round 4) and several P2/P3s are unresolved. Do not infer overall completion
+from the PR body or from any single scope.
 
 Next review: `canonical-load` with the scope-bound prompt above, after the
 maintainer decides the two round-4 P1 dispositions recorded in
