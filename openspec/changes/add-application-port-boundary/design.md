@@ -110,7 +110,9 @@ Registration is idempotent per acquisition, which is what makes one artifact car
 
 The run is the spine, so every port names one — and until this correction nothing created one. That gap could not be pushed to 2.4: `ingestion.run.run_id` is `GENERATED ALWAYS AS IDENTITY`, so a use case cannot construct a correct reference without reaching past the boundary into the database, which is exactly what the boundary exists to prevent.
 
-`ProcessingRunRepository.start(release, manifest_ref)` returns the reference, and nothing else in the boundary accepts a caller-constructed one. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
+`ProcessingRunRepository.start(release, manifest_ref)` returns the reference, and nothing else in the boundary accepts a caller-constructed one.
+
+Starting is also where concurrency has to be settled, because nothing below it settles concurrency. The accepted workflow requires that "overlapping active runs for the same county and release are prevented", and `ingestion.run` carries no constraint expressing it — its UNIQUE keys all include `run_id`, so each holds trivially for a single row. Two workers starting the same release would both get a run and both go on to create canonical loads. So `start` refuses an overlapping active run by name, and refuses it atomically; which mechanism provides that atomicity is 3.5's to choose. The rule is about overlap, not repetition: once the previous run is no longer active, the next one starts normally. The run is also where the three-component Bronze partition and a release identifier become one four-component canonical release, because `ingestion.run` references `bronze.release_partition` on three columns and carries `release_identifier` itself.
 
 ## What the registry can be required to know
 
@@ -377,7 +379,15 @@ A parent is named the same way whether it sits in this batch or an earlier one, 
   write(batch)  ─┘  that one account's handles stay resolvable; the rest are released
 ```
 
-"Bounded by open accounts" would be no bound at all if arbitrarily many could stay open, so a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
+One continuing account is necessary and not sufficient. Inside a single account the bound can still fail: an account with an unbounded number of owner associations, whose allocations arrive in later batches, keeps every association's mapping live until the account completes. So the batch also declares which handles must outlive it, and the implementation may release everything else:
+
+```text
+  still_needed = (h2, h7)     only these survive this batch
+                              live mappings ≤ what the last batch declared
+                              declared inside a bounded batch, so bounded
+```
+
+A parent needed five batches later is re-declared in each of the five, which makes the cost visible instead of hiding it in an implementation that quietly grows. With that in place, a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
 
 Who validates what follows from who can know what. `CanonicalRecordBatch` is a frozen value: it sees itself and nothing else, so asking it to reject a parent opened three batches ago is asking for a rule it cannot enforce.
 
@@ -391,6 +401,20 @@ Who validates what follows from who can know what. `CanonicalRecordBatch` is a f
 A handle is unique within the **session** rather than within an account, so one value never means two things at two moments. That costs nothing in memory, because the bound comes from retention and not from numbering: the implementation keeps a mapping only for handles still needed as parents and drops them when their account completes.
 
 `CorrelationHandle` is deliberately neither of the two identities already in play. It is not domain identity, because the canonical model gives these observations none. It is not persistence identity, because it is discarded when the account closes and never appears in a stored row. Naming it explicitly is what keeps it from drifting into either role, which is the same reason `ProcessingRunRef` says out loud that it is an opaque locator.
+
+## A parent that is already in the database
+
+The session resolves parents introduced within it, and the accepted canonical contract needs one more case. It permits a child from a second artifact of the same release — "a geometry enrichment or another child carries provenance from a second load and artifact of its parent's same release" — and says explicitly that parent and child are not required to share one load or artifact. A session that only accepts parents it saw introduced makes that unrepresentable: the parent is "never introduced", and resubmitting it would manufacture a second snapshot rather than link to the existing one.
+
+The way out is narrow and rests on something already decided. `AccountSnapshot`'s grain is fixed by the accepted contract as *exactly* its `AccountIdentity` and the release its provenance names. That is declared identity, so naming an existing snapshot by it is not the natural key this boundary forbids — the forbidden thing is keying on observed values, and account identity is not an observed value.
+
+```text
+  adopt(account_identity, release) ─► CorrelationHandle    names the existing snapshot
+                                                            creates no observation
+                                                            child keeps its own lineage
+```
+
+It stops there deliberately. An owner association or taxing-unit observation has no such grain — the canonical model gives them no identity at all, which is why correlation handles exist — so adopting one would mean inventing a key over observed values. Those parents stay in one session with their children, and the contract says so rather than leaving 3.5 to discover it.
 
 ## Quality and publication are different units of work
 

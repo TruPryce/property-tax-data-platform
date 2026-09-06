@@ -198,9 +198,19 @@ The system SHALL provide an application-owned contract that creates a processing
 
 The contract SHALL also record that a run has finished.
 
+Starting a run for a release that already has an active run SHALL be refused with a named error, and that decision SHALL be made atomically, so two concurrent callers cannot both obtain an active run for one release. The accepted contract requires overlapping active runs for one county and release to be prevented, and no database constraint expresses it, so the boundary SHALL. The mechanism securing that atomicity is an implementation decision and SHALL NOT be fixed by the port contract. A release whose previous run is no longer active SHALL start normally, because the rule prevents overlap and not repetition.
+
 #### Scenario: A run is started
 - **WHEN** a use case begins processing a release it has acquired
 - **THEN** it obtains a run reference from the boundary, and the reference identifies a run that has been recorded
+
+#### Scenario: A second run is started for a release already running
+- **WHEN** a run is started for a release that already has an active run
+- **THEN** the operation refuses with a named error rather than creating a second active run, and the decision is made atomically so two concurrent callers cannot both succeed
+
+#### Scenario: A run is started after the previous one finished
+- **WHEN** a run is started for a release whose previous run is no longer active
+- **THEN** a new run is created, because the rule prevents overlap and not repetition
 
 #### Scenario: A run reference is required somewhere
 - **WHEN** any port requiring a run reference is examined
@@ -252,6 +262,8 @@ A session that aborts, or whose completion fails, SHALL leave zero canonical rec
 The canonical persistence boundary SHALL allow one account's records to span more than one bounded batch, and SHALL provide a correlation mechanism by which a record names a parent written in an earlier batch.
 
 That correlation SHALL be carried by the batch rather than by the canonical records, which hold their parents directly and SHALL NOT gain a correlation field. A batch entry SHALL pair one canonical record with the correlation value it can later be named by, where it may be a parent, and with the correlation value of its parent. A parent SHALL be named the same way whether it appears in the same batch or an earlier one, so there is one linkage mechanism rather than two.
+
+Each batch SHALL declare which correlation values must remain resolvable after it, and an implementation MAY release every mapping not so declared. Live mappings SHALL therefore be bounded by what the most recent batch declared, and that declaration SHALL be bounded because the batch is. Without this the bound fails inside a single account: an account carrying an unbounded number of owner associations whose allocations arrive in later batches would keep every association's mapping live until the account completed, so allowing only one continuing account SHALL NOT be claimed to bound correlation on its own.
 
 A correlation value SHALL be unique within one load session, and SHALL NOT be reused once its account is complete. Because the session releases the mapping for a completed account, uniqueness SHALL be enforced by requiring values to increase strictly over the session and by retaining the highest value yet introduced: any value not exceeding it SHALL be refused unless it is currently live. That state is a single value, so the bound is unaffected, and a late record naming a released value SHALL be refused rather than silently retargeted at a later account.
 
@@ -305,9 +317,38 @@ A correlation value that duplicates one already live, that names a parent never 
 - **WHEN** a later batch introduces a value already used by an account that has completed
 - **THEN** it is refused, because values must exceed the highest yet introduced, so a released value cannot be silently retargeted
 
+#### Scenario: A parent is still needed several batches later
+- **WHEN** a parent's children arrive in a later batch of the same account
+- **THEN** every batch between them declares that parent's value as still needed, and the implementation may release everything it does not declare
+
+#### Scenario: An account carries more parents than a batch can hold
+- **WHEN** one account's parents outnumber what a bounded batch may declare as still needed
+- **THEN** the contract does not claim to hold them all live, because live mappings are bounded by the declaration and not by the account
+
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
 - **THEN** nothing requires an implementation to retain correlation beyond one bounded batch except for the single continuing account, so the state grows with neither the release nor the number of accounts in it
+
+### Requirement: A child may name a parent persisted by an earlier load
+A correlation value SHALL be obtainable for an account snapshot already persisted for the release being loaded, identified by the account identity and release that are its declared grain, so a child arriving from a second artifact of the same release can name its existing parent instead of resubmitting it.
+
+That identification SHALL NOT be a key over observed values: the accepted canonical contract fixes a snapshot's grain as exactly its account identity and the release its provenance names, so naming a snapshot that way uses declared identity rather than resemblance. Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
+
+Where no snapshot matching that grain has been persisted, adoption SHALL fail with a named error rather than creating one.
+
+A parent that is not an account snapshot SHALL NOT be adoptable, because the canonical model gives those observations no identity to name them by, and inventing one would be the natural key this boundary forbids. A child of such a parent SHALL therefore be written in the same session as that parent.
+
+#### Scenario: A geometry enrichment arrives from a second artifact
+- **WHEN** a child carrying provenance from a second load and artifact names an account snapshot already persisted for the same release
+- **THEN** it is retained with its own artifact lineage, its parent is the existing snapshot, and no second snapshot is created
+
+#### Scenario: An adopted parent does not exist
+- **WHEN** adoption names an account identity and release for which no snapshot has been persisted
+- **THEN** it fails with a named error and no snapshot is created
+
+#### Scenario: A deeper parent is offered for adoption
+- **WHEN** adoption is attempted for an observation that is not an account snapshot
+- **THEN** it is refused, because that observation has no declared identity to name it by
 
 ### Requirement: The processing outcome and the canonical load complete as one unit of work
 The canonical load session SHALL own the relationship between the processing run, its accepted or rejected outcome with bounded diagnostics and notices, and the canonical load, such that the outcome and the load become durable together at one completion point.
