@@ -89,7 +89,7 @@ A third idiom for this problem would itself be the defect.
 
 ## From an acquisition to a run
 
-`BronzeStore.record()` returns a storage locator — in the S3 adapter, `s3://<bucket>/<sha>.manifest.json`. `ingestion.run.manifest_id` needs something else entirely: a `bigint` that `bronze.release_manifest` generates, on a table that holds no column containing that URI and carries no unique constraint on the artifact checksum either. There is no path from one to the other, and nothing in the first draft produced the value `start()` was specified to take.
+`BronzeStore.record()` returns a storage locator. In the S3 adapter that is, **before task 1.2**, the artifact-keyed `s3://<bucket>/<sha>.manifest.json`, and **after it** an acquisition-grain locator; in neither case is it a `ManifestRef`, which is the point of this section. `ingestion.run.manifest_id` needs something else entirely: a `bigint` that `bronze.release_manifest` generates, on a table that holds no column containing that URI and carries no unique constraint on the artifact checksum either. There is no path from one to the other, and nothing in the first draft produced the value `start()` was specified to take.
 
 Left alone, 3.5 would have had to choose — parse the S3 locator, insert a second manifest row, query by evidence that is not unique, or reach across adapters — and whichever it chose would have become the contract by default. That is the outcome 2.3 exists to prevent.
 
