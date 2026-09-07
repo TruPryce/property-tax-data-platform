@@ -16,7 +16,11 @@ The quality boundary SHALL read the configured rules, with their severity and th
 
 A recorded failing evaluation SHALL carry the measured and expected values.
 
-The boundary SHALL provide a run-level verdict: for one run, against the blocking rules active when the verdict is asked for, which active blocking rules have no recorded evaluation for that run at their active version, which recorded blocking evaluations failed, and which warning evaluations failed. The verdict is complete exactly when no active blocking rule lacks an evaluation, and clean exactly when it is complete and no blocking evaluation failed. It SHALL be computed from the recorded evaluations and the active rule set, and SHALL NOT be stored as a second model. An absent evaluation SHALL be reported as absent and SHALL NOT be reported as a pass: the accepted evaluation record notes that a release that passed because a rule never ran otherwise looks identical to one that passed because it did.
+The boundary SHALL provide a run-level verdict: for one run, against the blocking rule versions active when the verdict is asked for, which active blocking rules have no recorded evaluation for that run at exactly their active version — whether no evaluation exists or the only one is at a version since replaced — which recorded blocking evaluations failed, and which warning evaluations failed. The verdict is complete exactly when no active blocking rule lacks an evaluation at its active version, and clean exactly when it is complete and no blocking evaluation failed. It SHALL be computed from the recorded evaluations and the active rule set, and SHALL NOT be stored as a second model. An absent evaluation SHALL be reported as missing and SHALL NOT be reported as a pass; an evaluation at a replaced version SHALL be reported as stale and SHALL NOT be reported as coverage: the accepted evaluation record notes that a release that passed because a rule never ran otherwise looks identical to one that passed because it did.
+
+The remedy for a missing or stale evaluation SHALL be a new processing run, never re-evaluation within the run: the accepted evaluation record admits one immutable verdict per rule and subject per run, and the loading role cannot replace it. The boundary SHALL NOT name re-evaluation as a remedy.
+
+More than one active version of one blocking rule SHALL be a named configuration error: the verdict SHALL report it and SHALL NOT be complete while it stands, so activation fails closed rather than choosing a version. Keeping exactly one version of a rule active, and switching versions atomically, is the rule owner's obligation and not the boundary's.
 
 #### Scenario: Configured rules are evaluated
 - **WHEN** a use case evaluates quality for a run
@@ -31,11 +35,19 @@ The boundary SHALL provide a run-level verdict: for one run, against the blockin
 - **THEN** the run's verdict is incomplete, names that rule, and reports no pass for it
 
 #### Scenario: A blocking rule was activated after the run was evaluated
-- **WHEN** a blocking rule becomes active after a run's evaluations were recorded
-- **THEN** the run's verdict is incomplete until that rule is evaluated against the run, and re-evaluation rather than activation is the remedy
+- **WHEN** a blocking rule becomes active after a run's evaluations were recorded and has no evaluation for the run
+- **THEN** the verdict reports it as missing and the run as incomplete, and the remedy is a new processing run
+
+#### Scenario: A blocking rule's active version changed after the run was evaluated
+- **WHEN** a run holds an evaluation for a blocking rule only at a version that is no longer the active one
+- **THEN** the verdict reports that rule as stale and the run as incomplete, and the remedy is a new processing run rather than re-evaluation within this one
+
+#### Scenario: Two versions of one blocking rule are active
+- **WHEN** more than one version of one blocking rule is active when the verdict is asked for
+- **THEN** the verdict reports a named configuration error and is not complete, and activation refuses rather than choosing a version
 
 #### Scenario: Every active blocking rule passed
-- **WHEN** every active blocking rule has a recorded passing evaluation for a run
+- **WHEN** every active blocking rule has a recorded passing evaluation for a run at exactly its active version
 - **THEN** the verdict is complete and clean, whatever the warning evaluations recorded
 
 #### Scenario: The boundary is examined for a parallel model
@@ -64,7 +76,7 @@ Where the source establishes no such instant, the attempt SHALL record its absen
 ### Requirement: The publication boundary owns attempt, lineage, and activation
 The publication boundary SHALL record a publication attempt, its lineage to the release and run it rests on, and its transition to current or to failed. Activation SHALL make the new publication current and record the publication it supersedes. A failed attempt SHALL NOT become current and SHALL NOT supersede the publication that is already current.
 
-Activation SHALL refuse with a named error, leaving the previously current publication current, unless the run's quality verdict is clean at the moment of activation. An active blocking rule with no recorded evaluation for the run SHALL refuse activation exactly as a failed one does. The persisted publication gate counts recorded blocking failures only, so an unevaluated rule would pass it; the boundary SHALL NOT rely on that gate to detect absence.
+Activation SHALL refuse with a named error, leaving the previously current publication current, unless the run's quality verdict is clean at the moment of activation. An active blocking rule with no recorded evaluation for the run, one whose only evaluation is at a replaced version, or one with more than one active version SHALL refuse activation exactly as a failed one does. The persisted publication gate counts recorded blocking failures only, so none of those would stop it; the boundary SHALL NOT rely on that gate to detect them. The check is made at admission: a publication already current SHALL remain current whatever becomes active afterwards, and only a new activation is judged.
 
 This boundary SHALL NOT construct the published product itself; the transaction that builds and promotes the published data is owned separately. The boundary SHALL NOT grant, imply, or require raw canonical read access, and SHALL NOT confer permission to publish a sensitive field, which the reviewed field policy continues to govern.
 
@@ -77,8 +89,12 @@ This boundary SHALL NOT construct the published product itself; the transaction 
 - **THEN** it becomes current and the publication it replaces is recorded as superseded
 
 #### Scenario: An attempt is activated with an unevaluated blocking rule
-- **WHEN** activation is attempted for a run whose verdict is incomplete or carries a blocking failure
+- **WHEN** activation is attempted for a run whose verdict is incomplete — a missing evaluation, a stale-version evaluation, or a rule with two active versions — or carries a blocking failure
 - **THEN** activation refuses with a named error, the attempt is not marked current, and the previously current publication remains current
+
+#### Scenario: A rule changes after a publication is current
+- **WHEN** a blocking rule's active version changes after a publication became current
+- **THEN** that publication remains current, because the verdict is checked at admission and a current publication is not re-judged
 
 #### Scenario: An attempt is activated with a clean verdict
 - **WHEN** activation is attempted for a run whose verdict is complete and clean

@@ -13,7 +13,8 @@ before this ledger existed, each pinned to the commit it reviewed. Round 5 is a
 read-only review of the same head. None of the five was scope-bound, so each is
 a **transition record** carrying one machine block per scope it touched. Round 6
 was the first round whose findings fall in one scope; round 7 spans three again,
-because the bots review the whole PR.
+because the bots review the whole PR; round 8 is one scope and records a
+maintainer decision.
 
 ## Verdict semantics
 
@@ -113,7 +114,7 @@ next round file and file each finding under its scope.
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `canonical-load`            | REVISE (round 4: adoption is ambiguous at a non-unique grain; oversized parent sets have no bounded path — two P1s UNRESOLVED)    | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
-| `quality-publication-clock` | REVISE (round 7 P1 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
+| `quality-publication-clock` | REVISE (round 8 P1 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 8          | `88a64a977e30a13a6916b0b3ef410b51ae128be2` |
 | `surface-and-proof`         | REVISE (round 5: task prerequisites cite decisions that do not exist; seven tasks exceed the 2,048-character task bound)          | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
 
 **Change status:** OPEN — no scope has an accepting round; three P1s (all in
