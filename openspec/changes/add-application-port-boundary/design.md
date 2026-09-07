@@ -533,7 +533,7 @@ The change carries six capability specs. Every shared concept is defined in exac
 | The closed diagnostic vocabulary; the bounded notice grammar | accepted `bounded-release-processing` | `processing-run` (validates against them; defines no second enum) |
 | Outcome, diagnostic, notice, quality, and publication records reused rather than replaced | accepted `canonical-silver-persistence` | `processing-run`, `run-bound-quality-and-publication` |
 | `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, `still_needed`, adoption, `ReleaseLoadCompletion` | `canonical-load-session` | — |
-| Account snapshot grain (deliberately non-unique), one-to-many children, cross-load lineage, release-scoped retry | accepted `canonical-silver-persistence` | `canonical-load-session` (adoption names the grain; review round 4 records that the grain is not a key) |
+| Account snapshot grain (deliberately non-unique), one-to-many children, cross-load lineage, release-scoped retry | accepted `canonical-silver-persistence` | `canonical-load-session` (adoption names an **opaque locator**, never the grain, and never provenance — both name more than one snapshot; round 4 records why) |
 | The canonical record types | accepted `canonical-appraisal-records` | `canonical-load-session` |
 | `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityVerdict`, `QualityRepository` | `run-bound-quality-and-publication` | the publication attempt's activation, in the same spec, checks the verdict |
 | `PublicationProduct`, `PublicationRef`, `PublicationAttempt`, `PublicationRepository` | `run-bound-quality-and-publication` | — |
@@ -620,14 +620,32 @@ an allocation's parent chain is two links deep.
 No generic mapping, JSON payload, free-form metadata attribute, or database-shaped row type,
 and no key over observed values.
 
+### Completion, and why it is one unit of work
+
+`commit` is where the outcome and the canonical load become durable **together**. That is not a
+preference: the database gate requiring an accepted outcome is `DEFERRABLE INITIALLY DEFERRED`, so an
+implementation that made the outcome durable in one unit of work and the load in another cannot
+satisfy it — the gate is judged at `COMMIT`, when both halves must already be present. An
+implementer reading only the port would otherwise be free to split them and would find out at
+integration.
+
+`ReleaseLoadCompletion` reports whether the pairing had already completed rather than raising, and
+the retry key is the release and the run: re-completing one pairing persists nothing further, while a
+second distinct run is a second load and not a retry. The capability states both; this note exists so
+the reason for the single commit point sits beside the contract that requires it.
+
 ### `AccountSnapshotRef`, `AdoptableSnapshot`, and `ReleaseLoadCompletion`
 
 `AccountSnapshotRef` is an opaque locator on the same terms as `ProcessingRunRef`.
 `AdoptableSnapshot` pairs one with the `AccountSnapshot` it locates — the whole value, not its
 provenance, because two snapshots can share a provenance and differ only in a composed situs
-address or legal description. Candidate access is paged or streamed: one acquisition may
-persist several snapshots at one grain, so the count for an account and release is not bounded
-per acquisition. `ReleaseLoadCompletion` carries the `ProcessingRunRef` and `already_complete`,
+address or legal description. **Adoption takes the candidate, not the bare locator**, so the
+handle is bound to that exact snapshot object and a child naming it is held to the same
+object-identity check as a parent introduced in the batch; a locator alone would leave the one
+class of parent reached across loads unverified. Candidate access returns an **iterator**: one
+acquisition may persist several snapshots at one grain, so the count is unbounded, and
+"paged or streamed" as an adjective is satisfied by a list called a page — the shape has to
+make laziness observable. `ReleaseLoadCompletion` carries the `ProcessingRunRef` and `already_complete`,
 and deliberately not a locator per account — see the adoption argument above.
 
 ## The falsification matrix
@@ -707,8 +725,11 @@ Each case names a defect. A case that cannot fail is not on this list.
 - Two snapshots sharing one **load, release, and provenance**, differing only in a situs address or a
   legal description, are offered as **two** candidates and adopt independently. A candidate carrying
   only provenance would present them as one; this case is why it carries the snapshot.
-- Candidate access is paged or streamed: a fake holding more candidates for one account and release
-  than a page returns yields them across pages, and nothing requires materialising all of them.
+- Candidate access is lazy: a fake that records how many candidates it drew yields none beyond the
+  one a caller stops at, which a materialised collection cannot satisfy.
+- A child naming an adopted handle while holding a snapshot **equal in value but not the same
+  object** is refused, exactly as it is for a parent introduced in the batch — which is why adoption
+  takes the candidate rather than the locator.
 - An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
   port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
   risk that task 3.5 owns.

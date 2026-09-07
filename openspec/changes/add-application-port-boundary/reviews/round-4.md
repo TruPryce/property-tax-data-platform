@@ -94,6 +94,15 @@ commit, before the spec was split into six files: `spec.md:335` and
    per-acquisition bound holds. `AdoptableSnapshot` now carries the **snapshot
    value**, and candidate access is **paged or streamed** rather than resting on a
    cardinality no accepted contract promises.
+
+   **Corrected twice.** The next round found that `adopt(ref)` discarded the object
+   the candidate had just supplied, so an adopted parent was the one class of parent
+   the object-identity check could not reach — the check that exists because two
+   legitimate parents can be equal by value. Adoption now takes the **candidate**,
+   binding the handle to that exact snapshot object. The same round found that "paged
+   or streamed" is an adjective a list called a page satisfies, so the port now names
+   the shape: `Iterator[AdoptableSnapshot]`, with the implementation forbidden from
+   drawing every candidate before the caller consumes the first.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

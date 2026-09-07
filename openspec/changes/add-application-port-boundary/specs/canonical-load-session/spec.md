@@ -104,11 +104,21 @@ A correlation value SHALL be obtainable for an account snapshot already persiste
 
 **Adoption SHALL name that snapshot by an opaque locator, never by its grain.** The account identity and release are a snapshot's *grain*, and the accepted canonical contract makes that grain deliberately non-unique: two snapshots sharing an account and a release with different provenance are both retained, and the grain SHALL NOT be expressed as a uniqueness constraint. Identifying a parent by grain is therefore ambiguous exactly in the divergence case this boundary exists to preserve, and would let an enrichment attach to whichever observation a lookup happened to return.
 
-The boundary SHALL therefore expose the snapshots persisted for an account and release as candidates, each pairing an opaque locator with **the account snapshot value it locates**, so a caller selects on the whole observation. That locator SHALL carry the same terms as every other locator here: comparable for equality, carrying no ordering, freshness, or precedence meaning, and never canonical identity. Adoption SHALL accept the locator alone.
+The boundary SHALL therefore expose the snapshots persisted for an account and release as candidates, each pairing an opaque locator with **the account snapshot value it locates**, so a caller selects on the whole observation. That locator SHALL carry the same terms as every other locator here: comparable for equality, carrying no ordering, freshness, or precedence meaning, and never canonical identity.
+
+**Adoption SHALL accept the candidate, not the locator alone.** A record naming an in-batch parent is checked against the very object the canonical value holds, compared by identity rather than by value, because two legitimate parents can be equal. An adopted parent SHALL be held to that same check, and a locator alone does not permit it: the session would have a handle bound to a reference and no object to compare a child's parent against, so the one class of parent reached across loads would be the one nothing verified. Taking the candidate — which already carries both the locator and the snapshot it locates — binds the handle to that exact object, and a child naming the handle SHALL be refused unless the snapshot it holds is that same object.
+
+A caller SHALL therefore construct children against the snapshot the candidate carried, rather than an equal value built elsewhere.
 
 The candidate SHALL carry the snapshot rather than its provenance alone. Provenance does not distinguish them: the accepted persistence contract retains two snapshots **sharing one load, account, release, and provenance** that differ only in a composed situs address or legal description, and refuses any uniqueness over load, account, and provenance that would collapse them. A candidate offering only provenance would present those two as one, which is the ambiguity this requirement exists to remove, moved one field along. Where two candidates are equal as domain values they are indistinguishable by construction, and either is a correct parent.
 
-The number of candidates for one account and release SHALL NOT be assumed bounded. One acquisition may persist several snapshots at one grain, so a per-acquisition bound is not one the accepted contract supports. Candidate access SHALL therefore be paged or streamed, so a caller obtains candidates in bounded quantity without the boundary materialising all of them and without a caller holding a locator for every snapshot in a release.
+The number of candidates for one account and release SHALL NOT be assumed bounded. One acquisition may persist several snapshots at one grain, so a per-acquisition bound is not one the accepted contract supports.
+
+Candidate access SHALL therefore be **lazy and expressed as one**: the operation SHALL return an iterator of candidates rather than a materialised collection, so an implementation yields them as they are drawn and a caller may stop at the one it wants. "Paged or streamed" as an adjective is not a contract — an implementation satisfies it by returning a list and calling the list a page — so the port SHALL state the shape that makes laziness observable, and an implementation SHALL NOT draw every candidate before the caller consumes the first.
+
+#### Scenario: A caller stops at the first candidate it wants
+- **WHEN** a caller iterates the candidates for an account and release and stops after the one it adopts
+- **THEN** the implementation has not drawn the remainder, which is what distinguishes the iterator from a collection wearing its name
 
 Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
 
@@ -130,7 +140,11 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 
 #### Scenario: An account has more candidates than a caller wishes to hold
 - **WHEN** the snapshots persisted for one account and release outnumber what a caller wants in memory
-- **THEN** candidates are obtained in bounded quantity through paged or streamed access, and the boundary does not require materialising all of them
+- **THEN** candidates are obtained lazily through the iterator, and neither the boundary nor the caller is required to hold all of them
+
+#### Scenario: An adopted parent is named by a child holding an equal but different snapshot
+- **WHEN** a child names an adopted handle while holding a snapshot equal in value to the adopted one but not the same object
+- **THEN** it is refused, exactly as it would be for a parent introduced in the batch
 
 #### Scenario: An adopted parent does not exist
 - **WHEN** adoption names a locator that resolves to no snapshot persisted for the release being loaded, including one belonging to another release
