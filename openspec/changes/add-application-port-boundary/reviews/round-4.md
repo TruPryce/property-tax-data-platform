@@ -103,6 +103,16 @@ commit, before the spec was split into six files: `spec.md:335` and
    or streamed" is an adjective a list called a page satisfies, so the port now names
    the shape: `Iterator[AdoptableSnapshot]`, with the implementation forbidden from
    drawing every candidate before the caller consumes the first.
+
+   **Corrected three times.** The round after that found the candidate is an ordinary
+   value a caller can assemble, so a valid locator could be paired with a snapshot it
+   does not locate — binding the handle to an object the locator never named, which is
+   the original ambiguity arriving through the value introduced to remove it. Adoption
+   now resolves the locator and refuses unless it locates the snapshot the candidate
+   carries. The same round found the active design diagram and several normative
+   scenarios still prescribing `adopt(locator)` and "paged or streamed" beneath prose
+   that had moved on; both are now swept, and only the historical record here and the
+   sentence explaining why the adjective is inadequate still use those words.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

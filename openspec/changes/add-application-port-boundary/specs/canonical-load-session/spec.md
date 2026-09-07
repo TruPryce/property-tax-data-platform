@@ -110,6 +110,8 @@ The boundary SHALL therefore expose the snapshots persisted for an account and r
 
 A caller SHALL therefore construct children against the snapshot the candidate carried, rather than an equal value built elsewhere.
 
+**Adoption SHALL verify that the candidate's two halves agree.** A candidate is an ordinary value a caller can construct, so nothing prevents pairing a valid locator with a snapshot it does not locate — and a boundary that trusted the pair would bind the handle to an object the locator never named, which is the original defect reintroduced through the fix for it. Adoption SHALL resolve the locator and SHALL refuse with a named error unless the snapshot it locates equals the snapshot the candidate carries. The verified pair is what makes the handle trustworthy; a candidate obtained from the boundary's own candidate access SHALL always satisfy it.
+
 The candidate SHALL carry the snapshot rather than its provenance alone. Provenance does not distinguish them: the accepted persistence contract retains two snapshots **sharing one load, account, release, and provenance** that differ only in a composed situs address or legal description, and refuses any uniqueness over load, account, and provenance that would collapse them. A candidate offering only provenance would present those two as one, which is the ambiguity this requirement exists to remove, moved one field along. Where two candidates are equal as domain values they are indistinguishable by construction, and either is a correct parent.
 
 The number of candidates for one account and release SHALL NOT be assumed bounded. One acquisition may persist several snapshots at one grain, so a per-acquisition bound is not one the accepted contract supports.
@@ -132,11 +134,11 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 
 #### Scenario: An account has two snapshots at one grain and one is enriched
 - **WHEN** an account has two persisted snapshots for one release differing in provenance, and a child from a third artifact must name one of them
-- **THEN** the candidates are offered as locator-and-snapshot pairs, the caller adopts one locator, and the child attaches to exactly that observation rather than to whichever the grain would have matched
+- **THEN** the candidates are offered as locator-and-snapshot pairs, the caller adopts one candidate, and the child attaches to exactly that observation rather than to whichever the grain would have matched
 
 #### Scenario: Two candidates share a provenance and differ only in a composed value
 - **WHEN** an account has two persisted snapshots sharing one load, release, and provenance that differ only in a situs address or a legal description
-- **THEN** both are offered as distinct candidates carrying their own snapshot values, and adopting one locator attaches the child to that observation and not the other
+- **THEN** both are offered as distinct candidates carrying their own snapshot values, and adopting one candidate attaches the child to that observation and not the other
 
 #### Scenario: An account has more candidates than a caller wishes to hold
 - **WHEN** the snapshots persisted for one account and release outnumber what a caller wants in memory
@@ -147,11 +149,15 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 - **THEN** it is refused, exactly as it would be for a parent introduced in the batch
 
 #### Scenario: An adopted parent does not exist
-- **WHEN** adoption names a locator that resolves to no snapshot persisted for the release being loaded, including one belonging to another release
+- **WHEN** adoption is offered a candidate whose locator resolves to no snapshot persisted for the release being loaded, including one belonging to another release
 - **THEN** it fails with a named error and no snapshot is created
 
-#### Scenario: Adoption is offered a grain instead of a locator
-- **WHEN** adoption is attempted by account identity and release rather than by a locator
+#### Scenario: A candidate pairs a valid locator with a snapshot it does not locate
+- **WHEN** adoption is offered a candidate assembled by the caller whose locator resolves to a snapshot other than the one it carries
+- **THEN** it fails with a named error, because a handle bound to an object the locator never named is the ambiguity this requirement removes, arriving through the value meant to remove it
+
+#### Scenario: Adoption is offered a grain instead of a candidate
+- **WHEN** adoption is attempted by account identity and release rather than by a candidate
 - **THEN** no such operation exists, because the grain does not identify one snapshot
 
 #### Scenario: A deeper parent is offered for adoption

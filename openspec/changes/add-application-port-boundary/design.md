@@ -428,8 +428,10 @@ deliberately non-unique, so the draft was ambiguous exactly where adoption is ne
 it is below.
 
 ```text
-  candidates(account_identity, release) ─► AdoptableSnapshot(ref, snapshot)…   paged or streamed
-  adopt(ref) ───────────────────────────► CorrelationHandle    names one existing snapshot
+  candidates(account_identity, release) ─► Iterator[AdoptableSnapshot(ref, snapshot)]   lazy
+  adopt(candidate) ─────────────────────► CorrelationHandle    resolves ref, verifies it
+                                                                locates that snapshot
+                                                                binds the handle to that object
                                                                 creates no observation
                                                                 child keeps its own lineage
 ```
@@ -464,7 +466,7 @@ situs address or legal description, and forbids any uniqueness over load, accoun
 provenance that would collapse them. So provenance presents those two as one — the same
 ambiguity as grain, moved one field along — and a single acquisition can persist several
 snapshots at one grain, which is why no per-acquisition bound holds. The candidate therefore
-carries the snapshot value itself, and candidate access is paged or streamed rather than
+carries the snapshot value itself, and candidate access returns a lazy iterator rather than
 resting on a cardinality the accepted contract does not promise. Two candidates equal as
 domain values are indistinguishable by construction and either is a correct parent.
 
@@ -642,7 +644,12 @@ provenance, because two snapshots can share a provenance and differ only in a co
 address or legal description. **Adoption takes the candidate, not the bare locator**, so the
 handle is bound to that exact snapshot object and a child naming it is held to the same
 object-identity check as a parent introduced in the batch; a locator alone would leave the one
-class of parent reached across loads unverified. Candidate access returns an **iterator**: one
+class of parent reached across loads unverified. **And adoption verifies the pair**: a candidate
+is an ordinary value a caller can build, so a valid locator can be paired with a snapshot it does
+not locate, and trusting that pair would bind the handle to an object the locator never named —
+the original defect arriving through the fix for it. Adoption resolves the locator and refuses
+unless the snapshot it locates equals the one carried; a candidate the boundary itself produced
+always agrees. Candidate access returns an **iterator**: one
 acquisition may persist several snapshots at one grain, so the count is unbounded, and
 "paged or streamed" as an adjective is satisfied by a list called a page — the shape has to
 make laziness observable. `ReleaseLoadCompletion` carries the `ProcessingRunRef` and `already_complete`,
@@ -719,7 +726,7 @@ Each case names a defect. A case that cannot fail is not on this list.
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
   parent is refused.
 - An account with two persisted snapshots at one grain differing only in provenance offers **two**
-  adoptable candidates, each carrying the snapshot it locates, and a child adopting one locator
+  adoptable candidates, each carrying the snapshot it locates, and a child adopting one candidate
   attaches to exactly that observation and not the other. Adoption by account identity and release
   does not exist — the grain names both.
 - Two snapshots sharing one **load, release, and provenance**, differing only in a situs address or a
@@ -730,6 +737,9 @@ Each case names a defect. A case that cannot fail is not on this list.
 - A child naming an adopted handle while holding a snapshot **equal in value but not the same
   object** is refused, exactly as it is for a parent introduced in the batch — which is why adoption
   takes the candidate rather than the locator.
+- A candidate **assembled by the caller** pairing a valid locator with a snapshot it does not locate
+  is refused by name, and one obtained from the boundary's own candidate access is accepted. Without
+  this, the value introduced to remove the ambiguity reintroduces it.
 - An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
   port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
   risk that task 3.5 owns.
