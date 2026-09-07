@@ -420,12 +420,18 @@ A handle is unique within the **session** rather than within an account, so one 
 
 The session resolves parents introduced within it, and the accepted canonical contract needs one more case. It permits a child from a second artifact of the same release — "a geometry enrichment or another child carries provenance from a second load and artifact of its parent's same release" — and says explicitly that parent and child are not required to share one load or artifact. A session that only accepts parents it saw introduced makes that unrepresentable: the parent is "never introduced", and resubmitting it would manufacture a second snapshot rather than link to the existing one.
 
-The way out is narrow and rests on something already decided. `AccountSnapshot`'s grain is fixed by the accepted contract as *exactly* its `AccountIdentity` and the release its provenance names. That is declared identity, so naming an existing snapshot by it is not the natural key this boundary forbids — the forbidden thing is keying on observed values, and account identity is not an observed value.
+The first draft named the existing snapshot by its grain — `AccountIdentity` and the release its
+provenance names — and argued that grain is declared identity rather than an observed value, so
+naming a snapshot by it was not the natural key this boundary forbids. **That argument was wrong and
+is kept here because the mistake is instructive: grain is not a key.** The accepted contract makes it
+deliberately non-unique, so the draft was ambiguous exactly where adoption is needed. What replaced
+it is below.
 
 ```text
-  adopt(account_identity, release) ─► CorrelationHandle    names the existing snapshot
-                                                            creates no observation
-                                                            child keeps its own lineage
+  candidates(account_identity, release) ─► AdoptableSnapshot(ref, snapshot)…   paged or streamed
+  adopt(ref) ───────────────────────────► CorrelationHandle    names one existing snapshot
+                                                                creates no observation
+                                                                child keeps its own lineage
 ```
 
 It stops there deliberately. An owner association or taxing-unit observation has no such grain — the canonical model gives them no identity at all, which is why correlation handles exist — so adopting one would mean inventing a key over observed values. Those parents stay in one session with their children, and the contract says so rather than leaving 3.5 to discover it.
@@ -445,11 +451,22 @@ Within (a) there was a second choice, and this change takes the bounded one. "Th
 load's completion hands one back" reads naturally as `ReleaseLoadCompletion` carrying the
 locators it persisted — which would be one per account and would grow with the release,
 undoing the bound the rest of this capability is built to keep. Instead the boundary offers
-the snapshots at one grain as candidates, each pairing its locator with the provenance that
-distinguishes it, and the caller selects on evidence. That is bounded by acquisitions of one
-release rather than by accounts in it, and it is the completion's `ProcessingRunRef` that
-ties a locator to the load that wrote it. If the maintainer intended the literal bulk
-return, this is the place to say so.
+the snapshots persisted for one account and release as candidates, and the caller selects
+among them; it is the completion's `ProcessingRunRef` that ties a locator to the load that
+wrote it. If the maintainer intended the literal bulk return, this is the place to say so.
+
+**A candidate carries the snapshot, not its provenance, and the count is not bounded per
+acquisition.** A first pass at this paired each locator with the `DomainProvenance` that
+"distinguishes it", and claimed one candidate per acquisition of the release. Both were
+wrong, against a contract this change cites: `canonical-silver-persistence` retains two
+snapshots sharing one *load, account, release, and provenance* that differ only in a composed
+situs address or legal description, and forbids any uniqueness over load, account, and
+provenance that would collapse them. So provenance presents those two as one — the same
+ambiguity as grain, moved one field along — and a single acquisition can persist several
+snapshots at one grain, which is why no per-acquisition bound holds. The candidate therefore
+carries the snapshot value itself, and candidate access is paged or streamed rather than
+resting on a cardinality the accepted contract does not promise. Two candidates equal as
+domain values are indistinguishable by construction and either is a correct parent.
 
 **The oversized parent set is bounded honestly and spilled elsewhere.** Disposition (c)
 then (b): the port states the bound as one account's parents, refuses nothing, and names no
@@ -606,10 +623,12 @@ and no key over observed values.
 ### `AccountSnapshotRef`, `AdoptableSnapshot`, and `ReleaseLoadCompletion`
 
 `AccountSnapshotRef` is an opaque locator on the same terms as `ProcessingRunRef`.
-`AdoptableSnapshot` pairs one with the `DomainProvenance` that distinguishes it, which is how
-a caller selects among snapshots at one grain. `ReleaseLoadCompletion` carries the
-`ProcessingRunRef` and `already_complete`, and deliberately not a locator per account — see
-the adoption argument above.
+`AdoptableSnapshot` pairs one with the `AccountSnapshot` it locates — the whole value, not its
+provenance, because two snapshots can share a provenance and differ only in a composed situs
+address or legal description. Candidate access is paged or streamed: one acquisition may
+persist several snapshots at one grain, so the count for an account and release is not bounded
+per acquisition. `ReleaseLoadCompletion` carries the `ProcessingRunRef` and `already_complete`,
+and deliberately not a locator per account — see the adoption argument above.
 
 ## The falsification matrix
 
@@ -682,9 +701,14 @@ Each case names a defect. A case that cannot fail is not on this list.
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
   parent is refused.
 - An account with two persisted snapshots at one grain differing only in provenance offers **two**
-  adoptable candidates, each carrying the provenance that distinguishes it, and a child adopting one
-  locator attaches to exactly that observation and not the other. Adoption by account identity and
-  release does not exist — the grain names both.
+  adoptable candidates, each carrying the snapshot it locates, and a child adopting one locator
+  attaches to exactly that observation and not the other. Adoption by account identity and release
+  does not exist — the grain names both.
+- Two snapshots sharing one **load, release, and provenance**, differing only in a situs address or a
+  legal description, are offered as **two** candidates and adopt independently. A candidate carrying
+  only provenance would present them as one; this case is why it carries the snapshot.
+- Candidate access is paged or streamed: a fake holding more candidates for one account and release
+  than a page returns yields them across pages, and nothing requires materialising all of them.
 - An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
   port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
   risk that task 3.5 owns.

@@ -82,6 +82,18 @@ commit, before the spec was split into six files: `spec.md:335` and
    scenarios), `design.md` under "A parent that is already in the database", the
    falsification matrix, and tasks 3.1 and 3.2. If the literal bulk return was
    intended, say so and it changes back.
+
+   **Corrected once, at review.** The first application of (a) paired each locator
+   with the `DomainProvenance` "that distinguishes it" and claimed one candidate per
+   acquisition. Both were wrong against a contract this change cites:
+   `canonical-silver-persistence` retains two snapshots sharing one *load, account,
+   release, and provenance* that differ only in a composed situs address or legal
+   description, and forbids the uniqueness that would collapse them. Provenance
+   therefore presents those two as one — the same ambiguity as grain, moved a field
+   along — and one acquisition can persist several snapshots at one grain, so no
+   per-acquisition bound holds. `AdoptableSnapshot` now carries the **snapshot
+   value**, and candidate access is **paged or streamed** rather than resting on a
+   cardinality no accepted contract promises.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering
@@ -100,6 +112,14 @@ commit, before the spec was split into six files: `spec.md:335` and
    than disclaiming it, `design.md` carries the residual case as a recorded risk
    and a handoff to 3.5, and the falsification matrix requires proving the port
    refuses nothing and offers no spill.
+
+   **The handoff was not binding until it landed in 3.5's own contract.** Attributing
+   the spill to task 3.5 in this change's prose left an obligation nothing would carry:
+   bootstrap 3.5's task line said only "bounded batch parsing and PostgreSQL
+   COPY-to-staging plus set-based idempotent merges", with no mention of a spill, a
+   parent, or correlation. That line now names both obligations this change hands it —
+   the durable spill, and paged or streamed candidate access. Text only; its checkbox
+   is untouched and stays `[ ]`.
 3. [P1] UNRESOLVED — `quality-publication-clock`, with the likely landing in
    `run-and-manifest`: the durable home the finding asks for is at the
    manifest/run handoff, so the fix probably adds the instant to what

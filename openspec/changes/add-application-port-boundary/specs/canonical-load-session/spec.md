@@ -104,9 +104,11 @@ A correlation value SHALL be obtainable for an account snapshot already persiste
 
 **Adoption SHALL name that snapshot by an opaque locator, never by its grain.** The account identity and release are a snapshot's *grain*, and the accepted canonical contract makes that grain deliberately non-unique: two snapshots sharing an account and a release with different provenance are both retained, and the grain SHALL NOT be expressed as a uniqueness constraint. Identifying a parent by grain is therefore ambiguous exactly in the divergence case this boundary exists to preserve, and would let an enrichment attach to whichever observation a lookup happened to return.
 
-The boundary SHALL therefore expose the snapshots persisted for an account and release as candidates, each pairing an opaque locator with the provenance that distinguishes it, so a caller selects on evidence rather than on resemblance. That locator SHALL carry the same terms as every other locator here: comparable for equality, carrying no ordering, freshness, or precedence meaning, and never canonical identity. Adoption SHALL accept the locator alone.
+The boundary SHALL therefore expose the snapshots persisted for an account and release as candidates, each pairing an opaque locator with **the account snapshot value it locates**, so a caller selects on the whole observation. That locator SHALL carry the same terms as every other locator here: comparable for equality, carrying no ordering, freshness, or precedence meaning, and never canonical identity. Adoption SHALL accept the locator alone.
 
-The candidate lookup SHALL be bounded by the snapshots at one grain — one per acquisition of that release — and SHALL NOT require the boundary to return, or a caller to hold, a locator for every snapshot in a release. A completion that handed back one locator per account would grow with the release, which is the bound the rest of this capability is built to keep.
+The candidate SHALL carry the snapshot rather than its provenance alone. Provenance does not distinguish them: the accepted persistence contract retains two snapshots **sharing one load, account, release, and provenance** that differ only in a composed situs address or legal description, and refuses any uniqueness over load, account, and provenance that would collapse them. A candidate offering only provenance would present those two as one, which is the ambiguity this requirement exists to remove, moved one field along. Where two candidates are equal as domain values they are indistinguishable by construction, and either is a correct parent.
+
+The number of candidates for one account and release SHALL NOT be assumed bounded. One acquisition may persist several snapshots at one grain, so a per-acquisition bound is not one the accepted contract supports. Candidate access SHALL therefore be paged or streamed, so a caller obtains candidates in bounded quantity without the boundary materialising all of them and without a caller holding a locator for every snapshot in a release.
 
 Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
 
@@ -120,7 +122,15 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 
 #### Scenario: An account has two snapshots at one grain and one is enriched
 - **WHEN** an account has two persisted snapshots for one release differing in provenance, and a child from a third artifact must name one of them
-- **THEN** the candidates are offered as locator-and-provenance pairs, the caller adopts one locator, and the child attaches to exactly that observation rather than to whichever the grain would have matched
+- **THEN** the candidates are offered as locator-and-snapshot pairs, the caller adopts one locator, and the child attaches to exactly that observation rather than to whichever the grain would have matched
+
+#### Scenario: Two candidates share a provenance and differ only in a composed value
+- **WHEN** an account has two persisted snapshots sharing one load, release, and provenance that differ only in a situs address or a legal description
+- **THEN** both are offered as distinct candidates carrying their own snapshot values, and adopting one locator attaches the child to that observation and not the other
+
+#### Scenario: An account has more candidates than a caller wishes to hold
+- **WHEN** the snapshots persisted for one account and release outnumber what a caller wants in memory
+- **THEN** candidates are obtained in bounded quantity through paged or streamed access, and the boundary does not require materialising all of them
 
 #### Scenario: An adopted parent does not exist
 - **WHEN** adoption names a locator that resolves to no snapshot persisted for the release being loaded, including one belonging to another release
