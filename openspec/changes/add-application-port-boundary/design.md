@@ -303,6 +303,8 @@ The failure belongs one step earlier, at the only place a partial release become
 
 Downstream of promotion no port carries a "maybe complete" identity, and `ReleaseIdentity` is not weakened to make the error expressible. The alternative — a nullable fourth component threaded through the canonical port — is precisely how a filename ends up as a release identifier under schedule pressure.
 
+The evidence carries one more fact that is not identity: the source as-of instant established for that logical release, where one was. Promotion does not consume it — it rides beside the identity to the publication attempt, which is what lets a current release and the certified release packed in the same artifact each publish their own freshness. A page instant for the export as a whole applies to every release drawn from it; a content-established instant for one release takes precedence for that release; absence is recorded, and the acquisition instant is never substituted.
+
 ## The transaction seam
 
 `canonical.release_load` carries this trigger:
@@ -356,7 +358,7 @@ The session accepts the run's processing outcome, and the obvious candidate is `
 
 The application may not import it. `FORBIDDEN_IMPORTS` in the dependency-direction test lists `property_tax_adapters` under `property_tax_application`, and the direction is real rather than nominal: five county modules already import `CountySourceDefinition` from the application, so the arrow points inward and reversing it anywhere would make the graph cyclic.
 
-So the application defines its own outcome value carrying the facts the database gate and the accepted contract need — disposition, the counts, the bounded diagnostics and notices with their truncation flags — and the adapter maps `ReleaseOutcome` onto it at the boundary it already crosses.
+So the application defines its own outcome value carrying the facts the database gate and the accepted contract need — disposition, the counts, the bounded diagnostics and notices with their truncation flags — and the adapter maps `ReleaseOutcome` onto it at the boundary it already crosses. One fact in that value is a constant rather than a measurement: `ingestion.release_outcome` carries `CHECK (boundary_contract_version = 1)`, and the adapters pin it as `BOUNDARY_CONTRACT_VERSION`. The application cannot import that constant, so it holds a copy and refuses any other integer at construction, and the dependency-direction test — which may import both packages — asserts the two copies are equal. Without the pin an outcome carrying `2` would satisfy every enumerated invariant and abort the canonical completion at persistence, the same shape of defect the evidence seal closed.
 
 This is a mapping, not a second model. The alternative, moving `ReleaseOutcome` inward, would edit the public surface of a promoted capability (`bounded-release-processing`) to serve a consumer that does not exist yet, and would drag `ReleaseDiagnostic` and `ReleaseNotice` with it.
 
@@ -434,14 +436,16 @@ Quality evaluates loaded canonical data — required-key completeness, uniquenes
 
 Publication is atomic on its own terms: attempt, then activate or fail. `publication.publication` carries the state machine (`building`, `current`, `superseded`, `failed`) and the supersession pointer, and `PublicationAttempt.fail()` leaves the previously current publication current, which is the accepted requirement that consumers keep reading the last good build.
 
+What stands between the two is a verdict the database cannot compute. The persisted gate, `publication.assert_current_is_validated`, refuses a current publication when the run's outcome is not accepted or when `quality.blocking_failure` holds a row for it — and that view is derived from *recorded* evaluations that failed. A blocking rule nobody evaluated leaves no row, so the gate waves it through, and `quality.evaluation`'s own comment names the blind spot: a release that passed because a rule never ran looks identical afterwards to one that passed because it did. The accepted requirement is that all blocking rules pass, not that none recorded a failure. An earlier draft left the blocking-or-warning decision to the use case; it cannot make that decision after a crash, because nothing in the boundary read back which evaluations a dead worker had recorded. So `QualityRepository` computes a run-level verdict when asked — the active blocking rules with no recorded evaluation for the run at their active version, the recorded blocking failures, the warning failures — and `activate()` refuses by name unless that verdict is complete and clean at the moment of activation. The verdict is stored nowhere: a stored verdict would be the second quality model D7 forbids, and it would go stale the moment a rule was activated, which is exactly the case that must refuse. The rule set that counts is the one active at activation; a blocking rule activated after the run was evaluated makes the verdict incomplete, and re-evaluation is the remedy.
+
 The boundary stops there deliberately. Migration `0005` says task 6.2 owns the promotion path, and this port has no operation that stages or writes published content — so scoping it to attempt, lineage, and activation describes what it can actually do. A requirement promising an atomic Gold build would be a promise no task in this change makes representable.
 
 So there are three transactions in the pipeline, not one, and the boundary makes the seams explicit:
 
 ```text
   [ run + outcome + canonical load ]   one transaction, deferred gate
-  [ quality evaluations ]              run-bound, after the load
-  [ publication build → activate ]     atomic, over completed loads
+  [ quality evaluations → verdict ]    run-bound, after the load; the verdict is computed, never stored
+  [ publication build → activate ]     atomic, over completed loads; activation refuses unless the verdict is clean
 ```
 
 ## Cross-spec contract matrix
@@ -454,19 +458,19 @@ The change carries six capability specs. Every shared concept is defined in exac
 | Opaque persistence locators (`ProcessingRunRef`, `ManifestRef`, `PublicationRef`) | `application-port-boundary` | `processing-run`, `acquisition-manifest-index`, `run-bound-quality-and-publication` |
 | `ReleaseIdentity`, four components | accepted `canonical-identity-and-provenance` | `source-registry-and-discovery` (promotion), `processing-run`, `canonical-load-session` |
 | Promotion from `LogicalReleaseEvidence`; `IncompleteReleaseIdentity` | `source-registry-and-discovery` | `processing-run` (`start` takes the promoted identity), `canonical-load-session` |
-| `SourceCandidate`, `PageEvidence`, source as-of evidence, `UnchangedRelease` | `source-registry-and-discovery` | `acquisition-manifest-index` (a `ReleasePartition` is the evidence with the identifier dropped), `run-bound-quality-and-publication` (the as-of instant at the attempt) |
+| `SourceCandidate`, `PageEvidence`, `UnchangedRelease`, and the per-release source as-of instant on `LogicalReleaseEvidence` | `source-registry-and-discovery` | `acquisition-manifest-index` (a `ReleasePartition` is the evidence with the identifier dropped), `run-bound-quality-and-publication` (each release's own instant at its attempt) |
 | `CountySourceDefinition`, `AcquisitionMethod`, expected media types, `SourceRegistry` | `source-registry-and-discovery` | — |
 | `ArtifactSink`, `BronzeStore`, `ReleaseManifest`, `ReleasePartition`, `StoredArtifact` | `acquisition-manifest-index` (retained; bounded corrections) | `source-registry-and-discovery` |
 | Acquisition equivalence, acquisition-grain storage, the manifest shape version | `acquisition-manifest-index` | — |
 | `ManifestIndex`, `ManifestRef` | `acquisition-manifest-index` | `processing-run` |
 | `ProcessingRunRef`, `ProcessingRunRepository`, the active-run refusal | `processing-run` | `canonical-load-session`, `run-bound-quality-and-publication` |
-| `ReleaseProcessingOutcome`, `ReleaseDiagnosticRecord`, `ReleaseNoticeRecord`, `ReleaseDisposition`, the evidence seal | `processing-run` | `canonical-load-session` (the session accepts it at `open`) |
+| `ReleaseProcessingOutcome`, `ReleaseDiagnosticRecord`, `ReleaseNoticeRecord`, `ReleaseDisposition`, the evidence seal, the mirrored `BOUNDARY_CONTRACT_VERSION` | `processing-run` | `canonical-load-session` (the session accepts it at `open`); task 7.1 pins the mirror equal to the adapters' constant |
 | The closed diagnostic vocabulary; the bounded notice grammar | accepted `bounded-release-processing` | `processing-run` (validates against them; defines no second enum) |
 | Outcome, diagnostic, notice, quality, and publication records reused rather than replaced | accepted `canonical-silver-persistence` | `processing-run`, `run-bound-quality-and-publication` |
 | `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, `still_needed`, adoption, `ReleaseLoadCompletion` | `canonical-load-session` | — |
 | Account snapshot grain (deliberately non-unique), one-to-many children, cross-load lineage, release-scoped retry | accepted `canonical-silver-persistence` | `canonical-load-session` (adoption names the grain; review round 4 records that the grain is not a key) |
 | The canonical record types | accepted `canonical-appraisal-records` | `canonical-load-session` |
-| `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityRepository` | `run-bound-quality-and-publication` | — |
+| `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityVerdict`, `QualityRepository` | `run-bound-quality-and-publication` | the publication attempt's activation, in the same spec, checks the verdict |
 | `PublicationProduct`, `PublicationRef`, `PublicationAttempt`, `PublicationRepository` | `run-bound-quality-and-publication` | — |
 | `Clock` | `run-bound-quality-and-publication` | — |
 
@@ -494,6 +498,8 @@ The change carries six capability specs. Every shared concept is defined in exac
 - **Deferring run creation to 2.4.** The reference is database-generated; a use case cannot construct a correct one without reaching through the boundary, so deferring it would have made the first implementation invent the contract.
 - **Refusing every unfinished run.** It prevents overlap and also prevents recovery: a dead worker never finishes its run, and the boundary offered no way to obtain or retire it, so the release waited for a database edit. Holding is what distinguishes a live worker from a dead one, and it is worth the mechanism.
 - **Returning the existing run to any caller.** It recovers from a crash by letting two live workers share one run, so the accepted overlap scenario fails and one run carries two workers' outcomes.
+- **Trusting the persisted publication gate for quality.** It counts recorded blocking failures, so a blocking rule nobody evaluated passes it; the accepted contract requires every blocking rule to pass. Leaving the verdict to the use case fails the same way after a crash, because the boundary offered no read of what was recorded.
+- **A candidate-level source as-of instant only.** One Collin export carries a current release and a certified one; a single instant on the candidate cannot let them publish different freshness, and after promotion nothing but the evidence travels with the release.
 
 ## Risks
 
@@ -518,5 +524,4 @@ One construction signature does change: `ReleaseManifest` gains a required `juri
 ## Unresolved questions
 
 - Whether `ReleaseDiscovery` should return candidates for one jurisdiction or accept a cohort, which depends on how 2.4 shapes the six-county scheduled workflow.
-- Whether `QualityRepository` should expose a computed verdict for a run or leave the blocking/warning decision to the use case. The plan leaves it to the use case, since the thresholds are configuration and the decision is orchestration.
 - Whether publication products beyond the accepted three ever need a distinct session shape. Out of scope until a fourth product exists.

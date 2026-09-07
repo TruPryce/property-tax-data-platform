@@ -62,6 +62,8 @@ The outcome SHALL also satisfy the evidence seal the accepted outcome record enf
 
 A diagnostic code SHALL be one the accepted closed vocabulary admits. A notice code SHALL NOT be closed to that vocabulary; it SHALL satisfy the bounded lowercase identifier grammar the accepted notice contract admits. Either way a value valid at this boundary SHALL be a value that can be recorded.
 
+The boundary contract version SHALL equal the accepted boundary's constant, so a value the boundary accepts cannot fail the persisted check that pins it. The application SHALL hold its own copy of that constant, because it cannot import the adapters', and the dependency-direction test SHALL assert the two are equal so the copy cannot drift.
+
 An implementation SHALL be able to record the accepted outcome from this value alone, without obtaining any of those facts from outside the boundary. The paired invariants the accepted record enforces SHALL be enforced here, so a violation is refused at the boundary rather than at commit.
 
 #### Scenario: A prepared release reports its parser evidence
@@ -103,3 +105,7 @@ An implementation SHALL be able to record the accepted outcome from this value a
 #### Scenario: A notice carries a malformed code
 - **WHEN** an outcome carries a notice whose code does not satisfy the bounded lowercase identifier grammar
 - **THEN** the outcome is refused
+
+#### Scenario: An outcome carries another boundary contract version
+- **WHEN** an outcome is constructed with a boundary contract version other than the accepted constant
+- **THEN** it is refused at the boundary rather than accepted here and rejected at persistence

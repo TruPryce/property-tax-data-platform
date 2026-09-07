@@ -43,6 +43,8 @@ Release discovery SHALL return, for each observed source, either a source candid
 
 Discovery SHALL NOT be required to establish a tax year or a release kind. Where the publisher's page establishes those facts, the source candidate SHALL carry the resulting logical release evidence, one entry per logical release; where they are established only by verified source content, the candidate SHALL carry none and that evidence SHALL be produced during parsing instead. One source candidate SHALL therefore be able to yield several logical releases backed by one artifact.
 
+Each logical release evidence SHALL carry the source as-of instant established for that logical release, where one was established. An instant the publisher's page establishes for the export as a whole applies to every logical release drawn from it, whether the page or verified content established the release; an instant verified content establishes for one release takes precedence for that release; where neither established one, the evidence SHALL record absence, and the acquisition instant SHALL NOT be substituted. The candidate's own source as-of evidence remains what discovery preserves for the acquisition; the release-level instant is what promotion carries forward and the publication attempt receives.
+
 Every evidence carrier SHALL be bounded. Discovery SHALL NOT return credentials, arbitrary source content, or an unbounded payload, and SHALL NOT perform county parsing or county field mapping.
 
 #### Scenario: A new release is observed
@@ -64,6 +66,18 @@ Every evidence carrier SHALL be bounded. Discovery SHALL NOT return credentials,
 #### Scenario: One artifact carries two logical releases
 - **WHEN** parsing an acquired artifact establishes a current release for one tax year and a certified release for another
 - **THEN** two logical release evidences are produced from that one artifact, and neither requires re-acquiring it
+
+#### Scenario: Two logical releases carry their own freshness
+- **WHEN** verified content establishes a current and a certified release from one artifact and a release-specific source as-of instant for one of them
+- **THEN** each evidence carries its own instant, and neither is given the other's
+
+#### Scenario: A page instant covers every release drawn from the export
+- **WHEN** the publisher's page establishes one source as-of instant for the export and two logical releases are later drawn from it
+- **THEN** both evidences carry that instant as page-established, and content may replace it for a release only with an instant it established for that release
+
+#### Scenario: No source as-of instant was established for a release
+- **WHEN** neither the page nor verified content establishes a source as-of instant for a logical release
+- **THEN** its evidence records absence, and the acquisition instant is not substituted
 
 ### Requirement: Canonical release identity is promoted from evidence and fails closed
 The system SHALL provide one promotion from logical release evidence to canonical release identity, and that promotion SHALL be the only place where an incomplete release becomes a complete one. That evidence SHALL be the single input to promotion whether it was established by the publisher's page during discovery or by verified source content during parsing, so there is one promotion seam rather than one per origin. Where fewer than all four canonical components were established, promotion SHALL fail with a named error naming what was missing.
