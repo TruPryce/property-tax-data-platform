@@ -439,7 +439,7 @@ it is below.
 It stops there deliberately. An owner association or taxing-unit observation has no such grain — the canonical model gives them no identity at all, which is why correlation handles exist — so adopting one would mean inventing a key over observed values. Those parents stay in one session with their children, and the contract says so rather than leaving 3.5 to discover it.
 
 
-**Round 4 settled this by locator, not by grain.** The first draft named an existing
+**Round 4 settled this by opaque locator, not by grain.** The first draft named an existing
 snapshot by its account identity and release, calling that grain "declared identity rather
 than resemblance". That reasoning was wrong in a way worth keeping visible: grain is not a
 key. `canonical-silver-persistence` says the grain "SHALL NOT be expressed as a uniqueness
@@ -578,9 +578,20 @@ bounds nothing by itself. With it, live mappings are bounded by the most recent 
 which is bounded because the batch is — and a parent needed several batches later must be
 re-declared in each, which makes the cost visible rather than hidden.
 
-**The bound is one account's parents, and that is the whole claim.** An account whose
-parents outnumber what an implementation holds live has no remedy in this change; see the
-risk, and task 3.5 for the durable spill.
+**The bound is one account's parents, and that is the whole claim.** It is worth being exact
+about what a durable spill can and cannot rescue, because an earlier draft of this handoff was
+not. `still_needed` is a *declaration*: an implementation may release every mapping a batch
+does not declare, and naming a released handle afterwards is refused. A spill therefore cannot
+resurrect a handle the caller failed to declare — that handle is gone by contract, and no
+storage changes it.
+
+What a spill serves is the opposite case: a declaration an implementation cannot hold in
+memory. A caller that correctly declares a large parent set has satisfied the contract, and the
+implementation owes it resolvability; where that set exceeds RAM, spilling the declared
+mappings to durable storage is how the obligation is met without the port naming a mechanism.
+The residual risk is therefore narrower than first stated — not "an account with many parents",
+but an account whose **declared** still-needed set outgrows what an implementation can hold,
+which is exactly what task 3.5 must handle.
 
 ### Where each rule is enforced
 
@@ -721,7 +732,7 @@ Each case names a defect. A case that cannot fail is not on this list.
 - A batch naming a parent it does not itself contain is well-formed on its own.
 - A handle omitted from `still_needed` may be released and naming it afterwards is refused, while one
   re-declared across several batches stays resolvable.
-- Adopting a snapshot persisted by an earlier load, **by locator**, yields a usable parent handle
+- Adopting a snapshot persisted by an earlier load, **by candidate**, yields a usable parent handle
   without creating an observation; a locator resolving to no snapshot of the release being loaded
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
   parent is refused.
@@ -738,11 +749,15 @@ Each case names a defect. A case that cannot fail is not on this list.
   object** is refused, exactly as it is for a parent introduced in the batch — which is why adoption
   takes the candidate rather than the locator.
 - A candidate **assembled by the caller** pairing a valid locator with a snapshot it does not locate
-  is refused by name, and one obtained from the boundary's own candidate access is accepted. Without
-  this, the value introduced to remove the ambiguity reintroduces it.
+  raises the mismatch exception, a locator resolving to nothing raises the unknown-snapshot one, and
+  the two are asserted **distinct** — a caller that cannot tell them apart cannot tell a stale
+  locator from an assembly mistake. A candidate obtained from the boundary's own access is accepted.
 - An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
   port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
   risk that task 3.5 owns.
+- A handle the caller **did not** declare in `still_needed` is refused when named later, and no spill
+  changes that — proving the spill's scope is a large *declared* set, not a rescue for an undeclared
+  one.
 - A session accepts several batches and exposes nothing until `commit`; `abort` leaves zero records.
 - Re-completing one release and run returns `already_complete=True` and writes nothing further; a
   second distinct run returns `already_complete=False` and both loads are retained.
@@ -827,7 +842,7 @@ Each case names a defect. A case that cannot fail is not on this list.
 
 ## Risks
 
-- **One pathological account can exceed live correlation state.** The bound is one account's parents, and an account whose parents outnumber what an implementation holds live has no remedy in this change. The port names no spill because a port naming a mechanism is the wrong shape; task 3.5 owns the durable one. Accepted knowingly under round 4's disposition (c) then (b) rather than closed here.
+- **One pathological account can exceed live correlation state.** The bound is one account's parents. Where a caller **declares** more still-needed handles than an implementation can hold in memory, the contract is satisfied and the implementation owes resolvability — task 3.5 owns the durable spill that provides it. Where a caller does **not** declare a handle, it is released and naming it afterwards is refused; no spill rescues that, and none is asked to. The port names no mechanism because a port naming one is the wrong shape. Accepted knowingly under round 4's disposition (c) then (b) rather than closed here.
 
 - **The session can be implemented as a lie.** Nothing in a Protocol forces an implementation to honour atomicity; a `commit()` that writes eagerly conforms structurally. The same is true of `ReleaseStage` today, and the answer is the same: 3.6's containerised integration tests are where atomicity is actually proven. This change states the obligation and the falsification tests assert the contract's shape, not the storage behaviour.
 - **`ProcessingRunRef` invites misuse.** It is an opaque locator that will be a `bigint` in practice, and someone will eventually sort by it. The contract names it, a test asserts it carries no ordering guarantee, and that is the extent of what a type can do here.
@@ -844,7 +859,7 @@ One construction signature does change: `ReleaseManifest` gains a required `juri
 
 ## Handoffs
 
-- **Task 3.5 owns the durable spill for oversized parent sets.** This change bounds correlation by declaration and states the residual case; the loading mechanism is where a spill can exist without a port naming it.
+- **Task 3.5 owns the durable spill for an oversized *declared* still-needed set.** This change bounds correlation by declaration and states the residual case precisely: the spill keeps declared mappings resolvable when they outgrow memory, and does not — cannot — resurrect a handle the caller did not declare.
 
 **To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands — including whatever represents a held run, since `ingestion.run` carries no such column. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
 

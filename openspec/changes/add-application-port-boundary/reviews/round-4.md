@@ -113,6 +113,25 @@ commit, before the spec was split into six files: `spec.md:335` and
    scenarios still prescribing `adopt(locator)` and "paged or streamed" beneath prose
    that had moved on; both are now swept, and only the historical record here and the
    sentence explaining why the adjective is inadequate still use those words.
+
+   **Corrected four times, and the fourth found the decision record itself.** D2q in
+   `proposal.md` still carried the rejected reasoning verbatim — "names an existing
+   snapshot by its `AccountIdentity` and release, which the accepted contract fixes as
+   exactly that snapshot's grain — declared identity, not a key over observed values" —
+   so the proposal was arguing for the shape three rounds had removed. Rewritten. The
+   mismatch between a candidate's locator and its snapshot also had no declared
+   exception, only "a named error"; it is now `AdoptableSnapshotMismatch`, distinct
+   from `UnknownAccountSnapshot`, because a stale locator and an assembly mistake are
+   different facts a caller must be able to separate.
+
+   **And the spill obligation contradicted the contract it was handed under.**
+   `still_needed` lets an implementation release every mapping a batch does not
+   declare, and naming a released handle afterwards is refused — so no durable spill
+   can rescue an undeclared handle, and 3.5 had been handed something unsatisfiable.
+   The scope is now stated precisely: the spill keeps a **declared** still-needed set
+   resolvable when it outgrows memory, which is a real obligation, and does not touch
+   handles the caller never declared, which are gone by contract. The risk, the
+   handoff, the matrix, and bootstrap 3.5 and 3.6 all say that.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering
