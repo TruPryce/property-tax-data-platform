@@ -93,18 +93,24 @@ A correlation value that duplicates one already live, that names a parent never 
 
 #### Scenario: An account carries more parents than a batch can hold
 - **WHEN** one account's parents outnumber what a bounded batch may declare as still needed
-- **THEN** the contract does not claim to hold them all live, because live mappings are bounded by the declaration and not by the account
+- **THEN** the port refuses nothing and names no spill: the declaration is what bounds live mappings, a durable spill belongs to the implementation, and a caller that declares more than it can hold is bounded by that account rather than by the release
 
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
 - **THEN** nothing requires an implementation to retain correlation beyond one bounded batch except for the single continuing account, so the state grows with neither the release nor the number of accounts in it
 
 ### Requirement: A child may name a parent persisted by an earlier load
-A correlation value SHALL be obtainable for an account snapshot already persisted for the release being loaded, identified by the account identity and release that are its declared grain, so a child arriving from a second artifact of the same release can name its existing parent instead of resubmitting it.
+A correlation value SHALL be obtainable for an account snapshot already persisted for the release being loaded, so a child arriving from a second artifact of the same release can name its existing parent instead of resubmitting it.
 
-That identification SHALL NOT be a key over observed values: the accepted canonical contract fixes a snapshot's grain as exactly its account identity and the release its provenance names, so naming a snapshot that way uses declared identity rather than resemblance. Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
+**Adoption SHALL name that snapshot by an opaque locator, never by its grain.** The account identity and release are a snapshot's *grain*, and the accepted canonical contract makes that grain deliberately non-unique: two snapshots sharing an account and a release with different provenance are both retained, and the grain SHALL NOT be expressed as a uniqueness constraint. Identifying a parent by grain is therefore ambiguous exactly in the divergence case this boundary exists to preserve, and would let an enrichment attach to whichever observation a lookup happened to return.
 
-Where no snapshot matching that grain has been persisted, adoption SHALL fail with a named error rather than creating one.
+The boundary SHALL therefore expose the snapshots persisted for an account and release as candidates, each pairing an opaque locator with the provenance that distinguishes it, so a caller selects on evidence rather than on resemblance. That locator SHALL carry the same terms as every other locator here: comparable for equality, carrying no ordering, freshness, or precedence meaning, and never canonical identity. Adoption SHALL accept the locator alone.
+
+The candidate lookup SHALL be bounded by the snapshots at one grain — one per acquisition of that release — and SHALL NOT require the boundary to return, or a caller to hold, a locator for every snapshot in a release. A completion that handed back one locator per account would grow with the release, which is the bound the rest of this capability is built to keep.
+
+Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
+
+Where the locator resolves to no persisted snapshot for the release being loaded, adoption SHALL fail with a named error rather than creating one, and SHALL fail the same way for a locator belonging to another release.
 
 A parent that is not an account snapshot SHALL NOT be adoptable, because the canonical model gives those observations no identity to name them by, and inventing one would be the natural key this boundary forbids. A child of such a parent SHALL therefore be written in the same session as that parent.
 
@@ -112,9 +118,17 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 - **WHEN** a child carrying provenance from a second load and artifact names an account snapshot already persisted for the same release
 - **THEN** it is retained with its own artifact lineage, its parent is the existing snapshot, and no second snapshot is created
 
+#### Scenario: An account has two snapshots at one grain and one is enriched
+- **WHEN** an account has two persisted snapshots for one release differing in provenance, and a child from a third artifact must name one of them
+- **THEN** the candidates are offered as locator-and-provenance pairs, the caller adopts one locator, and the child attaches to exactly that observation rather than to whichever the grain would have matched
+
 #### Scenario: An adopted parent does not exist
-- **WHEN** adoption names an account identity and release for which no snapshot has been persisted
+- **WHEN** adoption names a locator that resolves to no snapshot persisted for the release being loaded, including one belonging to another release
 - **THEN** it fails with a named error and no snapshot is created
+
+#### Scenario: Adoption is offered a grain instead of a locator
+- **WHEN** adoption is attempted by account identity and release rather than by a locator
+- **THEN** no such operation exists, because the grain does not identify one snapshot
 
 #### Scenario: A deeper parent is offered for adoption
 - **WHEN** adoption is attempted for an observation that is not an account snapshot

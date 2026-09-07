@@ -430,6 +430,34 @@ The way out is narrow and rests on something already decided. `AccountSnapshot`'
 
 It stops there deliberately. An owner association or taxing-unit observation has no such grain — the canonical model gives them no identity at all, which is why correlation handles exist — so adopting one would mean inventing a key over observed values. Those parents stay in one session with their children, and the contract says so rather than leaving 3.5 to discover it.
 
+
+**Round 4 settled this by locator, not by grain.** The first draft named an existing
+snapshot by its account identity and release, calling that grain "declared identity rather
+than resemblance". That reasoning was wrong in a way worth keeping visible: grain is not a
+key. `canonical-silver-persistence` says the grain "SHALL NOT be expressed as a uniqueness
+constraint" precisely so an account observed through two acquisitions of one release keeps
+both observations — so identifying a parent by grain is ambiguous exactly in the case
+adoption exists to serve, and would attach an enrichment to whichever row a lookup happened
+to return. The maintainer's disposition is (a): adoption names the snapshot by an **opaque
+locator**, on the same terms as `ProcessingRunRef`.
+
+Within (a) there was a second choice, and this change takes the bounded one. "The earlier
+load's completion hands one back" reads naturally as `ReleaseLoadCompletion` carrying the
+locators it persisted — which would be one per account and would grow with the release,
+undoing the bound the rest of this capability is built to keep. Instead the boundary offers
+the snapshots at one grain as candidates, each pairing its locator with the provenance that
+distinguishes it, and the caller selects on evidence. That is bounded by acquisitions of one
+release rather than by accounts in it, and it is the completion's `ProcessingRunRef` that
+ties a locator to the load that wrote it. If the maintainer intended the literal bulk
+return, this is the place to say so.
+
+**The oversized parent set is bounded honestly and spilled elsewhere.** Disposition (c)
+then (b): the port states the bound as one account's parents, refuses nothing, and names no
+mechanism — no ordering contract pushed onto callers, no N that no accepted contract
+establishes. A durable spill is an implementation concern and belongs to task 3.5, which
+owns the loading mechanism. The scenario now asserts that rather than disclaiming, and the
+risk is recorded rather than left implied: a single pathological account can still exceed
+what an implementation holds live, and nothing in this change fixes that.
 ## Quality and publication are different units of work
 
 Quality evaluates loaded canonical data — required-key completeness, uniqueness, child relationships, row-count drift — so it necessarily runs after the load has committed. A blocking failure prevents *publication* and quarantines the release; it does not retract the load, and `validated-data-publication` says exactly that.
@@ -493,6 +521,95 @@ The change carries six capability specs. Every shared concept is defined in exac
 | `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityVerdict`, `QualityRepository` | `run-bound-quality-and-publication` | the publication attempt's activation, in the same spec, checks the verdict |
 | `PublicationProduct`, `PublicationRef`, `PublicationAttempt`, `PublicationRepository` | `run-bound-quality-and-publication` | — |
 | `Clock` | `run-bound-quality-and-publication` | — |
+
+## The canonical-load value contracts
+
+Tasks 3.1 and 3.2 implement these. They live here for the reason the falsification matrix
+does: the rendered task line is bounded at 2,048 characters, and an enumerated invariant
+list is only reviewable when it sits where the argument for it sits.
+
+### `CorrelationHandle`
+
+A frozen value over a positive integer, unique within one `ReleaseLoadSession`. Neither
+domain identity nor persistence identity: it exists only to let a record name a parent, it
+never appears in a stored row, and it stops being resolvable once its account is complete.
+Session-wide rather than per-account, because one value meaning different things in
+different accounts is an ambiguity nothing later can recover.
+
+Handles increase **strictly** over the session, and the session retains the highest yet
+introduced — one integer, so the bound is untouched. Any handle that does not exceed it is
+refused unless it is currently live. Without that, a later account could mint a value an
+earlier one used and silently retarget a late record at the wrong parent.
+
+### `CorrelatedRecord` and `CanonicalRecordBatch`
+
+Canonical records hold their parents directly and **do not** gain a correlation field —
+they are domain types this change does not modify — so correlation rides on the batch.
+`CorrelatedRecord` pairs one canonical record with an optional `handle` (the value it may
+later be named by) and an optional `parent` (the value naming its own parent).
+
+`CanonicalRecordBatch` is a bounded tuple of those, plus `continuing` naming the one
+account, if any, left open at the end of the batch, and `still_needed` naming the handles
+that must stay resolvable after it.
+
+`still_needed` is what actually bounds correlation. Without it the bound fails *inside* one
+account: an account with an unbounded number of owner associations whose allocations arrive
+later would keep every association mapping live until completion, so one-continuing-account
+bounds nothing by itself. With it, live mappings are bounded by the most recent declaration,
+which is bounded because the batch is — and a parent needed several batches later must be
+re-declared in each, which makes the cost visible rather than hidden.
+
+**The bound is one account's parents, and that is the whole claim.** An account whose
+parents outnumber what an implementation holds live has no remedy in this change; see the
+risk, and task 3.5 for the durable spill.
+
+### Where each rule is enforced
+
+Split by what each party can know. The batch is a frozen value that sees only itself, so it
+validates exactly the intrinsic shape:
+
+- well-formed entries;
+- no handle introduced twice within the batch;
+- a `parent` naming a handle inside the batch resolves inside it;
+- at most one account named as continuing;
+- and where the parent is in the batch, that the handle denotes **the very record the
+  canonical value already holds** — compared by object identity, never by value. Pairing an
+  allocation with a live handle for a different association would persist it under a parent
+  its own domain value does not name, and no database constraint can catch that because both
+  parents are legitimate.
+
+The session owns everything needing history, refused on `write` or on completion:
+
+- a handle duplicating one already live;
+- a handle not exceeding the highest yet introduced;
+- a parent never introduced;
+- a parent whose account has completed;
+- a parent handle denoting a record other than the one the child actually holds;
+- a continuing-account state inconsistent with the previous batch.
+
+A batch is never asked to judge handles opened by earlier batches or accounts already
+completed — it cannot know them, and a rule it cannot enforce is worse than none.
+
+### What a batch is not required to carry
+
+Not an account's complete descent. The canonical model places no maximum on how many owners,
+allocations, values, exemptions, land records, improvements, or geometries an account may
+carry, so a whole-account batch would be bounded only by the largest account in the release,
+and inventing a maximum child count no accepted contract establishes would be worse. Nor may
+it assume every relation hangs off the snapshot: `canonical.owner_value_allocation`
+deliberately carries no `snapshot_key` and reaches its snapshot through its association, so
+an allocation's parent chain is two links deep.
+
+No generic mapping, JSON payload, free-form metadata attribute, or database-shaped row type,
+and no key over observed values.
+
+### `AccountSnapshotRef`, `AdoptableSnapshot`, and `ReleaseLoadCompletion`
+
+`AccountSnapshotRef` is an opaque locator on the same terms as `ProcessingRunRef`.
+`AdoptableSnapshot` pairs one with the `DomainProvenance` that distinguishes it, which is how
+a caller selects among snapshots at one grain. `ReleaseLoadCompletion` carries the
+`ProcessingRunRef` and `already_complete`, and deliberately not a locator per account — see
+the adoption argument above.
 
 ## The falsification matrix
 
@@ -560,9 +677,17 @@ Each case names a defect. A case that cannot fail is not on this list.
 - A batch naming a parent it does not itself contain is well-formed on its own.
 - A handle omitted from `still_needed` may be released and naming it afterwards is refused, while one
   re-declared across several batches stays resolvable.
-- Adopting a snapshot persisted by an earlier load yields a usable parent handle without creating an
-  observation; adopting one that does not exist raises `UnknownAccountSnapshot`; adopting a
-  non-snapshot parent is refused.
+- Adopting a snapshot persisted by an earlier load, **by locator**, yields a usable parent handle
+  without creating an observation; a locator resolving to no snapshot of the release being loaded
+  raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
+  parent is refused.
+- An account with two persisted snapshots at one grain differing only in provenance offers **two**
+  adoptable candidates, each carrying the provenance that distinguishes it, and a child adopting one
+  locator attaches to exactly that observation and not the other. Adoption by account identity and
+  release does not exist — the grain names both.
+- An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
+  port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
+  risk that task 3.5 owns.
 - A session accepts several batches and exposes nothing until `commit`; `abort` leaves zero records.
 - Re-completing one release and run returns `already_complete=True` and writes nothing further; a
   second distinct run returns `already_complete=False` and both loads are retained.
@@ -647,6 +772,8 @@ Each case names a defect. A case that cannot fail is not on this list.
 
 ## Risks
 
+- **One pathological account can exceed live correlation state.** The bound is one account's parents, and an account whose parents outnumber what an implementation holds live has no remedy in this change. The port names no spill because a port naming a mechanism is the wrong shape; task 3.5 owns the durable one. Accepted knowingly under round 4's disposition (c) then (b) rather than closed here.
+
 - **The session can be implemented as a lie.** Nothing in a Protocol forces an implementation to honour atomicity; a `commit()` that writes eagerly conforms structurally. The same is true of `ReleaseStage` today, and the answer is the same: 3.6's containerised integration tests are where atomicity is actually proven. This change states the obligation and the falsification tests assert the contract's shape, not the storage behaviour.
 - **`ProcessingRunRef` invites misuse.** It is an opaque locator that will be a `bigint` in practice, and someone will eventually sort by it. The contract names it, a test asserts it carries no ordering guarantee, and that is the extent of what a type can do here.
 - **The port count could still be wrong.** Eleven contracts for seven named responsibilities is a judgement, defended in the proposal by the two accepted requirements behind "source discovery". If 2.4 finds the registry/discovery split artificial in practice, merging them is a smaller change than splitting a merged one.
@@ -661,6 +788,8 @@ No data moves and no migration is added. `ArtifactSink` keeps its signatures and
 One construction signature does change: `ReleaseManifest` gains a required `jurisdiction`, so `ReleaseManifest(...)` and `ReleaseManifest.from_acquisition(...)` take one more keyword argument. The four call sites are all in `libs/property-tax-adapters/tests/objectstore/test_s3_bronze.py` and are updated with it. Stored v1 manifest objects are untouched and are not re-read or rewritten.
 
 ## Handoffs
+
+- **Task 3.5 owns the durable spill for oversized parent sets.** This change bounds correlation by declaration and states the residual case; the loading mechanism is where a spill can exist without a port naming it.
 
 **To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands — including whatever represents a held run, since `ingestion.run` carries no such column. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
 

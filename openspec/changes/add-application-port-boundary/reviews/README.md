@@ -113,23 +113,30 @@ next round file and file each finding under its scope.
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------ |
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
-| `canonical-load`            | REVISE (round 4: adoption is ambiguous at a non-unique grain; oversized parent sets have no bounded path — two P1s UNRESOLVED)    | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
+| `canonical-load` | REVISE (round 4's two P1s **RESOLVED** by maintainer disposition — adoption by opaque locator (a); the parent bound stated honestly with the spill left to task 3.5 (c then b). No open finding in this scope; awaiting a review round against the resolving commit) | 9 | `e6a3a24+1` |
 | `quality-publication-clock` | REVISE (round 9 P1 and P2 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 9 | `73115fa3a3fa` |
-| `surface-and-proof` | REVISE (round 9 P2 resolved in the same commit; round 5: task prerequisites cite decisions that do not exist; six tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, 3.1, 3.2) | 9 | `73115fa3a3fa` |
+| `surface-and-proof` | REVISE (round 9 P2 resolved; round 5: task prerequisites cite decisions that do not exist; four tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, all awaiting their scopes' own dispositions) | 9 | `e6a3a24+1` |
 
 **Change status:** OPEN — no scope has an accepting round; three P1s (all in
 round 4) and several P2/P3s are unresolved. Do not infer overall completion
 from the PR body or from any single scope.
 
-Round 9's P1 and both P2s are resolved in the commit that records them; they do
-not change that status, because the three round-4 P1s stand and no scope has an
-accepting round. Round 9 also corrects the task-length count: the bound as
-`planning.py:201` applies it was exceeded by **eight** tasks, not nine, and two
-of those are resolved there, leaving six.
+Round 9's P1 and both P2s are resolved in the commit that records them. Round 9
+also corrects the task-length count: the bound as `planning.py:201` applies it
+was exceeded by **eight** tasks, not nine.
 
-Next review: `canonical-load` with the scope-bound prompt above, after the
-maintainer decides the two round-4 P1 dispositions recorded in
-[`round-4.md`](round-4.md). One further decision now waits beside them, recorded
-in [`round-9.md`](round-9.md): whether the six remaining oversized tasks are
-shortened now or after those dispositions, since all six sit in the scopes those
-dispositions will change.
+Since then the maintainer settled both `canonical-load` P1s from round 4 —
+adoption by opaque locator (a), and the parent bound stated honestly with the
+durable spill left to task 3.5 (c then b) — and both are applied. That leaves
+**one P1 open**, round 4's source-as-of durability in
+`quality-publication-clock`, plus round 4's `PageEvidence` P2 in
+`registry-and-discovery` and round 5's write-root decision in
+`run-and-manifest`. Four tasks remain over the character bound: 1.1 and 1.3 in
+`run-and-manifest`, 2.1 and 2.2 in `registry-and-discovery`. They are held
+deliberately until those two scopes' dispositions land, which is the sequence the
+round-9 reviewer recommended — shorten a task once its final contract is known.
+
+Next review: `canonical-load` with the scope-bound prompt above, against the
+commit that applies its two dispositions — that scope now has no open finding and
+has never had an accepting round. Then `quality-publication-clock` for round 4's
+source-as-of durability, which is the last open P1.

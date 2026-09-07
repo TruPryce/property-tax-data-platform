@@ -52,7 +52,7 @@ commit, before the spec was split into six files: `spec.md:335` and
 
 ## Dispositions
 
-1. [P1] UNRESOLVED — `canonical-load`. Confirmed against the accepted
+1. [P1] **RESOLVED (a)** at `e6a3a24`+1 — `canonical-load`. Confirmed against the accepted
    `canonical-silver-persistence` requirement "Snapshot grain admits divergent
    evidence": the grain "SHALL NOT be expressed as a uniqueness constraint",
    and two snapshots sharing an account and a release with different provenance
@@ -67,7 +67,22 @@ commit, before the spec was split into six files: `spec.md:335` and
    child carries a provenance-qualified parent reference instead. Each changes
    D2q, the `canonical-load-session` spec, and tasks 3.1–3.2, and (a) touches
    `ReleaseLoadCompletion`.
-2. [P1] UNRESOLVED — `canonical-load`. The `still_needed` declaration bounds
+
+   **Maintainer chose (a).** Adoption names the snapshot by an opaque locator,
+   `AccountSnapshotRef`, on the same terms as `ProcessingRunRef`; adoption by
+   account identity and release no longer exists, because the grain names both
+   snapshots. Within (a) this change took the bounded reading rather than the
+   literal one: the boundary offers `AdoptableSnapshot` candidates — a locator
+   paired with the `DomainProvenance` that distinguishes it — for one account and
+   release, bounded by acquisitions of that release, instead of
+   `ReleaseLoadCompletion` carrying one locator per account, which would grow with
+   the release and undo the bound the rest of the capability keeps. The completion's
+   `ProcessingRunRef` is what ties a locator to the load that wrote it. Landed in
+   the `canonical-load-session` spec (the adoption requirement and three
+   scenarios), `design.md` under "A parent that is already in the database", the
+   falsification matrix, and tasks 3.1 and 3.2. If the literal bulk return was
+   intended, say so and it changes back.
+2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering
    contract — a child is written within N batches of its parent, and a parent
@@ -77,6 +92,14 @@ commit, before the spec was split into six files: `spec.md:335` and
    durable spill the adapter owns, which is 3.5's mechanism and leaves the port
    contract as (b). The scenario as written asserts nothing testable and is
    also round 5 finding 3.
+
+   **Maintainer chose (c) then (b).** The port states the bound as one account's
+   parents, refuses nothing, and names no mechanism — no ordering contract pushed
+   onto callers, and no N no accepted contract establishes. A durable spill is the
+   implementation's and belongs to task 3.5. The scenario now asserts that rather
+   than disclaiming it, `design.md` carries the residual case as a recorded risk
+   and a handoff to 3.5, and the falsification matrix requires proving the port
+   refuses nothing and offers no spill.
 3. [P1] UNRESOLVED — `quality-publication-clock`, with the likely landing in
    `run-and-manifest`: the durable home the finding asks for is at the
    manifest/run handoff, so the fix probably adds the instant to what
