@@ -114,13 +114,22 @@ next round file and file each finding under its scope.
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `canonical-load`            | REVISE (round 4: adoption is ambiguous at a non-unique grain; oversized parent sets have no bounded path — two P1s UNRESOLVED)    | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
-| `quality-publication-clock` | REVISE (round 8 P1 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 8          | `88a64a977e30a13a6916b0b3ef410b51ae128be2` |
-| `surface-and-proof`         | REVISE (round 5: task prerequisites cite decisions that do not exist; seven tasks exceed the 2,048-character task bound)          | 5          | `67107035918a9db72ee6581c35f3c3a77f3c76c9` |
+| `quality-publication-clock` | REVISE (round 9 P1 and P2 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 9 | `73115fa3a3fa` |
+| `surface-and-proof` | REVISE (round 9 P2 resolved in the same commit; round 5: task prerequisites cite decisions that do not exist; six tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, 3.1, 3.2) | 9 | `73115fa3a3fa` |
 
 **Change status:** OPEN — no scope has an accepting round; three P1s (all in
 round 4) and several P2/P3s are unresolved. Do not infer overall completion
 from the PR body or from any single scope.
 
+Round 9's P1 and both P2s are resolved in the commit that records them; they do
+not change that status, because the three round-4 P1s stand and no scope has an
+accepting round. Round 9 also corrects the task-length count: the bound as
+`planning.py:201` applies it was exceeded by **eight** tasks, not nine, and two
+of those are resolved there, leaving six.
+
 Next review: `canonical-load` with the scope-bound prompt above, after the
 maintainer decides the two round-4 P1 dispositions recorded in
-[`round-4.md`](round-4.md).
+[`round-4.md`](round-4.md). One further decision now waits beside them, recorded
+in [`round-9.md`](round-9.md): whether the six remaining oversized tasks are
+shortened now or after those dispositions, since all six sit in the scopes those
+dispositions will change.

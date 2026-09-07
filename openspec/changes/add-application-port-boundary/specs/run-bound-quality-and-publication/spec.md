@@ -20,7 +20,7 @@ The boundary SHALL provide a run-level verdict: for one run, against the blockin
 
 The remedy for a missing or stale evaluation SHALL be a new processing run, never re-evaluation within the run: the accepted evaluation record admits one immutable verdict per rule and subject per run, and the loading role cannot replace it. The boundary SHALL NOT name re-evaluation as a remedy.
 
-More than one active version of one blocking rule SHALL be a named configuration error: the verdict SHALL report it and SHALL NOT be complete while it stands, so activation fails closed rather than choosing a version. Keeping exactly one version of a rule active, and switching versions atomically, is the rule owner's obligation and not the boundary's.
+More than one active version of **one rule** SHALL be a named configuration error, whatever the severity of the versions involved: the verdict SHALL report it and SHALL NOT be complete while it stands, so activation fails closed rather than choosing a version. The rule identifier is what must be unambiguous, and severity is a property of a version rather than of the rule — two active versions that disagree about whether a rule blocks is the same defect wearing a different hat, and reading severity first to decide whether to care would let it through. Keeping exactly one version of a rule active, and switching versions atomically, is the rule owner's obligation and not the boundary's.
 
 #### Scenario: Configured rules are evaluated
 - **WHEN** a use case evaluates quality for a run
@@ -42,9 +42,9 @@ More than one active version of one blocking rule SHALL be a named configuration
 - **WHEN** a run holds an evaluation for a blocking rule only at a version that is no longer the active one
 - **THEN** the verdict reports that rule as stale and the run as incomplete, and the remedy is a new processing run rather than re-evaluation within this one
 
-#### Scenario: Two versions of one blocking rule are active
-- **WHEN** more than one version of one blocking rule is active when the verdict is asked for
-- **THEN** the verdict reports a named configuration error and is not complete, and activation refuses rather than choosing a version
+#### Scenario: Two versions of one rule are active
+- **WHEN** more than one version of one rule is active when the verdict is asked for, including when the two versions disagree about whether that rule blocks
+- **THEN** the verdict reports a named configuration error and is not complete, and activation refuses rather than choosing a version or reading the severity of either
 
 #### Scenario: Every active blocking rule passed
 - **WHEN** every active blocking rule has a recorded passing evaluation for a run at exactly its active version
@@ -76,7 +76,9 @@ Where the source establishes no such instant, the attempt SHALL record its absen
 ### Requirement: The publication boundary owns attempt, lineage, and activation
 The publication boundary SHALL record a publication attempt, its lineage to the release and run it rests on, and its transition to current or to failed. Activation SHALL make the new publication current and record the publication it supersedes. A failed attempt SHALL NOT become current and SHALL NOT supersede the publication that is already current.
 
-Activation SHALL refuse with a named error, leaving the previously current publication current, unless the run's quality verdict is clean at the moment of activation. An active blocking rule with no recorded evaluation for the run, one whose only evaluation is at a replaced version, or one with more than one active version SHALL refuse activation exactly as a failed one does. The persisted publication gate counts recorded blocking failures only, so none of those would stop it; the boundary SHALL NOT rely on that gate to detect them. The check is made at admission: a publication already current SHALL remain current whatever becomes active afterwards, and only a new activation is judged.
+Activation SHALL refuse with a named error, leaving the previously current publication current, unless the run's quality verdict is clean at the moment of activation.
+
+That verdict SHALL be derived within the same atomic boundary as the state change it admits, against the rule set active inside that boundary. A verdict obtained beforehand through the quality port SHALL be advisory only — usable for reporting, and for deciding whether to attempt an activation at all, but never as the admission decision. Reading a clean verdict and then activating on it is two decisions with a window between them, and a version becoming active inside that window admits a publication no verdict ever cleared. The boundary SHALL make that window unrepresentable rather than merely narrow, and where the store cannot serialize the derivation with the state change, activation SHALL refuse rather than proceed on a verdict it cannot vouch for. An active blocking rule with no recorded evaluation for the run, one whose only evaluation is at a replaced version, or one with more than one active version SHALL refuse activation exactly as a failed one does. The persisted publication gate counts recorded blocking failures only, so none of those would stop it; the boundary SHALL NOT rely on that gate to detect them. The check is made at admission: a publication already current SHALL remain current whatever becomes active afterwards, and only a new activation is judged.
 
 This boundary SHALL NOT construct the published product itself; the transaction that builds and promotes the published data is owned separately. The boundary SHALL NOT grant, imply, or require raw canonical read access, and SHALL NOT confer permission to publish a sensitive field, which the reviewed field policy continues to govern.
 
@@ -87,6 +89,14 @@ This boundary SHALL NOT construct the published product itself; the transaction 
 #### Scenario: An attempt is activated
 - **WHEN** an attempt is activated
 - **THEN** it becomes current and the publication it replaces is recorded as superseded
+
+#### Scenario: A rule version changes between reading a verdict and activating
+- **WHEN** a caller reads a clean verdict for a run, a different version of a rule becomes active, and the caller then activates the attempt
+- **THEN** activation refuses by name, because the verdict admitting it is derived inside the activation against the rule set active there rather than the one the caller read earlier
+
+#### Scenario: The verdict and the activation cannot be serialized
+- **WHEN** the boundary cannot derive the verdict and change the state within one atomic boundary
+- **THEN** activation refuses by name rather than proceeding on a verdict it cannot vouch for
 
 #### Scenario: An attempt is activated with an unevaluated blocking rule
 - **WHEN** activation is attempted for a run whose verdict is incomplete — a missing evaluation, a stale-version evaluation, or a rule with two active versions — or carries a blocking failure

@@ -438,6 +438,26 @@ Publication is atomic on its own terms: attempt, then activate or fail. `publica
 
 What stands between the two is a verdict the database cannot compute. The persisted gate, `publication.assert_current_is_validated`, refuses a current publication when the run's outcome is not accepted or when `quality.blocking_failure` holds a row for it — and that view is derived from *recorded* evaluations that failed. A blocking rule nobody evaluated leaves no row, so the gate waves it through, and `quality.evaluation`'s own comment names the blind spot: a release that passed because a rule never ran looks identical afterwards to one that passed because it did. The accepted requirement is that all blocking rules pass, not that none recorded a failure. An earlier draft left the blocking-or-warning decision to the use case; it cannot make that decision after a crash, because nothing in the boundary read back which evaluations a dead worker had recorded. So `QualityRepository` computes a run-level verdict when asked — the active blocking rules with no recorded evaluation for the run at their active version, the recorded blocking failures, the warning failures — and `activate()` refuses by name unless that verdict is complete and clean at the moment of activation. The verdict is stored nowhere: a stored verdict would be the second quality model D7 forbids, and it would go stale the moment a rule was activated, which is exactly the case that must refuse. The rule set that counts is the one active at activation, at exact versions: an evaluation at a version since replaced is stale, not coverage. The remedy for missing or stale coverage is a new processing run, never re-evaluation within the run. An earlier draft of this paragraph promised re-evaluation, and the schema forbids it: `quality.evaluation` is unique on run, rule, and subject without the version, and the loading role holds SELECT and INSERT only, so the first verdict a run records for a rule is the only one it will ever hold. Judging the run under "the rules of its time" by timestamp was considered and rejected: `quality.rule` records when a version was defined, not when it became active; a rule can be defined inactive and activated later; no activation history exists; nothing prevents two versions being active at once; and evaluation timestamps do not mark a completed quality cycle. Any cutoff inferred from those columns would replace a known defect with history the database does not store. Two active versions of one rule is therefore a named configuration error the verdict reports and activation fails closed on; keeping one version active and switching atomically is the migrator's obligation, and a partial unique constraint over active versions is a follow-up migration issue outside this change. The check is admission-time: a publication already current stays current whatever becomes active afterwards, exactly as the persisted trigger judges only the row becoming current.
 
+**"At the moment of activation" has to mean inside it.** An earlier draft said the verdict must be
+clean at the moment of activation and left who computes it unstated, which reads as a guarantee and
+is not one: a caller reads a clean verdict through `QualityRepository`, a rule version becomes active,
+the caller then calls `activate()`, and a publication is admitted that the rule set active at
+activation would have refused. Two decisions with a window between them is the same defect as the
+persisted gate's blind spot, arriving one layer up. So the verdict admitting an activation is derived
+**within the same atomic boundary as the state change**, against the rule set active inside that
+boundary; a verdict a caller obtained earlier is advisory — good for reporting and for deciding
+whether to bother attempting — and never the admission decision. Where the store cannot serialize the
+derivation with the state change, activation refuses rather than proceeding on a verdict it cannot
+vouch for. That is what the persisted trigger already does, and this is the same rule where the
+database cannot reach.
+
+**The ambiguity is about the rule, not its severity.** Two active versions of one rule fail closed
+whatever those versions' severities are. Narrowing it to blocking versions reads as a tightening and
+is a loophole: severity is a property of a *version*, so two active versions that disagree about
+whether the rule blocks are precisely the case where "is this a blocking rule?" has no answer, and
+the verdict would have to pick one to decide whether to care. It reports the ambiguity without
+reading either severity.
+
 The boundary stops there deliberately. Migration `0005` says task 6.2 owns the promotion path, and this port has no operation that stages or writes published content — so scoping it to attempt, lineage, and activation describes what it can actually do. A requirement promising an atomic Gold build would be a promise no task in this change makes representable.
 
 So there are three transactions in the pipeline, not one, and the boundary makes the seams explicit:
@@ -473,6 +493,128 @@ The change carries six capability specs. Every shared concept is defined in exac
 | `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityVerdict`, `QualityRepository` | `run-bound-quality-and-publication` | the publication attempt's activation, in the same spec, checks the verdict |
 | `PublicationProduct`, `PublicationRef`, `PublicationAttempt`, `PublicationRepository` | `run-bound-quality-and-publication` | — |
 | `Clock` | `run-bound-quality-and-publication` | — |
+
+## The falsification matrix
+
+Task 7.2 implements every case below. They live here rather than inside the task line for two
+reasons: the rendered task line is bounded at 2,048 characters by the planning materializer, and a
+list this long is only reviewable if it is grouped by the scope that owns it — which is how this
+change is reviewed.
+
+Each case names a defect. A case that cannot fail is not on this list.
+
+### `registry-and-discovery`
+
+- An unregistered jurisdiction raises `UnsupportedSource` **before any network call**, proved with a
+  fake that fails the test if asked to acquire.
+- A registered jurisdiction resolves with no release kind supplied.
+- A caller-supplied unregistered kind raises before any network call.
+- A kind established only by parsing is validated after parsing and before promotion.
+- A resolved definition carries its expected media types, and every one of the six registered
+  counties carries a non-empty tuple of its own rather than a shared default.
+- Discovery distinguishes a candidate from an unchanged result, and the unchanged path performs no
+  download.
+- A source candidate carrying no logical release evidence is valid, so a source whose tax years and
+  release kinds live only in content is expressible.
+- Evidence that established three components records three and does not synthesise a fourth.
+- Promoting incomplete evidence raises `IncompleteReleaseIdentity` naming the missing component;
+  promoting complete evidence yields a `ReleaseIdentity`.
+- Evidence established by parsing promotes through that same seam, and two evidences drawn from one
+  artifact yield two identities and two runs bound to one `ManifestRef`.
+
+### `run-and-manifest`
+
+- A `ReleaseManifest` carrying no partition is valid and carries its jurisdiction; one whose
+  partition names a different jurisdiction is refused.
+- Acquisition equivalence is falsified **table-driven**, one case per declared acquisition-defining
+  component — jurisdiction, artifact `sha256`, `acquired_at`, `source_url`, response metadata,
+  redirects, `manifest_version`, `tool_versions` — mutating exactly one and asserting the acquisition
+  becomes different.
+- Companion cases mutate only `partitions`, and only the artifact's `locator`, `byte_count`, or
+  `media_type`, each asserting the acquisition stays the same. No case claims that a locator, byte
+  count, or media type alone makes a different acquisition.
+- Two manifests equal in every compared component compare as one acquisition, including where their
+  content digests agree and nothing else was changed.
+- A `ManifestIndex` fake returns one `ManifestRef` for a re-registered acquisition, distinct
+  references for two acquisitions of one artifact, and attaches a later partition without altering
+  what was recorded.
+- Recording one acquisition twice yields one `ManifestRef`, and two releases carried by one artifact
+  bind to that same reference.
+- A run reference is never required to be invented — every port takes the reference type rather than
+  a raw value — and a reference resolving to no started run is refused.
+- Starting a run for a release whose run is held is refused by name, while one whose previous run
+  finished starts normally.
+- Starting a run for a release whose unfinished run's holder is gone returns the same reference with
+  `resumed=True` and creates no second run; of two racing retries exactly one resumes and the other
+  is refused by name; completing the load again under the resumed run returns `already_complete=True`.
+- `ProcessingRunRef` supports equality and not ordering.
+
+### `canonical-load`
+
+- An account's records written across several batches name their parents by handle.
+- A batch naming two accounts as continuing is refused **by the batch**.
+- A handle duplicating one already live, a handle not exceeding the highest yet introduced, a parent
+  never introduced, a parent whose account has completed, and a parent handle denoting a record other
+  than the one the child actually holds are each refused **by the session** — proving the split
+  rather than assuming it.
+- A batch naming a parent it does not itself contain is well-formed on its own.
+- A handle omitted from `still_needed` may be released and naming it afterwards is refused, while one
+  re-declared across several batches stays resolvable.
+- Adopting a snapshot persisted by an earlier load yields a usable parent handle without creating an
+  observation; adopting one that does not exist raises `UnknownAccountSnapshot`; adopting a
+  non-snapshot parent is refused.
+- A session accepts several batches and exposes nothing until `commit`; `abort` leaves zero records.
+- Re-completing one release and run returns `already_complete=True` and writes nothing further; a
+  second distinct run returns `already_complete=False` and both loads are retained.
+- Several snapshots at one account and release grain differing only in provenance are all retained.
+- Several children of a one-to-many type, and several geometries, survive.
+- An outcome with a parser contract version but no layout fingerprint is refused; one describing a
+  prepared release carries both; one carrying a diagnostic code outside the accepted vocabulary is
+  refused while a well-formed notice code outside it is accepted.
+- The evidence seal is falsified in each direction — retained counts disagreeing with declared totals
+  below the bound, a total above the bound retaining other than the bound, each truncation flag set
+  against its total, and a retained diagnostic whose layout fingerprint differs from the outcome's,
+  including where the outcome has none.
+- An outcome carrying a boundary contract version other than the accepted constant is refused.
+
+### `quality-publication-clock`
+
+- A failing `QualityEvaluation` without measured and expected values is rejected.
+- A run's verdict reports an active blocking rule with no recorded evaluation as **missing**, one
+  whose only evaluation is at a replaced version as **stale**, and one with two active versions as a
+  named **configuration error**, each making the verdict incomplete; and is complete and clean when
+  every active blocking rule has a recorded pass at exactly its active version, whatever the warnings
+  say.
+- Two active versions of one rule are that configuration error **even when the two versions disagree
+  about whether the rule blocks**, and the verdict reaches that answer without reading the severity
+  of either — the ambiguity is about the rule identifier, not about severity.
+- `PublicationAttempt.activate()` refuses by name and leaves the previously current publication
+  current for a missing, stale, or ambiguous rule or a blocking failure; activates on a clean
+  verdict; and a publication already current stays current when a rule's active version changes
+  afterwards.
+- **The admitting verdict is derived inside the activation.** A fake flips the active rule set
+  *between* the caller reading a clean verdict and calling `activate()`; activation refuses by name.
+  A caller that reads clean and then activates must not be able to publish what the rule set active
+  at activation would refuse.
+- **Where the fake cannot serialize the derivation with the state change**, `activate()` refuses by
+  name rather than proceeding on a verdict it cannot vouch for.
+- **A new run is the recovery, and it works.** A run holding an evaluation at v1 becomes stale when
+  v2 becomes active and its activation refuses; a new run evaluated against v2 is complete and clean;
+  and that new run activates. Proving the refusal without proving the recovery would leave the
+  remedy asserted rather than demonstrated.
+- `PublicationAttempt.fail()` leaves the previously current publication current.
+- Two evidences drawn from one artifact carry their own source as-of instants and each attempt opened
+  for them receives its own; a page-established instant for the export reaches both releases drawn
+  from it; and an attempt opened for a release whose evidence carries none receives its absence
+  rather than a substituted time.
+- `Clock` returns an aware instant, with a fixed fake observed by the caller.
+
+### `surface-and-proof`
+
+- The suite is application-contract only: it asserts value semantics and Protocol properties, and
+  never an object key, a serialized manifest body, or any storage behaviour — those belong to task
+  1.2's adapter tests.
+- The module is collected by the default repository configuration.
 
 ## Alternatives rejected
 
