@@ -53,6 +53,19 @@ sees need only satisfy the handle rules themselves. `S0` SHALL be complete at th
 session SHALL NOT be opened without the release, the run, the outcome, and the maximum it will be
 judged against.
 
+**Opening.** A session SHALL be obtained from `CanonicalReleaseRepository` for a `ReleaseIdentity`,
+a `ProcessingRunRef`, and a `ReleaseProcessingOutcome`, and SHALL be refused rather than opened
+when `S0` cannot be completed — a maximum that is not a usable count included. A refused open SHALL
+produce no session and no state, so there is nothing to abort and nothing staged. The boundary
+SHALL NOT serialize sessions: two sessions open for one release and run are two attempts, and the
+retry key decides between them at completion, not at open.
+
+**Resolution.** Resolving an `AccountSnapshotRef` — what `W4` requires — SHALL be the
+repository's, SHALL be scoped to the release `S0` names, and SHALL be a read that changes no
+component. No other party SHALL be required to resolve a locator, and the boundary SHALL NOT
+expose resolution as an operation a caller invokes for its own purposes, because a resolved
+snapshot outside a batch is the standalone adoption this specification removed.
+
 **The operations** SHALL be exactly `write(batch)`, `commit()`, and `abort()`. Reading which
 persisted snapshots an account and release offer for adoption SHALL be a repository read that
 changes no component, and SHALL NOT be an operation of this machine.
@@ -72,10 +85,17 @@ A batch SHALL validate these when it is constructed, knowing only itself:
 | B3 | No handle is repeated within one delta |
 | B4 | No handle appears in both deltas |
 | B5 | No handle is both introduced by the batch and released by it |
-| B6 | A parent named within the batch resolves within the batch |
+| B6 | No entry names its own handle as its parent |
 | B7 | An in-batch parent handle denotes **the very object** the child holds, compared by identity |
 | B8 | At most one account is named as continuing |
 | B9 | A child naming an adoption's handle within the batch holds the very snapshot that adoption carries |
+| B10 | The batch does not name one account as both continuing and closing |
+
+A batch SHALL NOT refuse a parent handle it does not introduce. It cannot know whether such a
+handle is live, whose account it belongs to, or what it denotes, so it SHALL accept the entry as
+well-formed and `W5` SHALL decide. Where the parent handle **is** one this batch introduces, `B7`
+SHALL apply and the batch SHALL settle it without the session. Naming a parent from an earlier
+batch is therefore ordinary, and no intrinsic precondition may be read as forbidding it.
 
 `B1` SHALL NOT include any rule about records being distinct. Two entries carrying equal canonical
 records are two records and SHALL both be accepted, because a rule refusing the second would be a
@@ -83,6 +103,13 @@ deduplication rule over observed values, which this boundary forbids.
 
 A batch SHALL be said to **touch** an account when it carries at least one entry, adoption,
 retained handle, or released handle belonging to it.
+
+A batch SHALL carry two account declarations, each optional: `continuing`, naming the one account
+left open at its end, and `closing`, naming the account it deliberately completes without
+necessarily carrying anything of it. `closing` exists because an account cannot always be closed
+by touching it: its live handles may outnumber `max_batch_entries`, so a closing batch may have
+nothing it is able to carry. Without an explicit declaration the boundary would have to read
+silence as either "close it" or "an accident", and it cannot tell those apart.
 
 #### `write(batch)` — session preconditions
 
@@ -99,14 +126,21 @@ The session SHALL check these on `write`:
 | W7 | Every released handle is in `S5` |
 | W8 | Every handle in either delta belongs to an account open in the batch: one it touches, or `S2` |
 | W9 | Every retained handle belongs to the account the batch names as continuing |
-| W10 | `S2`, if set, is either named as continuing by this batch or **touched** by it |
+| W10 | `S2`, if set, is named by this batch as continuing, or as closing, or is touched by it |
 | W11 | The account named as continuing, if any, is one the batch touches or `S2` itself |
+| W12 | The account named as closing, if any, is `S2` |
 
-`W10` SHALL be checkable by inspection of the batch alone against `S2`, and its violation SHALL be
-a batch that neither carries anything of the account the previous batch left open nor carries that
-account onward. The previous batch promised more of that account; a batch that neither delivers
-any of it nor deliberately closes it by touching it is refused rather than allowed to close it by
-saying nothing.
+`W10` SHALL be checkable by inspecting the batch against `S2` alone, and its violation SHALL be a
+batch that says nothing about the account the previous batch left open and carries nothing of it.
+That batch is refused rather than allowed to close the account by silence: the previous batch
+promised more of it, and closing by omission is indistinguishable from forgetting. Any of three
+things satisfies `W10` — carrying some of the account, carrying it onward, or declaring it closed
+— and the third SHALL be available with an otherwise empty batch, since an account whose live
+handles outnumber `max_batch_entries` cannot be closed by carrying anything at all.
+
+`W12` SHALL hold because `closing` exists only to end the one account left open. An account a
+batch introduces and does not carry onward is already complete by the success transition below,
+and needs no declaration.
 
 `W11` SHALL be the session's and not the batch's, because carrying `S2` onward without touching it
 is legitimate — a batch may complete other work and still promise more of the open account — and a
@@ -128,13 +162,13 @@ S2 <- the account the batch names as continuing, or none
 S1 <- unchanged
 ```
 
-An account SHALL be **complete** at the end of a batch that touches it and does not name it as
-continuing. Completion SHALL be determined that way and by no other means: there SHALL be no
+An account SHALL be **complete** at the end of a batch that names it as closing, or that touches
+it and does not name it as continuing. Completion SHALL be determined that way and by no other means: there SHALL be no
 operation declaring it, because `S2` and the batch's `continuing` already carry the fact between
 them and one fact with two sources is a fact a caller must reconcile.
 
 A handle introduced and **not** retained SHALL never enter `S4`: it resolves inside its own batch
-by `B6`, and the batch is over. That is the ordinary case of a parent whose children arrive beside
+under `B7`, and the batch is over. That is the ordinary case of a parent whose children arrive beside
 it, and it is why `S4` holds only handles that cross a batch boundary.
 
 **On failure** — any `B` or `W` precondition unmet — each of `S1` through `S6` SHALL be exactly
@@ -150,13 +184,23 @@ rejected attempt carried.
 | C1 | `S1 = OPEN` (G1) |
 | C2 | `S2` is none |
 
-**On success**, one of two outcomes, both terminal:
+**On success**, one of three outcomes, all terminal:
 
 ```text
 already loaded by S0's release and run  ->  nothing further persisted, already_complete = True
+                                            S3 discarded, never merged into the earlier load
+S0's outcome is rejected                ->  the outcome recorded, S3 discarded,
+                                            zero canonical records for the load
 otherwise                               ->  S3 and the outcome become durable together
 S1 <- COMMITTED    S2, S3, S4 cleared
 ```
+
+The rejected branch SHALL exist because the outcome is fixed in `S0` and a caller MAY have staged
+records before the run was rejected. Committing them because the accepted branch is the only one
+written would persist the records of a release the outcome says was not accepted, which no
+constraint downstream would catch. Writing batches under a rejected outcome SHALL NOT be refused —
+`S0` is fixed at open and the disposition is not the session's to police — and those records SHALL
+simply not become durable.
 
 **On failure** — `C1` or `C2` unmet, or the durable write itself failing — zero canonical records
 SHALL exist for the load, `S1` SHALL stay `OPEN`, and `S2` through `S6` SHALL be unchanged. A
@@ -170,6 +214,12 @@ or abort.
 | A1 | `S1 = OPEN` (G1) |
 
 An open account SHALL NOT prevent an abort, because an abort persists nothing.
+
+Aborting SHALL affect only this session. Records an earlier session made durable for the same
+release, including a load this session would have found already complete, SHALL be untouched: an
+abort removes nothing that was already committed, and there SHALL be no operation on this boundary
+that does. The same SHALL hold for a completion that fails and for a session that is abandoned
+without either operation.
 
 ```text
 S1 <- ABORTED    S2, S3, S4 discarded    zero canonical records for the load
@@ -185,7 +235,9 @@ S1 <- ABORTED    S2, S3, S4 discarded    zero canonical records for the load
 | --- | --- | --- | --- | --- | --- |
 | `write` success | — | ← `continuing` | += records | += retained − released − completed | ← greatest introduced |
 | `write` failure | — | — | — | — | — |
-| `commit` success | ← COMMITTED | cleared | durable, cleared | cleared | — |
+| `commit` success, outcome accepted | ← COMMITTED | cleared | durable, cleared | cleared | — |
+| `commit` success, outcome rejected | ← COMMITTED | cleared | discarded, cleared | cleared | — |
+| `commit` success, already complete | ← COMMITTED | cleared | discarded, cleared | cleared | — |
 | `commit` failure | — (OPEN) | — | — | — | — |
 | `abort` success | ← ABORTED | cleared | discarded | cleared | — |
 | `abort` failure | — | — | — | — | — |
@@ -202,6 +254,18 @@ same completion as the accepted ones, and no caller could tell until the load wa
 
 A session SHALL NOT make any batch durable before completion, and SHALL NOT require a complete
 release to be held in memory.
+
+#### Scenario: A session cannot be opened without its context
+- **WHEN** a session is requested without a release, a run, or an outcome, or with a maximum that is not a usable count
+- **THEN** it is refused and no session exists, so there is nothing staged and nothing to abort
+
+#### Scenario: Two sessions are opened for one release and run
+- **WHEN** two sessions are opened for the same release and run
+- **THEN** both open, and the retry key decides between them at completion rather than at open
+
+#### Scenario: A locator is resolved
+- **WHEN** an adoption's locator is resolved for `W4`
+- **THEN** the repository resolves it against the release `S0` names, as a read that changes no component, and no operation exposes resolution for a caller's own use
 
 #### Scenario: A session opens in the initial state
 - **WHEN** a session is opened for a release, a run, and an outcome
@@ -288,7 +352,7 @@ the session holds the state a refusal must leave unmoved.
 
 #### Scenario: A batch names a parent from an earlier batch
 - **WHEN** a batch names a parent it does not itself contain
-- **THEN** the batch accepts it as well-formed under `B6`, and the session decides under `W5` whether that parent is live
+- **THEN** the batch accepts it as well-formed, because no intrinsic precondition judges a handle it does not introduce, and the session decides under `W5` whether that parent is live
 
 ### Requirement: Parent linkage is resolved by bounded, account-scoped correlation
 
@@ -338,7 +402,7 @@ require the set to fit in memory.
 
 #### Scenario: A handle introduced and not retained
 - **WHEN** a batch introduces a handle, names it as a parent within that same batch, and does not retain it
-- **THEN** the batch is well-formed and the handle never enters `S4`, being resolvable inside its own batch by `B6` and gone after it
+- **THEN** the batch is well-formed and the handle never enters `S4`, being resolvable inside its own batch under `B7` and gone after it
 
 #### Scenario: Deltas take effect at the batch boundary
 - **WHEN** a batch releases a live handle and records positioned both before and after the release name it as a parent
@@ -352,9 +416,21 @@ require the set to fit in memory.
 - **WHEN** a batch touches an account and does not name it as continuing
 - **THEN** that account is complete at the end of the batch and every handle of it still live leaves `S4`, with no second operation able to disagree
 
-#### Scenario: An account is closed by a batch carrying nothing but the account's own last record
-- **WHEN** a caller closes an account whose live handles outnumber `max_batch_entries`
-- **THEN** it still closes, because closure releases nothing by name and completion sweeps `S4` for that account
+#### Scenario: An account is closed by a batch carrying nothing
+- **WHEN** a caller closes an account whose live handles outnumber `max_batch_entries`, with a batch carrying no entries, no adoptions, and no deltas, naming it as closing
+- **THEN** it is accepted and completion sweeps `S4` for that account, so closing requires neither inventing a record nor enumerating a live set the maximum could not hold
+
+#### Scenario: A batch declares an account both continuing and closing
+- **WHEN** a batch names one account in both declarations
+- **THEN** it is refused by `B10`, the batch seeing the contradiction without any history
+
+#### Scenario: A batch closes an account that is not the open one
+- **WHEN** a batch names as closing an account that is not `S2`
+- **THEN** it is refused by `W12`, because the declaration exists only to end the one account left open, and an account the batch introduces and does not carry onward is already complete
+
+#### Scenario: An account is closed by being touched
+- **WHEN** a batch carries one entry of `S2`'s account and names it neither as continuing nor as closing
+- **THEN** it is accepted and that account is complete at the end of the batch, which is the second of `W10`'s three satisfiers
 
 #### Scenario: A caller sizes its batches before building them
 - **WHEN** a caller reads `max_batch_entries`
@@ -514,6 +590,10 @@ of work and the canonical load in another.
 - **WHEN** a run's outcome is rejected
 - **THEN** the outcome is recorded and zero canonical records are committed for that release
 
+#### Scenario: Records were staged before a rejected outcome is completed
+- **WHEN** a session whose `S0` outcome is rejected has accepted several batches and is then completed
+- **THEN** those staged records are discarded, the outcome is recorded, and zero canonical records exist for the load, because the accepted branch of the completion is not the only one
+
 #### Scenario: The contract is examined for independent commits
 - **WHEN** the boundary is examined
 - **THEN** no arrangement of its operations requires the outcome and the load to be committed separately
@@ -530,7 +610,11 @@ SHALL NOT be treated as a retry of the first.
 
 #### Scenario: A completed load is retried
 - **WHEN** a load is completed again for the same release and the same run
-- **THEN** the result reports that the load was already complete and nothing further is persisted
+- **THEN** the result reports that the load was already complete, nothing further is persisted, and the staged records of this session are discarded rather than merged into the earlier load
+
+#### Scenario: A retrying session is aborted instead of completed
+- **WHEN** a session opened for a release and run that already completed is aborted
+- **THEN** zero records are added and the earlier load is untouched, because an abort affects only its own session
 
 #### Scenario: A release is reprocessed by a second run
 - **WHEN** a second processing run loads a release a first run already loaded

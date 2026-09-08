@@ -1,24 +1,32 @@
 ## Why
 
-Bootstrap 3.5 implements the canonical load against PostgreSQL — COPY-to-staging, set-based
-merges, staging tables of its own choosing. It needs an application contract to implement rather
-than one to invent while designing SQL, and the contract has to be settled before that work
-starts, because a persistence protocol discovered during implementation is a protocol the
-database shape dictates.
+Bootstrap 3.5 implements the canonical load against PostgreSQL and needs an application contract
+to implement rather than one to invent while designing SQL.
 
-This capability was one scope of five in `add-application-port-boundary` (issue #119, PR #120).
-Ten review rounds on that plan produced a specific and repeating failure: the canonical load is a
-**stateful transactional protocol**, the other four scopes are sets of value contracts, and a
-stateful protocol specified as prose across a spec, a design, a decision list, a task list, and
-two bootstrap handoffs cannot be checked for completeness. Every correction was locally right,
-changed the state space, and exposed the next interaction; two of the last three findings were
-defects introduced by the fix before them. The staged-row rollback case had already been raised
-once and been half-fixed, because "what a refusal leaves behind" was written in three places and
-none of them was the whole answer.
+That contract was one scope of five in `add-application-port-boundary` (issue #119, PR #120), and
+ten review rounds there showed why it cannot stay: the canonical load is a stateful transactional
+protocol, the other four scopes are value contracts, and a protocol written as prose across a
+spec, a design, a decision list, a task list, and two handoffs cannot be checked for completeness.
+Every correction was locally right, changed the state space, and exposed the next interaction; two
+of the last three findings were defects introduced by the fix before them. The full account is in
+`design.md`.
 
-Separating this capability is the remedy, and so is the shape of the artefact: one authoritative
-transition table, with every requirement, scenario, and task referring to it instead of restating
-it.
+Separating the capability is half the remedy. The other half is the artefact: one authoritative
+transition table in the spec, with every requirement, scenario, and task referring to it.
+
+## What Changes
+
+- **ADDED** capability `canonical-load-session`: the session state machine and its transition
+  table, `CanonicalReleaseRepository`, `ReleaseLoadSession`, `CanonicalRecordBatch`,
+  `CorrelatedRecord`, `CorrelationHandle`, `AccountSnapshotRef`, `AdoptableSnapshot`,
+  `AdoptedParent`, `ReleaseLoadCompletion`, the retry key, and the no-natural-key rule.
+- **MODIFIED** the sibling change `add-application-port-boundary`: it loses this capability, its
+  spec delta, its two canonical tasks, ten decisions, six design sections, its canonical
+  falsification block, and the `canonical-load` review scope, and cites this change instead.
+- **MODIFIED** bootstrap tasks 3.5 and 3.6: they reference the transition table by ID rather than
+  paraphrasing its rules.
+- No code, no migration, no adapter, and no orchestration change. Implementation of the tasks in
+  this change waits for an accepting review round.
 
 ## Outcome
 
@@ -44,10 +52,13 @@ capability rather than defining it.
 
 ## Decisions
 
-- **D1 — The state machine is the authority, and it lives in one table.** `design.md` defines six
-  state components, three operations, every precondition with an ID, and one success and one
-  failure transition each. The spec's requirements and scenarios reference those IDs; the tasks
-  reference them; nothing restates them. A transition absent from the table does not exist, and
+- **D1 — The state machine is the authority, and it lives in one table, in the spec.** The
+  capability spec defines the fixed context `S0`, six state components, three operations, every
+  precondition with an ID, and the transitions of each operation. It is in the **spec** and not in
+  `design.md` because the spec is what promotion keeps: a table that is authoritative and archived
+  would leave the promoted contract citing a document the reader no longer has. The spec's other
+  requirements, its scenarios, `design.md`, and the tasks all reference the IDs; nothing restates
+  them. A transition absent from the table does not exist, and
   any text elsewhere that disagrees with the table is a defect in that text. This is a direct
   response to ten rounds in which the same protocol was described in five places and no reader
   could tell whether a rule was complete.
@@ -89,6 +100,20 @@ capability rather than defining it.
   separate completion operation gave one fact two sources and left the case of a handle retained
   by the very batch that completes its account undefined. `continuing` decides it; retaining a
   handle of an account the batch does not carry onward is refused as the contradiction it is.
+
+- **D8a — A batch says how the open account ends, and silence is not an answer.** An account
+  cannot always be closed by touching it: its live handles may outnumber `max_batch_entries`, so a
+  closing batch may have nothing it is able to carry. The batch therefore carries an explicit
+  `closing` declaration beside `continuing`. Without it the boundary would have to read a batch
+  that says nothing about the open account as either "close it" or "an accident", and it cannot
+  tell those apart — which is how an earlier draft produced a rule nothing could falsify, and then
+  a rule that made an empty close impossible.
+
+- **D8b — Completion branches on the outcome's disposition.** The outcome is fixed in `S0`, so a
+  caller may stage records and then complete a run the outcome says was rejected. A single
+  "records and outcome become durable together" transition would persist them, and nothing
+  downstream would catch it. The rejected branch records the outcome and discards the records; the
+  already-complete branch discards them too, rather than merging them into the earlier load.
 
 - **D8 — A completion that fails is not terminal.** `S1` stays `OPEN` and the rest is unchanged,
   so a caller that committed with an account still open closes it and commits again. Only a

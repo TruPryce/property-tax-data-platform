@@ -16,8 +16,8 @@ one model, so no reader — reviewer or author — could tell whether a rule was
 survives promotion into `openspec/specs/canonical-load-session/`; this design is archived with the
 change. A table that is authoritative but archived would leave the promoted contract pointing at
 a document the reader no longer has, and a relative link that no longer resolves — so the spec
-carries the state components `S0`–`S6`, the operations, the precondition IDs `B1`–`B9`,
-`W1`–`W11`, `C1`–`C2`, `A1`, `G1`, and one success and one failure transition each.
+carries the state components `S0`–`S6`, opening and resolution, the operations, the precondition
+IDs `B1`–`B10`, `W1`–`W12`, `C1`–`C2`, `A1`, `G1`, and the transitions of each operation.
 
 What follows is the reasoning behind that table: why each shape was chosen, what was tried and
 rejected, and what the falsification suite must prove. It restates no transition, and where it
@@ -134,12 +134,20 @@ this change does not have.
 - A session opens in the initial state: `S1` open, `S2` none, `S3` and `S4` empty, `S6` with no
   handle yet introduced, and `S0` already carrying the release, run, outcome, and maximum. The
   first handle a session ever sees is accepted on its own merits.
-- Each of B1–B9 refuses **at construction**, without a session.
-- Each of W1–W11 refuses **on write**, with a session that has the history the check needs.
-- `W10` is falsified by two batches differing only in whether they touch the account `S2` names:
-  the one that carries an entry, an adoption, or a delta value of it closes the account and is
-  accepted; the one that carries nothing of it and does not name it as continuing is refused.
-  `W11` is falsified by a batch naming as continuing an account it neither touches nor inherits,
+- Each of B1–B10 refuses **at construction**, without a session. `B6` is falsified by an entry
+  naming its own handle as its parent, and the batch accepting a parent handle it does not
+  introduce is proven alongside it, since a rule that refused those would forbid naming a parent
+  from an earlier batch at all.
+- Each of W1–W12 refuses **on write**, with a session that has the history the check needs.
+- `W10` has three satisfiers and each is exercised: a batch that touches `S2`'s account, one that
+  names it as continuing, and one that names it as closing while carrying nothing at all. Its
+  violation is a batch that does none of the three, which is refused rather than allowed to close
+  the account by silence. `B10` refuses a batch naming one account as both; `W12` refuses a
+  closing declaration for an account that is not `S2`.
+- An account whose live handles outnumber `max_batch_entries` is closed by an **empty** batch that
+  declares it closing — the case that has to work, since such an account can be closed by carrying
+  nothing else.
+- `W11` is falsified by a batch naming as continuing an account it neither touches nor inherits,
   and satisfied by one that carries `S2` onward without touching it — which is why `W11` is the
   session's: a batch that knows only itself cannot tell `S2` from an account nothing has begun.
 - After every one of those refusals, S1–S6 are byte-for-byte what they were: nothing staged,
@@ -151,9 +159,18 @@ this change does not have.
   batch releases resolves for every record of that batch, including records positioned after the
   release, and is gone for the next.
 - A handle introduced and not retained never enters `S4` and dies with its batch.
-- `commit` with C2 unmet is refused; the account is then closed by a batch carrying no entries
-  and no deltas, and the commit succeeds. An account with more live handles than
-  `max_batch_entries` could carry closes the same way.
+- `commit` with C2 unmet is refused; the account is then closed by an empty batch declaring it
+  closing, and the commit succeeds.
+- `commit` takes the branch its outcome's disposition selects: accepted makes the staged records
+  and the outcome durable together; **rejected records the outcome and discards the records**,
+  proven by staging batches under a rejected outcome and finding zero canonical records; already
+  complete discards them rather than merging them into the earlier load.
+- An abort, a failed completion, and an abandoned session each leave an earlier session's durable
+  records untouched — including the load a retrying session would have found already complete.
+- Opening is refused when `S0` cannot be completed, and a refused open leaves no session to abort.
+  Two sessions for one release and run both open, and the retry key decides at completion.
+  Resolving a locator is the repository's, scoped to `S0`'s release, and is exposed as no
+  operation of its own.
 - A failed `commit` leaves `S1 = OPEN` and everything else unchanged, and a subsequent `abort`
   still leaves zero records.
 - `abort` succeeds with an account open. Every operation offered after a terminal one is refused.
@@ -222,6 +239,12 @@ this change does not have.
 - **Keeping the transition table in this design.** It would be authoritative and archived, leaving
   the promoted spec citing a document the reader no longer has, through a relative link that no
   longer resolves.
+- **Letting a batch close the open account by saying nothing about it.** Silence cannot be told
+  from forgetting, and the alternative — inferring the close from a touch — leaves an account with
+  more live handles than a batch can carry impossible to close at all. The `closing` declaration
+  costs one optional field and makes both cases explicit.
+- **One completion transition for every disposition.** It would persist the staged records of a
+  run whose outcome was rejected, which nothing downstream would catch.
 
 ## Risks
 

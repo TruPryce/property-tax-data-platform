@@ -2,9 +2,24 @@
 
 Bootstrap 3.4 is complete: PR #116 implemented canonical PostgreSQL persistence and PR #118 promoted `canonical-silver-persistence`. The next PostgreSQL task, 3.5, implements bounded batch parsing with COPY-to-staging and set-based merges.
 
-3.5 must implement an application contract rather than invent one while designing staging tables and merge SQL. That contract does not exist. The application package owns exactly two ports today — `ArtifactSink` and `BronzeStore` — and nothing at all for canonical persistence, quality, publication, or time.
+3.5 must implement an application contract rather than invent one while designing staging tables and merge SQL. That contract does not exist. The application package owns exactly two ports today — `ArtifactSink` and `BronzeStore` — and nothing at all for canonical persistence, quality, publication, or time. The canonical half of that gap is closed by the sibling change [`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which carries the run-time contract 3.5 implements; this change supplies the run, manifest, registry, discovery, quality, publication, and clock ports it opens beside, and the two are prerequisites of 3.5 together.
 
 Task 2.4 has the same problem from the other side: the discover/acquire/parse/normalize/validate/publish use cases need stable ports to coordinate, not infrastructure implementations to call.
+
+## What Changes
+
+- **ADDED** five capabilities: `application-port-boundary`, `processing-run`,
+  `source-registry-and-discovery`, `acquisition-manifest-index`, and
+  `run-bound-quality-and-publication`.
+- **MODIFIED** `ReleaseManifest` and the S3 manifest serialization and storage mechanics, within
+  the bounds task 1.2 states; `ArtifactSink` and the `BronzeStore` Protocol are retained unchanged.
+- **MODIFIED** the six county source definitions, only to populate the expected media types the
+  accepted registry requirement names.
+- **MOVED** the `canonical-load-session` capability to the sibling change
+  [`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which this change
+  cites and never restates.
+- No migration and no orchestration change. Implementation of each scope waits for its accepting
+  review round.
 
 ## Outcome
 
