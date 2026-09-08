@@ -113,7 +113,7 @@ next round file and file each finding under its scope.
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------ |
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
-| `canonical-load` | REVISE (round 4's two P1s **RESOLVED**, then corrected seven times across successive review rounds — the seventh replacing the four delta rules with six: the bound now enforced by the batch against its own size, ownership extended to the account continuing *into* a batch so the batch that completes it may release, atomicity extended to the high-water mark and the continuing-account state, and a new rule applying deltas at the batch boundary rather than between a batch's records. No open finding; awaiting a review round against the resolving commit) | 9 | `fe002b7+1` |
+| `canonical-load` | REVISE (round 4's two P1s **RESOLVED**, then corrected eight times across successive review rounds — the eighth giving the six rules something that actually checks them: one `max_batch_entries` stated by the session, since the seventh's bound was measured against a limit nothing defined and checked by a batch that cannot know it; completion determined by `continuing` alone, with task 3.2's rival completion operation struck and a retain of a completing account's value refused; and adoption placed inside the correlation model, its handle belonging to the adopted snapshot's account and surviving a batch refused after it. No open finding; awaiting a review round against the resolving commit) | 9 | `b3e40b5+1` |
 | `quality-publication-clock` | REVISE (round 9 P1 and P2 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 9 | `73115fa3a3fa` |
 | `surface-and-proof` | REVISE (round 9 P2 resolved; round 5: task prerequisites cite decisions that do not exist; four tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, all awaiting their scopes' own dispositions) | 9 | `e6a3a24+1` |
 
@@ -127,10 +127,11 @@ was exceeded by **eight** tasks, not nine.
 
 Since then the maintainer settled both `canonical-load` P1s from round 4 —
 adoption by opaque locator (a), and the parent bound stated honestly with the
-durable spill left to task 3.5 (c then b) — and both are applied. Seven review
+durable spill left to task 3.5 (c then b) — and both are applied. Eight review
 rounds have since found defects in the applications themselves rather than in the
-dispositions; each is recorded as a numbered correction under round 4's finding 1,
-and the seventh is the one that took the delta rules from four to six. That leaves
+dispositions; each is recorded as a numbered correction under round 4's finding 1.
+The seventh took the delta rules from four to six; the eighth made three of the six
+enforceable and closed the adoption hole in rollback. That leaves
 **one P1 open**, round 4's source-as-of durability in
 `quality-publication-clock`, plus round 4's `PageEvidence` P2 in
 `registry-and-discovery` and round 5's write-root decision in

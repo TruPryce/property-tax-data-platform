@@ -37,19 +37,19 @@ Each batch SHALL carry **bounded deltas** to the set of correlation values that 
 
 A complete re-declaration is what this replaces, and the reason is arithmetic: a full declaration must itself fit inside a bounded batch, so it would cap the live set at one batch's worth, and an account whose parents exceed that could never finish however the implementation stored them. Deltas keep every declaration bounded while letting the live set be as large as the caller's own retain-and-release discipline makes it.
 
-Releasing SHALL therefore be explicit, and completing an account SHALL release every value that account introduced, so a caller that never releases is bounded by its account rather than by the release. An implementation MAY hold the live set durably rather than in memory, which is what allows a large retained set to stay resolvable; the boundary SHALL NOT name that mechanism, and SHALL NOT require the set to fit in memory.
+Releasing SHALL therefore be explicit, and completing an account SHALL release every value of that account still live, so a caller that never releases is bounded by its account rather than by the release. An account SHALL be complete at the end of the batch that touches it unless that batch names it as continuing, and completion SHALL be determined that way alone: `continuing` already carries the fact, and a second operation declaring the same thing would be one fact with two sources a caller has to reconcile. Completion SHALL release atomically with the batch that completes it, and an explicit release delta and account completion SHALL be the only ways a value leaves the live set. An implementation MAY hold the live set durably rather than in memory, which is what allows a large retained set to stay resolvable; the boundary SHALL NOT name that mechanism, and SHALL NOT require the set to fit in memory.
 
 The deltas SHALL be governed by six rules, because an accumulating set that each batch edits is only as trustworthy as the edits:
 
-**Bounded, and enforced as such.** A batch's retain and release deltas SHALL be held to the same bound as the records it carries, and a batch whose deltas exceed that bound SHALL be refused by the batch itself, which can see its own size without consulting session history. Left unenforced, *bounded* would describe a well-behaved caller rather than a property of the boundary, and the memory argument below — that no declaration grows with the account — would rest on nothing.
+**Bounded against a stated maximum.** The session SHALL state one maximum for what a batch may carry — its entries together with both deltas, counted as a single total — fixed when the session opens and independent of the release, the account, the number of accounts, and the data. The caller SHALL be able to read that maximum, so it can size the batches it builds rather than discover the bound by refusal, and the session SHALL refuse any batch whose total exceeds it. The check SHALL belong to the session and not to the batch: an immutable value that knows only itself cannot know the session's maximum. Naming no maximum anywhere and calling the deltas bounded is what this replaces — *bounded* would then describe a well-behaved caller rather than a property something checks, and the memory argument below would rest on nothing.
 
-**Validity.** A retained value SHALL be one this batch introduces or one live at the start of it; a released value SHALL be one live at the start of it, so a batch SHALL NOT release a value it introduces itself. Retaining or releasing a value that is neither SHALL be refused, so a delta cannot silently create or discard state that was never there. A batch introducing a value it does not retain SHALL be well-formed: that value is live for the batch that introduced it and is released at its end, which is the common case of a parent whose children arrive beside it — and is why releasing it explicitly is redundant rather than permitted.
+**Validity.** A retained value SHALL be one this batch introduces or one live at the start of it, and SHALL belong to the account the batch names as continuing, because a value of an account complete at the end of this batch cannot survive it — retaining it asks for exactly what completion undoes, and the contradiction SHALL be refused rather than settled by preferring one. A released value SHALL be one live at the start of it, so a batch SHALL NOT release a value it introduces itself; releasing a value of an account the batch completes SHALL remain valid, completion sweeping whatever the caller does not release by name. Retaining or releasing a value that is neither SHALL be refused, so a delta cannot silently create or discard state that was never there. A batch introducing a value it does not retain SHALL be well-formed: that value is live for the batch that introduced it and is released at its end, which is the common case of a parent whose children arrive beside it — and is why releasing it explicitly is redundant rather than permitted.
 
 **No contradiction, and no ordering to learn.** A value named in both deltas of one batch SHALL be refused rather than resolved by applying one before the other. There is no correct order to pick — retain-then-release and release-then-retain give opposite results for the same batch — so the boundary SHALL refuse the ambiguity instead of defining a precedence a caller must remember.
 
 **Deltas apply at the batch boundary.** The deltas SHALL take effect once every record in their batch has been validated, binding on the batch after rather than within their own. A value a batch releases SHALL therefore stay resolvable to every record in that same batch, wherever those records sit in it, and SHALL be gone for the next. A caller may name a parent for the last time and release it in one write without ordering the batch's own contents, and no record's meaning SHALL depend on its position among its siblings.
 
-**Atomicity.** The deltas of a batch SHALL take effect only if that batch is accepted in full, and SHALL take effect together with every other change that batch makes to session correlation state: the live set, the highest value yet introduced, and which account is continuing. A refused batch SHALL leave all three exactly as they were — so a corrected retry is neither refused for reusing values its own rejected attempt pushed the highest-yet past, nor judged against a continuing account it never established. A refused account completion SHALL likewise leave that account open with its values still live, because completion releases them only by completing.
+**Atomicity.** The deltas of a batch SHALL take effect only if that batch is accepted in full, and SHALL take effect together with every other change that batch makes to session correlation state: the live set, the highest value yet introduced, which account is continuing, and the completion — with its releases — of every account the batch does not carry onward. A refused batch SHALL leave all of them exactly as they were, so a corrected retry is not refused for reusing values its own rejected attempt pushed the highest-yet past, is not judged against a continuing account it never established, and does not find an account closed by a batch that was never accepted. Adoption SHALL sit outside this, being its own accepted operation rather than part of a batch: a batch refused after an adoption SHALL leave the handle that adoption minted live, and the caller SHALL NOT be required to adopt again to retry.
 
 **Account ownership.** The accounts a batch may edit SHALL be the accounts open in it: those it introduces, and the account continuing into it from the previous batch — which is what lets the batch that finally completes an account release values an earlier batch introduced. Retaining or releasing a value belonging to any other account SHALL be refused: correlation is account-scoped, and one account editing another's live set is the retargeting that strictly increasing values exist to prevent, arriving through the delta instead of through the handle.
 
@@ -59,7 +59,7 @@ A correlation value SHALL be unique within one load session, and SHALL NOT be re
 
 A correlation value SHALL be neither domain identity nor persistence identity, SHALL carry no meaning outside the session, and SHALL NOT appear in any persisted record as a business value. An implementation SHALL retain a parent mapping only for values still needed as parents, releasing those whose account is complete.
 
-Validation authority SHALL be split according to what each party can know. A batch is an immutable value and knows only itself, so it SHALL validate its own shape alone: well-formed entries, no value introduced twice within it, parents named within it resolving within it, at most one account named as continuing, deltas within the bound its own records are held to, no value in both deltas, and no release of a value it introduces itself. Everything requiring session history SHALL be validated by the session on write and on account completion — whether a value duplicates one already live, whether a released or retained value is live, whose account each value belongs to, whether a named parent was ever introduced, whether its account has since completed, and whether the continuing-account state is consistent with the previous batch. Atomicity SHALL be the session's, because only the session holds the state a refusal must leave unmoved.
+Validation authority SHALL be split according to what each party can know. A batch is an immutable value and knows only itself, so it SHALL validate its own shape alone: well-formed entries, no value introduced twice within it, parents named within it resolving within it, at most one account named as continuing, no value in both deltas, and no release of a value it introduces itself. Everything requiring knowledge the batch does not have SHALL be validated by the session on write — the maximum a batch may carry, which is the session's and not the batch's; whether a value duplicates one already live; whether a released or retained value is live; whose account each value belongs to and whether that account is open; whether a named parent was ever introduced; whether its account has since completed; and whether the continuing-account state is consistent with the previous batch. Atomicity SHALL be the session's too, because only the session holds the state a refusal must leave unmoved.
 
 A resolved correlation value SHALL denote the very parent the canonical record already holds. Resolving is not sufficient: a record whose embedded parent is one observation SHALL NOT be accepted paired with a correlation value denoting a different one, because the record would then be persisted under a parent its own domain value does not name. Where the parent appears in the same batch, the batch SHALL enforce this; where it was introduced earlier, the session SHALL, since it already retains what each live value denotes. A batch SHALL NOT be required to know handles opened by earlier batches or accounts already completed, because it cannot.
 
@@ -89,7 +89,7 @@ A correlation value that duplicates one already live, that names a parent never 
 
 #### Scenario: A batch is validated on its own
 - **WHEN** a batch is constructed
-- **THEN** it rejects only what it can see — a value introduced twice within it, a parent named within it that resolves nowhere in it, or more than one account named as continuing — and does not attempt to judge handles from earlier batches
+- **THEN** it rejects only what it can see — a value introduced twice within it, a parent named within it that resolves nowhere in it, more than one account named as continuing, a value in both of its deltas, or a release of a value it introduces itself — and judges neither handles from earlier batches nor its own size against the session's maximum, knowing neither
 
 #### Scenario: A correlation value denotes a parent the record does not hold
 - **WHEN** a record embedding one parent is paired with a correlation value denoting a different parent of the same kind
@@ -151,9 +151,21 @@ A correlation value that duplicates one already live, that names a parent never 
 - **WHEN** a batch naming an account as continuing is refused, and the next batch names the account the last accepted batch left continuing
 - **THEN** it is accepted, because the refused batch's continuing-account claim never took effect
 
-#### Scenario: Completing an account is refused
-- **WHEN** completing an account is refused
-- **THEN** that account is still open and every value it retained still resolves, because completion releases them only by completing
+#### Scenario: A batch that would complete an account is refused
+- **WHEN** a batch that names an account as continuing no further is refused
+- **THEN** that account is still open and every value of it still resolves, because the completion and its releases take effect only with the batch that carries them
+
+#### Scenario: An account completes without any separate declaration
+- **WHEN** a batch touches an account and does not name it as continuing
+- **THEN** that account is complete at the end of the batch and every value of it still live is released, with no second operation declaring it and no way for the two to disagree
+
+#### Scenario: A batch retains a value of an account it completes
+- **WHEN** a batch retains a correlation value belonging to an account it does not name as continuing
+- **THEN** it is refused, because the retain asks the value to outlive the batch and the completion releases it at that batch's end
+
+#### Scenario: A batch releases a value of an account it completes
+- **WHEN** a batch releases some of a completing account's values by name and leaves the rest
+- **THEN** it is accepted and the completion sweeps the rest, so an exhaustive release is a caller's option and never its obligation
 
 #### Scenario: A batch releases another account's value
 - **WHEN** a batch releases a correlation value belonging to an account that is neither introduced by it nor continuing into it from the previous batch
@@ -167,9 +179,13 @@ A correlation value that duplicates one already live, that names a parent never 
 - **WHEN** a batch introduces a correlation value, names it as a parent within that same batch, and does not retain it
 - **THEN** the batch is well-formed, and the value is released at the end of it
 
-#### Scenario: A batch carries more deltas than it may
-- **WHEN** a batch's retain and release deltas together exceed the bound its records are held to
-- **THEN** it is refused by the batch itself, which needs no session history to measure its own size, so the deltas are bounded by enforcement rather than by the caller's good behaviour
+#### Scenario: A batch carries more than the session's maximum
+- **WHEN** a batch's entries and its two deltas together exceed the maximum the session states
+- **THEN** the session refuses it on write, so the deltas are bounded by something that checks rather than by the caller's good behaviour
+
+#### Scenario: A caller sizes its batches before building them
+- **WHEN** a caller asks the session what a batch may carry
+- **THEN** it reads one maximum fixed for the session, covering entries and both deltas together, and does not have to find the bound by being refused
 
 #### Scenario: A batch releases a value it introduced itself
 - **WHEN** a batch names a correlation value in both the entries it introduces and its release delta
@@ -208,6 +224,10 @@ Candidate access SHALL therefore be **lazy and expressed as one**: the operation
 
 Adopting a parent SHALL create no observation and SHALL leave the existing snapshot unchanged, and the child SHALL retain its own load and artifact lineage rather than being attached to its parent's.
 
+An adopted handle SHALL take its place in the correlation model rather than beside it. It SHALL belong to the account of the snapshot it locates, SHALL be live from the moment adoption succeeds, and SHALL advance the highest value yet introduced like any other. Adopting SHALL open that account in the session, so the batch writing its children either completes it or names it as continuing, exactly as for an account that batch introduced, and the handle SHALL be released when that account completes.
+
+Adoption SHALL take effect on its own rather than as part of a batch, because it is not carried by one. A batch refused after an adoption SHALL leave the adopted handle live and the highest value where adoption left it, and a caller retrying that batch SHALL NOT be required to adopt again, nor refused for naming the handle it already holds.
+
 Where the locator resolves to no persisted snapshot for the release being loaded, adoption SHALL fail with a named error rather than creating one, and SHALL fail the same way for a locator belonging to another release.
 
 A parent that is not an account snapshot SHALL NOT be adoptable, because the canonical model gives those observations no identity to name them by, and inventing one would be the natural key this boundary forbids. A child of such a parent SHALL therefore be written in the same session as that parent.
@@ -227,6 +247,14 @@ A parent that is not an account snapshot SHALL NOT be adoptable, because the can
 #### Scenario: An account has more candidates than a caller wishes to hold
 - **WHEN** the snapshots persisted for one account and release outnumber what a caller wants in memory
 - **THEN** candidates are obtained lazily through the iterator, and neither the boundary nor the caller is required to hold all of them
+
+#### Scenario: An adopted parent's account is carried like any other
+- **WHEN** a batch writes children of an adopted parent
+- **THEN** it completes that parent's account or names it as continuing, and the adopted handle is released when the account completes, because adoption opened the account rather than creating a handle outside every account
+
+#### Scenario: A batch is refused after an adoption
+- **WHEN** a caller adopts a parent, writes a batch naming it, and that batch is refused
+- **THEN** the adopted handle is still live and the retry names it without adopting again, because adoption is its own accepted operation and not part of the batch that failed
 
 #### Scenario: An adopted parent is named by a child holding an equal but different snapshot
 - **WHEN** a child names an adopted handle while holding a snapshot equal in value to the adopted one but not the same object

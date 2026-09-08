@@ -180,6 +180,28 @@ commit, before the spec was split into six files: `spec.md:335` and
    split restated: the batch measures its own size and its own contradictions, the session
    owns liveness, ownership, and atomicity, because only the session holds what a refusal
    must leave unmoved.
+
+   **Corrected eight times, and the enforcement I added was itself unenforceable.** The round
+   after found three of the six rules still short and one new contradiction. The *bound* named
+   no bound: I had written that the deltas are held to "the same bound as the records it
+   carries" and then never said what bounds the records, so the enforcement pointed at nothing
+   — and I had put the check on the batch, which cannot know a maximum it was never told. The
+   session now states one `max_batch_entries` covering entries and both deltas, fixed at open,
+   readable so a caller can size what it builds, and refused by the session, which is the only
+   party that knows it. *Completion* had two mechanisms: `continuing` decides it per batch in
+   the spec, while task 3.2 also carried an operation declaring an account complete — one fact
+   with two sources, and neither said what happens to a value the caller retains in the very
+   batch that completes its account. Completion is now batch-determined alone, the operation is
+   struck from 3.2, retaining a value of an account the batch does not carry onward is refused
+   as the contradiction it is, and releasing one by name stays valid with completion sweeping
+   the rest. *Rollback* had a hole I had walked past twice: `adopt()` mints a handle **outside**
+   any batch, so nothing said whether a refused write un-adopted it, which account it belonged
+   to, or when it was released. An adopted handle now belongs to the adopted snapshot's account,
+   opens that account in the session, advances the high-water mark, is released when that
+   account completes, and survives a batch refused after it — adoption being its own accepted
+   operation. And the intrinsic-validation scenario still listed the old three checks after I
+   had rewritten the prose list beside it, which is the same failure as the stale decision
+   records: I swept the paragraph and left the scenario that contradicts it.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering
