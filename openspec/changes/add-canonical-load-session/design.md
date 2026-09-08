@@ -10,163 +10,18 @@ locally right, changed the state space, and exposed the next interaction. Two of
 findings were defects introduced by the fix before them.
 
 The diagnosis is not that the wording was poor. It is that the state machine was never closed as
-one model, so no reader — reviewer or author — could tell whether a rule was complete. This
-design therefore leads with **one authoritative transition table**. Everything else in this
-change, including every requirement, scenario, and task, refers to that table rather than
-restating it. A transition that is not in the table does not exist, and a rule stated anywhere
-else that contradicts the table is a defect in the other place.
+one model, so no reader — reviewer or author — could tell whether a rule was complete.
 
-## The session state
+**The transition table therefore lives in the capability spec, not here.** The spec is what
+survives promotion into `openspec/specs/canonical-load-session/`; this design is archived with the
+change. A table that is authoritative but archived would leave the promoted contract pointing at
+a document the reader no longer has, and a relative link that no longer resolves — so the spec
+carries the state components `S0`–`S6`, the operations, the precondition IDs `B1`–`B9`,
+`W1`–`W11`, `C1`–`C2`, `A1`, `G1`, and one success and one failure transition each.
 
-A `ReleaseLoadSession` holds exactly six components. Nothing else about a session is state, and
-no operation may add one.
-
-```text
-S1  status        OPEN | COMMITTED | ABORTED
-S2  open_account  the one account still open across a batch boundary, or none
-S3  staged        the canonical records of accepted batches; none of them durable
-S4  mappings      each live handle -> the parent object it denotes, and the account it belongs to
-S5  live          the handles that resolve: exactly the keys of S4, never tracked separately
-S6  high_water    the greatest handle yet introduced in this session
-```
-
-`S5` is named because reviewers and callers talk about "the live set", but it is the key set of
-`S4` and is not independent state. Two structures that can disagree about which handles resolve
-is precisely the class of defect this table exists to prevent.
-
-`S3` is the component that a purely value-level reading keeps losing. Records written before a
-refusal are invisible either way, because nothing is durable before completion — which is why
-their fate has to be stated rather than assumed. An implementation that stages rows as they
-arrive and validates afterwards would otherwise carry a rejected batch's rows to the same commit
-as the accepted ones, and the load would be wrong before any caller could look.
-
-## The operations
-
-Three, and only three: `write(batch)`, `commit()`, `abort()`. Candidate *discovery* — reading
-which persisted snapshots an account and release offer for adoption — is a read on
-`CanonicalReleaseRepository` that touches no component of `S1`–`S6` and is therefore not an
-operation of this machine.
-
-**G1.** Every operation requires `S1 = OPEN`. An operation offered when `S1` is `COMMITTED` or
-`ABORTED` is refused, explicitly rather than silently, and changes nothing. A caller extending a
-load it has already ended would otherwise watch its records vanish without a word.
-
-### `write(batch)`
-
-The batch validates its own shape when it is constructed, knowing only itself. These are the
-intrinsic preconditions, and a batch that fails one cannot be built, let alone written:
-
-| ID | Intrinsic precondition |
-| --- | --- |
-| B1 | Entries are well-formed, and each canonical record appears once |
-| B2 | No handle is introduced twice within the batch |
-| B3 | No handle is repeated within one delta |
-| B4 | No handle appears in both deltas |
-| B5 | No handle is both introduced (or adopted) by the batch and released by it |
-| B6 | A parent named within the batch resolves within the batch |
-| B7 | An in-batch parent handle denotes **the very object** the child holds, compared by identity |
-| B8 | At most one account is named as continuing |
-| B9 | An adoption's carried snapshot is the object any in-batch child of it holds |
-
-The session checks what needs history, on `write`:
-
-| ID | Session precondition |
-| --- | --- |
-| W1 | `S1 = OPEN` (G1) |
-| W2 | Entries + adoptions + retained + released ≤ `max_batch_entries` |
-| W3 | Every handle introduced or adopted exceeds `S6` and is not in `S5` |
-| W4 | Every adoption's locator resolves to a snapshot of the release being loaded, and to the snapshot the candidate carries |
-| W5 | Every parent not resolved in-batch is in `S5`, and `S4` says it denotes the object the child holds |
-| W6 | Every retained handle is introduced or adopted by this batch, or already in `S5` |
-| W7 | Every released handle is in `S5` |
-| W8 | Every handle in either delta belongs to an account open in the batch: one it introduces, one it adopts into, or `S2` |
-| W9 | Every retained handle belongs to the account the batch names as continuing |
-| W10 | `S2`, if set, is completed by this batch or named as continuing by it |
-
-**On success**, all of these apply together, at the batch boundary — after every record in the
-batch has been validated, never between records:
-
-```text
-S3 <- S3 + the batch's records
-S6 <- the greatest handle the batch introduced or adopted, if any; otherwise unchanged
-S4 <- (S4 + the handles this batch retained) - the released
-                                            - every handle of an account this batch completes
-S2 <- the account the batch names as continuing, or none
-S1 <- unchanged
-```
-
-A handle introduced or adopted and **not** retained never enters `S4` at all: it is resolvable
-inside its own batch by B6, and the batch is over. That is the ordinary case of a parent whose
-children arrive beside it, and it is why `S4` only ever holds handles that cross a batch
-boundary.
-
-An account is complete at the end of the batch that touches it and does not name it as
-continuing. There is no separate operation declaring completion; `S2` and the batch's
-`continuing` carry the fact between them, and one fact with two sources is a fact a caller has
-to reconcile.
-
-**On failure** — any B or W precondition unmet — `S1` through `S6` are **each exactly what they
-were**. No record staged, no mapping added or removed, `S6` not advanced, `S2` not moved, the
-session still `OPEN`. A corrected retry may reuse the very handles the rejected attempt carried.
-
-### `commit()`
-
-| ID | Precondition |
-| --- | --- |
-| C1 | `S1 = OPEN` (G1) |
-| C2 | `S2` is none |
-
-C2 is not bookkeeping. A batch naming an account as continuing promises a batch that continues
-it; committing instead persists a truncated account that nothing downstream can distinguish from
-a small one. The caller closes it the way it closes every account: a final batch that does not
-name it as continuing, **carrying no entries and no deltas at all**, since completion releases
-what is live. Closure must not ask for a release list — a delta is bounded by `max_batch_entries`
-and `S4` is not, so demanding the list would be unsatisfiable for exactly the accounts the deltas
-exist to serve.
-
-**On success**, one of two outcomes, and both are terminal:
-
-```text
-already loaded by this run   ->  nothing further persisted, already_complete = True
-otherwise                    ->  S3 and the processing outcome become durable together
-S1 <- COMMITTED    S2, S3, S4 cleared
-```
-
-**On failure** — C1 or C2 unmet, or the durable write itself fails — zero canonical records exist
-for the load, `S1` stays `OPEN`, and `S2` through `S6` are unchanged. The caller may close the
-open account and commit again, or abort. A failed completion is not a terminal state; only a
-successful one is.
-
-### `abort()`
-
-| ID | Precondition |
-| --- | --- |
-| A1 | `S1 = OPEN` (G1) |
-
-An open account does not prevent an abort, because an abort persists nothing.
-
-```text
-S1 <- ABORTED    S2, S3, S4 discarded    zero canonical records for the load
-```
-
-**On failure** — A1 unmet — refused, and nothing changes.
-
-### The whole machine
-
-`—` means unchanged.
-
-| Transition | S1 status | S2 open account | S3 staged | S4 mappings | S6 high water |
-| --- | --- | --- | --- | --- | --- |
-| `write` success | — | ← `continuing` | += records | += retained − released − completed | ← greatest introduced |
-| `write` failure | — | — | — | — | — |
-| `commit` success | ← COMMITTED | cleared | durable, cleared | cleared | — |
-| `commit` failure | — (OPEN) | — | — | — | — |
-| `abort` success | ← ABORTED | cleared | discarded | cleared | — |
-| `abort` failure | — | — | — | — | — |
-| any op, `S1 ≠ OPEN` | — | — | — | — | — |
-
-Every failure row is empty across every component. That is the property the table exists to make
-checkable at a glance, and it is the property nine rounds of prose could not hold.
+What follows is the reasoning behind that table: why each shape was chosen, what was tried and
+rejected, and what the falsification suite must prove. It restates no transition, and where it
+appears to disagree with the spec, the spec is right and this document is the defect.
 
 ## Why adoption is batch-scoped
 
@@ -192,6 +47,14 @@ handles they bind are introduced by that batch, live and die by exactly the rule
 handle follows, and the whole thing takes effect or does not with the batch. `W4` is the only
 precondition adoption adds, `B9` the only intrinsic one, and the machine has three operations
 instead of four. Nothing else in the table mentions adoption, which is the point.
+
+The binding has to be carried, not inferred. A batch declaring "these adoptions and these
+handles" as two parallel sequences would make the pairing depend on order, and a reader of one
+batch could not say which handle denotes which snapshot without counting. `AdoptedParent` pairs
+one candidate with the one handle bound to it, so the binding is a value. That handle is then
+**introduced by the batch** for every rule in the table — `B2`, `W3`, retention, release,
+ownership, and the success transition — which is what keeps adoption from acquiring a second
+lifetime.
 
 The candidate itself is unchanged from the accepted argument: an **opaque locator** paired with
 the `AccountSnapshot` it locates. Never the grain — the accepted contract makes it deliberately
@@ -241,45 +104,6 @@ bound is untouched. Without it, session-wide uniqueness would be unenforceable, 
 completing an account releases its mappings and a later account could mint the same value,
 silently retargeting a late record.
 
-## The value contracts
-
-### `CorrelationHandle`
-
-A frozen value over an integer of at least one that is not a boolean, unique within one session.
-It exists only to let a record name a parent, never appears in a stored row, and stops resolving
-once its account completes. Session-wide rather than per-account, because one value meaning
-different things in two accounts is an ambiguity nothing later can recover.
-
-### `CorrelatedRecord` and `CanonicalRecordBatch`
-
-`CorrelatedRecord` pairs one canonical record with an optional `handle` — the value it may later
-be named by — and an optional `parent`, the value naming its own parent. Correlation rides on the
-batch, never on the canonical records, which hold their parents directly and gain no correlation
-field.
-
-`CanonicalRecordBatch` carries those entries, the adoptions it makes, `continuing` naming the one
-account left open at its end, and two delta tuples, `retain` and `release`. Its intrinsic
-validation is exactly B1–B9 and nothing more: it cannot judge `S4`, `S6`, or `max_batch_entries`,
-because it knows only itself.
-
-### `AccountSnapshotRef`, `AdoptableSnapshot`, `ReleaseLoadCompletion`
-
-`AccountSnapshotRef` is an opaque locator on the same terms as `ProcessingRunRef`.
-`AdoptableSnapshot` pairs one with the `AccountSnapshot` it locates. `ReleaseLoadCompletion`
-carries the `ProcessingRunRef` and `already_complete`, and deliberately no locator per account —
-a caller wanting to name a snapshot it just wrote uses the handle it already has.
-
-### `ReleaseLoadSession` and `CanonicalReleaseRepository`
-
-The session is a Protocol with `__enter__` and `__exit__` annotated `-> None` so a failure cannot
-be suppressed, `max_batch_entries`, and the three operations. `CanonicalReleaseRepository` opens
-a session for a `ReleaseIdentity`, a `ProcessingRunRef`, and a `ReleaseProcessingOutcome`, and
-offers an account and release's adoptable snapshots as a lazy `Iterator[AdoptableSnapshot]`.
-
-Neither names a schema, table, cursor, connection, transaction, bulk-load mechanism, conflict
-clause, or surrogate key. Resolving a handle to a generated key is the adapter's mechanism to
-choose, subject to the table.
-
 ## Completion, and why it is one unit of work
 
 The session owns the relationship between the processing run, its accepted or rejected outcome,
@@ -307,8 +131,17 @@ this change does not have.
 
 **The state machine.**
 
+- A session opens in the initial state: `S1` open, `S2` none, `S3` and `S4` empty, `S6` with no
+  handle yet introduced, and `S0` already carrying the release, run, outcome, and maximum. The
+  first handle a session ever sees is accepted on its own merits.
 - Each of B1–B9 refuses **at construction**, without a session.
-- Each of W1–W10 refuses **on write**, with a session that has the history the check needs.
+- Each of W1–W11 refuses **on write**, with a session that has the history the check needs.
+- `W10` is falsified by two batches differing only in whether they touch the account `S2` names:
+  the one that carries an entry, an adoption, or a delta value of it closes the account and is
+  accepted; the one that carries nothing of it and does not name it as continuing is refused.
+  `W11` is falsified by a batch naming as continuing an account it neither touches nor inherits,
+  and satisfied by one that carries `S2` onward without touching it — which is why `W11` is the
+  session's: a batch that knows only itself cannot tell `S2` from an account nothing has begun.
 - After every one of those refusals, S1–S6 are byte-for-byte what they were: nothing staged,
   `S6` not advanced — proven by a corrected retry reusing the rejected batch's handles — `S2`
   unmoved, no mapping added or removed, and the session still `OPEN`.
@@ -340,6 +173,11 @@ this change does not have.
 
 **Adoption.**
 
+- An `AdoptedParent` states its binding: the pairing survives reordering the batch's adoptions and
+  its entries, and nothing infers a handle from position.
+- An adopted handle behaves as an introduced one under `B2`, `W3`, retention, release, and the
+  success transition — proven by exercising each of those rules on an adopted handle, not by
+  asserting the sentence.
 - Adoption by candidate yields a usable parent handle and creates no observation; the child keeps
   its own load and artifact lineage.
 - W4 refuses a locator resolving to no snapshot of the release being loaded, one belonging to
@@ -362,6 +200,9 @@ this change does not have.
   `already_complete`; a second distinct run reports a new load and both loads are retained.
 - Several snapshots at one grain, several children of one parent, and children from another load
   of the same release are all retained and none collapsed.
+- **Two entries of one batch carrying equal canonical records both persist.** No precondition may
+  be read as a deduplication rule: `B1` governs an entry's shape and `B2` a handle's uniqueness,
+  and neither compares one canonical record with another.
 
 ## Alternatives rejected
 
@@ -375,6 +216,12 @@ this change does not have.
   marked "closing".
 - **Tracking `live` separately from `mappings`.** Two structures that can disagree about which
   handles resolve.
+- **A batch rule requiring its canonical records to be distinct.** It reads as tidiness and is a
+  deduplication rule over observed values, which the accepted persistence contract forbids and
+  which this boundary exists not to impose.
+- **Keeping the transition table in this design.** It would be authoritative and archived, leaving
+  the promoted spec citing a document the reader no longer has, through a relative link that no
+  longer resolves.
 
 ## Risks
 
