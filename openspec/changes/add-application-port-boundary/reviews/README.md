@@ -28,8 +28,10 @@ a marker applies until the next marker or the end of the file:
 - `registry-and-discovery` — group 2: the source registry, discovery, its
   evidence carriers, and identity promotion (spec
   `source-registry-and-discovery`).
-- `canonical-load` — group 3: the batch, correlation, adoption, the load session
-  and repository (spec `canonical-load-session`).
+- `canonical-load` — **moved out.** This scope became the sibling change
+  `add-canonical-load-session`, with its own ledger. The rounds recorded here
+  that touched it stay here as history; nothing in them is a current finding
+  against either change.
 - `quality-publication-clock` — groups 4–5 (spec
   `run-bound-quality-and-publication`).
 - `surface-and-proof` — groups 6–8: the public surface, the dependency and
@@ -113,7 +115,7 @@ next round file and file each finding under its scope.
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------ |
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
-| `canonical-load` | REVISE (round 4's two P1s **RESOLVED**, then corrected ten times across successive review rounds — the tenth striking the release list from the ninth's closing batch, which asked a bounded batch to enumerate an unbounded live set for the third time in this scope, and stating that a refused batch leaves no *records* behind and not merely no state, since an implementation staging rows before validating would otherwise commit a rejected batch's rows with the accepted ones. No open finding; awaiting a review round against the resolving commit) | 9 | `f441c74+1` |
+| `canonical-load` | MOVED OUT to `add-canonical-load-session`, where the model was rebuilt as one transition table with batch-scoped adoption. Its two round-4 P1s were settled by maintainer disposition and are settled there; ten successive corrections to the applications of those dispositions are why it is now its own change | 9 | `d147bdb` |
 | `quality-publication-clock` | REVISE (round 9 P1 and P2 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 9 | `73115fa3a3fa` |
 | `surface-and-proof` | REVISE (round 9 P2 resolved; round 5: task prerequisites cite decisions that do not exist; four tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, all awaiting their scopes' own dispositions) | 9 | `e6a3a24+1` |
 
@@ -125,6 +127,7 @@ Round 9's P1 and both P2s are resolved in the commit that records them. Round 9
 also corrects the task-length count: the bound as `planning.py:201` applies it
 was exceeded by **eight** tasks, not nine.
 
+**`canonical-load` has left this change.** Everything below about it is history.
 Since then the maintainer settled both `canonical-load` P1s from round 4 —
 adoption by opaque locator (a), and the parent bound stated honestly with the
 durable spill left to task 3.5 (c then b) — and both are applied. Ten review
@@ -143,7 +146,7 @@ batch's records from its state. That leaves
 deliberately until those two scopes' dispositions land, which is the sequence the
 round-9 reviewer recommended — shorten a task once its final contract is known.
 
-Next review: `canonical-load` with the scope-bound prompt above, against the
-commit that applies its two dispositions — that scope now has no open finding and
-has never had an accepting round. Then `quality-publication-clock` for round 4's
-source-as-of durability, which is the last open P1.
+Next review: `quality-publication-clock` for round 4's source-as-of durability,
+which is now the last open P1 in this change. `canonical-load` is reviewed in its
+own change and its own ledger, and this change resumes only after that capability
+is accepted.
