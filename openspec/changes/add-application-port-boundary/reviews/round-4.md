@@ -132,6 +132,17 @@ commit, before the spec was split into six files: `spec.md:335` and
    resolvable when it outgrows memory, which is a real obligation, and does not touch
    handles the caller never declared, which are gone by contract. The risk, the
    handoff, the matrix, and bootstrap 3.5 and 3.6 all say that.
+
+   **Corrected five times, and the fifth found the arithmetic.** A "large declared
+   still-needed set" cannot exist: the declaration is carried by a bounded batch, so it
+   caps the live set at one batch's worth, and the second remedy was as unsatisfiable
+   as the first. Correlation is now expressed as **bounded retain and release deltas**
+   over an accumulating live set, on the reviewer's recommendation. Every declaration
+   stays bounded because the batch is; the live set is bounded by the caller's own
+   discipline and by account completion, not by any batch; and task 3.5's obligation is
+   finally coherent — durably maintaining that logical live set when one continuing
+   account's exceeds memory. A released handle stays released: the spill maintains the
+   set, it does not extend it.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

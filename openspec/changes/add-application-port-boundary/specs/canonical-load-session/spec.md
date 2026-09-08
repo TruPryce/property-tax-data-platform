@@ -33,7 +33,13 @@ The canonical persistence boundary SHALL allow one account's records to span mor
 
 That correlation SHALL be carried by the batch rather than by the canonical records, which hold their parents directly and SHALL NOT gain a correlation field. A batch entry SHALL pair one canonical record with the correlation value it can later be named by, where it may be a parent, and with the correlation value of its parent. A parent SHALL be named the same way whether it appears in the same batch or an earlier one, so there is one linkage mechanism rather than two.
 
-Each batch SHALL declare which correlation values must remain resolvable after it, and an implementation MAY release every mapping not so declared. Live mappings SHALL therefore be bounded by what the most recent batch declared, and that declaration SHALL be bounded because the batch is. Without this the bound fails inside a single account: an account carrying an unbounded number of owner associations whose allocations arrive in later batches would keep every association's mapping live until the account completed, so allowing only one continuing account SHALL NOT be claimed to bound correlation on its own.
+Each batch SHALL carry **bounded deltas** to the set of correlation values that must remain resolvable: the values it newly requires to survive beyond it, and the values it no longer requires. The live set SHALL be the accumulation of those deltas across the session, and a batch SHALL NOT be required to re-declare it in full.
+
+A complete re-declaration is what this replaces, and the reason is arithmetic: a full declaration must itself fit inside a bounded batch, so it would cap the live set at one batch's worth, and an account whose parents exceed that could never finish however the implementation stored them. Deltas keep every declaration bounded while letting the live set be as large as the caller's own retain-and-release discipline makes it.
+
+Releasing SHALL therefore be explicit, and completing an account SHALL release every value that account introduced, so a caller that never releases is bounded by its account rather than by the release. An implementation MAY hold the live set durably rather than in memory, which is what allows a large retained set to stay resolvable; the boundary SHALL NOT name that mechanism, and SHALL NOT require the set to fit in memory.
+
+Without deltas the bound fails inside a single account: an account carrying an unbounded number of owner associations whose allocations arrive in later batches would keep every association's mapping live until the account completed, so allowing only one continuing account SHALL NOT be claimed to bound correlation on its own.
 
 A correlation value SHALL be unique within one load session, and SHALL NOT be reused once its account is complete. Because the session releases the mapping for a completed account, uniqueness SHALL be enforced by requiring values to increase strictly over the session and by retaining the highest value yet introduced: any value not exceeding it SHALL be refused unless it is currently live. That state is a single value, so the bound is unaffected, and a late record naming a released value SHALL be refused rather than silently retargeted at a later account.
 
@@ -43,7 +49,7 @@ Validation authority SHALL be split according to what each party can know. A bat
 
 A resolved correlation value SHALL denote the very parent the canonical record already holds. Resolving is not sufficient: a record whose embedded parent is one observation SHALL NOT be accepted paired with a correlation value denoting a different one, because the record would then be persisted under a parent its own domain value does not name. Where the parent appears in the same batch, the batch SHALL enforce this; where it was introduced earlier, the session SHALL, since it already retains what each live value denotes. A batch SHALL NOT be required to know handles opened by earlier batches or accounts already completed, because it cannot.
 
-Every account a batch introduces SHALL be complete at the end of that batch, except at most one, which the batch SHALL name as continuing into the next. An implementation SHALL therefore retain, beyond a single bounded batch, only the correlation values of one continuing account, and only for records actually named as parents. Correlation SHALL NOT require memory proportional to the release, to the number of accounts in it, or to a continuing account's complete descent.
+Every account a batch introduces SHALL be complete at the end of that batch, except at most one, which the batch SHALL name as continuing into the next. An implementation SHALL therefore retain, beyond a single bounded batch, only the correlation values of one continuing account, and only those retained and not yet released. Correlation SHALL NOT require memory proportional to the release, to the number of accounts in it, or to a continuing account's complete descent — and where one continuing account's retained set is itself large, an implementation MAY hold it durably rather than in memory, which is the case a bounded per-batch declaration could not express.
 
 A correlation value that duplicates one already live, that names a parent never introduced, or that names one whose account is complete, SHALL be refused by the session.
 
@@ -91,9 +97,17 @@ A correlation value that duplicates one already live, that names a parent never 
 - **WHEN** a parent's children arrive in a later batch of the same account
 - **THEN** every batch between them declares that parent's value as still needed, and the implementation may release everything it does not declare
 
-#### Scenario: An account carries more parents than a batch can hold
-- **WHEN** one account's parents outnumber what a bounded batch may declare as still needed
-- **THEN** the port refuses nothing and names no spill: the declaration is what bounds live mappings, a durable spill belongs to the implementation, and a caller that declares more than it can hold is bounded by that account rather than by the release
+#### Scenario: An account carries more parents than one batch could enumerate
+- **WHEN** one account's live parents outnumber what a single bounded batch could have listed
+- **THEN** the account still completes, because each batch contributed bounded retain and release deltas rather than a full declaration, and the port refuses nothing and names no mechanism for holding the accumulated set
+
+#### Scenario: A released value is named afterwards
+- **WHEN** a batch releases a correlation value and a later record names it
+- **THEN** it is refused, because release is explicit and a released value is gone whatever an implementation still holds
+
+#### Scenario: A caller never releases within an account
+- **WHEN** a caller retains every value it introduces and releases none until the account completes
+- **THEN** the live set is bounded by that one account and is released in full at completion, rather than growing with the release
 
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined

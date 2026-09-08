@@ -393,13 +393,16 @@ A parent is named the same way whether it sits in this batch or an earlier one, 
   write(batch)  ─┘  that one account's handles stay resolvable; the rest are released
 ```
 
-One continuing account is necessary and not sufficient. Inside a single account the bound can still fail: an account with an unbounded number of owner associations, whose allocations arrive in later batches, keeps every association's mapping live until the account completes. So the batch also declares which handles must outlive it, and the implementation may release everything else:
+One continuing account is necessary and not sufficient. Inside a single account the bound can still fail: an account with an unbounded number of owner associations, whose allocations arrive in later batches, keeps every association's mapping live until the account completes. So each batch carries bounded **deltas** to the set of handles that must stay resolvable, and the live set accumulates across them:
 
 ```text
-  still_needed = (h2, h7)     only these survive this batch
-                              live mappings ≤ what the last batch declared
-                              declared inside a bounded batch, so bounded
+  retain = (h7,)   release = (h2,)     bounded deltas, not a full list
+                                       live set = accumulated retains − releases
+                                       each delta bounded because the batch is;
+                                       the live set is not, and need not be
 ```
+
+A full re-declaration each batch was the first shape and it does not work: the declaration must itself fit inside a bounded batch, so it caps the live set at one batch's worth, and an account whose parents exceed that could never finish however the implementation stored them. Deltas keep every declaration bounded while letting the live set grow to whatever the caller retains and has not released — which an implementation may hold durably rather than in memory.
 
 A parent needed five batches later is re-declared in each of the five, which makes the cost visible instead of hiding it in an implementation that quietly grows. With that in place, a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
 
@@ -534,7 +537,7 @@ The change carries six capability specs. Every shared concept is defined in exac
 | `ReleaseProcessingOutcome`, `ReleaseDiagnosticRecord`, `ReleaseNoticeRecord`, `ReleaseDisposition`, the evidence seal, the mirrored `BOUNDARY_CONTRACT_VERSION` | `processing-run` | `canonical-load-session` (the session accepts it at `open`); task 7.1 pins the mirror equal to the adapters' constant |
 | The closed diagnostic vocabulary; the bounded notice grammar | accepted `bounded-release-processing` | `processing-run` (validates against them; defines no second enum) |
 | Outcome, diagnostic, notice, quality, and publication records reused rather than replaced | accepted `canonical-silver-persistence` | `processing-run`, `run-bound-quality-and-publication` |
-| `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, `still_needed`, adoption, `ReleaseLoadCompletion` | `canonical-load-session` | — |
+| `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, the retain/release deltas, adoption, `ReleaseLoadCompletion` | `canonical-load-session` | — |
 | Account snapshot grain (deliberately non-unique), one-to-many children, cross-load lineage, release-scoped retry | accepted `canonical-silver-persistence` | `canonical-load-session` (adoption names an **opaque locator**, never the grain, and never provenance — both name more than one snapshot; round 4 records why) |
 | The canonical record types | accepted `canonical-appraisal-records` | `canonical-load-session` |
 | `RuleSeverity`, `QualityRule`, `QualityEvaluation`, `QualityVerdict`, `QualityRepository` | `run-bound-quality-and-publication` | the publication attempt's activation, in the same spec, checks the verdict |
@@ -568,30 +571,32 @@ they are domain types this change does not modify — so correlation rides on th
 later be named by) and an optional `parent` (the value naming its own parent).
 
 `CanonicalRecordBatch` is a bounded tuple of those, plus `continuing` naming the one
-account, if any, left open at the end of the batch, and `still_needed` naming the handles
-that must stay resolvable after it.
+account, if any, left open at the end of the batch, and two bounded delta tuples — `retain`,
+the handles it newly requires to survive beyond it, and `release`, those it no longer
+requires.
 
-`still_needed` is what actually bounds correlation. Without it the bound fails *inside* one
-account: an account with an unbounded number of owner associations whose allocations arrive
-later would keep every association mapping live until completion, so one-continuing-account
-bounds nothing by itself. With it, live mappings are bounded by the most recent declaration,
-which is bounded because the batch is — and a parent needed several batches later must be
-re-declared in each, which makes the cost visible rather than hidden.
+Deltas are what actually bound correlation, and they replace a full per-batch declaration
+that could not work. Without any declaration the bound fails *inside* one account: an account
+with an unbounded number of owner associations whose allocations arrive later would keep every
+association mapping live until completion, so one-continuing-account bounds nothing by itself.
+But a *complete* declaration has to fit in a bounded batch, which caps the live set at one
+batch's worth and leaves an account with more parents than that unable to finish at all. Deltas
+keep each declaration bounded while letting the live set be as large as the caller's own
+retain-and-release discipline makes it, and completing an account releases everything it
+introduced, so a caller that never releases is bounded by its account rather than by the
+release.
 
-**The bound is one account's parents, and that is the whole claim.** It is worth being exact
-about what a durable spill can and cannot rescue, because an earlier draft of this handoff was
-not. `still_needed` is a *declaration*: an implementation may release every mapping a batch
-does not declare, and naming a released handle afterwards is refused. A spill therefore cannot
-resurrect a handle the caller failed to declare — that handle is gone by contract, and no
-storage changes it.
+**What a durable spill is for, stated after two wrong attempts.** The first said it rescued an
+account with many parents; the second said it rescued a large *declared* set — and a declaration
+bounded by the batch can never be large, so that obligation was unsatisfiable too. With deltas
+the case is finally coherent and it is the live set, not any declaration, that can grow: the
+accumulation of retains minus releases for one continuing account is bounded by the caller's
+discipline and by nothing in the batch, so it may exceed memory. Holding it durably is what
+keeps it resolvable, and that is task 3.5's obligation.
 
-What a spill serves is the opposite case: a declaration an implementation cannot hold in
-memory. A caller that correctly declares a large parent set has satisfied the contract, and the
-implementation owes it resolvability; where that set exceeds RAM, spilling the declared
-mappings to durable storage is how the obligation is met without the port naming a mechanism.
-The residual risk is therefore narrower than first stated — not "an account with many parents",
-but an account whose **declared** still-needed set outgrows what an implementation can hold,
-which is exactly what task 3.5 must handle.
+A release is still a release. A handle the caller explicitly releases, or one whose account
+completes, is gone by contract, and no storage resurrects it — the spill maintains the logical
+live set, it does not extend it.
 
 ### Where each rule is enforced
 
@@ -730,8 +735,9 @@ Each case names a defect. A case that cannot fail is not on this list.
   than the one the child actually holds are each refused **by the session** — proving the split
   rather than assuming it.
 - A batch naming a parent it does not itself contain is well-formed on its own.
-- A handle omitted from `still_needed` may be released and naming it afterwards is refused, while one
-  re-declared across several batches stays resolvable.
+- A handle named in a batch's `release` delta is refused when named afterwards, while one retained and
+  never released stays resolvable across as many batches as the account spans — without being
+  re-declared in each.
 - Adopting a snapshot persisted by an earlier load, **by candidate**, yields a usable parent handle
   without creating an observation; a locator resolving to no snapshot of the release being loaded
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
@@ -755,9 +761,10 @@ Each case names a defect. A case that cannot fail is not on this list.
 - An account whose parents outnumber what the fake holds live is **not** refused by the port, and the
   port offers no spill: the declaration bounds live mappings, and the residual case is a recorded
   risk that task 3.5 owns.
-- A handle the caller **did not** declare in `still_needed` is refused when named later, and no spill
-  changes that — proving the spill's scope is a large *declared* set, not a rescue for an undeclared
-  one.
+- A released handle is refused when named later and no spill changes that, while an account whose
+  accumulated live set exceeds what the fake holds in memory still completes — proving the spill
+  maintains the logical live set rather than extending it, and that no single batch had to enumerate
+  that set.
 - A session accepts several batches and exposes nothing until `commit`; `abort` leaves zero records.
 - Re-completing one release and run returns `already_complete=True` and writes nothing further; a
   second distinct run returns `already_complete=False` and both loads are retained.
@@ -842,7 +849,7 @@ Each case names a defect. A case that cannot fail is not on this list.
 
 ## Risks
 
-- **One pathological account can exceed live correlation state.** The bound is one account's parents. Where a caller **declares** more still-needed handles than an implementation can hold in memory, the contract is satisfied and the implementation owes resolvability — task 3.5 owns the durable spill that provides it. Where a caller does **not** declare a handle, it is released and naming it afterwards is refused; no spill rescues that, and none is asked to. The port names no mechanism because a port naming one is the wrong shape. Accepted knowingly under round 4's disposition (c) then (b) rather than closed here.
+- **One continuing account's live correlation set can exceed memory.** Each batch carries bounded retain and release deltas, so no declaration is ever large — but the set they accumulate is bounded only by the caller's own discipline and by account completion, and for one pathological account it may exceed what an implementation holds in memory. Task 3.5 owns the durable maintenance that keeps it resolvable. A handle the caller releases, or whose account completes, is gone by contract; nothing is asked to resurrect it. The port names no mechanism because a port naming one is the wrong shape. Accepted knowingly under round 4's disposition (c) then (b) rather than closed here.
 
 - **The session can be implemented as a lie.** Nothing in a Protocol forces an implementation to honour atomicity; a `commit()` that writes eagerly conforms structurally. The same is true of `ReleaseStage` today, and the answer is the same: 3.6's containerised integration tests are where atomicity is actually proven. This change states the obligation and the falsification tests assert the contract's shape, not the storage behaviour.
 - **`ProcessingRunRef` invites misuse.** It is an opaque locator that will be a `bigint` in practice, and someone will eventually sort by it. The contract names it, a test asserts it carries no ordering guarantee, and that is the extent of what a type can do here.
@@ -859,7 +866,7 @@ One construction signature does change: `ReleaseManifest` gains a required `juri
 
 ## Handoffs
 
-- **Task 3.5 owns the durable spill for an oversized *declared* still-needed set.** This change bounds correlation by declaration and states the residual case precisely: the spill keeps declared mappings resolvable when they outgrow memory, and does not — cannot — resurrect a handle the caller did not declare.
+- **Task 3.5 owns durable maintenance of the logical live correlation set.** This change bounds every per-batch declaration by making it a delta, and states the residual case precisely: the accumulated live set for one continuing account may outgrow memory, and holding it durably is what keeps it resolvable. It maintains that set; it does not extend it, and a released handle stays released.
 
 **To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession` using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing, and merge SQL. It also implements `ManifestIndex` and `ProcessingRunRepository`, which are prerequisites rather than companions: a canonical load cannot open without a run, and a run cannot start without a manifest reference, so `bronze.release_manifest` and `ingestion.run` are 3.5's to write before the first batch lands — including whatever represents a held run, since `ingestion.run` carries no such column. Resolving a `CorrelationHandle` to a generated key is 3.5's mechanism to choose, subject to the bound the session states. None of that appears in the application contract, and 3.5 may not add it there.
 
