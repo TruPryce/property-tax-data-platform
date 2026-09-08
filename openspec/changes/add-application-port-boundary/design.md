@@ -94,8 +94,18 @@ a load it already ended would otherwise watch its records disappear silently. Co
 an account is still continuing is refused for the same reason in reverse: that batch promised a
 batch continuing the account, and committing instead persists a truncated account that nothing
 downstream can tell from a small one. The caller closes it the way it closes every account — a
-final batch not naming it as continuing, which may carry no entries at all and only the releases,
-so closing never requires inventing a record. Abort is always available, an open account
+final batch not naming it as continuing, carrying no entries and no deltas at all, since
+completion releases what is live. Closure must not ask for the list: a release delta is bounded by
+the maximum and the live set is not, so demanding it would be unsatisfiable for exactly the
+accounts the deltas exist to serve — the same arithmetic that killed the full per-batch
+declaration, arriving through the closing batch.
+
+A refused batch also leaves no *records* behind, which is worth stating separately from the state
+it leaves unmoved. Nothing is durable before completion, so the difference is invisible until the
+end — and that is the danger: an implementation staging rows as they arrive and validating after
+would carry a rejected batch's rows to the same commit as the accepted ones, and the load would be
+wrong before anyone could look. Rows, resolved parent mappings, anything derived from a refused
+batch: no trace in the completed load, and nothing a later batch or the completion resurrects. Abort is always available, an open account
 included, because it persists nothing.
 
 A third idiom for this problem would itself be the defect.
@@ -569,7 +579,7 @@ list is only reviewable when it sits where the argument for it sits.
 
 ### `CorrelationHandle`
 
-A frozen value over a positive integer, unique within one `ReleaseLoadSession`. Neither
+A frozen value over an integer of at least one that is not a boolean — the guard this repository already writes as `isinstance(value, bool) or not isinstance(value, int)`, since `True` would otherwise be a handle equal to one — unique within one `ReleaseLoadSession`. Neither
 domain identity nor persistence identity: it exists only to let a record name a parent, it
 never appears in a stored row, and it stops being resolvable once its account is complete.
 Session-wide rather than per-account, because one value meaning different things in
@@ -603,8 +613,9 @@ on its own.
 
 Six rules govern the deltas, because an accumulating set each batch edits is only as
 trustworthy as the edits. **Bounded against a stated maximum**: the session states one maximum for what a
-batch may carry — a positive integer counting the entries plus the values in each delta, fixed
-at open, readable by the caller so it can size what it builds — and the session refuses a batch exceeding it. The check
+batch may carry — an integer of at least one and not a boolean, counting the entries plus the
+values in each delta, unchanging while the session is open and readable by the caller so it can
+size what it builds — and the session refuses a batch exceeding it. The check
 is the session's because the batch cannot know the maximum; a bound named nowhere would leave
 *bounded* describing a well-behaved caller rather than something that checks, and the whole
 memory argument resting on a caller's manners. **Validity**: a retained handle is one this batch
@@ -823,6 +834,7 @@ Each case names a defect. A case that cannot fail is not on this list.
 
 - An account's records written across several batches name their parents by handle.
 - A batch naming two accounts as continuing is refused **by the batch**.
+- A handle that is a boolean is refused, for the reason the maximum's guard exists.
 - A handle duplicating one already live, a handle not exceeding the highest yet introduced, a parent
   never introduced, a parent whose account has completed, and a parent handle denoting a record other
   than the one the child actually holds are each refused **by the session** — proving the split
@@ -851,8 +863,16 @@ Each case names a defect. A case that cannot fail is not on this list.
 - Every operation offered after a session's terminal operation is refused, a completion attempted while an
   account is still continuing is refused, an entry-less batch closes that account, and an abort with an
   account open is permitted and leaves zero records.
-- A value repeated within one delta is refused by the batch; the maximum is a positive integer counting a
-  batch's entries plus the values in each delta, and is readable before a batch is built.
+- A value repeated within one delta is refused by the batch. The maximum counts a batch's entries plus the
+  values in each delta, is readable before a batch is built, is rejected when zero, negative, non-integer,
+  or **a boolean** — `True` is an `int` in Python and would otherwise pass as a maximum of one, the guard
+  `archives.py` already writes as `isinstance(value, bool) or not isinstance(value, int)` — and a session
+  reporting a different maximum after the first answer breaks the contract.
+- A refused batch contributes no records: after a refusal, a correction, and a completion, the load holds
+  the accepted batches' records and nothing from the rejected attempt, whatever was staged before it was
+  refused.
+- An account with more live handles than one batch's maximum could carry still closes, with a batch
+  carrying no entries and no deltas at all — closure releasing nothing by name and completion sweeping it.
 - A refused batch leaves every piece of session correlation state as it was: the live set, the highest
   handle yet introduced — proven by retrying a corrected batch with the same handles — which account is
   continuing, and the completion of the accounts it did not carry onward, whose handles are still live and

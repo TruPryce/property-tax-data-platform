@@ -223,6 +223,24 @@ commit, before the spec was split into six files: `spec.md:335` and
    close it — so closing never requires inventing a record. The maximum is now a positive integer
    counting entries plus each delta's values, and a value repeated within one delta is refused by
    the batch rather than counted twice against a maximum whose units were never stated.
+
+   **Corrected ten times, and the closing batch repeated the arithmetic a third time.** The
+   ninth's escape hatch for closing an open account — "a final batch that may carry no entries
+   and only the deltas releasing what remains" — asks the caller to enumerate the account's live
+   set inside a batch bounded by the maximum. That is the `still_needed` mistake for the third
+   time in this scope: a bounded carrier cannot hold an unbounded list, and it would fail for
+   exactly the accounts the deltas exist to serve. A closing batch now carries no entries **and
+   no deltas**; completion releases what is live, and closure never asks for the list. The other
+   blocker was one the atomicity rule kept pointing away from: it governs session correlation
+   state and says nothing about the *records* a refused batch carried. Nothing is durable before
+   completion, so an implementation that stages rows as they arrive and validates afterwards
+   would carry a rejected batch's rows to the same commit as the accepted ones, invisibly, and
+   the load would be wrong before anyone could look. A refused batch now leaves no trace in the
+   completed load — rows, resolved parent mappings, anything derived from it — and nothing
+   resurrects them. The maximum also gained the guard this repo already writes everywhere else,
+   `isinstance(value, bool) or not isinstance(value, int)`: `True` is an `int` in Python and
+   would have passed as a maximum of one. It is fixed while the session is open, too, since a
+   caller sized its batch against the first answer.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

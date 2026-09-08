@@ -113,7 +113,7 @@ next round file and file each finding under its scope.
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------ |
 | `run-and-manifest`          | REVISE (rounds 6–7 findings resolved; round 5: adapter and county write roots have no scope-policy entry — decision needed)         | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
 | `registry-and-discovery`    | REVISE (round 7 P1 resolved in the same commit; round 4: `PageEvidence` fields unspecified — UNRESOLVED)                          | 7          | `57526347fdd6f2001a568580a37d114bf8c91f3b` |
-| `canonical-load` | REVISE (round 4's two P1s **RESOLVED**, then corrected nine times across successive review rounds — the ninth closing the hole the eighth's own fix opened, adoption having been given the power to open an account without being held to the one-open-account bound that power exists under. Adoption is now refused into a second account, a failed adoption changes nothing, an adopted handle lives one batch unless retained, and the session lifecycle is written rather than implied: every operation after the terminal one refused, `commit()` refused while an account is still continuing, an entry-less batch the way to close it. No open finding; awaiting a review round against the resolving commit) | 9 | `5c2a719+1` |
+| `canonical-load` | REVISE (round 4's two P1s **RESOLVED**, then corrected ten times across successive review rounds — the tenth striking the release list from the ninth's closing batch, which asked a bounded batch to enumerate an unbounded live set for the third time in this scope, and stating that a refused batch leaves no *records* behind and not merely no state, since an implementation staging rows before validating would otherwise commit a rejected batch's rows with the accepted ones. No open finding; awaiting a review round against the resolving commit) | 9 | `f441c74+1` |
 | `quality-publication-clock` | REVISE (round 9 P1 and P2 resolved in the same commit; round 4: the source as-of instant is not durable across retried stages — UNRESOLVED) | 9 | `73115fa3a3fa` |
 | `surface-and-proof` | REVISE (round 9 P2 resolved; round 5: task prerequisites cite decisions that do not exist; four tasks still exceed the 2,048-character bound — 1.1, 1.3, 2.1, 2.2, all awaiting their scopes' own dispositions) | 9 | `e6a3a24+1` |
 
@@ -127,12 +127,14 @@ was exceeded by **eight** tasks, not nine.
 
 Since then the maintainer settled both `canonical-load` P1s from round 4 —
 adoption by opaque locator (a), and the parent bound stated honestly with the
-durable spill left to task 3.5 (c then b) — and both are applied. Nine review
+durable spill left to task 3.5 (c then b) — and both are applied. Ten review
 rounds have since found defects in the applications themselves rather than in the
 dispositions; each is recorded as a numbered correction under round 4's finding 1.
 The seventh took the delta rules from four to six; the eighth made three of the six
 enforceable and closed the adoption hole in rollback; the ninth bounded the
-adoption the eighth had introduced, and wrote the session lifecycle down. That leaves
+adoption the eighth had introduced and wrote the session lifecycle down; the tenth
+took the unbounded list back out of the ninth's closing batch and separated a refused
+batch's records from its state. That leaves
 **one P1 open**, round 4's source-as-of durability in
 `quality-publication-clock`, plus round 4's `PageEvidence` P2 in
 `registry-and-discovery` and round 5's write-root decision in
