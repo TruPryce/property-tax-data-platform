@@ -157,6 +157,29 @@ commit, before the spec was split into six files: `spec.md:335` and
    is accepted in full), and **account ownership** (a batch touches no other account's
    values). Six scenarios carry them, plus one stating that a handle introduced and not
    retained is well-formed and dies with its batch.
+
+   **Corrected seven times, and every one of the four rules was thinner than it read.**
+   The round after found that three of them do not hold and a fourth was missing.
+   *Bounded* was an adjective with nothing behind it: the spec called the deltas
+   bounded and named nothing that enforces it, so the memory argument rested on a
+   well-behaved caller rather than on the boundary — the same defect as the
+   `still_needed` arithmetic, one level up. *Account ownership* was self-contradictory:
+   a batch could edit only an account it introduces or names as continuing, which
+   excludes the batch that **completes** a continuing account and therefore must release
+   the values an earlier batch introduced — the one release every account needs. And
+   *atomicity* covered the live set alone, while a batch moves two other pieces of
+   session state: the highest value yet introduced and which account is continuing. A
+   refused batch that raised the high-water mark would refuse the corrected retry of its
+   own values, which is exactly the half-applied edit the rule exists to prevent. The
+   missing rule was ordering **within** a batch: no-contradiction compares the two
+   deltas only, so a batch that names a live value as a parent and also releases it had
+   no defined answer. Deltas now take effect at the batch **boundary** — after every
+   record is validated, binding on the batch after — so a caller may use a parent for
+   the last time and release it in one write, and no record's meaning depends on where
+   it sits among its siblings. Six rules now, with eleven scenarios, and the batch/session
+   split restated: the batch measures its own size and its own contradictions, the session
+   owns liveness, ownership, and atomicity, because only the session holds what a refusal
+   must leave unmoved.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

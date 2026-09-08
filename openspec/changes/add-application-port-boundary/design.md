@@ -398,8 +398,10 @@ One continuing account is necessary and not sufficient. Inside a single account 
 ```text
   retain = (h7,)   release = (h2,)     bounded deltas, not a full list
                                        live set = accumulated retains − releases
-                                       each delta bounded because the batch is;
-                                       the live set is not, and need not be
+                                       deltas held to the batch's own bound,
+                                       and applied at its boundary, not between
+                                       its records; the live set is not bounded,
+                                       and need not be
 ```
 
 A full re-declaration each batch was the first shape and it does not work: the declaration must itself fit inside a bounded batch, so it caps the live set at one batch's worth, and an account whose parents exceed that could never finish however the implementation stored them. Deltas keep every declaration bounded while letting the live set grow to whatever the caller retains and has not released — which an implementation may hold durably rather than in memory.
@@ -575,16 +577,28 @@ account, if any, left open at the end of the batch, and two bounded delta tuples
 the handles it newly requires to survive beyond it, and `release`, those it no longer
 requires.
 
-Four rules govern the deltas, because an accumulating set each batch edits is only as
-trustworthy as the edits. **Validity**: a retained handle is one this batch introduces or one
-already live, and a released handle is one already live — a delta cannot create or discard
-state that was never there. **No contradiction**: a handle in both deltas of one batch is
-refused rather than resolved by precedence, because retain-then-release and release-then-retain
-give opposite results and neither is more correct than the other. **Atomicity**: deltas apply
-only if the batch is accepted in full, so a retry after a validation failure is not reasoning
-about half an edit. **Account ownership**: a batch touches only values of an account it
-introduces or names as continuing, because one account editing another's live set is the
-retargeting that strictly increasing handles exist to prevent, arriving by another route.
+Six rules govern the deltas, because an accumulating set each batch edits is only as
+trustworthy as the edits. **Bounded, enforced**: the deltas are held to the same bound as the
+batch's records and a batch exceeding it refuses itself, since otherwise *bounded* describes a
+well-behaved caller rather than the boundary, and the whole memory argument rests on a caller's
+manners. **Validity**: a retained handle is one this batch introduces or one live at the start
+of it, and a released handle is one live at the start of it — a delta cannot create or discard
+state that was never there, and a batch does not release what it introduced, which dies with it
+anyway. **No contradiction**: a handle in both deltas of one batch is refused rather than
+resolved by precedence, because retain-then-release and release-then-retain give opposite
+results and neither is more correct than the other. **Batch boundary**: deltas take effect once
+every record in their batch is validated and bind on the batch after, so a handle a batch
+releases resolves for every record in that batch wherever it sits, and no record's meaning
+depends on its position among its siblings. **Atomicity**: deltas apply only if the batch is
+accepted in full, together with the two other pieces of session correlation state a batch moves
+— the highest handle yet introduced and which account is continuing — so a corrected retry is
+neither refused for reusing handles its own rejected attempt burned nor judged against a
+continuing account it never established; a refused account completion likewise leaves that
+account open with its handles live. **Account ownership**: a batch touches only values of an
+account open in it — one it introduces, or the one continuing into it, which is what lets the
+batch that finally completes an account release handles an earlier batch introduced — because
+one account editing another's live set is the retargeting that strictly increasing handles
+exist to prevent, arriving by another route.
 
 A handle introduced and *not* retained is well-formed: it is live for its own batch and
 released at the end of it, which is the ordinary case of a parent whose children arrive beside
@@ -622,6 +636,10 @@ validates exactly the intrinsic shape:
 - no handle introduced twice within the batch;
 - a `parent` naming a handle inside the batch resolves inside it;
 - at most one account named as continuing;
+- `retain` and `release` together within the same bound as the batch's records — a size it can
+  measure without any history, which is what makes *bounded* enforced rather than assumed;
+- no handle in both deltas, and no handle in both the entries it introduces and `release`,
+  the latter being redundant since an unretained handle dies with its batch anyway;
 - and where the parent is in the batch, that the handle denotes **the very record the
   canonical value already holds** — compared by object identity, never by value. Pairing an
   allocation with a live handle for a different association would persist it under a parent
@@ -635,7 +653,16 @@ The session owns everything needing history, refused on `write` or on completion
 - a parent never introduced;
 - a parent whose account has completed;
 - a parent handle denoting a record other than the one the child actually holds;
-- a continuing-account state inconsistent with the previous batch.
+- a retained or released handle that is not live at the start of the batch;
+- a handle belonging to an account not open in the batch — neither introduced by it nor
+  continuing into it;
+- a continuing-account state inconsistent with the previous batch — an account left open
+  that the next batch neither completes nor carries onward included.
+
+Atomicity is the session's too, because only the session holds what a refusal must leave
+unmoved: the live set, the highest handle yet introduced, and which account is continuing. All
+three move together with an accepted batch or not at all, and a refused account completion
+leaves that account open with its handles live.
 
 A batch is never asked to judge handles opened by earlier batches or accounts already
 completed — it cannot know them, and a rule it cannot enforce is worse than none.
@@ -754,9 +781,16 @@ Each case names a defect. A case that cannot fail is not on this list.
   never released stays resolvable across as many batches as the account spans — without being
   re-declared in each.
 - A delta naming a handle that is neither live nor introduced by its batch is refused; a handle in both
-  deltas of one batch is refused rather than ordered; a refused batch leaves the live set byte-for-byte
-  as it was; and a batch releasing a handle of an account it neither introduces nor continues is
-  refused. A handle introduced and not retained is well-formed and dies with its batch.
+  deltas of one batch is refused rather than ordered; deltas exceeding the bound the batch's records are
+  held to are refused by the batch itself; and a batch releasing a handle it introduced itself is refused
+  as redundant. A handle introduced and not retained is well-formed and dies with its batch.
+- A refused batch leaves all three pieces of session correlation state as they were: the live set, the
+  highest handle yet introduced — proven by retrying a corrected batch with the same handles — and which
+  account is continuing. A refused account completion leaves that account open with its handles live.
+- A batch releasing a handle of an account neither introduced by it nor continuing into it is refused,
+  while the batch that completes a continuing account releases handles an earlier batch introduced and is
+  accepted. A handle released by a batch resolves for every record of that batch, including records
+  positioned after the release, and is gone for the next.
 - Adopting a snapshot persisted by an earlier load, **by candidate**, yields a usable parent handle
   without creating an observation; a locator resolving to no snapshot of the release being loaded
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot
