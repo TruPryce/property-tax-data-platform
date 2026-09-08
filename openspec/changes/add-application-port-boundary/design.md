@@ -404,7 +404,7 @@ One continuing account is necessary and not sufficient. Inside a single account 
 
 A full re-declaration each batch was the first shape and it does not work: the declaration must itself fit inside a bounded batch, so it caps the live set at one batch's worth, and an account whose parents exceed that could never finish however the implementation stored them. Deltas keep every declaration bounded while letting the live set grow to whatever the caller retains and has not released — which an implementation may hold durably rather than in memory.
 
-A parent needed five batches later is re-declared in each of the five, which makes the cost visible instead of hiding it in an implementation that quietly grows. With that in place, a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
+A parent needed five batches later is retained once and released when it is done with, so the cost is a caller's explicit decision rather than something an implementation grows quietly — and the batches between it and its children carry nothing on its account. With that in place, a batch may leave **at most one** account continuing past its end. Ordinary accounts therefore complete inside one batch and need no cross-batch correlation at all; only a pathological account spans batches, and only one may be in flight. Beyond a single bounded batch an implementation retains handles for that one account, and only for records actually named as parents — owners, associations, taxing units — while allocations, values, exemptions, land, improvements, and geometries stream as leaves. Correlation grows with neither the release nor the number of accounts in it.
 
 Who validates what follows from who can know what. `CanonicalRecordBatch` is a frozen value: it sees itself and nothing else, so asking it to reject a parent opened three batches ago is asking for a rule it cannot enforce.
 
@@ -575,6 +575,21 @@ account, if any, left open at the end of the batch, and two bounded delta tuples
 the handles it newly requires to survive beyond it, and `release`, those it no longer
 requires.
 
+Four rules govern the deltas, because an accumulating set each batch edits is only as
+trustworthy as the edits. **Validity**: a retained handle is one this batch introduces or one
+already live, and a released handle is one already live — a delta cannot create or discard
+state that was never there. **No contradiction**: a handle in both deltas of one batch is
+refused rather than resolved by precedence, because retain-then-release and release-then-retain
+give opposite results and neither is more correct than the other. **Atomicity**: deltas apply
+only if the batch is accepted in full, so a retry after a validation failure is not reasoning
+about half an edit. **Account ownership**: a batch touches only values of an account it
+introduces or names as continuing, because one account editing another's live set is the
+retargeting that strictly increasing handles exist to prevent, arriving by another route.
+
+A handle introduced and *not* retained is well-formed: it is live for its own batch and
+released at the end of it, which is the ordinary case of a parent whose children arrive beside
+it.
+
 Deltas are what actually bound correlation, and they replace a full per-batch declaration
 that could not work. Without any declaration the bound fails *inside* one account: an account
 with an unbounded number of owner associations whose allocations arrive later would keep every
@@ -738,6 +753,10 @@ Each case names a defect. A case that cannot fail is not on this list.
 - A handle named in a batch's `release` delta is refused when named afterwards, while one retained and
   never released stays resolvable across as many batches as the account spans — without being
   re-declared in each.
+- A delta naming a handle that is neither live nor introduced by its batch is refused; a handle in both
+  deltas of one batch is refused rather than ordered; a refused batch leaves the live set byte-for-byte
+  as it was; and a batch releasing a handle of an account it neither introduces nor continues is
+  refused. A handle introduced and not retained is well-formed and dies with its batch.
 - Adopting a snapshot persisted by an earlier load, **by candidate**, yields a usable parent handle
   without creating an observation; a locator resolving to no snapshot of the release being loaded
   raises `UnknownAccountSnapshot`, as does one belonging to another release; adopting a non-snapshot

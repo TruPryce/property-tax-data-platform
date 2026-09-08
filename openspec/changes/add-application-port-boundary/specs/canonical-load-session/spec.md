@@ -39,6 +39,16 @@ A complete re-declaration is what this replaces, and the reason is arithmetic: a
 
 Releasing SHALL therefore be explicit, and completing an account SHALL release every value that account introduced, so a caller that never releases is bounded by its account rather than by the release. An implementation MAY hold the live set durably rather than in memory, which is what allows a large retained set to stay resolvable; the boundary SHALL NOT name that mechanism, and SHALL NOT require the set to fit in memory.
 
+The deltas SHALL be governed by four rules, because an accumulating set that each batch edits is only as trustworthy as the edits:
+
+**Validity.** A retained value SHALL be one this batch introduces or one already live; a released value SHALL be one already live. Retaining or releasing a value that is neither SHALL be refused, so a delta cannot silently create or discard state that was never there. A batch introducing a value it does not retain SHALL be well-formed: that value is live for the batch that introduced it and is released at its end, which is the common case of a parent whose children arrive beside it.
+
+**No contradiction, and no ordering to learn.** A value named in both deltas of one batch SHALL be refused rather than resolved by applying one before the other. There is no correct order to pick — retain-then-release and release-then-retain give opposite results for the same batch — so the boundary SHALL refuse the ambiguity instead of defining a precedence a caller must remember.
+
+**Atomicity.** The deltas of a batch SHALL take effect only if that batch is accepted in full. A refused batch SHALL leave the live set exactly as it was, so a caller that retries after a validation failure is not reasoning about a half-applied edit.
+
+**Account ownership.** A batch SHALL retain or release only values belonging to an account it introduces or to the account it names as continuing. Releasing a value belonging to another account SHALL be refused: correlation is account-scoped, and one account editing another's live set is the retargeting that strictly increasing values exist to prevent, arriving through the delta instead of through the handle.
+
 Without deltas the bound fails inside a single account: an account carrying an unbounded number of owner associations whose allocations arrive in later batches would keep every association's mapping live until the account completed, so allowing only one continuing account SHALL NOT be claimed to bound correlation on its own.
 
 A correlation value SHALL be unique within one load session, and SHALL NOT be reused once its account is complete. Because the session releases the mapping for a completed account, uniqueness SHALL be enforced by requiring values to increase strictly over the session and by retaining the highest value yet introduced: any value not exceeding it SHALL be refused unless it is currently live. That state is a single value, so the bound is unaffected, and a late record naming a released value SHALL be refused rather than silently retargeted at a later account.
@@ -95,7 +105,7 @@ A correlation value that duplicates one already live, that names a parent never 
 
 #### Scenario: A parent is still needed several batches later
 - **WHEN** a parent's children arrive in a later batch of the same account
-- **THEN** every batch between them declares that parent's value as still needed, and the implementation may release everything it does not declare
+- **THEN** the batch that introduced the parent retained its value once, no batch between them re-declares it, and it stays resolvable until a batch releases it or its account completes
 
 #### Scenario: An account carries more parents than one batch could enumerate
 - **WHEN** one account's live parents outnumber what a single bounded batch could have listed
@@ -111,7 +121,27 @@ A correlation value that duplicates one already live, that names a parent never 
 
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
-- **THEN** nothing requires an implementation to retain correlation beyond one bounded batch except for the single continuing account, so the state grows with neither the release nor the number of accounts in it
+- **THEN** correlation state grows with neither the release nor the number of accounts in it: only one continuing account's values outlive a batch, and that account's set is what the caller retained and has not released — which the boundary permits an implementation to hold durably rather than in memory
+
+#### Scenario: A delta names a value that is neither live nor introduced here
+- **WHEN** a batch retains or releases a correlation value it does not introduce and which is not live
+- **THEN** it is refused, so a delta cannot create or discard state that was never there
+
+#### Scenario: One batch both retains and releases one value
+- **WHEN** a batch names one correlation value in both its retain and its release delta
+- **THEN** it is refused rather than resolved by an ordering rule, because the two orders give opposite results and neither is more correct
+
+#### Scenario: A refused batch leaves the live set alone
+- **WHEN** a batch is refused for any reason after carrying retain and release deltas
+- **THEN** the live set is exactly what it was before, so a retry reasons about no half-applied edit
+
+#### Scenario: A batch releases another account's value
+- **WHEN** a batch releases a correlation value belonging to an account it neither introduces nor names as continuing
+- **THEN** it is refused, because correlation is account-scoped and one account editing another's live set is retargeting by another route
+
+#### Scenario: A value is introduced and not retained
+- **WHEN** a batch introduces a correlation value, names it as a parent within that same batch, and does not retain it
+- **THEN** the batch is well-formed, and the value is released at the end of it
 
 ### Requirement: A child may name a parent persisted by an earlier load
 A correlation value SHALL be obtainable for an account snapshot already persisted for the release being loaded, so a child arriving from a second artifact of the same release can name its existing parent instead of resubmitting it.

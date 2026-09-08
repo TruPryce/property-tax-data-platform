@@ -143,6 +143,20 @@ commit, before the spec was split into six files: `spec.md:335` and
    finally coherent — durably maintaining that logical live set when one continuing
    account's exceeds memory. A released handle stays released: the spill maintains the
    set, it does not extend it.
+
+   **Corrected six times.** The delta architecture was accepted, and the round after
+   found two things it had left undone. D2p still argued the superseded full
+   re-declaration — "each batch names the handles that must outlive it… a parent needed
+   several batches later is re-declared in each" — so the proposal again disagreed with
+   the spec, which is the second time a decision record outlived its decision here.
+   And the deltas themselves were unspecified beyond their existence: an accumulating
+   set each batch edits is only as trustworthy as the edits, so the capability now
+   fixes **validity** (a delta names only live or newly introduced handles),
+   **contradiction** (one handle in both deltas is refused rather than ordered, because
+   the two orders give opposite results), **atomicity** (deltas apply only if the batch
+   is accepted in full), and **account ownership** (a batch touches no other account's
+   values). Six scenarios carry them, plus one stating that a handle introduced and not
+   retained is well-formed and dies with its batch.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering
