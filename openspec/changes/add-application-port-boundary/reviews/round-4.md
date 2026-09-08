@@ -202,6 +202,27 @@ commit, before the spec was split into six files: `spec.md:335` and
    operation. And the intrinsic-validation scenario still listed the old three checks after I
    had rewritten the prose list beside it, which is the same failure as the stale decision
    records: I swept the paragraph and left the scenario that contradicts it.
+
+   **Corrected nine times, and the eighth's own fix opened the hole the ninth found.** Closing
+   the rollback gap by making adoption *open* an account handed adoption an unbounded way around
+   the one-open-account rule the entire correlation model rests on: nothing said a caller could
+   not adopt parents from a hundred accounts before writing a batch, each one live, each one
+   open. Adoption is now held to the same bound as everything else — refused unless the account
+   it opens is the one already open or none is — and an account opened by adoption *is* that one
+   open account, continuing into the next batch exactly as if a previous batch had left it open,
+   which also repairs the ownership rule, whose enumeration of "accounts open in a batch" had no
+   entry for one adoption opened. An adopted handle survives the next batch only if that batch
+   retains it, the same lifetime an introduced value has. *Failure* was unstated in the same
+   place: nothing said what a refused adoption leaves behind, so a stale locator might have
+   burned a correlation value or opened an account. It now changes nothing at all. And the
+   **lifecycle** had been implied and never written: "exactly one completion or one abort" says
+   nothing about what a write after `commit()` does, or what `commit()` means while a batch has
+   promised a continuing account. Every operation after the terminal one is refused, committing
+   with an account still open is refused because it would persist a truncation nothing downstream
+   could tell from a small account, and an entry-less batch carrying only releases is the way to
+   close it — so closing never requires inventing a record. The maximum is now a positive integer
+   counting entries plus each delta's values, and a value repeated within one delta is refused by
+   the batch rather than counted twice against a maximum whose units were never stated.
 2. [P1] **RESOLVED (c) then (b)** at `e6a3a24`+1 — `canonical-load`. The `still_needed` declaration bounds
    retention but the scenario "An account carries more parents than a batch can
    hold" only disclaims. Needs a maintainer decision among: (a) an ordering

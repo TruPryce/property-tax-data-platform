@@ -80,9 +80,23 @@ open(release, run, outcome)      one logical release load
     │   max_batch_entries        one maximum, fixed for the session
     ├── write(batch)             bounded, many times, nothing visible
     ├── write(batch)             entries + retain + release ≤ the maximum
+    ├── adopt(candidate)         opens an account, same one-open bound
     └── commit() ─► completion   outcome and load become durable together
         or abort()               zero canonical records
+                                 exactly one terminal op; everything after
+                                 it is refused, and commit is refused while
+                                 an account is still continuing
 ```
+
+One terminal operation ends it, and everything after that — a write, an adoption, a second
+commit, an abort following a commit — is refused rather than ignored, because a caller adding to
+a load it already ended would otherwise watch its records disappear silently. Committing while
+an account is still continuing is refused for the same reason in reverse: that batch promised a
+batch continuing the account, and committing instead persists a truncated account that nothing
+downstream can tell from a small one. The caller closes it the way it closes every account — a
+final batch not naming it as continuing, which may carry no entries at all and only the releases,
+so closing never requires inventing a record. Abort is always available, an open account
+included, because it persists nothing.
 
 A third idiom for this problem would itself be the defect.
 
@@ -589,8 +603,8 @@ on its own.
 
 Six rules govern the deltas, because an accumulating set each batch edits is only as
 trustworthy as the edits. **Bounded against a stated maximum**: the session states one maximum for what a
-batch may carry — entries and both deltas as a single total, fixed at open, readable by the
-caller so it can size what it builds — and the session refuses a batch exceeding it. The check
+batch may carry — a positive integer counting the entries plus the values in each delta, fixed
+at open, readable by the caller so it can size what it builds — and the session refuses a batch exceeding it. The check
 is the session's because the batch cannot know the maximum; a bound named nowhere would leave
 *bounded* describing a well-behaved caller rather than something that checks, and the whole
 memory argument resting on a caller's manners. **Validity**: a retained handle is one this batch
@@ -599,8 +613,9 @@ since retaining a handle of an account this batch completes asks for exactly wha
 undoes; a released handle is one live at the start of it — a delta cannot create or discard
 state that was never there, and a batch does not release what it introduced, which dies with it
 anyway, while releasing a completing account's handle by name stays valid and completion sweeps
-the rest. **No contradiction**: a handle in both deltas of one batch is refused rather than
-resolved by precedence, because retain-then-release and release-then-retain give opposite
+the rest. **No repetition or contradiction**: a handle repeated within one delta is
+refused by the batch rather than counted twice or collapsed, and a handle in both deltas of one
+batch is refused rather than resolved by precedence, because retain-then-release and release-then-retain give opposite
 results and neither is more correct than the other. **Batch boundary**: deltas take effect once
 every record in their batch is validated and bind on the batch after, so a handle a batch
 releases resolves for every record in that batch wherever it sits, and no record's meaning
@@ -611,9 +626,11 @@ does not carry onward — so a corrected retry is not refused for reusing handle
 attempt burned, not judged against a continuing account it never established, and does not meet
 an account closed by a batch nobody accepted. Adoption sits outside it, being its own accepted
 operation: a batch refused afterwards leaves the adopted handle live, and the retry names it
-without adopting again. **Account ownership**: a batch touches only values of an
-account open in it — one it introduces, or the one continuing into it, which is what lets the
-batch that finally completes an account release handles an earlier batch introduced — because
+without adopting again. Adoption is atomic on its own terms too — it takes effect by succeeding,
+and a failed one leaves the session exactly as it found it. **Account ownership**: a batch touches only values of an
+account open in it — one it introduces, or the one continuing into it, left open by the previous
+batch or opened by an adoption since it, which is what lets the batch that finally completes an
+account release handles an earlier batch introduced — because
 one account editing another's live set is the retargeting that strictly increasing handles
 exist to prevent, arriving by another route.
 
@@ -653,6 +670,7 @@ validates exactly the intrinsic shape:
 - no handle introduced twice within the batch;
 - a `parent` naming a handle inside the batch resolves inside it;
 - at most one account named as continuing;
+- no handle repeated within one delta;
 - no handle in both deltas, and no handle in both the entries it introduces and `release`,
   the latter being redundant since an unretained handle dies with its batch anyway;
 - and where the parent is in the batch, that the handle denotes **the very record the
@@ -668,8 +686,11 @@ The session owns everything needing history, refused on `write` or on completion
 - a parent never introduced;
 - a parent whose account has completed;
 - a parent handle denoting a record other than the one the child actually holds;
-- a batch whose entries and deltas together exceed the maximum stated at open — the session's
-  check, because the maximum is the session's and a batch knows only itself;
+- a batch whose entries and delta values together exceed the maximum stated at open — the
+  session's check, because the maximum is the session's and a batch knows only itself;
+- an adoption that would open a second account, and any operation at all after the session's
+  one terminal operation;
+- a completion attempted while an account is still continuing;
 - a retained or released handle that is not live at the start of the batch, or one retained for
   an account the batch does not carry onward;
 - a handle belonging to an account not open in the batch — neither introduced by it nor
@@ -730,8 +751,18 @@ unless the snapshot it locates equals the one carried; a candidate the boundary 
 always agrees. Candidate access returns an **iterator**: one
 acquisition may persist several snapshots at one grain, so the count is unbounded, and
 "paged or streamed" as an adjective is satisfied by a list called a page — the shape has to
-make laziness observable. `ReleaseLoadCompletion` carries the `ProcessingRunRef` and `already_complete`,
-and deliberately not a locator per account — see the adoption argument above.
+make laziness observable. Adoption sits **inside** the correlation model rather than beside it, and that
+placement is the part easiest to get wrong: the adopted handle belongs to the located
+snapshot's account, opens it, advances the high-water mark, is released when that account
+completes, and survives the next batch only if that batch retains it. Opening is where the bound
+lives — an operation that opens an account can open too many — so adopting into a second account
+while one is open is refused, and a caller with parents in several accounts finishes one before
+adopting into the next. Several snapshots of the *one* open account may be adopted; that is one
+account's parents, which the deltas already bound. A failed adoption changes nothing at all: no
+handle, no consumed value, no moved high-water mark, no opened account, so a stale locator costs
+a caller a retry rather than a session. `ReleaseLoadCompletion` carries the `ProcessingRunRef`
+and `already_complete`, and deliberately not a locator per account — see the adoption argument
+above.
 
 ## The falsification matrix
 
@@ -812,7 +843,16 @@ Each case names a defect. A case that cannot fail is not on this list.
   operation able to disagree.
 - An adopted handle belongs to the adopted snapshot's account, is live from adoption, advances the highest
   handle yet introduced, and is released when that account completes; a batch refused after an adoption
-  leaves it live, and the retry names it without adopting again.
+  leaves it live, and the retry names it without adopting again. An adopted handle the next batch does not
+  retain dies at the end of that batch, like one that batch introduced.
+- Adopting into a second account while one is open is refused, while several snapshots of the one open
+  account are each adopted. A failed adoption — stale locator, disagreeing halves, wrong kind of parent —
+  mints no handle, consumes no value, moves no high-water mark, and opens no account.
+- Every operation offered after a session's terminal operation is refused, a completion attempted while an
+  account is still continuing is refused, an entry-less batch closes that account, and an abort with an
+  account open is permitted and leaves zero records.
+- A value repeated within one delta is refused by the batch; the maximum is a positive integer counting a
+  batch's entries plus the values in each delta, and is readable before a batch is built.
 - A refused batch leaves every piece of session correlation state as it was: the live set, the highest
   handle yet introduced — proven by retrying a corrected batch with the same handles — which account is
   continuing, and the completion of the accounts it did not carry onward, whose handles are still live and
