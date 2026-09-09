@@ -101,7 +101,12 @@ capability rather than defining it.
   by the very batch that completes its account undefined. `continuing` decides it; retaining a
   handle of an account the batch does not carry onward is refused as the contradiction it is.
 
-- **D8a — A batch says how the open account ends, and silence is not an answer.** An account
+- **D8 — A completion that fails is not terminal.** `S1` stays `OPEN` and the rest is unchanged,
+  so a caller that committed with an account still open closes it and commits again. Only a
+  successful completion or an abort ends a session, and every operation after that is refused
+  explicitly rather than ignored.
+
+- **D9 — A batch says how the open account ends, and silence is not an answer.** An account
   cannot always be closed by touching it: its live handles may outnumber `max_batch_entries`, so a
   closing batch may have nothing it is able to carry. The batch therefore carries an explicit
   `closing` declaration beside `continuing`. Without it the boundary would have to read a batch
@@ -109,16 +114,11 @@ capability rather than defining it.
   tell those apart — which is how an earlier draft produced a rule nothing could falsify, and then
   a rule that made an empty close impossible.
 
-- **D8b — Completion branches on the outcome's disposition.** The outcome is fixed in `S0`, so a
+- **D10 — Completion branches on the outcome's disposition.** The outcome is fixed in `S0`, so a
   caller may stage records and then complete a run the outcome says was rejected. A single
   "records and outcome become durable together" transition would persist them, and nothing
   downstream would catch it. The rejected branch records the outcome and discards the records; the
   already-complete branch discards them too, rather than merging them into the earlier load.
-
-- **D8 — A completion that fails is not terminal.** `S1` stays `OPEN` and the rest is unchanged,
-  so a caller that committed with an account still open closes it and commits again. Only a
-  successful completion or an abort ends a session, and every operation after that is refused
-  explicitly rather than ignored.
 
 ## Constraints
 

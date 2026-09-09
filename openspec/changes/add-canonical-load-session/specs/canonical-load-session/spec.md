@@ -66,7 +66,31 @@ component. No other party SHALL be required to resolve a locator, and the bounda
 expose resolution as an operation a caller invokes for its own purposes, because a resolved
 snapshot outside a batch is the standalone adoption this specification removed.
 
-**The operations** SHALL be exactly `write(batch)`, `commit()`, and `abort()`. Reading which
+**The operations** SHALL be exactly `write(batch)`, `commit()`, and `abort()`, and the surface
+SHALL be stated precisely enough that two implementations cannot differ on it:
+
+```text
+CanonicalReleaseRepository
+  open_load(release: ReleaseIdentity,
+            run: ProcessingRunRef,
+            outcome: ReleaseProcessingOutcome) -> ReleaseLoadSession
+  adoptable_snapshots(account: AccountIdentity,
+                      release: ReleaseIdentity) -> Iterator[AdoptableSnapshot]
+
+ReleaseLoadSession
+  max_batch_entries: int                      read-only, fixed for the session
+  write(batch: CanonicalRecordBatch) -> None  refusal is an exception, never a return value
+  commit() -> ReleaseLoadCompletion           carries already_complete
+  abort() -> None
+  __enter__() -> ReleaseLoadSession
+  __exit__(exc_type, exc, tb) -> None         annotated -> None so a failure cannot be suppressed
+```
+
+`write` SHALL return nothing: a refusal is raised, so a caller cannot ignore one by discarding a
+result, and every failure row of this table is reached the same way. `commit` SHALL return the
+completion rather than raise on an already-complete pairing, because a retry is the ordinary path
+and not an error. `__exit__` SHALL be annotated `-> None` rather than `-> bool`, so an
+implementation cannot silently swallow the exception that should have aborted the load. Reading which
 persisted snapshots an account and release offer for adoption SHALL be a repository read that
 changes no component, and SHALL NOT be an operation of this machine.
 
@@ -101,8 +125,20 @@ batch is therefore ordinary, and no intrinsic precondition may be read as forbid
 records are two records and SHALL both be accepted, because a rule refusing the second would be a
 deduplication rule over observed values, which this boundary forbids.
 
-A batch SHALL be said to **touch** an account when it carries at least one entry, adoption,
-retained handle, or released handle belonging to it.
+Three terms are used below and SHALL mean exactly this.
+
+A batch **carries** an account when it holds at least one entry or adoption belonging to it. This
+SHALL be settled by the batch's records alone and SHALL NOT consult either delta.
+
+An account is **open in a batch** when the batch carries it, or when it is `S2`. This SHALL be
+settled without consulting either delta, because a rule permitting a delta is not permitted to
+take the delta as its evidence: a batch naming another account's handle in `release` would
+otherwise make that account open by the act of naming it, and the account-scoping rule would
+permit exactly what it exists to refuse.
+
+A batch **touches** an account when it carries it or names one of its handles in either delta.
+This term SHALL be used only where a delta is legitimate evidence that a batch is dealing with an
+account, never as the source of permission to name it.
 
 A batch SHALL carry two account declarations, each optional: `continuing`, naming the one account
 left open at its end, and `closing`, naming the account it deliberately completes without
@@ -124,10 +160,10 @@ The session SHALL check these on `write`:
 | W5 | Every parent not resolved in-batch is in `S5`, and `S4` says it denotes the object the child holds |
 | W6 | Every retained handle is introduced by this batch or already in `S5` |
 | W7 | Every released handle is in `S5` |
-| W8 | Every handle in either delta belongs to an account open in the batch: one it touches, or `S2` |
+| W8 | Every handle in either delta belongs to an account **open in the batch**: one it carries, or `S2` |
 | W9 | Every retained handle belongs to the account the batch names as continuing |
 | W10 | `S2`, if set, is named by this batch as continuing, or as closing, or is touched by it |
-| W11 | The account named as continuing, if any, is one the batch touches or `S2` itself |
+| W11 | The account named as continuing, if any, is **open in the batch** |
 | W12 | The account named as closing, if any, is `S2` |
 
 `W10` SHALL be checkable by inspecting the batch against `S2` alone, and its violation SHALL be a
@@ -142,7 +178,11 @@ handles outnumber `max_batch_entries` cannot be closed by carrying anything at a
 batch introduces and does not carry onward is already complete by the success transition below,
 and needs no declaration.
 
-`W11` SHALL be the session's and not the batch's, because carrying `S2` onward without touching it
+`W8` SHALL be checked against accounts open in the batch and never against touched ones, so a
+handle a batch has no other business with cannot be released by being released. Its violation is a
+batch naming, in either delta, a handle of an account it neither carries nor inherits as `S2`.
+
+`W11` SHALL be the session's and not the batch's, because carrying `S2` onward without carrying it
 is legitimate — a batch may complete other work and still promise more of the open account — and a
 batch that knows only itself cannot tell `S2` from an account it has never seen. Naming as
 continuing an account that is neither touched here nor already open SHALL be refused, because such
@@ -187,13 +227,21 @@ rejected attempt carried.
 **On success**, one of three outcomes, all terminal:
 
 ```text
-already loaded by S0's release and run  ->  nothing further persisted, already_complete = True
-                                            S3 discarded, never merged into the earlier load
-S0's outcome is rejected                ->  the outcome recorded, S3 discarded,
-                                            zero canonical records for the load
-otherwise                               ->  S3 and the outcome become durable together
+branches are tried in this order, and exactly one applies
+
+1. already loaded by S0's release and run  ->  nothing persisted at all, not even the outcome,
+                                               already_complete = True, S3 discarded and
+                                               never merged into the earlier load
+2. S0's outcome is rejected                ->  the outcome recorded, S3 discarded,
+                                               zero canonical records for the load
+3. otherwise                               ->  S3 and the outcome become durable together
 S1 <- COMMITTED    S2, S3, S4 cleared
 ```
+
+The order SHALL be normative. A retried pairing whose outcome is rejected satisfies both of the
+first two conditions, and "persist nothing further" and "record the outcome" cannot both hold: the
+first branch wins, because the earlier completion already recorded an outcome for that pairing and
+a retry that overwrote it would make the retry key a lie.
 
 The rejected branch SHALL exist because the outcome is fixed in `S0` and a caller MAY have staged
 records before the run was rejected. Committing them because the accepted branch is the only one
@@ -247,6 +295,10 @@ S1 <- ABORTED    S2, S3, S4 discarded    zero canonical records for the load
 looking, rather than several a reader must assemble, and it SHALL hold for every refusal reason
 named above.
 
+Throughout this specification, "zero canonical records" SHALL mean zero **from the session being
+described**. Records an earlier session made durable for the same release are not this session's
+to remove, and no operation on this boundary removes them.
+
 A refused batch SHALL contribute nothing to the completed load. Records are invisible before
 completion either way, which is why this is stated rather than assumed: an implementation staging
 rows as they arrive and validating afterwards would otherwise carry a rejected batch's rows to the
@@ -270,6 +322,10 @@ release to be held in memory.
 #### Scenario: A session opens in the initial state
 - **WHEN** a session is opened for a release, a run, and an outcome
 - **THEN** `S1` is `OPEN`, `S2` is none, `S3` and `S4` are empty, `S6` is no handle yet introduced, and `S0` already carries the release, the run, the outcome, and `max_batch_entries`
+
+#### Scenario: The surface is examined for its signatures
+- **WHEN** the ports are examined
+- **THEN** `write` returns nothing and raises on refusal, `commit` returns a `ReleaseLoadCompletion` rather than raising on an already-complete pairing, `abort` returns nothing, `max_batch_entries` is read-only, and `__exit__` is annotated `-> None` so no implementation can suppress a failure
 
 #### Scenario: The session's state and operations are enumerated
 - **WHEN** the session contract is examined
@@ -301,7 +357,7 @@ release to be held in memory.
 
 #### Scenario: A load is abandoned partway
 - **WHEN** a caller aborts after writing several batches
-- **THEN** zero canonical records exist for that load
+- **THEN** zero canonical records from that session exist, and any earlier session's durable records for the release are untouched
 
 #### Scenario: An abort leaves an open account behind
 - **WHEN** a caller aborts while `S2` names an account
@@ -324,17 +380,17 @@ release to be held in memory.
 - **THEN** it is accepted and that account is complete at the end of the batch, which is the difference `W10` measures
 
 #### Scenario: A batch promises an account nothing has begun
-- **WHEN** a batch names as continuing an account it does not touch and which is not `S2`
+- **WHEN** a batch names as continuing an account it does not carry and which is not `S2`
 - **THEN** it is refused by `W11`, because a batch cannot promise more of an account nothing has begun
 
-#### Scenario: A batch carries the open account onward without touching it
+#### Scenario: A batch carries the open account onward without carrying any of it
 - **WHEN** a batch completes other work and names `S2` as continuing without carrying any record of it
 - **THEN** it is accepted by `W11`, because promising more of the account already open is legitimate, and `W10` is satisfied by naming it as continuing
 
 ### Requirement: A batch is validated by whichever party can see the answer
 
 Validation authority SHALL be split by what each party can know, and the split SHALL be exactly
-`B1`–`B9` for the batch and `W1`–`W11` for the session.
+`B1`–`B10` for the batch and `W1`–`W12` for the session.
 
 A batch SHALL be an immutable value that knows only itself, and SHALL therefore reject exactly its
 intrinsic defects. It SHALL NOT judge handles opened by earlier batches, accounts already
@@ -344,7 +400,7 @@ the session holds the state a refusal must leave unmoved.
 
 #### Scenario: A batch is validated on its own
 - **WHEN** a batch is constructed
-- **THEN** it rejects exactly `B1`–`B9` and judges neither handles from earlier batches nor its own size against a maximum it never sees, nor whether the account it names as continuing is the one already open
+- **THEN** it rejects exactly `B1`–`B10` and judges neither handles from earlier batches nor its own size against a maximum it never sees, nor whether the account it names as continuing is the one already open
 
 #### Scenario: The session judges what needs history
 - **WHEN** a batch is written whose defect is a duplicate live handle, a handle not exceeding `S6`, a parent never introduced, a parent whose account has completed, or a parent handle denoting a record other than the one the child holds
@@ -461,8 +517,12 @@ require the set to fit in memory.
 - **THEN** it is refused by `B8`, so at most one account is ever open across a batch boundary
 
 #### Scenario: A batch edits another account's handles
-- **WHEN** a batch retains or releases a handle belonging to an account it neither touches nor inherits as `S2`
-- **THEN** it is refused by `W8`, because correlation is account-scoped and one account editing another's live set is retargeting by another route
+- **WHEN** a batch retains or releases a handle belonging to an account it neither carries nor inherits as `S2`
+- **THEN** it is refused by `W8`, because an account is open in a batch by what the batch carries and never by what its deltas name, so naming another account's handle does not make that account the batch's business
+
+#### Scenario: A batch tries to make an account its own by naming it in a delta
+- **WHEN** a batch carries no entry and no adoption of an account, does not inherit it as `S2`, and names one of its handles in `release`
+- **THEN** it is refused by `W8`, the delta being the thing under judgement and never the evidence for it
 
 #### Scenario: A batch retains a handle of an account it completes
 - **WHEN** a batch retains a handle belonging to an account it does not name as continuing
@@ -608,9 +668,20 @@ already happened, rather than raising an error the caller must interpret.
 Two distinct processing runs loading one canonical release SHALL be two loads, and the second
 SHALL NOT be treated as a retry of the first.
 
+Deciding that a pairing has already completed and making this session's records durable SHALL be
+one atomic step. Two sessions open for one pairing MAY complete concurrently, and exactly one
+SHALL persist a load while the other reports `already_complete`; the boundary SHALL NOT permit an
+interleaving in which both observe an incomplete pairing and both persist. The check is worthless
+if a caller can pass it and then lose the race, and a retry key that admits two loads for one
+pairing is not a retry key.
+
 #### Scenario: A completed load is retried
 - **WHEN** a load is completed again for the same release and the same run
-- **THEN** the result reports that the load was already complete, nothing further is persisted, and the staged records of this session are discarded rather than merged into the earlier load
+- **THEN** the result reports that the load was already complete, nothing is persisted — not even the outcome — and the staged records of this session are discarded rather than merged into the earlier load
+
+#### Scenario: A retried pairing has a rejected outcome
+- **WHEN** a session whose outcome is rejected completes a pairing that has already completed
+- **THEN** the already-complete branch applies and nothing is persisted, because the earlier completion already recorded an outcome for that pairing and overwriting it would make the retry key a lie
 
 #### Scenario: A retrying session is aborted instead of completed
 - **WHEN** a session opened for a release and run that already completed is aborted
@@ -619,6 +690,10 @@ SHALL NOT be treated as a retry of the first.
 #### Scenario: A release is reprocessed by a second run
 - **WHEN** a second processing run loads a release a first run already loaded
 - **THEN** the result reports a new load rather than an already-complete one, and both loads are retained
+
+#### Scenario: Two sessions for one pairing complete concurrently
+- **WHEN** two sessions open for the same release and run both complete
+- **THEN** exactly one persists a load and the other reports that the load was already complete, because the decision and the durable write are one atomic step
 
 #### Scenario: The retry key is inspected
 - **WHEN** the retry key is examined

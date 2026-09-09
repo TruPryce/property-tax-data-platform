@@ -139,6 +139,10 @@ this change does not have.
   introduce is proven alongside it, since a rule that refused those would forbid naming a parent
   from an earlier batch at all.
 - Each of W1–W12 refuses **on write**, with a session that has the history the check needs.
+- `W8` is falsified by a batch that carries no entry and no adoption of an account, does not
+  inherit it as `S2`, and names one of its handles in `release`: refused, because an account is
+  open in a batch by what the batch **carries** and never by what its deltas name. A rule that
+  took the delta as evidence for the delta would permit exactly the retargeting it forbids.
 - `W10` has three satisfiers and each is exercised: a batch that touches `S2`'s account, one that
   names it as continuing, and one that names it as closing while carrying nothing at all. Its
   violation is a batch that does none of the three, which is refused rather than allowed to close
@@ -161,10 +165,18 @@ this change does not have.
 - A handle introduced and not retained never enters `S4` and dies with its batch.
 - `commit` with C2 unmet is refused; the account is then closed by an empty batch declaring it
   closing, and the commit succeeds.
-- `commit` takes the branch its outcome's disposition selects: accepted makes the staged records
-  and the outcome durable together; **rejected records the outcome and discards the records**,
-  proven by staging batches under a rejected outcome and finding zero canonical records; already
-  complete discards them rather than merging them into the earlier load.
+- `commit` takes the first branch that applies, in the order the table states: **already
+  complete** persists nothing at all, not even the outcome, and is proven with a retried pairing
+  whose outcome is *rejected* — both conditions hold and only the first may apply, since
+  overwriting the earlier outcome would make the retry key a lie; **rejected** records the outcome
+  and discards the records, proven by staging batches under a rejected outcome and finding zero
+  canonical records; **accepted** makes records and outcome durable together.
+- Two sessions completing one pairing concurrently yield exactly one load, the other reporting
+  `already_complete` — the decision and the durable write being one atomic step, which a fake that
+  interleaves them must fail.
+- The signatures hold: `write` returns `None` and raises on refusal, `commit` returns a completion
+  rather than raising on an already-complete pairing, `abort` returns `None`, `max_batch_entries`
+  is read-only, and `__exit__` is annotated `-> None`.
 - An abort, a failed completion, and an abandoned session each leave an earlier session's durable
   records untouched — including the load a retrying session would have found already complete.
 - Opening is refused when `S0` cannot be completed, and a refused open leaves no session to abort.
@@ -245,6 +257,12 @@ this change does not have.
   costs one optional field and makes both cases explicit.
 - **One completion transition for every disposition.** It would persist the staged records of a
   run whose outcome was rejected, which nothing downstream would catch.
+- **Defining "the accounts a batch may edit" in terms of what the batch touches.** Touching
+  includes naming a handle in a delta, so the rule would take the delta as the evidence for the
+  delta: any account could be made the batch's business by releasing one of its handles. Accounts
+  open in a batch are settled by what it *carries*, records alone.
+- **Letting `write` return a refusal instead of raising.** A caller that discards the result would
+  march past every failure row in the table.
 
 ## Risks
 
