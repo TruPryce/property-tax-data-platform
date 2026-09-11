@@ -220,7 +220,7 @@ Before any of that, something has to say when two recordings are *one* acquisiti
               media_type              and not per acquisition
 ```
 
-That is decidable from the value alone — no locator, key, lock, digest choice, or query — and it needs no acquisition identifier beside the manifest, which is the second identifier vocabulary D2a and D2c already refused.
+That is decidable from the value alone — no locator, key, lock, digest choice, or query — and it needs no acquisition identifier beside the manifest, which is the second identifier vocabulary D23 already refused, as does the correlation decision now carried by `add-canonical-load-session`.
 
 The artifact takes part by its content identity alone, and the database settles why. `bronze.artifact` is keyed by `sha256` and carries the locator, byte count, and media type **once per artifact**; `bronze.release_manifest` references it by `artifact_sha256` and persists none of the three:
 

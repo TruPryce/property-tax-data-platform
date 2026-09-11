@@ -89,8 +89,13 @@ ReleaseLoadSession
 `write` SHALL return nothing: a refusal is raised, so a caller cannot ignore one by discarding a
 result, and every failure row of this table is reached the same way. `commit` SHALL return the
 completion rather than raise on an already-complete pairing, because a retry is the ordinary path
-and not an error. `__exit__` SHALL be annotated `-> None` rather than `-> bool`, so an
-implementation cannot silently swallow the exception that should have aborted the load. Reading which
+and not an error. `__enter__` SHALL return the session, so `with repository.open_load(...) as session:` binds it.
+`__exit__` SHALL be annotated `-> None` rather than `-> bool`, and the annotation SHALL NOT be the
+whole of the rule: an implementation returning a truthy value at runtime would suppress the
+exception whatever its annotation says. An exception raised inside the block SHALL therefore
+propagate to the caller and the load SHALL leave zero canonical records of its own, and an
+implementation that suppresses it SHALL be a contract violation the falsification suite detects by
+observing the exception, not by reading the signature. Reading which
 persisted snapshots an account and release offer for adoption SHALL be a repository read that
 changes no component, and SHALL NOT be an operation of this machine.
 
@@ -166,8 +171,11 @@ The session SHALL check these on `write`:
 | W11 | The account named as continuing, if any, is **open in the batch** |
 | W12 | The account named as closing, if any, is `S2` |
 
-`W10` SHALL be checkable by inspecting the batch against `S2` alone, and its violation SHALL be a
-batch that says nothing about the account the previous batch left open and carries nothing of it.
+`W10` SHALL be decided against `S2` **and `S4`**, and is the session's for that reason: whether a
+batch touches `S2`'s account can turn on a handle named in a delta, and only `S4` says which
+account a handle belongs to. A batch cannot answer it, which is why no `B` rule attempts to. Its
+violation SHALL be a batch that says nothing about the account the previous batch left open and
+carries nothing of it.
 That batch is refused rather than allowed to close the account by silence: the previous batch
 promised more of it, and closing by omission is indistinguishable from forgetting. Any of three
 things satisfies `W10` — carrying some of the account, carrying it onward, or declaring it closed
@@ -182,11 +190,13 @@ and needs no declaration.
 handle a batch has no other business with cannot be released by being released. Its violation is a
 batch naming, in either delta, a handle of an account it neither carries nor inherits as `S2`.
 
-`W11` SHALL be the session's and not the batch's, because carrying `S2` onward without carrying it
-is legitimate — a batch may complete other work and still promise more of the open account — and a
-batch that knows only itself cannot tell `S2` from an account it has never seen. Naming as
-continuing an account that is neither touched here nor already open SHALL be refused, because such
-a batch promises more of an account nothing has begun.
+`W11` SHALL be decided against the accounts **open in the batch**, never against touched ones, for
+the same reason `W8` is: a delta may not be its own permission. It SHALL be the session's and not
+the batch's, because carrying `S2` onward without carrying any of it is legitimate — a batch may
+complete other work and still promise more of the open account — and a batch that knows only
+itself cannot tell `S2` from an account it has never seen. Naming as continuing an account that is
+neither carried here nor already open SHALL be refused, because such a batch promises more of an
+account nothing has begun.
 
 #### `write(batch)` — transitions
 
@@ -325,7 +335,15 @@ release to be held in memory.
 
 #### Scenario: The surface is examined for its signatures
 - **WHEN** the ports are examined
-- **THEN** `write` returns nothing and raises on refusal, `commit` returns a `ReleaseLoadCompletion` rather than raising on an already-complete pairing, `abort` returns nothing, `max_batch_entries` is read-only, and `__exit__` is annotated `-> None` so no implementation can suppress a failure
+- **THEN** `write` returns nothing and raises on refusal, `commit` returns a `ReleaseLoadCompletion` rather than raising on an already-complete pairing, `abort` returns nothing, `max_batch_entries` is read-only, `__enter__` returns the session, and `__exit__` is annotated `-> None`
+
+#### Scenario: An exception is raised inside the session block
+- **WHEN** a caller raises inside `with ... as session:` after writing batches
+- **THEN** the exception reaches the caller and zero canonical records of that session exist, the annotation being a claim and the propagation the thing that proves it
+
+#### Scenario: An implementation tries to suppress the failure
+- **WHEN** an implementation returns a truthy value from `__exit__` while an exception is in flight
+- **THEN** it is a contract violation, observable because the exception does not reach the caller, and not something the `-> None` annotation prevents at runtime
 
 #### Scenario: The session's state and operations are enumerated
 - **WHEN** the session contract is examined
@@ -372,8 +390,8 @@ release to be held in memory.
 - **THEN** zero canonical records exist for the load, `S1` is still `OPEN`, `S2`–`S6` are unchanged, and the caller may commit again or abort
 
 #### Scenario: A batch abandons the account left open
-- **WHEN** `S2` names an account and a batch neither touches that account nor names it as continuing
-- **THEN** it is refused by `W10`, because the previous batch promised more of that account and this batch neither delivers any of it nor closes it by touching it
+- **WHEN** `S2` names an account and a batch neither touches that account nor names it as continuing or as closing
+- **THEN** it is refused by `W10`, none of its three satisfiers being met, because the previous batch promised more of that account and closing by silence cannot be told from forgetting
 
 #### Scenario: A batch closes the open account by touching it
 - **WHEN** `S2` names an account and a batch carries one entry of it, or one delta value of it, and does not name it as continuing
@@ -474,7 +492,7 @@ require the set to fit in memory.
 
 #### Scenario: An account is closed by a batch carrying nothing
 - **WHEN** a caller closes an account whose live handles outnumber `max_batch_entries`, with a batch carrying no entries, no adoptions, and no deltas, naming it as closing
-- **THEN** it is accepted and completion sweeps `S4` for that account, so closing requires neither inventing a record nor enumerating a live set the maximum could not hold
+- **THEN** it is accepted — `W10` satisfied by the declaration and `W12` by its being `S2` — and the success transition sweeps `S4` for that account, so closing requires neither inventing a record nor enumerating a live set the maximum could not hold
 
 #### Scenario: A batch declares an account both continuing and closing
 - **WHEN** a batch names one account in both declarations
@@ -486,7 +504,19 @@ require the set to fit in memory.
 
 #### Scenario: An account is closed by being touched
 - **WHEN** a batch carries one entry of `S2`'s account and names it neither as continuing nor as closing
-- **THEN** it is accepted and that account is complete at the end of the batch, which is the second of `W10`'s three satisfiers
+- **THEN** `W10` is satisfied by the carrying, the batch is accepted, and that account is complete at the end of it
+
+#### Scenario: An account is touched only by a delta
+- **WHEN** a batch carries no entry of `S2`'s account, releases one of its handles, and names it neither as continuing nor as closing
+- **THEN** `W10` is satisfied, the session deciding it against `S4`, which is what says the released handle belongs to that account
+
+#### Scenario: The open account is satisfied by being carried onward
+- **WHEN** a batch names `S2` as continuing
+- **THEN** `W10` is satisfied by the declaration alone, whatever else the batch carries
+
+#### Scenario: The open account is satisfied by being declared closed
+- **WHEN** a batch carrying no entries, no adoptions, and no deltas names `S2` as closing
+- **THEN** `W10` is satisfied by the declaration alone, which is the only satisfier available to an account whose live handles outnumber `max_batch_entries`
 
 #### Scenario: A caller sizes its batches before building them
 - **WHEN** a caller reads `max_batch_entries`

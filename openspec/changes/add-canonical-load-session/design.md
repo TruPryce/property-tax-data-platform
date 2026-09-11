@@ -151,9 +151,11 @@ this change does not have.
 - An account whose live handles outnumber `max_batch_entries` is closed by an **empty** batch that
   declares it closing — the case that has to work, since such an account can be closed by carrying
   nothing else.
-- `W11` is falsified by a batch naming as continuing an account it neither touches nor inherits,
-  and satisfied by one that carries `S2` onward without touching it — which is why `W11` is the
-  session's: a batch that knows only itself cannot tell `S2` from an account nothing has begun.
+- `W11` is falsified by a batch naming as continuing an account it neither **carries** nor
+  inherits, and satisfied by one that carries `S2` onward while carrying none of it — decided
+  against accounts open in the batch, never touched ones, for the same reason `W8` is, and the
+  session's because a batch that knows only itself cannot tell `S2` from an account nothing has
+  begun.
 - After every one of those refusals, S1–S6 are byte-for-byte what they were: nothing staged,
   `S6` not advanced — proven by a corrected retry reusing the rejected batch's handles — `S2`
   unmoved, no mapping added or removed, and the session still `OPEN`.
@@ -176,7 +178,13 @@ this change does not have.
   interleaves them must fail.
 - The signatures hold: `write` returns `None` and raises on refusal, `commit` returns a completion
   rather than raising on an already-complete pairing, `abort` returns `None`, `max_batch_entries`
-  is read-only, and `__exit__` is annotated `-> None`.
+  is read-only, `__enter__` returns the session, and `__exit__` is annotated `-> None`.
+- Suppression is falsified at **runtime**, not by reading the annotation: an exception raised
+  inside the block reaches the caller and leaves zero records of that session, and a fake that
+  returns truthy from `__exit__` is caught because the exception never arrives.
+- `W10` is exercised through each of its three satisfiers and its violation, including the case
+  satisfied only by a delta — which is why it is decided against `S4` as well as `S2`, since only
+  `S4` says which account a released handle belongs to.
 - An abort, a failed completion, and an abandoned session each leave an earlier session's durable
   records untouched — including the load a retrying session would have found already complete.
 - Opening is refused when `S0` cannot be completed, and a refused open leaves no session to abort.
@@ -263,6 +271,9 @@ this change does not have.
   open in a batch are settled by what it *carries*, records alone.
 - **Letting `write` return a refusal instead of raising.** A caller that discards the result would
   march past every failure row in the table.
+- **Treating the `-> None` annotation on `__exit__` as the whole rule.** An implementation that
+  returns truthy suppresses the exception whatever the annotation says, so the contract states the
+  behaviour and the suite observes it.
 
 ## Risks
 
