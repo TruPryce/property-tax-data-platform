@@ -221,3 +221,110 @@ def test_the_new_domain_suites_are_collected_by_the_default_configuration() -> N
 
     missing = [relative for relative in DOMAIN_TEST_MODULES if relative not in completed.stdout]
     assert not missing, "Default pytest collection does not reach:\n" + "\n".join(missing)
+
+
+_INFRASTRUCTURE_VOCABULARY = (
+    # Schema and table names the canonical port must never speak.
+    "canonical.",
+    "silver.",
+    "ingestion.",
+    "quality.",
+    "publication.",
+    "bronze.",
+    # Driver, connection and bulk-load mechanics.
+    "psycopg",
+    "boto3",
+    "cursor",
+    "connection",
+    "COPY ",
+    "ON CONFLICT",
+    "staging table",
+    # Surrogate keys the persistence layer generates.
+    "release_key",
+    "load_key",
+    "snapshot_key",
+    "provenance_key",
+)
+
+
+def _strings_and_identifiers(path: Path) -> list[str]:
+    """Every name and literal in a module, with docstrings removed.
+
+    Docstrings are stripped first because the application's modules *explain*
+    what they refuse to name — a comment saying an adapter uses COPY-to-staging
+    is the opposite of a dependency on it, and reading one as a violation would
+    make the honest explanation the thing that fails.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in docstrings:
+                found.append(node.value)
+        elif isinstance(node, ast.Name):
+            found.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.append(node.attr)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            found.append(node.name)
+        elif isinstance(node, ast.arg):
+            found.append(node.arg)
+    return found
+
+
+def test_the_application_ports_name_no_infrastructure() -> None:
+    application = ROOT / "libs/property-tax-application/src/property_tax_application"
+    violations: list[str] = []
+    for path in sorted(application.rglob("*.py")):
+        for text in _strings_and_identifiers(path):
+            for forbidden in _INFRASTRUCTURE_VOCABULARY:
+                if forbidden in text:
+                    violations.append(f"{path.relative_to(ROOT)}: {forbidden!r} in {text!r}")
+    assert not violations, violations
+
+
+def test_the_canonical_port_is_reachable_from_the_package_root() -> None:
+    import property_tax_application as application
+
+    for name in (
+        "CanonicalReleaseRepository",
+        "ReleaseLoadSession",
+        "CanonicalRecordBatch",
+        "CorrelatedRecord",
+        "CorrelationHandle",
+        "AdoptedParent",
+        "AdoptableSnapshot",
+        "AccountSnapshotRef",
+        "ReleaseLoadCompletion",
+        "UnknownAccountSnapshot",
+        "AdoptableSnapshotMismatch",
+    ):
+        assert name in application.__all__, name
+        assert hasattr(application, name), name
+    assert application.__all__ == sorted(application.__all__)
+
+
+def test_the_cited_run_and_outcome_stay_off_the_public_surface() -> None:
+    """`processing-run` owns them; this package must not claim the names.
+
+    They are structural stand-ins until that capability lands, so exporting them
+    would put a name on the boundary that a later change has to take back.
+    """
+
+    import property_tax_application as application
+
+    assert "ProcessingRunRef" not in application.__all__
+    assert "ReleaseProcessingOutcome" not in application.__all__
