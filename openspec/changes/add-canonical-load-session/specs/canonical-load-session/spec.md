@@ -213,9 +213,10 @@ S1 <- unchanged
 ```
 
 An account SHALL be **complete** at the end of a batch that names it as closing, or that touches
-it and does not name it as continuing. Completion SHALL be determined that way and by no other means: there SHALL be no
-operation declaring it, because `S2` and the batch's `continuing` already carry the fact between
-them and one fact with two sources is a fact a caller must reconcile.
+it and does not name it as continuing. Completion SHALL be determined inside the batch and by no operation of its own. All three signals
+— `continuing`, `closing`, and a legitimate touch with neither — are carried by one atomic batch
+and settle with it, so an account never completes outside a transition. A separate operation would
+give one fact a second source for a caller to reconcile against the batch it already sent.
 
 A handle introduced and **not** retained SHALL never enter `S4`: it resolves inside its own batch
 under `B7`, and the batch is over. That is the ordinary case of a parent whose children arrive beside
@@ -393,8 +394,8 @@ release to be held in memory.
 - **WHEN** `S2` names an account and a batch neither touches that account nor names it as continuing or as closing
 - **THEN** it is refused by `W10`, none of its three satisfiers being met, because the previous batch promised more of that account and closing by silence cannot be told from forgetting
 
-#### Scenario: A batch closes the open account by touching it
-- **WHEN** `S2` names an account and a batch carries one entry of it, or one delta value of it, and does not name it as continuing
+#### Scenario: A batch closes the open account by carrying one of its records
+- **WHEN** `S2` names an account and a batch carries one entry of it and names it neither as continuing nor as closing
 - **THEN** it is accepted and that account is complete at the end of the batch, which is the difference `W10` measures
 
 #### Scenario: A batch promises an account nothing has begun

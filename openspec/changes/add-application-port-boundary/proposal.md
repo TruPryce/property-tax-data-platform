@@ -101,6 +101,19 @@ applied; the ledger is history and is not rewritten, so the old names resolve he
 | `D2c` | `D23` |
 | `D3a` | `D24` |
 
+Two task identifiers were renamed for the same grammar, `^[0-9]+\.[0-9]+$`, which the
+implementation lane's parser enforces at `implementation.py:35`. The ledger names them as they
+were, so they resolve here too.
+
+| Recorded in the ledger as | Now |
+| --- | --- |
+| task `1.2b` (the manifest index port) | task `1.3` |
+| task `1.3` (the run lifecycle port) | task `1.4` |
+
+Five decisions the ledger names — `D2a`, `D2k`, `D2l`, `D2p` and `D2q` — are not in either table
+because they left this change entirely: they belong to `add-canonical-load-session`, which states
+them in its own vocabulary.
+
 The canonical load session's decisions moved with it to the sibling change
 [`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which owns that
 capability: the state machine and its authority, the empty failure rows, batch-scoped adoption,

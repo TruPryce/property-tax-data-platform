@@ -245,8 +245,10 @@ this change does not have.
 
 - **`adopt()` as a session operation.** Rejected above: it moved `S6` and `S2` outside any
   transition and cost three review findings.
-- **A separate operation declaring an account complete.** One fact with two sources. `continuing`
-  already carries it.
+- **A separate operation declaring an account complete.** One fact with two sources. The batch
+  already carries every signal — `continuing`, `closing`, or a legitimate touch with neither —
+  and each settles with the batch that carried it, so completion never happens outside a
+  transition.
 - **A full per-batch declaration of what must stay resolvable.** Bounded by the batch, so it caps
   `S4` at one batch's worth.
 - **A closing batch that releases what remains.** The same arithmetic, arriving through the door

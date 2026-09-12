@@ -96,10 +96,13 @@ capability rather than defining it.
   sizes what it builds. The session enforces it, because a batch that knows only itself cannot
   know it.
 
-- **D7 — An account completes because a batch does not carry it, and by no other means.** A
-  separate completion operation gave one fact two sources and left the case of a handle retained
-  by the very batch that completes its account undefined. `continuing` decides it; retaining a
-  handle of an account the batch does not carry onward is refused as the contradiction it is.
+- **D7 — An account completes inside a batch, never through an operation of its own.** A separate
+  completion operation gave one fact two sources and left the case of a handle retained by the
+  very batch that completes its account undefined. The signals are all carried by one atomic
+  batch: `continuing` says the account stays open, `closing` says it ends here, and a legitimate
+  touch without either says the same — each settled with the batch that carries it, so nothing
+  completes an account outside a transition. Retaining a handle of an account the batch does not
+  carry onward is refused as the contradiction it is.
 
 - **D8 — A completion that fails is not terminal.** `S1` stays `OPEN` and the rest is unchanged,
   so a caller that committed with an account still open closes it and commits again. Only a
