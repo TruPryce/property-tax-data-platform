@@ -547,19 +547,27 @@ def test_materializer_writes_only_openspec_files(tmp_path: Path) -> None:
 
 def test_manifest_records_excluded_candidates_and_adrs_are_selected(tmp_path: Path) -> None:
     root = Path.cwd()
+    # `adr` ranks below openspec, source_contract, agent_guidance, and
+    # architecture, so the limit has to clear every higher-ranked document
+    # before an ADR can appear at all.  A hard-coded cap makes this assertion
+    # depend on how many openspec documents the repository happens to hold: it
+    # was raised from 48 to 64 for exactly that reason and went stale again the
+    # next time a change was added.  Derive it instead, so the test measures the
+    # ranking rather than the repository's current size.
+    ranked, _ = _select_files(
+        root,
+        ContextLimits(max_files=1_000_000, max_file_bytes=100, max_total_bytes=1_000_000_000),
+    )
+    ranked_categories = [source["category"] for source in ranked]
+    assert "adr" in ranked_categories, "the repository has no ADR to rank"
+    first_adr = ranked_categories.index("adr") + 1
     info = build_planning_packet(
         trigger=_trigger(root),
         issue={"number": 6, "title": "Feature work", "body": "bounded plan", "labels": []},
         contract_root=root,
         output_dir=tmp_path,
         run_id="manifest-fixture",
-        # `adr` ranks below openspec, source_contract, agent_guidance, and
-        # architecture, so this limit has to clear all four before an ADR can
-        # appear at all.  Those four now fill 48 files exactly, which made the
-        # assertion below depend on the repository not gaining one more document
-        # of any higher-ranked kind.  64 leaves room for the ranking to be
-        # exercised rather than for the cap to decide the outcome.
-        limits=ContextLimits(max_files=64, max_file_bytes=100, max_total_bytes=240_000),
+        limits=ContextLimits(max_files=first_adr, max_file_bytes=100, max_total_bytes=240_000),
     )
     packet = json.loads(Path(info["packet_path"]).read_text(encoding="utf-8"))
     assert any(source["category"] == "adr" for source in packet["sources"])

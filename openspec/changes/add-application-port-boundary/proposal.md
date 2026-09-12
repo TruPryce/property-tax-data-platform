@@ -1,0 +1,164 @@
+## Why
+
+Bootstrap 3.4 is complete: PR #116 implemented canonical PostgreSQL persistence and PR #118 promoted `canonical-silver-persistence`. The next PostgreSQL task, 3.5, implements bounded batch parsing with COPY-to-staging and set-based merges.
+
+3.5 must implement an application contract rather than invent one while designing staging tables and merge SQL. That contract does not exist. The application package owns exactly two ports today — `ArtifactSink` and `BronzeStore` — and nothing at all for canonical persistence, quality, publication, or time. The canonical half of that gap is closed by the sibling change [`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which carries the run-time contract 3.5 implements; this change supplies the run, manifest, registry, discovery, quality, publication, and clock ports it opens beside, and the two are prerequisites of 3.5 together.
+
+Task 2.4 has the same problem from the other side: the discover/acquire/parse/normalize/validate/publish use cases need stable ports to coordinate, not infrastructure implementations to call.
+
+## What Changes
+
+- **ADDED** five capabilities: `application-port-boundary`, `processing-run`,
+  `source-registry-and-discovery`, `acquisition-manifest-index`, and
+  `run-bound-quality-and-publication`.
+- **MODIFIED** `ReleaseManifest` and the S3 manifest serialization and storage mechanics, within
+  the bounds task 1.2 states; `ArtifactSink` and the `BronzeStore` Protocol are retained unchanged.
+- **MODIFIED** the six county source definitions, only to populate the expected media types the
+  accepted registry requirement names.
+- **MOVED** the `canonical-load-session` capability to the sibling change
+  [`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which this change
+  cites and never restates.
+- No migration and no orchestration change. Implementation of each scope waits for its accepting
+  review round.
+
+## Outcome
+
+Establish the application-owned port boundary for bootstrap task 2.3, adding only what the inventory shows is genuinely missing and retaining what already works.
+
+## Scope
+
+- Originating issue: #119
+- Affected capabilities: five, all ADDED — `application-port-boundary`, `processing-run`, `source-registry-and-discovery`, `acquisition-manifest-index`, `run-bound-quality-and-publication`. A sixth, `canonical-load-session`, was planned here and is now the sibling change [`add-canonical-load-session`](../add-canonical-load-session/proposal.md): it is a stateful transactional protocol rather than a set of value contracts, and reviewing it as one scope of five kept its state space changing under the other four. Issue #119 named one capability; the plan resolves it to six so that each accepted spec stays small enough for 2.4, 3.5, and 6.2 to delta against, and so that every shared concept has exactly one owning spec, listed below.
+- Affected decisions: none. Hexagonal ownership is settled in the root `AGENTS.md`; this change works inside it.
+
+### Capabilities
+
+One owner per shared concept; the others cite it by name and never restate its values. The full concept-level matrix is in `design.md`.
+
+| Capability | Owns | Cites |
+| --- | --- | --- |
+| `application-port-boundary` | the rule that no port names infrastructure vocabulary; the opaque-locator rule for every persistence-generated handle | — |
+| `processing-run` | `ProcessingRunRef`, `ProcessingRunRepository`, `ReleaseProcessingOutcome` with its diagnostic and notice records and the evidence seal | `application-port-boundary`; `source-registry-and-discovery` for the promoted identity; `acquisition-manifest-index` for `ManifestRef`; accepted `bounded-release-processing` for the diagnostic vocabulary |
+| `source-registry-and-discovery` | `SourceRegistry`, expected media types, `ReleaseDiscovery`, `SourceCandidate`, `PageEvidence`, `LogicalReleaseEvidence`, promotion to `ReleaseIdentity` | accepted `canonical-identity-and-provenance` for `ReleaseIdentity` |
+| `acquisition-manifest-index` | the retained `ArtifactSink` and `BronzeStore` contracts, the bounded `ReleaseManifest` corrections, acquisition equivalence and storage grain, `ManifestIndex` and `ManifestRef` | `application-port-boundary`; `source-registry-and-discovery` for the evidence a partition is derived from |
+| `canonical-load-session` | defined by the sibling change `add-canonical-load-session`; cited here and never restated | — |
+| `run-bound-quality-and-publication` | `QualityRepository` and its values, `PublicationRepository`, `PublicationAttempt`, the source as-of instant at the attempt, `Clock` | `processing-run`; `source-registry-and-discovery` for the source as-of evidence; accepted `canonical-silver-persistence` for the reused quality and publication models |
+
+## Inventory and disposition
+
+Every task-2.3 responsibility, classified against what the repository contains today. This table is the reason the change is the size it is.
+
+| Responsibility | Present today | Disposition |
+| --- | --- | --- |
+| Official source registry | `CountySourceDefinition`, `AcquisitionMethod` (application); `source_for_county` (adapters, a module function) | **(2) extend** — the vocabulary is right, the lookup is not injectable and does not key on release kind |
+| Release discovery | nothing | **(3) new** |
+| Artifact storage | `ArtifactSink` — `__enter__`/`write`/`commit`/`abort`/`__exit__` | **(1) retained unchanged** |
+| Manifest | `BronzeStore` — `classify`/`record`/`reference_partition` | **(1) Protocol retained unchanged**; `ReleaseManifest` and the S3 manifest mechanics take a bounded correction |
+| Canonical repository | nothing | **(3) new** |
+| Quality | nothing in the application; the run-bound database model exists | **(3) new** |
+| Publication | nothing in the application; the run-bound database model exists | **(3) new** |
+| Clock | `utc_now()`, a module function in the S3 adapter, not injectable | **(3) new** |
+| Processing run (shared) | `ingestion.run` in the database; `ReleaseOutcome` in adapters | **(3) new** — no application representation, and no producer for its reference |
+| Release identity promotion | `ReleaseIdentity` requires four components and cannot hold fewer | **(3) new** — nothing turns partial evidence into a complete identity |
+| Logical release evidence | Discovery may legitimately establish no tax year or release kind; the accepted contract has parsing create the partitions | **(3) new** — no carrier for facts established after acquisition |
+| Manifest reference | `BronzeStore.record()` returns a storage locator; the run needs the relational record's generated identity | **(3) new** — no path from one to the other |
+| Acquisition manifest lifecycle | `ReleaseManifest` requires a non-empty partition tuple, so an artifact failing inspection is never manifested | **(2) bounded extension** — admit zero partitions, carry the jurisdiction, attach partitions later |
+
+Seven responsibilities resolve to **eleven contracts**: two retained — one of them bounded-extended so an acquisition can be manifested before its releases are known — and nine added. The count differs from seven for one reason, stated rather than glossed: `source-release-ingestion` carries *two* accepted requirements here — "Official source registry" and "Release discovery" — and they are not the same responsibility. The registry resolves a county and release kind with no network access, because the accepted scenario requires an unsupported source to "fail before network acquisition". Discovery probes remote metadata. Collapsing them would make the pre-network failure inexpressible.
+
+`ArtifactSink` is unchanged. The `BronzeStore` Protocol and its signatures are unchanged. No new object-store CRUD port and no new S3 adapter are introduced; the existing bounded contracts already express the behaviour.
+
+Two bounded corrections do reach existing code, and the scope is exactly this and nothing more. `ReleaseManifest` takes the value-shape correction of D19 and D18 — a required `jurisdiction`, an admissible empty partition tuple, version `2`. `S3BronzeStore`'s manifest serialization and manifest-storage mechanics take the matching correctness correction of D18 and D17, in `objectstore/s3.py` and its tests, because a value that says it carries a jurisdiction and a serializer that never writes one would be worse than either alone. PostgreSQL, HTTP, clock, quality, publication, county, and every other adapter implementation stay out of scope.
+
+## Three facts from the code that shape the design
+
+**A Bronze partition is not a canonical release.** `ReleasePartition` carries `jurisdiction_code`, `tax_year`, `release_kind` — three components. `ReleaseIdentity` carries those plus `release_identifier` — four. The fourth first appears at `ingestion.run`, which references the three-component `bronze.release_partition` and supplies `release_identifier` itself. So the fourth component is established from the source's own evidence, and promoting a candidate to a complete `ReleaseIdentity` is the one place that happens; the run then binds that promoted identity to the indexed acquisition. The canonical port refuses a release whose identifier the source has not established rather than synthesise one.
+
+**The accepted-outcome gate is a transaction seam.** `canonical.release_load` carries a constraint trigger that is `DEFERRABLE INITIALLY DEFERRED` and requires the run's `ingestion.release_outcome` to be `accepted`. Two application ports that each own their own commit cannot satisfy it. One unit of work must span the outcome and the load.
+
+**The run is the spine.** `canonical.release_load`, `quality.evaluation`, and `publication.publication` all reference `ingestion.run`. The retry key is `UNIQUE (release_key, run_id)`. An application boundary with no run concept cannot express retry, quality, or publication lineage.
+
+## Decisions
+
+Decision identifiers match the control plane's grammar, `^D[0-9]{1,3}$`, which
+`planning_semantics.py` and `implementation.py` both enforce. Rounds 1–13 of the review ledger
+name thirteen of these decisions by the lettered identifiers they carried before that grammar was
+applied; the ledger is history and is not rewritten, so the old names resolve here.
+
+| Recorded in the ledger as | Now |
+| --- | --- |
+| `D2o` | `D12` |
+| `D2j` | `D13` |
+| `D2m` | `D14` |
+| `D2n` | `D15` |
+| `D2i` | `D16` |
+| `D2h` | `D17` |
+| `D2g` | `D18` |
+| `D2f` | `D19` |
+| `D2e` | `D20` |
+| `D2d` | `D21` |
+| `D2b` | `D22` |
+| `D2c` | `D23` |
+| `D3a` | `D24` |
+
+Two task identifiers were renamed for the same grammar, `^[0-9]+\.[0-9]+$`, which the
+implementation lane's parser enforces at `implementation.py:35`. The ledger names them as they
+were, so they resolve here too.
+
+| Recorded in the ledger as | Now |
+| --- | --- |
+| task `1.2b` (the manifest index port) | task `1.3` |
+| task `1.3` (the run lifecycle port) | task `1.4` |
+
+Five decisions the ledger names — `D2a`, `D2k`, `D2l`, `D2p` and `D2q` — are not in either table
+because they left this change entirely: they belong to `add-canonical-load-session`, which states
+them in its own vocabulary.
+
+The canonical load session's decisions moved with it to the sibling change
+[`add-canonical-load-session`](../add-canonical-load-session/proposal.md), which owns that
+capability: the state machine and its authority, the empty failure rows, batch-scoped adoption,
+the locator-and-snapshot candidate, bounded deltas, the stated maximum, batch-determined
+completion, and the non-terminal failed completion. Nothing below restates them.
+
+- **D1 — The run is an application concept, and its persistence key is not.** `ProcessingRunRef` names a run across ports. `ingestion.run.run_id` is `GENERATED ALWAYS AS IDENTITY`, so the reference is documented and typed as an **opaque locator**: it is comparable and passable, and it is not canonical identity, not ordering, and not a business fact. Ports that accept one say so in their contract.
+- **D12 — Starting a run refuses a held run and resumes an abandoned one, atomically.** The accepted workflow scenario requires overlapping active runs for one county and release to be prevented, and `ingestion.run` expresses nothing of the kind — every UNIQUE constraint on it includes `run_id`, so each is trivially satisfied per row. Two concurrent workers would otherwise both start runs and both create canonical loads. So `start` refuses by name, atomically, while a run is *held*: from start until finish, or until its worker is gone. Refusing every *unfinished* run would be the wrong rule — a worker that dies after `start` commits and before `finish` leaves `finished_at` null forever, and the accepted contract requires a retry to resume from the last verified stage rather than wait for a database repair. An unfinished run whose holder is gone is therefore resumed: `start` returns that run's reference in a result that says so, exactly one retrying worker wins, and the load's own retry result (D4) tells it whether the load already happened. How holding is represented is 3.5's to choose — a lock scoped to the worker's connection, or a lease the holder renews. A release whose previous run finished starts a new run.
+- **D13 — The outcome value carries the evidence seal, not just the counts.** `ingestion.assert_outcome_evidence_agrees` runs at COMMIT and requires retained diagnostics to equal `least(total, 100)`, each truncation flag to equal `total > 100`, and every retained diagnostic's layout fingerprint to equal the outcome's under `IS DISTINCT FROM`. An outcome declaring one diagnostic and retaining none satisfied every invariant the first draft listed and would have aborted the canonical completion transaction, so the seal belongs in the value.
+- **D14 — Release-level source freshness reaches publication through the boundary, one instant per logical release.** `publication.publication.source_as_of` is what a consumer means by freshness, and nothing else in the boundary carries it: `ReleaseIdentity` has no time component and `ProcessingRunRef` is opaque. It is the instant the release's own `LogicalReleaseEvidence` carries, supplied when the attempt opens, so two releases drawn from one artifact each publish their own. It is never derived from canonical snapshots, because `0011` makes snapshot equality structural over every field *but* `source_as_of`, so one release can hold snapshots disagreeing about it.
+- **D15 — Every county carries its own expected media types.** The accepted registry requirement names expected media types per county, so adding the field and leaving all six on a shared default would satisfy the type and fail the requirement, invisibly to a fake-only test. Task 2.1 populates the six definitions; nothing else about them changes.
+- **D16 — Acquisition equivalence is a value comparison, and its limit is stated.** Two recordings are the same acquisition exactly when their retained acquisition evidence is equal: jurisdiction, artifact **content identity** (`StoredArtifact.sha256`), `acquired_at`, `source_url`, response metadata, redirects, `manifest_version`, `tool_versions`, with `partitions` excluded because they attach after recording. Differing evidence means different acquisitions even where the bytes are identical. The artifact's locator, byte count, and media type are **not** acquisition-defining: `bronze.artifact` is keyed by `sha256` and holds those three once per artifact, while `bronze.release_manifest` references the artifact only by `artifact_sha256` and persists none of them, so a rule distinguishing two same-digest acquisitions by locator or media type could not be honoured by the index without a migration this change excludes. They are artifact-grain evidence — storage location, integrity, and metadata — and a disagreement about them for a known digest is an artifact-consistency concern, not a second acquisition identity. Every remaining component does have an acquisition-grain home: `jurisdiction_code`, `artifact_sha256`, `acquired_at`, `source_url`, `response_status`/`response_headers`, `bronze.release_redirect`, `manifest_version`, and `tool_versions`. The contract stops short of promising that a repeated fetch is always a new acquisition: under a fixed or coarse clock with an unchanged response two fetches can leave identical evidence, and they are then observationally equivalent and may coalesce. No physical-attempt identifier, column, or migration is added to force them apart. An adapter may implement this as a digest over a canonical preimage of the compared components — **not** over the full serialized manifest, which carries the partitions and would manufacture a second acquisition when one is attached.
+- **D17 — Acquisition manifests are stored at acquisition grain.** `manifest_key` says "The manifest describes an artifact, so it is keyed like one" while `ReleaseManifest` says it is "The immutable record of one acquisition"; both cannot hold. Artifact identity is the digest alone, so the same bytes acquired for two jurisdictions are one artifact and two acquisitions, and one key per artifact keeps only the first. The same key also lets a stored v1 manifest block a v2 acquisition of those bytes forever, since the conditional put finds the old object and reports success. Manifests get an acquisition-grain locator, artifact bytes stay content-addressed, and the contract states properties — idempotent per acquisition, distinct across acquisitions, never overwritten, earlier shapes immutable and non-blocking — rather than a keying scheme, which stays the adapter's choice.
+- **D18 — The serializer moves with the value, and the manifest version moves with the shape.** `serialize_manifest` enumerates fields by hand and the only county in the JSON is inside each partition, so a zero-partition acquisition would serialize with no county at all — the defect D19 exists to fix. This change therefore edits the S3 serializer and its tests, and nothing else in any adapter. `BRONZE_MANIFEST_VERSION` becomes `2`: v1 has non-empty partitions with the county recoverable only from them, v2 carries an explicit jurisdiction and may carry none. Stored v1 objects are immutable and are not migrated; nothing deserializes a manifest today. `jurisdiction` is required rather than inferred from partitions, so the four constructions are updated — inference would give one fact two sources of truth.
+- **D19 — An acquisition is manifested before its releases are known.** A successfully acquired artifact can fail inspection before any tax year or release kind exists; requiring a partition first would leave those immutable bytes with no record of what was acquired. `ReleaseManifest` therefore admits an empty partition tuple and carries an explicit `jurisdiction`, and partitions attach afterwards. Both follow the database: `bronze.release_manifest` has `jurisdiction_code NOT NULL` of its own, and `release_manifest_identity UNIQUE (manifest_id, jurisdiction_code)` exists so partitions can reference it compositely. `BronzeStore.reference_partition` already provides the object-store half; `ManifestIndex` gains the relational one. No partition is fabricated to carry a county.
+- **D20 — The registry resolves by jurisdiction, with the release kind optional.** Requiring a kind would make Collin unresolvable before it is undiscoverable, since a `CountySourceDefinition` must exist before the source can be probed. Today's registry is `source_for_county(county)`. The accepted scenarios are phrased as a run *requesting* a county and kind, so both survive: an unregistered jurisdiction and a caller-supplied unregistered kind each fail before network acquisition, while a kind established only by content is validated after parsing and before promotion.
+- **D21 — Discovery yields a source candidate, not a release.** The accepted ingestion contract permits an artifact whose tax years and release kinds are not known from discovery metadata, and requires that "discovery records one source candidate and parsing creates separately identified logical release partitions backed by the same immutable artifact". Collin is that case: one mutable Access export whose current and certified releases are established by `curr_val_yr`, `cert_val_yr`, and `property_status`. So `SourceCandidate` carries a possibly-empty tuple of `LogicalReleaseEvidence`, and promotion consumes the evidence rather than the candidate — one seam whether a page or parsing established the facts. Each evidence also carries the source as-of instant established for its release: a page instant for the whole export applies to every release drawn from it, a content-established instant for one release takes precedence, and absence is recorded rather than filled, because a candidate-level instant alone cannot tell a current release from the certified one packed beside it.
+- **D22 — Manifest persistence produces the reference the run binds to.** `BronzeStore.record()` returns a storage locator — the artifact-keyed `s3://<bucket>/<sha>.manifest.json` before task 1.2, an acquisition-grain locator after it, and a `ManifestRef` in neither case — while `ingestion.run.manifest_id` needs the relational record's generated identity, which that URI does not contain and the checksum cannot resolve, since the table carries no unique constraint on it. `ManifestIndex` returns a `ManifestRef`, idempotently per acquisition so one artifact carrying two releases binds both runs to one manifest. It is a second manifest port because the object store holds immutable evidence and the relational row is an index over it, and because adding a method to `BronzeStore` would stop its existing implementer from satisfying it.
+- **D23 — The run has a producer.** `ProcessingRunRepository` starts a run and returns its reference. Without it the boundary names a run everywhere and creates one nowhere, and a use case would have to reach past the port into the database to obtain a value the database generates.
+- **D24 — Identity promotion is one named seam, and it is not the repository's.** `ReleaseIdentity` already requires four components, so an incomplete one cannot exist and a repository that claimed to reject one could never receive it. Promotion from `LogicalReleaseEvidence` — however that evidence was established — is where the missing-identifier failure lives; the canonical port accepts a complete identity and has no such branch. `ReleaseIdentity` is not weakened to make the error reachable.
+- **D7 — Quality is one run-bound port, not a second quality model, and it says what was never evaluated.** `QualityRepository` reads the configured rules, records measured evaluations against a run, and computes a run-level verdict: which active blocking rules have no recorded evaluation for the run, which failed, which warnings failed. The verdict is computed when asked and stored nowhere, because `quality.evaluation`'s own comment says a release that passed because a rule never ran looks identical afterwards to one that passed because it did, and the boundary is where that difference is visible. Coverage is at the exact active version: an evaluation at a replaced version is stale, not coverage, and the remedy for missing or stale coverage is a new processing run, never re-evaluation within the run — `quality.evaluation` admits one immutable verdict per rule and subject per run and the loading role holds no UPDATE, so a same-run re-evaluation is impossible by design rather than by omission. Two active versions of one rule is a named configuration error that fails closed; keeping one version active and switching atomically is the migrator's obligation, and a partial unique constraint over active versions is a later migration issue, not this change's. It reuses `quality.rule` and `quality.evaluation`; it defines no parallel persistence and no county threshold.
+- **D8 — Publication owns the attempt, not the build.** `PublicationRepository` opens a `PublicationAttempt` that either `activate()`s — making it current and recording what it supersedes — or `fail()`s, leaving the previously current publication current. It is scoped to attempt, lineage, and activation, because migration `0005` states that task 6.2 owns the promotion path: a boundary claiming the Gold-build transaction would promise behaviour no task here makes representable. Publication is not in the load's transaction; it runs over completed loads, after quality. `activate()` refuses by name unless the run's quality verdict is clean at that moment: the persisted gate, `publication.assert_current_is_validated`, counts recorded blocking failures only, so a blocking rule nobody evaluated would pass it, and the accepted contract requires all blocking rules to pass, not merely none to have failed. The check is admission-time, as the persisted trigger's own is: a publication already current stays current whatever becomes active later, and only a new activation is judged.
+- **D9 — Publication grants no read access.** The port carries publication *decisions* and lineage. It confers no raw canonical read privilege and no sensitive-field permission; the reviewed field policy continues to govern that separately, exactly as `canonical-silver-persistence` requires.
+- **D10 — The processing outcome crossing the port is application-owned, and the mapping is total.** The adapters' `ReleaseOutcome` cannot be used: the dependency-direction test forbids the application from importing adapters, and five county modules already import from the application, so the arrow points inward. The application defines the outcome value, and it carries every fact `ingestion.release_outcome` requires — including the boundary contract version and the paired parser version and layout fingerprint — so an implementation can write that row from this value alone. A duplicate representation is acceptable here because the direction forbids reuse; a *lossy* one is not, because the missing facts would have to be fetched from outside the port. The boundary contract version is pinned to the accepted constant in the value itself — `ingestion.release_outcome` carries `CHECK (boundary_contract_version = 1)`, so an unpinned integer would pass the port and abort the canonical completion — and the dependency-direction test holds the application's copy equal to the adapters'.
+- **D11 — One clock, timezone-aware.** `Clock.now()` returns an aware `datetime`. `acquired_at` is already injected and already required to be aware, so this generalises an established idiom rather than introducing one.
+
+## Constraints
+
+- `property_tax_application` gains no dependency on `boto3`, `psycopg`, Airflow, an object-store SDK, or any county module. The existing dependency-direction test is extended to prove it.
+- `ArtifactSink` keeps its signatures and semantics, and so does the `BronzeStore` Protocol. `ReleaseManifest` and the S3 manifest serialization and storage mechanics take the bounded corrections named above, and nothing else in any adapter changes.
+- No migration is added or modified. The database contract is read, not changed.
+- No adapter is implemented. This change defines contracts and the values that cross them, plus two bounded corrections to existing adapter code that the contracts require to be true in production: the S3 manifest mechanics the `ReleaseManifest` change needs to be durable, and the expected media types the six county definitions need for the registry requirement to hold.
+- No canonical record type is added or altered; 2.2's promoted model is used as-is.
+- Bootstrap 2.4, 2.5, 3.5, and 3.6 are untouched, and 2.3 stays unchecked until a separate reconciliation verifies the implementation by substance.
+
+## Non-goals
+
+- COPY, staging tables, and set-based merges — bootstrap 3.5.
+- The discover/acquire/parse/normalize/validate/publish use cases — bootstrap 2.4.
+- S3, PostgreSQL, HTTP, clock, quality, and publication adapter implementations.
+- County adapters and county source semantics.
+- Gold tables, views, or API access.
+- Airflow DAGs and worker CLI orchestration.
+
+## Unresolved decisions
+
+- **The S3 adapter's `utc_now()` stays where it is.** Defining `Clock` does not by itself retire it, and rewiring the acquisition path to an injected clock reaches beyond the manifest serialization and storage mechanics that are the only adapter code this change corrects. It is recorded here so the residue is visible rather than assumed gone; 2.4 owns the migration when it composes the use cases.
+- **`SourceRegistry` keying on release kind is an extension, not a correction.** `source_for_county` resolves a county alone, while the accepted registry requirement speaks of "a registered county and release kind". The port carries release kind; whether any current county actually varies its definition by kind is a question for the county contracts, not for this boundary.
