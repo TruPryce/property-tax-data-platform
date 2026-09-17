@@ -10,6 +10,7 @@ This is the documentation navigation hub. Accepted behavior remains in OpenSpec;
 | [Airflow implementation](engineering/airflow-implementation.md) | Runtime limits, memory budget, test collection, and definition of done for Airflow-executed work |
 | [Canonical identity and provenance](engineering/canonical-identity.md) | Domain identity vocabulary, release-kind mappings, serialization, and what existing layers map onto |
 | [Canonical appraisal records](engineering/canonical-appraisal-records.md) | Domain appraisal vocabulary, record grain, parent relationships, and Silver mapping inputs |
+| [The canonical load session](engineering/canonical-load-session.md) | The application contract a PostgreSQL loader implements: one release load as a closed state machine, and what it refuses to decide |
 | [Processing-run values](engineering/processing-run-values.md) | The reference that names a run and the sealed outcome that describes one, and why each rule is enforced at the boundary rather than at COMMIT |
 | [Canonical Silver persistence](engineering/canonical-silver-persistence.md) | How the promoted canonical domain maps into PostgreSQL, and the four identity concepts a loader must keep apart |
 | [Engineering review](engineering/pre-pr-review-contract.md) | Pre-PR review loop, severity, and verdict contract |

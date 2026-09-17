@@ -1,0 +1,68 @@
+# Round 3 — implementation review — findings at d5e024f and 77b4565
+
+Two implementation rounds against the same scope, recorded together because the second is what the
+first's fixes exposed. The reviewer's verdict both times was REQUEST CHANGES, and both times two of
+the findings were defects in an accepted plan rather than in the code written against it.
+
+## At `d5e024f` — the first implementation
+
+Three blockers and two contract defects: local structural protocols standing in for the cited run
+and outcome types; `W8` simultaneously a precondition, an unreachable invariant and a required
+refusal; task paths that did not authorize what the implementation wrote; a rejected completion that
+was not retry-idempotent; and a locator admitting mutable payloads.
+
+Resolved by three merged changes rather than inside the implementation: PR #122 corrected the plan
+(`W8` retired for `I1`, completion never inferred from rows, the locator contract, the task paths),
+PRs #123 and #125 added and implemented the `processing-run-values` capability the session cites,
+and PR #124 took the repository-dependent planning test out of capability work.
+
+## At `77b4565` — the implementation against those corrections
+
+Three blockers and two gaps, all accepted:
+
+1. **[P1] RESOLVED by PR #126.** The plan still cited `processing-run` and named
+   `add-application-port-boundary` as owner, after the value slice moved to `processing-run-values`.
+   Promotion preserves what the plan says, so the promoted capability would have cited a capability
+   that does not own what it cites.
+
+2. **[P1] RESOLVED in this implementation.** The concrete types were imported and the boundary still
+   accepted the raw substitutes: `open_load` checked only `is None`, and `ReleaseLoadCompletion`
+   validated only its flag, so a raw run id reached a session and failed much later at the first
+   attribute access. The architecture test proved raw values are not *instances of* the reference
+   type and never that the port refuses them — the test and the boundary were checking different
+   things. Both now require the owned types, and the raw values are driven through both boundaries.
+
+3. **[P1] RESOLVED by PR #127, applied here.** `hash(value)` establishes nothing: an object whose
+   `__hash__` reads a mutable attribute passes the probe and then moves, and the entry filed under it
+   becomes unreachable with nothing raising. The owner now admits a payload by **exact type** — a
+   `str`, an `int`, or a flat non-empty tuple of those, since `isinstance` admits a subclass that
+   overrides `__hash__` — and `AccountSnapshotRef` borrows that rule rather than restating it.
+
+4. **[P2] RESOLVED in this implementation.** Task 2.1 was checked while two authoritative
+   falsification cases were absent. The fake gained durable-write failure injection, without which
+   the failure row of `commit` cannot be reached at all and its atomicity is a description rather
+   than a proof; the suite gained the failed completion, the retry after the write recovers, and the
+   abandoned session that leaves an earlier load untouched.
+
+5. **[P3] RESOLVED in this implementation.** Seven active descriptions still said `W1`–`W12` or
+   credited `W8` with account scope. They are the route by which a retired precondition comes back,
+   so all seven now read `W1`–`W7`, `W9`–`W12` with `I1` derived. The deliberate historical passages
+   — "there is no `W8`", and why — are kept.
+
+## Found while implementing
+
+The `I1` assertion was first written **inside** the fake session, and deleting it changed nothing:
+99 tests still passed. A subject that checks its own invariant fails together with the thing it
+checks. Moved outside, breaking the sweep of a completed account's handles fails five tests. The
+fake's docstring now says why it deliberately does not self-check.
+
+```json
+{
+	"contract": "implementation-review-v1",
+	"reviewed_commit": "77b4565",
+	"scope_id": "canonical-load",
+	"verdict": "REQUEST_CHANGES",
+	"unresolved_p1_count": 0,
+	"unassigned_p2_p3_count": 0
+}
+```
