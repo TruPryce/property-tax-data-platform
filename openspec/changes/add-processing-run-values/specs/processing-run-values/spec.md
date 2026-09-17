@@ -28,14 +28,31 @@ construction otherwise. Hashability SHALL NOT be taken as evidence of immutabili
 `__hash__` reads a mutable attribute passes a `hash()` probe, hashes differently after that
 attribute changes, and leaves the mapping entry filed under it unreachable with nothing raising. The
 admitted representation SHALL cover what a database hands back — an identity value, a textual
-identifier, or a composite of them — and SHALL NOT be widened to whatever happens to hash. It SHALL wrap the
-persistence-generated value without interpreting it, and no port SHALL accept a raw persistence
-value in its place — a port that took the bare value would let a caller invent a reference to a run
-that was never recorded, which is the one thing the type exists to prevent.
+identifier, or a composite of them — and SHALL NOT be widened to whatever happens to hash.
+
+Admission SHALL be by **exact type**, not by `isinstance`. A subclass of an admitted type may
+override `__hash__` and `__eq__` to read a mutable attribute: it satisfies `isinstance`, hashes
+differently once that attribute moves, and leaves the entry filed under it unreachable — the same
+corruption, arriving through the very type the rule admits. A composite SHALL be flat and non-empty,
+matching what it is declared to be rather than exceeding it: a nested composite is a composite of
+composites no key this locator names has, and an empty one locates nothing.
+
+The reference SHALL wrap the persistence-generated value without interpreting it, and no port SHALL
+accept a raw persistence value in its place — a port that took the bare value would let a caller
+invent a reference to a run that was never recorded, which is the one thing the type exists to
+prevent.
 
 #### Scenario: A run reference is required somewhere
 - **WHEN** any port requiring a run reference is examined
 - **THEN** it accepts the reference type and no raw persistence value in its place, so a caller is never required to invent one
+
+#### Scenario: A locator is offered a subclass of an admitted type
+- **WHEN** a reference is constructed over a subclass of an admitted type that overrides `__hash__` to read a mutable attribute
+- **THEN** it is refused, because admission is by exact type: the subclass satisfies every `isinstance` check and still moves underneath the entry filed under it
+
+#### Scenario: A locator is offered a nested or empty composite
+- **WHEN** a reference is constructed over a composite containing another composite, or over an empty one
+- **THEN** each is refused, the first because no key this locator names is a composite of composites and the second because it would locate nothing
 
 #### Scenario: A locator is offered a hashable but mutable value
 - **WHEN** a reference is constructed over an object that hashes at that moment but whose hash reads a mutable attribute

@@ -21,8 +21,12 @@ would be reading a persistence detail as a business fact. Omitting the methods w
 `TypeError` from somewhere else that does not say why. Hashing is not optional — these references
 are dictionary keys in every implementation that tracks runs.
 
-The wrapped value is constrained **by type**, to a string, an int that is not a bool, or a tuple of
-those: between them they cover every generated key a database hands back. An earlier version probed
+The wrapped value is constrained **by exact type**, to a string, an int, or a flat non-empty tuple
+of those: between them they cover every generated key a database hands back. Exact rather than
+`isinstance`, because a subclass of an admitted type can override `__hash__` and `__eq__` to read a
+mutable attribute — it satisfies `isinstance` and then moves, which is the same corruption arriving
+through the type the rule admits. Exact typing also excludes `bool` for free, since `type(True) is
+int` is False. An earlier version probed
 with `hash()` instead, and that proves nothing. An object whose `__hash__` reads a mutable attribute
 passes the probe, hashes differently once that attribute changes, and leaves the mapping entry filed
 under it unreachable — with nothing raising, which is the part that makes it dangerous. "It hashed

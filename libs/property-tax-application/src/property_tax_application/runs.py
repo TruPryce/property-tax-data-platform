@@ -80,13 +80,31 @@ _NOTICE_CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 #: large by answering with a megabyte where a name belongs.
 MAX_FIELD_CHARS: Final = 256
 
-#: What an opaque locator may wrap.  An allowlist, because `hash()` succeeding
-#: proves nothing: an object with a `__hash__` that reads a mutable attribute
-#: hashes today and hashes differently tomorrow, and the dictionary entry filed
-#: under it becomes unreachable without anything raising.  These three types
-#: cannot do that, and between them they cover every generated key a database
-#: hands back — an identity column, a textual identifier, or a composite of them.
+#: What an opaque locator may wrap: exactly `str`, exactly `int`, or a flat
+#: non-empty tuple of those.  Between them they cover every generated key a
+#: database hands back — an identity column, a textual identifier, or a
+#: composite of them.
 LOCATOR_VALUE_TYPES: Final = (str, int)
+
+
+def _require_locator_scalar(value: object, field_name: str) -> None:
+    """One locator component, admitted by its **exact** type.
+
+    `isinstance` is not enough and the difference is not pedantry.  A subclass of
+    `str`, `int` or `tuple` may override `__hash__` and `__eq__` to read a
+    mutable attribute: it passes an `isinstance` check, hashes differently once
+    that attribute moves, and the mapping entry filed under it becomes
+    unreachable with nothing raising.  Exact types cannot be extended that way,
+    and `bool` falls out for free — `type(True) is int` is False — so a boolean
+    cannot arrive as a reference to run one.
+    """
+
+    if type(value) not in LOCATOR_VALUE_TYPES:
+        raise ValueError(
+            f"{field_name} must be exactly a str or an int, got {type(value).__name__}: "
+            "a subclass may override __hash__ to read mutable state, so a hashable "
+            "object is not an immutable one"
+        )
 
 
 def require_locator_value(value: object, field_name: str = "value") -> None:
@@ -95,19 +113,22 @@ def require_locator_value(value: object, field_name: str = "value") -> None:
     Checked by type rather than probed with `hash()`. A wrapper is only as frozen
     as what it wraps, and "it hashed once" is not immutability: it is one
     observation of a value free to change afterwards.
+
+    A tuple is **flat and non-empty**, matching the annotation rather than
+    exceeding it: a nested tuple would be a composite of composites that no key
+    this locator names has, and an empty one would be a locator that locates
+    nothing.
     """
 
     if value is None:
         raise ValueError(f"{field_name} must not be None")
-    if isinstance(value, tuple):
+    if type(value) is tuple:
+        if not value:
+            raise ValueError(f"{field_name} must not be an empty tuple: it would locate nothing")
         for element in value:
-            require_locator_value(element, f"{field_name} element")
+            _require_locator_scalar(element, f"{field_name} element")
         return
-    if isinstance(value, bool) or not isinstance(value, LOCATOR_VALUE_TYPES):
-        raise ValueError(
-            f"{field_name} must be a str, an int, or a tuple of them, "
-            f"got {type(value).__name__}: a hashable object is not an immutable one"
-        )
+    _require_locator_scalar(value, field_name)
 
 
 def _require_optional_name(value: str | None, field_name: str) -> None:
