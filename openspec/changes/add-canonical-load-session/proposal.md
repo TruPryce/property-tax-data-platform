@@ -26,9 +26,10 @@ transition table in the spec, with every requirement, scenario, and task referri
 - **MODIFIED** bootstrap tasks 3.5 and 3.6: they reference the transition table by ID rather than
   paraphrasing its rules.
 - No code, no migration, no adapter, and no orchestration change. Implementation of the tasks in
-  this change waits for an accepting review round **and** for the `processing-run` value slice it
-  cites — `ProcessingRunRef`, `ReleaseDisposition`, and `ReleaseProcessingOutcome`, owned by
-  `add-application-port-boundary`. Tasks 1.2 and 2.1 import those concrete types. No substitute is
+  this change waits for an accepting review round **and** for the values it cites —
+  `ProcessingRunRef`, `ReleaseDisposition`, and `ReleaseProcessingOutcome`, owned by the
+  `processing-run-values` capability that `add-processing-run-values` adds. Tasks 1.2 and 2.1
+  import those concrete types. No substitute is
   permitted, structural or otherwise: an empty runtime-checkable protocol accepts every object,
   including the raw persistence value the reference type exists to keep out, and annotations that
   close over a local stand-in cannot be replaced by the owned type without a change to this
@@ -54,7 +55,7 @@ capability rather than defining it.
 
 | Capability | Owns | Cites |
 | --- | --- | --- |
-| `canonical-load-session` | the session state machine `S1`–`S6` and its three operations, `CanonicalReleaseRepository`, `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, batch-scoped adoption, `ReleaseLoadCompletion`, the retry key, the no-natural-key rule | `processing-run` for `ProcessingRunRef` and `ReleaseProcessingOutcome`; `source-registry-and-discovery` for `ReleaseIdentity`; `application-port-boundary` for the opaque-locator rule; the accepted `canonical-appraisal-records` and `canonical-silver-persistence` specs |
+| `canonical-load-session` | the session state machine `S1`–`S6` and its three operations, `CanonicalReleaseRepository`, `ReleaseLoadSession`, `CanonicalRecordBatch`, `CorrelatedRecord`, `CorrelationHandle`, batch-scoped adoption, `ReleaseLoadCompletion`, the retry key, the no-natural-key rule | `processing-run-values` for `ProcessingRunRef` and `ReleaseProcessingOutcome`; `source-registry-and-discovery` for `ReleaseIdentity`; `application-port-boundary` for the opaque-locator rule; the accepted `canonical-appraisal-records` and `canonical-silver-persistence` specs |
 
 ## Decisions
 
