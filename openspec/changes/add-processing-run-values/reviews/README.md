@@ -52,9 +52,15 @@ and the two must not disagree.
 
 | Scope | Status | Last round | Commit |
 | --- | --- | --- | --- |
-| `processing-run-values` | REVISE (no round yet against this change) | — | — |
+| `processing-run-values` | IMPLEMENTED under recorded authorization (the plan merged as PR #123; the maintainer directed implementation of the complete value slice rather than three names, and the review of PR #121 is why it exists at all) | — | plan merged at `39bcdce` |
 
-**Change status:** OPEN — no accepting round. Implementation of tasks 1.1
-through 3.1 waits for one.
+**Change status:** OPEN, implemented. The plan merged as PR #123 and the
+maintainer directed implementation immediately, which is the recorded
+authorization this scope had in place of an accepting round — noted here because
+the process otherwise reads implementation without a round as an error.
 
-Next review: the whole change, against the commit that creates it.
+Next review: the implementation, against the commit that adds it. The two places
+to press hardest are the ones enforced twice, here and by a database constraint:
+the evidence seal, and the two code vocabularies. If either disagrees with what
+`ingestion.release_diagnostic` and `ingestion.release_notice` accept, a value
+this boundary blesses will fail at the write.
