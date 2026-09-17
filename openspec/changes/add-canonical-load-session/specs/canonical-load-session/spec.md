@@ -5,8 +5,8 @@
      `CorrelatedRecord`, `CorrelationHandle`, `AdoptedParent`, batch-scoped
      adoption of a persisted snapshot, `ReleaseLoadCompletion`, the retry key,
      and the no-natural-key rule.
-     Cites: `processing-run` for `ProcessingRunRef` and
-     `ReleaseProcessingOutcome`; `source-registry-and-discovery` for the
+     Cites: `processing-run-values` for `ProcessingRunRef` and
+     `ReleaseProcessingOutcome`, which that capability owns; `source-registry-and-discovery` for the
      promoted `ReleaseIdentity`; `application-port-boundary` for the
      opaque-locator rule; the accepted `canonical-appraisal-records` spec for
      the record types; the accepted `canonical-silver-persistence` spec for the

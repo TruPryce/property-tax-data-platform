@@ -295,6 +295,13 @@ this change does not have.
 
 ## Handoffs
 
+**From `processing-run-values`.** `ProcessingRunRef` and `ReleaseProcessingOutcome` are that
+capability's, imported rather than redefined. The session holds the reference opaquely and reads
+exactly one thing from the outcome — whether the release was accepted, which selects a completion
+branch. It adds no rule of its own to either, and a substitute for either is forbidden: an empty
+runtime-checkable protocol accepts every object, including the raw persistence value the reference
+type exists to keep out.
+
 **To bootstrap 3.5.** PostgreSQL implements `CanonicalReleaseRepository` and `ReleaseLoadSession`
 using COPY-to-staging and set-based operations, choosing its own staging tables, batch sizing,
 merge SQL, and the value of `max_batch_entries`. It owns durable maintenance of `S4` when one
