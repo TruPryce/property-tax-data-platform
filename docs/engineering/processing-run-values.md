@@ -19,8 +19,18 @@ Ordering is the tempting mistake and the raise is deliberate: `ingestion.run.run
 `GENERATED ALWAYS AS IDENTITY`, so the wrapped value really is ascending, and a caller sorting by it
 would be reading a persistence detail as a business fact. Omitting the methods would produce a
 `TypeError` from somewhere else that does not say why. Hashing is not optional — these references
-are dictionary keys in every implementation that tracks runs — and the wrapped value must itself be
-immutable and hashable, because a frozen wrapper around a mutable payload is not frozen.
+are dictionary keys in every implementation that tracks runs.
+
+The wrapped value is constrained **by exact type**, to a string, an int, or a flat non-empty tuple
+of those: between them they cover every generated key a database hands back. Exact rather than
+`isinstance`, because a subclass of an admitted type can override `__hash__` and `__eq__` to read a
+mutable attribute — it satisfies `isinstance` and then moves, which is the same corruption arriving
+through the type the rule admits. Exact typing also excludes `bool` for free, since `type(True) is
+int` is False. An earlier version probed
+with `hash()` instead, and that proves nothing. An object whose `__hash__` reads a mutable attribute
+passes the probe, hashes differently once that attribute changes, and leaves the mapping entry filed
+under it unreachable — with nothing raising, which is the part that makes it dangerous. "It hashed
+once" is one observation of a value that was free to change afterwards.
 
 The type exists so no caller invents one. A port that accepted the bare integer would let a number a
 caller made up name a run that was never recorded, and nothing in the signature would say so.

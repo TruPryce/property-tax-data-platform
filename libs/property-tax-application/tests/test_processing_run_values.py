@@ -77,11 +77,95 @@ def test_every_ordering_comparison_raises_rather_than_being_absent() -> None:
 
 def test_the_reference_refuses_a_mutable_or_unhashable_value() -> None:
     for rejected_value in ([], {}, set(), ["run-1"]):
-        with pytest.raises(ValueError, match="immutable and hashable"):
+        with pytest.raises(ValueError, match="exactly a str or an int"):
             ProcessingRunRef(rejected_value)
 
     with pytest.raises(ValueError, match="must not be None"):
         ProcessingRunRef(None)
+
+
+def test_the_reference_refuses_a_hashable_but_mutable_value() -> None:
+    """The regression: `hash()` succeeding is one observation, not immutability.
+
+    An object whose `__hash__` reads a mutable attribute passes the probe, then
+    moves — and the mapping entry filed under it becomes unreachable with
+    nothing raising. Constraining the payload by type is what rules that out.
+    """
+
+    class Sneaky:
+        def __init__(self, key: int) -> None:
+            self.key = key
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, Sneaky) and other.key == self.key
+
+    payload = Sneaky(1)
+    assert hash(payload) == hash(Sneaky(1)), "it passes the probe the old guard used"
+
+    with pytest.raises(ValueError, match="a hashable object is not an immutable one"):
+        ProcessingRunRef(payload)
+
+
+def test_the_reference_refuses_subclasses_that_override_hashing() -> None:
+    """`isinstance` is not enough, and the difference is not pedantry.
+
+    A subclass of `str`, `int` or `tuple` may override `__hash__` and `__eq__` to
+    read a mutable attribute. It passes an `isinstance` check, hashes differently
+    once that attribute moves, and the mapping entry filed under it becomes
+    unreachable with nothing raising — the same corruption the type constraint
+    was added to prevent, arriving through the type it admits.
+    """
+
+    class SneakyStr(str):
+        key = 1
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, SneakyStr) and other.key == self.key
+
+    class SneakyInt(int):
+        def __hash__(self) -> int:
+            return 0
+
+    class SneakyTuple(tuple):  # type: ignore[type-arg]
+        def __hash__(self) -> int:
+            return 0
+
+    payload = SneakyStr("run-1")
+    assert isinstance(payload, str), "it passes the check exact typing replaced"
+
+    for sneaky in (payload, SneakyInt(7), SneakyTuple((1,))):
+        with pytest.raises(ValueError, match="exactly a str or an int"):
+            ProcessingRunRef(sneaky)
+
+
+def test_the_reference_admits_only_a_flat_non_empty_tuple() -> None:
+    """The annotation says `tuple[str | int, ...]`; the runtime now says the same.
+
+    A nested tuple would be a composite of composites that no key this locator
+    names has, and an empty one would be a locator that locates nothing.
+    """
+
+    with pytest.raises(ValueError, match="element must be exactly a str or an int"):
+        ProcessingRunRef((1, (2, 3)))
+    with pytest.raises(ValueError, match="must not be an empty tuple"):
+        ProcessingRunRef(())
+
+
+def test_the_reference_admits_what_a_database_hands_back() -> None:
+    for value in (7, "run-1", (2026, "run-1")):
+        assert ProcessingRunRef(value).value == value
+
+    # `True == 1` in Python, so a bool would otherwise be a reference to run 1.
+    with pytest.raises(ValueError, match="exactly a str or an int"):
+        ProcessingRunRef(True)
+    with pytest.raises(ValueError, match="element must be exactly a str or an int"):
+        ProcessingRunRef((1, []))
 
 
 def test_the_reference_is_frozen() -> None:
@@ -92,10 +176,10 @@ def test_the_reference_is_frozen() -> None:
 
 
 def test_a_tuple_of_mutables_is_refused_though_a_tuple_is_not() -> None:
-    """Hashability is the check, not the outer type: `([],)` is a tuple and unhashable."""
+    """A tuple is admitted by what it holds, checked element by element."""
 
     assert ProcessingRunRef(("run", 1)).value == ("run", 1)
-    with pytest.raises(ValueError, match="immutable and hashable"):
+    with pytest.raises(ValueError, match="element must be exactly a str or an int"):
         ProcessingRunRef(([],))
 
 

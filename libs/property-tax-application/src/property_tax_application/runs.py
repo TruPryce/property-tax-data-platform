@@ -29,11 +29,13 @@ __all__ = [
     "BOUNDARY_CONTRACT_VERSION",
     "DIAGNOSTIC_CODES",
     "DIAGNOSTIC_RETENTION_LIMIT",
+    "LOCATOR_VALUE_TYPES",
     "ProcessingRunRef",
     "ReleaseDiagnosticRecord",
     "ReleaseDisposition",
     "ReleaseNoticeRecord",
     "ReleaseProcessingOutcome",
+    "require_locator_value",
 ]
 
 #: The contract this boundary implements, pinned so a consumer can tell which.
@@ -78,6 +80,56 @@ _NOTICE_CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 #: large by answering with a megabyte where a name belongs.
 MAX_FIELD_CHARS: Final = 256
 
+#: What an opaque locator may wrap: exactly `str`, exactly `int`, or a flat
+#: non-empty tuple of those.  Between them they cover every generated key a
+#: database hands back — an identity column, a textual identifier, or a
+#: composite of them.
+LOCATOR_VALUE_TYPES: Final = (str, int)
+
+
+def _require_locator_scalar(value: object, field_name: str) -> None:
+    """One locator component, admitted by its **exact** type.
+
+    `isinstance` is not enough and the difference is not pedantry.  A subclass of
+    `str`, `int` or `tuple` may override `__hash__` and `__eq__` to read a
+    mutable attribute: it passes an `isinstance` check, hashes differently once
+    that attribute moves, and the mapping entry filed under it becomes
+    unreachable with nothing raising.  Exact types cannot be extended that way,
+    and `bool` falls out for free — `type(True) is int` is False — so a boolean
+    cannot arrive as a reference to run one.
+    """
+
+    if type(value) not in LOCATOR_VALUE_TYPES:
+        raise ValueError(
+            f"{field_name} must be exactly a str or an int, got {type(value).__name__}: "
+            "a subclass may override __hash__ to read mutable state, so a hashable "
+            "object is not an immutable one"
+        )
+
+
+def require_locator_value(value: object, field_name: str = "value") -> None:
+    """Refuse anything but an explicitly immutable locator payload.
+
+    Checked by type rather than probed with `hash()`. A wrapper is only as frozen
+    as what it wraps, and "it hashed once" is not immutability: it is one
+    observation of a value free to change afterwards.
+
+    A tuple is **flat and non-empty**, matching the annotation rather than
+    exceeding it: a nested tuple would be a composite of composites that no key
+    this locator names has, and an empty one would be a locator that locates
+    nothing.
+    """
+
+    if value is None:
+        raise ValueError(f"{field_name} must not be None")
+    if type(value) is tuple:
+        if not value:
+            raise ValueError(f"{field_name} must not be an empty tuple: it would locate nothing")
+        for element in value:
+            _require_locator_scalar(element, f"{field_name} element")
+        return
+    _require_locator_scalar(value, field_name)
+
 
 def _require_optional_name(value: str | None, field_name: str) -> None:
     if value is None:
@@ -114,20 +166,16 @@ class ProcessingRunRef:
     `TypeError` from somewhere else does not say why it is wrong.
     """
 
-    value: object
+    value: str | int | tuple[str | int, ...]
 
     def __post_init__(self) -> None:
-        if self.value is None:
-            raise ValueError("value must not be None")
-        try:
-            hash(self.value)
-        except TypeError as error:
-            # A frozen wrapper around a mutable payload is not frozen: its
-            # equality changes after construction, and it cannot be a key in the
-            # mapping every implementation tracking runs keeps.
-            raise ValueError(
-                f"value must be immutable and hashable, got {type(self.value).__name__}"
-            ) from error
+        # A frozen wrapper around a payload free to change is not frozen: its
+        # equality moves after construction, and the mapping entry every
+        # implementation tracking runs files under it becomes unreachable with
+        # nothing raising. `hash()` succeeding does not rule that out — an
+        # object whose `__hash__` reads a mutable attribute passes the probe —
+        # so the payload is constrained by type instead.
+        require_locator_value(self.value)
 
     def _no_ordering(self, other: object) -> bool:
         raise TypeError(
