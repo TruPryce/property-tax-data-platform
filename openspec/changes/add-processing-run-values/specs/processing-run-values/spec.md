@@ -21,7 +21,14 @@ the run produces. A caller SHALL NOT be required to construct one, because the v
 run is generated where the run is recorded.
 
 The reference SHALL be an **opaque locator**: comparable for equality, hashable, carrying no
-ordering, no freshness or precedence meaning, and never canonical identity. It SHALL wrap the
+ordering, no freshness or precedence meaning, and never canonical identity.
+
+The value it wraps SHALL be constrained to an **explicitly immutable representation** and refused at
+construction otherwise. Hashability SHALL NOT be taken as evidence of immutability: an object whose
+`__hash__` reads a mutable attribute passes a `hash()` probe, hashes differently after that
+attribute changes, and leaves the mapping entry filed under it unreachable with nothing raising. The
+admitted representation SHALL cover what a database hands back — an identity value, a textual
+identifier, or a composite of them — and SHALL NOT be widened to whatever happens to hash. It SHALL wrap the
 persistence-generated value without interpreting it, and no port SHALL accept a raw persistence
 value in its place — a port that took the bare value would let a caller invent a reference to a run
 that was never recorded, which is the one thing the type exists to prevent.
@@ -29,6 +36,10 @@ that was never recorded, which is the one thing the type exists to prevent.
 #### Scenario: A run reference is required somewhere
 - **WHEN** any port requiring a run reference is examined
 - **THEN** it accepts the reference type and no raw persistence value in its place, so a caller is never required to invent one
+
+#### Scenario: A locator is offered a hashable but mutable value
+- **WHEN** a reference is constructed over an object that hashes at that moment but whose hash reads a mutable attribute
+- **THEN** it is refused, because the probe would pass and the entry filed under it would become unreachable the moment that attribute changed
 
 #### Scenario: A reference that names no run is used
 - **WHEN** a reference that does not resolve to a started run is passed to a port that requires one

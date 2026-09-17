@@ -77,11 +77,47 @@ def test_every_ordering_comparison_raises_rather_than_being_absent() -> None:
 
 def test_the_reference_refuses_a_mutable_or_unhashable_value() -> None:
     for rejected_value in ([], {}, set(), ["run-1"]):
-        with pytest.raises(ValueError, match="immutable and hashable"):
+        with pytest.raises(ValueError, match="str, an int, or a tuple"):
             ProcessingRunRef(rejected_value)
 
     with pytest.raises(ValueError, match="must not be None"):
         ProcessingRunRef(None)
+
+
+def test_the_reference_refuses_a_hashable_but_mutable_value() -> None:
+    """The regression: `hash()` succeeding is one observation, not immutability.
+
+    An object whose `__hash__` reads a mutable attribute passes the probe, then
+    moves — and the mapping entry filed under it becomes unreachable with
+    nothing raising. Constraining the payload by type is what rules that out.
+    """
+
+    class Sneaky:
+        def __init__(self, key: int) -> None:
+            self.key = key
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, Sneaky) and other.key == self.key
+
+    payload = Sneaky(1)
+    assert hash(payload) == hash(Sneaky(1)), "it passes the probe the old guard used"
+
+    with pytest.raises(ValueError, match="a hashable object is not an immutable one"):
+        ProcessingRunRef(payload)
+
+
+def test_the_reference_admits_what_a_database_hands_back() -> None:
+    for value in (7, "run-1", (2026, "run-1")):
+        assert ProcessingRunRef(value).value == value
+
+    # `True == 1` in Python, so a bool would otherwise be a reference to run 1.
+    with pytest.raises(ValueError, match="str, an int, or a tuple"):
+        ProcessingRunRef(True)
+    with pytest.raises(ValueError, match="str, an int, or a tuple"):
+        ProcessingRunRef((1, []))
 
 
 def test_the_reference_is_frozen() -> None:
@@ -92,10 +128,10 @@ def test_the_reference_is_frozen() -> None:
 
 
 def test_a_tuple_of_mutables_is_refused_though_a_tuple_is_not() -> None:
-    """Hashability is the check, not the outer type: `([],)` is a tuple and unhashable."""
+    """A tuple is admitted by what it holds, checked element by element."""
 
     assert ProcessingRunRef(("run", 1)).value == ("run", 1)
-    with pytest.raises(ValueError, match="immutable and hashable"):
+    with pytest.raises(ValueError, match="element must be a str, an int"):
         ProcessingRunRef(([],))
 
 

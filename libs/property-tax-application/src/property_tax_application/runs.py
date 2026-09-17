@@ -29,11 +29,13 @@ __all__ = [
     "BOUNDARY_CONTRACT_VERSION",
     "DIAGNOSTIC_CODES",
     "DIAGNOSTIC_RETENTION_LIMIT",
+    "LOCATOR_VALUE_TYPES",
     "ProcessingRunRef",
     "ReleaseDiagnosticRecord",
     "ReleaseDisposition",
     "ReleaseNoticeRecord",
     "ReleaseProcessingOutcome",
+    "require_locator_value",
 ]
 
 #: The contract this boundary implements, pinned so a consumer can tell which.
@@ -78,6 +80,35 @@ _NOTICE_CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 #: large by answering with a megabyte where a name belongs.
 MAX_FIELD_CHARS: Final = 256
 
+#: What an opaque locator may wrap.  An allowlist, because `hash()` succeeding
+#: proves nothing: an object with a `__hash__` that reads a mutable attribute
+#: hashes today and hashes differently tomorrow, and the dictionary entry filed
+#: under it becomes unreachable without anything raising.  These three types
+#: cannot do that, and between them they cover every generated key a database
+#: hands back — an identity column, a textual identifier, or a composite of them.
+LOCATOR_VALUE_TYPES: Final = (str, int)
+
+
+def require_locator_value(value: object, field_name: str = "value") -> None:
+    """Refuse anything but an explicitly immutable locator payload.
+
+    Checked by type rather than probed with `hash()`. A wrapper is only as frozen
+    as what it wraps, and "it hashed once" is not immutability: it is one
+    observation of a value free to change afterwards.
+    """
+
+    if value is None:
+        raise ValueError(f"{field_name} must not be None")
+    if isinstance(value, tuple):
+        for element in value:
+            require_locator_value(element, f"{field_name} element")
+        return
+    if isinstance(value, bool) or not isinstance(value, LOCATOR_VALUE_TYPES):
+        raise ValueError(
+            f"{field_name} must be a str, an int, or a tuple of them, "
+            f"got {type(value).__name__}: a hashable object is not an immutable one"
+        )
+
 
 def _require_optional_name(value: str | None, field_name: str) -> None:
     if value is None:
@@ -114,20 +145,16 @@ class ProcessingRunRef:
     `TypeError` from somewhere else does not say why it is wrong.
     """
 
-    value: object
+    value: str | int | tuple[str | int, ...]
 
     def __post_init__(self) -> None:
-        if self.value is None:
-            raise ValueError("value must not be None")
-        try:
-            hash(self.value)
-        except TypeError as error:
-            # A frozen wrapper around a mutable payload is not frozen: its
-            # equality changes after construction, and it cannot be a key in the
-            # mapping every implementation tracking runs keeps.
-            raise ValueError(
-                f"value must be immutable and hashable, got {type(self.value).__name__}"
-            ) from error
+        # A frozen wrapper around a payload free to change is not frozen: its
+        # equality moves after construction, and the mapping entry every
+        # implementation tracking runs files under it becomes unreachable with
+        # nothing raising. `hash()` succeeding does not rule that out — an
+        # object whose `__hash__` reads a mutable attribute passes the probe —
+        # so the payload is constrained by type instead.
+        require_locator_value(self.value)
 
     def _no_ordering(self, other: object) -> bool:
         raise TypeError(
