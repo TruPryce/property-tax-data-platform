@@ -221,3 +221,82 @@ def test_the_new_domain_suites_are_collected_by_the_default_configuration() -> N
 
     missing = [relative for relative in DOMAIN_TEST_MODULES if relative not in completed.stdout]
     assert not missing, "Default pytest collection does not reach:\n" + "\n".join(missing)
+
+
+def test_the_application_mirrors_the_adapters_boundary_contract_version() -> None:
+    """The copy cannot drift, because a drifted copy is worse than no copy.
+
+    The application may not import the adapters, so it holds its own constant.
+    This suite may import both, and that is the whole reason it exists: a value
+    the boundary accepts would otherwise fail the persisted check that pins it.
+    """
+
+    from property_tax_adapters.release import outcome as adapters
+    from property_tax_application import (
+        BOUNDARY_CONTRACT_VERSION,
+        DIAGNOSTIC_CODES,
+        DIAGNOSTIC_RETENTION_LIMIT,
+    )
+
+    assert BOUNDARY_CONTRACT_VERSION == adapters.BOUNDARY_CONTRACT_VERSION
+    assert DIAGNOSTIC_RETENTION_LIMIT == adapters.DIAGNOSTIC_RETENTION_LIMIT
+    assert DIAGNOSTIC_CODES == {member.value for member in adapters.ReleaseDiagnosticCode}
+
+
+def test_the_processing_run_values_are_reachable_from_the_package_root() -> None:
+    import property_tax_application as application
+
+    for name in (
+        "ProcessingRunRef",
+        "ReleaseDisposition",
+        "ReleaseDiagnosticRecord",
+        "ReleaseNoticeRecord",
+        "ReleaseProcessingOutcome",
+        "BOUNDARY_CONTRACT_VERSION",
+    ):
+        assert name in application.__all__, name
+        assert hasattr(application, name), name
+
+
+def test_the_run_module_names_no_infrastructure() -> None:
+    """Docstrings stripped first: this module explains what it refuses to name."""
+
+    module = ROOT / "libs/property-tax-application/src/property_tax_application/runs.py"
+    forbidden = ("psycopg", "boto3", "cursor", "connection", "run_key", "GENERATED ALWAYS")
+    found = [
+        f"{name!r} in {text!r}"
+        for text in _strings_and_identifiers(module)
+        for name in forbidden
+        if name in text
+    ]
+    assert not found, found
+
+
+def _strings_and_identifiers(path: Path) -> list[str]:
+    """Every name and literal in a module, with docstrings removed."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in docstrings:
+                found.append(node.value)
+        elif isinstance(node, ast.Name):
+            found.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.append(node.attr)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            found.append(node.name)
+    return found
