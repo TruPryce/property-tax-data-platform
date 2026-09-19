@@ -21,6 +21,7 @@ the assertion can fail independently of what it is checking.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from types import TracebackType
 
 from property_tax_application.canonical import (
@@ -88,6 +89,44 @@ class FakeStore:
         self.completed: set[tuple[ReleaseIdentity, ProcessingRunRef]] = set()
         self._snapshots: dict[AccountSnapshotRef, tuple[ReleaseIdentity, AccountSnapshot]] = {}
         self.candidates_drawn = 0
+        #: How many durable writes succeed before one fails, or None for a store
+        #: that does not fail.  It lives here rather than on the session for two
+        #: reasons.  The session's state is `S1`-`S6` and nothing else, so a
+        #: seventh component would contradict the contract the suite is
+        #: checking; and a durable write fails on the durable side, which is
+        #: what makes the rollback worth proving.
+        self.fail_after_writes: int | None = None
+        #: Set when a write landed before the failure, so a test can tell a
+        #: rollback from a refusal that never touched anything.
+        self.partial_write_applied = False
+        self._writes_this_transaction = 0
+
+    @contextmanager
+    def durable_write(self) -> Iterator[FakeStore]:
+        """All three durable mutations, or none of them.
+
+        The snapshot-and-restore is the point. A completion that raised before
+        touching anything would satisfy "leaves zero records" without ever
+        exercising a rollback, so the injected failure lands *between* writes
+        and this is what has to put the store back.
+        """
+
+        before = (dict(self.loads), dict(self.outcomes), set(self.completed))
+        self._writes_this_transaction = 0
+        try:
+            yield self
+        except BaseException:
+            self.loads, self.outcomes, self.completed = before
+            raise
+
+    def _durably(self, apply: object) -> None:
+        if self.fail_after_writes is not None:
+            if self._writes_this_transaction >= self.fail_after_writes:
+                raise LoadRefused("durable_write", "the completion could not be persisted")
+        self._writes_this_transaction += 1
+        apply()  # type: ignore[operator]
+        if self.fail_after_writes is not None:
+            self.partial_write_applied = True
 
     def persist_snapshot(
         self, ref: AccountSnapshotRef, release: ReleaseIdentity, snapshot: AccountSnapshot
@@ -110,19 +149,9 @@ class FakeStore:
 class FakeRepository:
     """Opens sessions, and answers which parents an account already offers."""
 
-    def __init__(
-        self,
-        store: FakeStore | None = None,
-        *,
-        max_batch_entries: int = 8,
-        durable_write_fails: bool = False,
-    ) -> None:
+    def __init__(self, store: FakeStore | None = None, *, max_batch_entries: int = 8) -> None:
         self.store = store if store is not None else FakeStore()
         self._max_batch_entries = max_batch_entries
-        #: Injects the failure the transition table describes but nothing else
-        #: can produce.  Without it, "a failed completion leaves S1 OPEN and
-        #: everything else unchanged" is a sentence rather than a proof.
-        self.durable_write_fails = durable_write_fails
 
     def open_load(
         self, release: ReleaseIdentity, run: ProcessingRunRef, outcome: ReleaseProcessingOutcome
@@ -142,14 +171,7 @@ class FakeRepository:
         maximum = self._max_batch_entries
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
             raise LoadRefused("S0", "max_batch_entries")
-        return FakeSession(
-            self.store,
-            release,
-            run,
-            outcome,
-            maximum,
-            durable_write_fails=self.durable_write_fails,
-        )
+        return FakeSession(self.store, release, run, outcome, maximum)
 
     def adoptable_snapshots(
         self, account: AccountIdentity, release: ReleaseIdentity
@@ -167,10 +189,7 @@ class FakeSession:
         run: ProcessingRunRef,
         outcome: ReleaseProcessingOutcome,
         max_batch_entries: int,
-        *,
-        durable_write_fails: bool = False,
     ) -> None:
-        self._durable_write_fails = durable_write_fails
         self._store = store
         self._release = release  # S0
         self._run = run  # S0
@@ -331,22 +350,22 @@ class FakeSession:
             raise LoadRefused("C2", str(self._open_account.source_account_id))
 
         key = (self._release, self._run)
-        if self._durable_write_fails:
-            # The failure row of `commit`: zero records, `S1` still OPEN, and
-            # `S2`-`S6` untouched, so the caller may close and commit again or
-            # abort.  Raised before anything is written, which is the property.
-            raise LoadRefused("durable_write", "the completion could not be persisted")
-        if key in self._store.completed:  # branch 1
-            completion = ReleaseLoadCompletion(self._run, True)
-        elif not self._outcome.accepted:  # branch 2
-            self._store.outcomes[key] = self._outcome
-            self._store.completed.add(key)
-            completion = ReleaseLoadCompletion(self._run, False)
-        else:  # branch 3
-            self._store.loads[key] = tuple(self._staged)
-            self._store.outcomes[key] = self._outcome
-            self._store.completed.add(key)
-            completion = ReleaseLoadCompletion(self._run, False)
+        staged = tuple(self._staged)
+        # Everything durable happens inside one transaction, and a failure part
+        # way through it rolls the store back.  `S1`-`S6` are untouched until it
+        # returns, so the failure row needs nothing undone on this side.
+        with self._store.durable_write() as store:
+            if key in store.completed:  # branch 1
+                completion = ReleaseLoadCompletion(self._run, True)
+            elif not self._outcome.accepted:  # branch 2
+                store._durably(lambda: store.outcomes.__setitem__(key, self._outcome))
+                store._durably(lambda: store.completed.add(key))
+                completion = ReleaseLoadCompletion(self._run, False)
+            else:  # branch 3
+                store._durably(lambda: store.loads.__setitem__(key, staged))
+                store._durably(lambda: store.outcomes.__setitem__(key, self._outcome))
+                store._durably(lambda: store.completed.add(key))
+                completion = ReleaseLoadCompletion(self._run, False)
 
         self._status = "COMMITTED"
         self._clear()

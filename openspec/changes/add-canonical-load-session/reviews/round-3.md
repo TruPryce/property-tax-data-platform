@@ -49,6 +49,21 @@ Three blockers and two gaps, all accepted:
    so all seven now read `W1`–`W7`, `W9`–`W12` with `I1` derived. The deliberate historical passages
    — "there is no `W8`", and why — are kept.
 
+## At `d0c2231` — a fourth round on the injection itself
+
+One blocker and one stale heading, both accepted:
+
+6. **[P1] RESOLVED.** The failure injection was hidden session state and raised *before* any durable
+   write. Two defects in one: a seventh component on a session whose contract says it holds `S1`-`S6`
+   and nothing else, and a "failed completion" that never touched the store, so "leaves zero
+   records" passed without a rollback ever happening. The knob now lives on the **store** — where a
+   durable write actually fails — and the failure lands **between** writes, with the records already
+   stored. What the suite observes is the rollback, asserted positively: `partial_write_applied` is
+   true and the store is empty again. Mutation-checked both ways — remove the restore, or fail
+   before the first write, and the suite fails.
+
+7. **[P3] RESOLVED.** One active `W1-W12` heading remained in the suite.
+
 ## Found while implementing
 
 The `I1` assertion was first written **inside** the fake session, and deleting it changed nothing:

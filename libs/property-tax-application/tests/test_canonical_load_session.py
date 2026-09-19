@@ -281,7 +281,7 @@ def test_a_correlation_handle_is_an_integer_that_is_not_a_bool() -> None:
 
 
 # --------------------------------------------------------------------------
-# W1-W12: refused on write, by the session that has the history
+# W1-W7 and W9-W12: refused on write, by the session that has the history
 # --------------------------------------------------------------------------
 
 
@@ -1394,16 +1394,18 @@ def test_the_completion_carrier_refuses_a_raw_run_id() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_failed_completion_leaves_the_state_open_and_unchanged() -> None:
+def test_a_completion_that_fails_part_way_rolls_the_durable_write_back() -> None:
     """The proof that the completion row is atomic rather than described as such.
 
-    Without an injected durable-write failure there was no way to reach this
-    row at all, so "zero records, `S1` still OPEN, everything else unchanged"
-    was a sentence in the table and nothing else.
+    The failure lands **between** the durable writes, not before them: the
+    records are already in the store when it is raised. A completion that
+    refused before touching anything would satisfy "leaves zero records" without
+    exercising a rollback at all, which is the weaker test this replaces.
     """
 
     store = FakeStore()
-    repository = FakeRepository(store, durable_write_fails=True)
+    store.fail_after_writes = 1  # the records land, then the outcome fails
+    repository = FakeRepository(store)
     load = repository.open_load(RELEASE, run(), outcome())
     load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
     before = load.state
@@ -1412,8 +1414,10 @@ def test_a_failed_completion_leaves_the_state_open_and_unchanged() -> None:
         load.commit()
 
     assert refusal.value.rule == "durable_write"
+    assert store.partial_write_applied, "the records were written before it failed"
+    assert store.loads == {}, "and rolled back, which is the property under test"
+    assert store.outcomes == {} and store.completed == set()
     assert load.state == before, "S1 is still OPEN and S2-S6 are untouched"
-    assert store.loads == {} and store.outcomes == {} and store.completed == set()
     require_i1(load)
 
     # A failed completion is not terminal: the caller may still abort, and that
@@ -1422,20 +1426,48 @@ def test_a_failed_completion_leaves_the_state_open_and_unchanged() -> None:
     assert store.loads == {}
 
 
+def test_a_rejected_completion_that_fails_part_way_rolls_back_too() -> None:
+    """The branch that persists no records still writes an outcome and a marker."""
+
+    store = FakeStore()
+    store.fail_after_writes = 1  # the outcome lands, then the completion marker fails
+    _, load = session(store=store, accepted=False)
+
+    with pytest.raises(LoadRefused):
+        load.commit()
+
+    assert store.partial_write_applied
+    assert store.outcomes == {} and store.completed == set()
+
+
 def test_a_failed_completion_can_be_retried_after_the_write_recovers() -> None:
     store = FakeStore()
-    repository = FakeRepository(store, durable_write_fails=True)
+    store.fail_after_writes = 1
+    repository = FakeRepository(store)
     load = repository.open_load(RELEASE, run(), outcome())
     load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
     with pytest.raises(LoadRefused):
         load.commit()
 
-    repository.durable_write_fails = False
-    load._durable_write_fails = False  # the write recovered under the same session
+    store.fail_after_writes = None  # the durable side recovered
     completion = load.commit()
 
     assert completion.already_complete is False
     assert len(store.loads[(RELEASE, run())]) == 1
+
+
+def test_the_session_holds_no_state_beyond_the_six_components() -> None:
+    """The injection is the store's, not the session's.
+
+    A seventh component would contradict the very contract this suite checks,
+    so the knob that makes a durable write fail lives on the durable side —
+    which is also where such a write actually fails.
+    """
+
+    _, load = session()
+
+    assert not any("fail" in name for name in vars(load)), vars(load).keys()
+    assert len(load.state) == 5, "S1, S2, S3, S4 and S6; S5 is the key set of S4"
 
 
 def test_an_abandoned_session_leaves_an_earlier_load_untouched() -> None:

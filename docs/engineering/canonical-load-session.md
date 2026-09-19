@@ -81,8 +81,11 @@ separately.
 
 `libs/property-tax-application/tests/test_canonical_load_session.py` implements the falsification
 matrix, one case per table row or precondition identifier, against an in-memory session that can be
-asked to fail its durable write. Without that injection, the failure row of `commit` is a line in
-the table with no way to reach it, and "atomic" is a description rather than a proof. Two
+asked to fail its durable write **part way through it**. Two details of that matter. The knob lives
+on the store rather than the session, because the session's state is `S1`-`S6` and nothing else, and
+because a durable write fails on the durable side. And the failure lands *between* writes, with the
+records already stored, so what the test observes is the rollback: a completion that refused before
+touching anything would satisfy "leaves zero records" without exercising one. Two
 properties it exists for: every `B` refusal happens at construction with no session in sight, and
 after every refusal the whole state is what it was — proven by retrying the rejected batch's own
 handles and by completing to find none of its records.
