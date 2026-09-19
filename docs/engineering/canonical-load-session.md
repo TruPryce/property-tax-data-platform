@@ -2,16 +2,14 @@
 
 The application-side contract a PostgreSQL loader implements, and the one a use case calls. Normative
 behaviour lives in the
-[canonical load session capability](../../openspec/changes/add-canonical-load-session/specs/canonical-load-session/spec.md),
+[canonical load session capability](../../openspec/specs/canonical-load-session/spec.md),
 whose **transition table** is the authority: the fixed context `S0`, the state components `S1`–`S6`, the
 three operations, and every precondition by identifier. This page does not restate that table.
 Restating it is the failure the capability was separated to correct — the protocol was once
 described across a spec, a design, a decision list, a task list and two handoffs, and no reader
 could tell whether a rule was complete.
 
-Where this page and the capability disagree, the capability wins. The capability is still a change
-rather than a promoted spec, so the link above points into `openspec/changes/`; archiving moves it to
-`openspec/specs/canonical-load-session/spec.md` and this page's link moves with it.
+Where this page and the capability disagree, the capability wins.
 
 ## What the port is
 
