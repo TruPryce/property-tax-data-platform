@@ -64,6 +64,22 @@ One blocker and one stale heading, both accepted:
 
 7. **[P3] RESOLVED.** One active `W1-W12` heading remained in the suite.
 
+## At `b5e539f` — a fifth round on the rollback itself
+
+8. **[P1] RESOLVED.** The rollback **rebound** the store's attributes to snapshot copies rather
+   than restoring the containers. Anything holding a reference taken before the transaction — a
+   component, a caller, a test that captured `store.loads` — kept looking at the original, which
+   still held the failed write, so the rollback existed only for whoever reached it through the
+   store object. Reproduced before fixing: the held reference showed the failed load while
+   `store.loads` showed `{}`. The restore now mutates in place, and a test asserts the container is
+   the same object *and* empty.
+
+9. **[P3] RESOLVED.** Two gaps in the evidence. `partial_write_applied` was never reset, so a later
+   assertion could pass on what an earlier transaction observed; it is cleared at the start of each
+   transaction. And the already-complete branch had no regression against a failing store — a store
+   set to fail on its first write is the sharpest way to say the branch persists nothing, since any
+   write at all would raise instead of reporting the retry.
+
 ## Found while implementing
 
 The `I1` assertion was first written **inside** the fake session, and deleting it changed nothing:

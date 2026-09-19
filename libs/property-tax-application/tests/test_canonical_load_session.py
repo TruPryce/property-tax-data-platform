@@ -1487,3 +1487,70 @@ def test_an_abandoned_session_leaves_an_earlier_load_untouched() -> None:
     assert store.loads == persisted
     assert store.outcomes == recorded
     assert store.completed == {(RELEASE, run())}
+
+
+def test_the_rollback_is_visible_through_a_reference_taken_before_it() -> None:
+    """Restoring means the container, not the attribute.
+
+    Rebinding `store.loads` to a snapshot leaves anything holding the original —
+    another component, a caller, a test that captured it — looking at a
+    container that still holds the failed write. The rollback would then exist
+    only for whoever reaches it through the store object, which is not a
+    rollback at all.
+    """
+
+    store = FakeStore()
+    store.fail_after_writes = 1
+    held = store.loads
+    repository = FakeRepository(store)
+    load = repository.open_load(RELEASE, run(), outcome())
+    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+
+    with pytest.raises(LoadRefused):
+        load.commit()
+
+    assert held is store.loads, "the container was restored, not replaced"
+    assert held == {}, "and the failed write is not visible through it either"
+
+
+def test_the_already_complete_branch_never_touches_the_store() -> None:
+    """Branch 1 persists nothing, so a failing durable side cannot reach it.
+
+    A store that fails on its very first write is the sharpest way to say that:
+    if the branch wrote anything at all — an outcome, a completion marker, a
+    no-op that still counted — this would raise instead of reporting the retry.
+    """
+
+    store = FakeStore()
+    _, first = session(store=store)
+    first.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    first.commit()
+    persisted = dict(store.loads)
+
+    store.fail_after_writes = 0  # any durable write now fails
+    _, retry = session(store=store)
+    retry.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    completion = retry.commit()
+
+    assert completion.already_complete is True
+    assert store.loads == persisted
+    assert store.partial_write_applied is False
+
+
+def test_partial_write_evidence_does_not_carry_across_transactions() -> None:
+    """Otherwise a later assertion passes on what an earlier failure observed."""
+
+    store = FakeStore()
+    store.fail_after_writes = 1
+    _, failing = session(store=store)
+    failing.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    with pytest.raises(LoadRefused):
+        failing.commit()
+    assert store.partial_write_applied is True
+
+    store.fail_after_writes = None
+    _, succeeding = session(store=store, run_id="run-2")
+    succeeding.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    succeeding.commit()
+
+    assert store.partial_write_applied is False, "the flag belongs to one transaction"

@@ -109,14 +109,31 @@ class FakeStore:
         touching anything would satisfy "leaves zero records" without ever
         exercising a rollback, so the injected failure lands *between* writes
         and this is what has to put the store back.
+
+        The restore mutates the containers **in place** rather than rebinding
+        the attributes. Rebinding leaves anything holding a reference taken
+        before the transaction — another component, a caller, a test that
+        captured `store.loads` — looking at the original container, which still
+        holds the failed write. The rollback would then be visible only through
+        the store object itself, which is not a rollback.
         """
 
-        before = (dict(self.loads), dict(self.outcomes), set(self.completed))
+        loads_before = dict(self.loads)
+        outcomes_before = dict(self.outcomes)
+        completed_before = set(self.completed)
         self._writes_this_transaction = 0
+        # Per-transaction evidence, reset here so a later assertion cannot pass
+        # on what an earlier transaction observed.
+        self.partial_write_applied = False
         try:
             yield self
         except BaseException:
-            self.loads, self.outcomes, self.completed = before
+            self.loads.clear()
+            self.loads.update(loads_before)
+            self.outcomes.clear()
+            self.outcomes.update(outcomes_before)
+            self.completed.clear()
+            self.completed.update(completed_before)
             raise
 
     def _durably(self, apply: object) -> None:
