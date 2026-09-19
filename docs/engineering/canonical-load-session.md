@@ -81,7 +81,9 @@ separately.
 
 `libs/property-tax-application/tests/test_canonical_load_session.py` implements the falsification
 matrix, one case per table row or precondition identifier, against an in-memory session that can be
-asked to fail its durable write **part way through it**. Two details of that matter. The knob lives
+asked to fail its durable write at any point in it, including at the transaction's own commit —
+every write landing and the transaction failing anyway, which is what a database does when COMMIT is
+the thing that goes wrong, and the only failure that reaches the last mutation's rollback. Two details of that matter. The knob lives
 on the store rather than the session, because the session's state is `S1`-`S6` and nothing else, and
 because a durable write fails on the durable side. And the failure lands *between* writes, with the
 records already stored, so what the test observes is the rollback: a completion that refused before

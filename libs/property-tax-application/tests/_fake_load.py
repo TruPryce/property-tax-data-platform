@@ -90,7 +90,12 @@ class FakeStore:
         self._snapshots: dict[AccountSnapshotRef, tuple[ReleaseIdentity, AccountSnapshot]] = {}
         self.candidates_drawn = 0
         #: How many durable writes succeed before one fails, or None for a store
-        #: that does not fail.  It lives here rather than on the session for two
+        #: that does not fail.  Setting it to the number of writes a branch
+        #: makes means every write lands and the transaction itself then fails,
+        #: which is how a database behaves when COMMIT is what goes wrong — and
+        #: is the only failure that can reach the last mutation's rollback.
+        #:
+        #: It lives here rather than on the session for two
         #: reasons.  The session's state is `S1`-`S6` and nothing else, so a
         #: seventh component would contradict the contract the suite is
         #: checking; and a durable write fails on the durable side, which is
@@ -127,6 +132,15 @@ class FakeStore:
         self.partial_write_applied = False
         try:
             yield self
+            if (
+                self.fail_after_writes is not None
+                and self._writes_this_transaction > 0
+                and self._writes_this_transaction >= self.fail_after_writes
+            ):
+                # Every write landed and the transaction failed anyway. Without
+                # this the last mutation's restore is unreachable, and
+                # unreachable code in a rollback is a rollback nobody has tested.
+                raise LoadRefused("durable_write", "the transaction could not be committed")
         except BaseException:
             self.loads.clear()
             self.loads.update(loads_before)

@@ -80,6 +80,20 @@ One blocker and one stale heading, both accepted:
    set to fail on its first write is the sharpest way to say the branch persists nothing, since any
    write at all would raise instead of reporting the retry.
 
+## At `f3539df` — a sixth round on the same rollback
+
+10. **[P1] RESOLVED.** The rollback proof covered `loads` and neither of the other two containers.
+    Confirmed before fixing: rebinding `outcomes`, and removing the `completed` restore entirely,
+    both survived the whole suite. The failure point is now parameterised over **every** durable
+    mutation in each branch, and each case asserts identity and contents for all three containers,
+    with one case that has an earlier load to lose rather than only asserting emptiness.
+
+    Reaching the last mutation's rollback needed a failure that does not exist yet in the fake: a
+    transaction where every write lands and the commit itself fails, which is what a database does
+    when COMMIT is what goes wrong. Without it, restoring the completion marker was code no test
+    could exercise — the same unreachable-rule defect as `W8`, this time in the suite rather than
+    the spec. Each container's restore now fails the suite when removed.
+
 ## Found while implementing
 
 The `I1` assertion was first written **inside** the fake session, and deleting it changed nothing:

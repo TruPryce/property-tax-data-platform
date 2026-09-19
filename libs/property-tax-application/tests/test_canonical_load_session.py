@@ -1489,28 +1489,96 @@ def test_an_abandoned_session_leaves_an_earlier_load_untouched() -> None:
     assert store.completed == {(RELEASE, run())}
 
 
-def test_the_rollback_is_visible_through_a_reference_taken_before_it() -> None:
-    """Restoring means the container, not the attribute.
+def durable_state(store: FakeStore) -> tuple[object, object, object]:
+    """Every durable container, so a proof cannot cover one and miss two."""
 
-    Rebinding `store.loads` to a snapshot leaves anything holding the original —
-    another component, a caller, a test that captured it — looking at a
-    container that still holds the failed write. The rollback would then exist
-    only for whoever reaches it through the store object, which is not a
-    rollback at all.
+    return (store.loads, store.outcomes, store.completed)
+
+
+@pytest.mark.parametrize("fail_after", [0, 1, 2, 3])
+def test_a_completion_rolls_back_from_a_failure_at_any_durable_write(fail_after: int) -> None:
+    """A failure point after every mutation, not just after the first.
+
+    The accepted branch writes three things — the records, the outcome, the
+    completion marker — and a proof that only injects between the first and the
+    second says nothing about the other two. Each parameter here stops the
+    transaction at a different point, and every one of them has to leave all
+    three containers as they were.
+
+    The last parameter is the one that reaches the final mutation's rollback:
+    every write lands and the transaction itself fails, which is what a database
+    does when COMMIT is the thing that goes wrong. Without it, restoring the
+    completion marker is code no test can exercise.
     """
 
     store = FakeStore()
-    store.fail_after_writes = 1
-    held = store.loads
+    store.fail_after_writes = fail_after
+    held = durable_state(store)
     repository = FakeRepository(store)
     load = repository.open_load(RELEASE, run(), outcome())
     load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    before = load.state
+
+    with pytest.raises(LoadRefused) as refusal:
+        load.commit()
+
+    assert refusal.value.rule == "durable_write"
+    assert store.partial_write_applied is (fail_after > 0)
+    assert durable_state(store) == (held[0], held[1], held[2])
+    assert all(a is b for a, b in zip(durable_state(store), held, strict=True)), (
+        "every container was restored, not replaced: a rebind leaves anything "
+        "holding the original looking at the failed write"
+    )
+    assert store.loads == {} and store.outcomes == {} and store.completed == set()
+    assert load.state == before
+    require_i1(load)
+
+
+@pytest.mark.parametrize("fail_after", [0, 1, 2])
+def test_a_rejected_completion_rolls_back_from_a_failure_at_any_durable_write(
+    fail_after: int,
+) -> None:
+    """The rejected branch writes two things, so both positions are exercised."""
+
+    store = FakeStore()
+    store.fail_after_writes = fail_after
+    held = durable_state(store)
+    _, load = session(store=store, accepted=False)
 
     with pytest.raises(LoadRefused):
         load.commit()
 
-    assert held is store.loads, "the container was restored, not replaced"
-    assert held == {}, "and the failed write is not visible through it either"
+    assert store.partial_write_applied is (fail_after > 0)
+    assert all(a is b for a, b in zip(durable_state(store), held, strict=True))
+    assert store.outcomes == {} and store.completed == set()
+
+
+def test_a_rollback_restores_what_was_already_there() -> None:
+    """Not just emptiness: an earlier load's rows survive a later failure.
+
+    Asserting the store is empty afterwards passes for a rollback that throws
+    everything away. This one has something to lose.
+    """
+
+    store = FakeStore()
+    _, first = session(store=store)
+    first.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot()),)))
+    first.commit()
+    persisted_loads = dict(store.loads)
+    persisted_outcomes = dict(store.outcomes)
+    persisted_completed = set(store.completed)
+    held = durable_state(store)
+
+    store.fail_after_writes = 2  # fails at the completion marker of the second run
+    _, second = session(store=store, run_id="run-2")
+    second.write(CanonicalRecordBatch(entries=(CorrelatedRecord(snapshot(OTHER_ACCOUNT)),)))
+    with pytest.raises(LoadRefused):
+        second.commit()
+
+    assert all(a is b for a, b in zip(durable_state(store), held, strict=True))
+    assert store.loads == persisted_loads
+    assert store.outcomes == persisted_outcomes
+    assert store.completed == persisted_completed
 
 
 def test_the_already_complete_branch_never_touches_the_store() -> None:
