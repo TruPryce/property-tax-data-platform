@@ -28,7 +28,7 @@ transition table in the spec, with every requirement, scenario, and task referri
 - No code, no migration, no adapter, and no orchestration change. Implementation of the tasks in
   this change waits for an accepting review round **and** for the values it cites —
   `ProcessingRunRef`, `ReleaseDisposition`, and `ReleaseProcessingOutcome`, owned by the
-  `processing-run-values` capability that `add-processing-run-values` adds. Tasks 1.2 and 2.1
+  promoted `processing-run-values` capability. Tasks 1.2 and 2.1
   import those concrete types. No substitute is
   permitted, structural or otherwise: an empty runtime-checkable protocol accepts every object,
   including the raw persistence value the reference type exists to keep out, and annotations that

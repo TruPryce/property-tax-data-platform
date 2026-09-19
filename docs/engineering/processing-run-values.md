@@ -2,11 +2,9 @@
 
 The vocabulary the application owns for a processing run: the reference that names one, and the
 outcome that describes what processing it produced. Normative behaviour lives in the
-[processing-run values capability](../../openspec/changes/add-processing-run-values/specs/processing-run-values/spec.md);
+[processing-run values capability](../../openspec/specs/processing-run-values/spec.md);
 this page records what each value carries and why, and the consequences a caller has to know. Where
-the two disagree the capability wins. The capability is still a change rather than a promoted spec,
-so the link points into `openspec/changes/`; archiving moves it to `openspec/specs/` and this link
-moves with it.
+the two disagree the capability wins.
 
 This is **values only**. Starting a run, holding it, resuming an abandoned one, finishing it, and
 the repository that does all four belong to the run lifecycle and are planned separately.
