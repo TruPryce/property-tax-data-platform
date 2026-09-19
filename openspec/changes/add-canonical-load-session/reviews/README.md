@@ -68,13 +68,20 @@ that is a `P1`, because it is the class of defect that produced ten rounds.
 
 | Scope | Status | Last round | Commit |
 | --- | --- | --- | --- |
-| `canonical-load` | REVISE (round 1 ACCEPTed the plan at `51ef6bd`; round 2 reviewed the first implementation at `d5e024f` and found two defects in the **plan** that only writing the code could expose — `W8` unreachable, and rejected completions not retry-idempotent — plus a locator that admitted mutable values and task paths that did not authorize what the implementation wrote. One P1 stays open and belongs to the implementation PR: no substitute for the cited `processing-run` types) | 2 | this correction |
+| `canonical-load` | REVISE (round 1 ACCEPTed the plan; round 2 reviewed the first implementation at `d5e024f`. Its plan defects are fixed and merged as PR #122; its last open P1 — no substitute for the cited `processing-run` types — is closed by the second implementation, which imports them from the capability merged as PRs #123 and #125) | 3 | PRs #122, #126, #127, then this implementation |
 
-**Change status:** ACCEPTED, then corrected. The plan was accepted at round 1
-and the first implementation attempt exposed two defects in it, which round 2
-records and this correction fixes. Implementation resumes against the corrected
-plan, and only once the `processing-run` value slice it cites exists: no
-structural substitute is permitted for a type this capability does not own.
+**Change status:** ACCEPTED, corrected, and implemented against the corrected
+plan. Round 2's three blockers are closed: the plan defects merged as PR #122,
+the `processing-run` values this capability cites merged as PRs #123 and #125
+and are imported rather than substituted, and the implementation is a commit of
+its own on top of the accepted plan rather than one commit doing three jobs.
+
+Two corrections the second implementation made beyond the review's list, both
+found by mutation-testing rather than by reading: the `I1` invariant is asserted
+**from outside the session**, because a subject checking its own invariant fails
+together with the thing it checks and nothing notices; and completion is recorded
+independently of the rows it persisted, so a rejected pairing is idempotent on
+retry.
 
 The `W8` story is worth keeping in view, because it is the failure mode this
 whole separation exists to remove and it survived into an accepted plan. Round 1

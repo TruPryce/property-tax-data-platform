@@ -300,3 +300,63 @@ def _strings_and_identifiers(path: Path) -> list[str]:
         elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             found.append(node.name)
     return found
+
+
+def test_the_canonical_port_is_reachable_from_the_package_root() -> None:
+    import property_tax_application as application
+
+    for name in (
+        "CanonicalReleaseRepository",
+        "ReleaseLoadSession",
+        "CanonicalRecordBatch",
+        "CorrelatedRecord",
+        "CorrelationHandle",
+        "AdoptedParent",
+        "AdoptableSnapshot",
+        "AccountSnapshotRef",
+        "ReleaseLoadCompletion",
+        "UnknownAccountSnapshot",
+        "AdoptableSnapshotMismatch",
+    ):
+        assert name in application.__all__, name
+        assert hasattr(application, name), name
+    assert application.__all__ == sorted(application.__all__)
+
+
+def test_the_canonical_port_carries_the_owned_run_and_outcome_types() -> None:
+    """No substitute. The empty protocols that accepted every object are gone.
+
+    An empty runtime-checkable protocol returns True for isinstance(None, ...),
+    isinstance(7, ...) and isinstance("raw-run-id", ...), so it accepted exactly
+    the raw persistence value the reference type exists to keep out.
+    """
+
+    import property_tax_application.canonical as canonical
+    from property_tax_application.runs import ProcessingRunRef, ReleaseProcessingOutcome
+
+    assert canonical.ProcessingRunRef is ProcessingRunRef
+    assert canonical.ReleaseProcessingOutcome is ReleaseProcessingOutcome
+    for raw in (None, 7, "raw-run-id"):
+        assert not isinstance(raw, ProcessingRunRef)
+
+
+def test_the_canonical_module_names_no_infrastructure() -> None:
+    module = ROOT / "libs/property-tax-application/src/property_tax_application/canonical.py"
+    forbidden = (
+        "canonical.",
+        "silver.",
+        "ingestion.",
+        "psycopg",
+        "boto3",
+        "cursor",
+        "ON CONFLICT",
+        "snapshot_key",
+        "load_key",
+    )
+    found = [
+        f"{name!r} in {text!r}"
+        for text in _strings_and_identifiers(module)
+        for name in forbidden
+        if name in text
+    ]
+    assert not found, found
