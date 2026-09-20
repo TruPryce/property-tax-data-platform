@@ -49,6 +49,19 @@
       "required_cross_issues": [
         43
       ]
+    },
+    "119": {
+      "write_roots": [
+        "libs/property-tax-application/",
+        "libs/property-tax-adapters/src/property_tax_adapters/objectstore/",
+        "libs/property-tax-adapters/src/property_tax_adapters/sources/texas/",
+        "libs/property-tax-adapters/tests/objectstore/",
+        "libs/AGENTS.md",
+        "tests/architecture/",
+        "docs/engineering/"
+      ],
+      "required_cross_issues": [],
+      "note": "Application port boundary, bootstrap 2.3. The application package is the subject. Three narrower adapter roots are deliberate rather than a blanket libs/property-tax-adapters/: the S3 manifest serializer must move with the manifest value it serializes, since shipping one without the other leaves a value the writer cannot write; the six Texas county definitions are populated with the expected media types the accepted registry requirement names, which a shared default cannot express; and the objectstore tests cover both. No county layout, parser, or acquisition behaviour is in scope, and no migration is."
     }
   },
   "capabilities": {
