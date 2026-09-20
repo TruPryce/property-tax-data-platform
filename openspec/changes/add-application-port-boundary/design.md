@@ -414,6 +414,17 @@ Each case names a defect. A case that cannot fail is not on this list.
 - A `ManifestIndex` fake returns one `ManifestRef` for a re-registered acquisition, distinct
   references for two acquisitions of one artifact, and attaches a later partition without altering
   what was recorded.
+- **A partition's source as-of instant survives the manifest round trip.** A v2 manifest whose
+  partition carries an instant serializes and deserializes to an equal value with that instant
+  intact and still timezone-aware; one whose partition carries none round-trips as *absence*, and
+  the acquisition instant is not substituted on the way out any more than on the way in. Two
+  partitions of one manifest carrying different instants each keep their own. This is the case the
+  durable home rests on: if the instant does not survive serialization, nothing a later publication
+  reads is what discovery established.
+- **The instant is not part of acquisition equivalence.** Two recordings differing only in a
+  partition's as-of instant are the same acquisition, because partitions attach after recording and
+  are excluded from the compared components. A preimage that included it would manufacture a second
+  acquisition out of a fact learned later.
 - Recording one acquisition twice yields one `ManifestRef`, and two releases carried by one artifact
   bind to that same reference.
 - A run reference is never required to be invented — every port takes the reference type rather than
@@ -451,6 +462,14 @@ Each case names a defect. A case that cannot fail is not on this list.
   and that new run activates. Proving the refusal without proving the recovery would leave the
   remedy asserted rather than demonstrated.
 - `PublicationAttempt.fail()` leaves the previously current publication current.
+- **A publication that never saw the candidate still receives the instant.** An attempt opened in a
+  process holding only the run and its `ManifestRef` — no candidate in memory, discovery and
+  acquisition having completed earlier — receives the release's instant from the acquisition's
+  partition. The same attempt retried after the source page has been edited receives the same
+  instant, because the durable record is what it reads; a fake whose page answers differently on a
+  second read must not change the result.
+- **A release whose partition records absence publishes absence.** The attempt records it, and no
+  acquisition instant, clock reading, or other available time is substituted for it.
 - Two evidences drawn from one artifact carry their own source as-of instants and each attempt opened
   for them receives its own; a page-established instant for the export reaches both releases drawn
   from it; and an attempt opened for a release whose evidence carries none receives its absence
