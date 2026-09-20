@@ -147,6 +147,36 @@ The system SHALL provide an application-owned reference identifying a recorded a
 
 Recording the same acquisition again SHALL yield the same reference, so that several logical releases carried by one artifact bind their runs to one acquisition rather than to duplicates of it. The reference SHALL be an opaque locator on the same terms as any other persistence-generated handle.
 
+**The index SHALL offer a read path for what it recorded, not only writes.** Given a manifest
+reference and a logical release, it SHALL return the partition evidence recorded for that release —
+the source as-of instant among it — or state that no partition was attached for it. Without this
+the instant has a durable *location* and no boundary able to retrieve it, and a publication
+resuming with only the run's reference would have to record absence or rediscover a mutable page:
+exactly the two outcomes recording it was meant to prevent.
+
+The lookup SHALL be acquisition-scoped and SHALL take the reference rather than any locator,
+checksum, or storage path, so a caller never reconstructs an identity it was handed. It SHALL
+distinguish *no partition attached for that release* from *a partition attached that established no
+instant*, because those are different facts and a publication records them differently: the first
+means the release is not part of this acquisition, the second that the source established no
+freshness. Returning `None` for both would make a missing attachment look like a source that said
+nothing.
+
+Reading SHALL change nothing. The index remains the relational counterpart of the object-store
+record, and this operation SHALL NOT be a second way to write one.
+
+#### Scenario: Recorded freshness is read back for a release
+- **WHEN** a caller holding a manifest reference asks for the partition evidence of one logical release of that acquisition
+- **THEN** it receives the evidence recorded for that release, the source as-of instant included, without a candidate in memory and without reading the source page
+
+#### Scenario: A release was never attached to that acquisition
+- **WHEN** the lookup names a logical release for which no partition was attached
+- **THEN** it says so, distinguishably from a partition that was attached and established no instant, because a release that is not part of the acquisition and a source that published no freshness are different facts
+
+#### Scenario: The read path is examined for writes
+- **WHEN** the lookup is examined
+- **THEN** it changes nothing it reads, and it is not a second way to record or attach
+
 #### Scenario: A manifest is recorded and referenced
 - **WHEN** an acquisition manifest is recorded
 - **THEN** a reference to it is returned, and no caller derives that reference from a storage locator or a checksum

@@ -39,7 +39,12 @@ A resolved definition SHALL describe the expected media types of the source, and
 - **THEN** it describes the expected media types of the source and carries no credential
 
 ### Requirement: Discovery carries bounded evidence and distinguishes a new release from an unchanged one
-Release discovery SHALL return, for each observed source, either a source candidate or a no-change result. A source candidate SHALL carry the jurisdiction, the source locator, the remote metadata, the source as-of evidence, and the page evidence the source published. A no-change result SHALL be returned where remote metadata and content identity match a release already acquired, and SHALL NOT require the artifact to be downloaded again.
+Release discovery SHALL observe **one jurisdiction per invocation** and SHALL return, for that
+source, either a source candidate or a no-change result. It SHALL NOT accept a cohort of
+jurisdictions: six counties are six independent publishers, and a cohort operation would have to
+either fail all six when one page times out or return a partial result needing a per-jurisdiction
+error carrier this boundary does not define. Fanning out across the six is the caller's, which is
+where the schedule, the ordering, and the per-county failure handling already live. A source candidate SHALL carry the jurisdiction, the source locator, the remote metadata, the source as-of evidence, and the page evidence the source published. A no-change result SHALL be returned where remote metadata and content identity match a release already acquired, and SHALL NOT require the artifact to be downloaded again.
 
 Discovery SHALL NOT be required to establish a tax year or a release kind. Where the publisher's page establishes those facts, the source candidate SHALL carry the resulting logical release evidence, one entry per logical release; where they are established only by verified source content, the candidate SHALL carry none and that evidence SHALL be produced during parsing instead. One source candidate SHALL therefore be able to yield several logical releases backed by one artifact.
 
@@ -60,6 +65,18 @@ require, and a fake-only contract test would pass either way. The fields SHALL b
 | `directory_path` | The path the artifact was listed at, where the source is a directory listing | optional |
 | `published_label` | What the page displayed as the release's date or version, **as text** | optional |
 
+Each text field SHALL carry a **stated** maximum, not an implied one, because every one of them is
+publisher-controlled and an unstated bound is the bound the first implementation happens to pick:
+
+| Field | Maximum | Why that number |
+| --- | --- | --- |
+| `page_url` | 2,048 characters | The locator bound the acquisition boundary already states as `MAX_LOCATOR_CHARS`; a page URL is a locator and there is no reason for a second number |
+| `section_heading`, `link_label`, `directory_path`, `published_label` | 256 characters each | The bounded-field length the application already uses for a name-like fact, stated as `MAX_FIELD_CHARS` |
+
+A value exceeding its maximum SHALL be refused rather than truncated. Truncating would record
+something the page did not say while looking like evidence of what it did, and a heading cut at 256
+characters is not the heading.
+
 `published_label` SHALL remain text and SHALL NOT be parsed into an instant here. The instant a
 release was current as of is `LogicalReleaseEvidence`'s, established by the rules above; a page's
 displayed label is evidence of what the page said, which is a different fact and is frequently not
@@ -75,6 +92,10 @@ present.
 
 Every evidence carrier SHALL be bounded, each text field to a stated maximum, and the carrier SHALL have nowhere to put a page body, an HTML fragment, a script, or a credential — not by convention but because no field admits one. Discovery SHALL NOT return credentials, arbitrary source content, or an unbounded payload, and SHALL NOT perform county parsing or county field mapping.
 
+#### Scenario: Discovery is examined for its invocation shape
+- **WHEN** the discovery port is examined
+- **THEN** it observes one jurisdiction and returns one result for it, and there is no operation taking a cohort, so one publisher being unreachable cannot fail another
+
 #### Scenario: A new release is observed
 - **WHEN** discovery observes a release not already acquired
 - **THEN** a candidate is returned carrying its locator, remote metadata, source as-of evidence, and page evidence, and carrying no credential and no source row
@@ -85,7 +106,11 @@ Every evidence carrier SHALL be bounded, each text field to a stated maximum, an
 
 #### Scenario: Page evidence is examined for what it carries
 - **WHEN** the page evidence carrier is examined
-- **THEN** it has a named bounded field for the discovery instant, the page read, whether rendering was required, the section heading, the visible link label, the directory path, and the displayed label, and no field for a page body, an HTML fragment, or anything unbounded
+- **THEN** it has a named bounded field for the discovery instant, the page read, whether rendering was required, the section heading, the visible link label, the directory path, and the displayed label, each with the maximum stated above, and no field for a page body, an HTML fragment, or anything unbounded
+
+#### Scenario: A publisher supplies an oversized heading
+- **WHEN** a page carries a heading, label, path, or displayed label longer than the stated maximum for that field
+- **THEN** the evidence is refused rather than truncated, because a heading cut at its limit is not the heading and would read as evidence of something the page did not say
 
 #### Scenario: A rendered page and a fetched page are distinguished
 - **WHEN** one county's link exists in the fetched bytes and another's appears only after the page is rendered

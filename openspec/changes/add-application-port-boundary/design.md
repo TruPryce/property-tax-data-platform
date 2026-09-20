@@ -381,6 +381,16 @@ Each case names a defect. A case that cannot fail is not on this list.
 
 ### `registry-and-discovery`
 
+- **Page evidence is bounded at a stated number, and over-length is refused rather than truncated.**
+  Each of the four text fields at 256 and the page URL at 2,048, asserted at the boundary and one
+  character past it, because a limit nothing tests is the limit the first implementation picks. A
+  heading cut at its maximum is not the heading, and truncation would read as evidence of something
+  the page did not say.
+- **Evidence carrying only when and where it looked is refused**, and each optional fact is absent
+  rather than filled with a placeholder when it does not apply.
+- **Discovery observes one jurisdiction per call.** There is no cohort operation, and a fake whose
+  page raises for one jurisdiction leaves the others' results unaffected — which is the property
+  the per-jurisdiction shape exists for.
 - An unregistered jurisdiction raises `UnsupportedSource` **before any network call**, proved with a
   fake that fails the test if asked to acquire.
 - A registered jurisdiction resolves with no release kind supplied.
@@ -462,6 +472,11 @@ Each case names a defect. A case that cannot fail is not on this list.
   and that new run activates. Proving the refusal without proving the recovery would leave the
   remedy asserted rather than demonstrated.
 - `PublicationAttempt.fail()` leaves the previously current publication current.
+- **The read path returns what the write path recorded.** A lookup on a `ManifestRef` and a logical
+  release returns that partition's evidence with its instant; a release never attached to that
+  acquisition is reported distinguishably from a partition attached with no instant, since a
+  release outside the acquisition and a source that published no freshness are different facts; and
+  the lookup writes nothing a subsequent read can see.
 - **A publication that never saw the candidate still receives the instant.** An attempt opened in a
   process holding only the run and its `ManifestRef` — no candidate in memory, discovery and
   acquisition having completed earlier — receives the release's instant from the acquisition's
@@ -527,7 +542,34 @@ One construction signature does change: `ReleaseManifest` gains a required `juri
 
 **To bootstrap 2.4.** The discover, acquire, parse, normalize, validate, and publish use cases coordinate `SourceRegistry`, `ReleaseDiscovery`, `ArtifactSink`, `BronzeStore`, `ManifestIndex`, `ProcessingRunRepository`, `CanonicalReleaseRepository`, `QualityRepository`, `PublicationRepository`, and `Clock` — never an adapter type. Minting correlation handles and carrying adoptions in the batches it builds are 2.4's, and are stated by `add-canonical-load-session`, which owns that port. It also owns retiring the S3 adapter's `utc_now()` in favour of the injected clock.
 
+## One jurisdiction per call
+
+`ReleaseDiscovery` observes **one jurisdiction** and returns that source's candidate or its
+no-change result. It does not accept a cohort. Leaving this open would have made an implementer
+define a public application boundary outside the plan, and it decides four things at once.
+
+**Failure isolation.** Six counties are six independent publishers. A cohort call has to answer
+what happens when Tarrant's page times out and the other five are fine — either it fails the batch,
+which lets one county stop five, or it returns a partial result that needs a per-jurisdiction error
+carrier this plan does not have and would have to invent. Per-jurisdiction calls make the question
+disappear rather than answering it.
+
+**Return cardinality.** One call, one result, and the result is already a two-state value:
+candidate or unchanged. A cohort would return a mapping whose absent keys mean something —
+unreachable? unregistered? not scheduled? — and that meaning would live nowhere.
+
+**The registry it pairs with.** `SourceRegistry` resolves *a* jurisdiction, with the release kind
+optional. Discovery taking a cohort against a registry resolving one source would put the fan-out
+in two shapes at one seam.
+
+**Who fans out.** Bootstrap 2.4 schedules the six counties and already owns their ordering,
+concurrency, and per-county failure handling. A cohort operation would move that decision into a
+port that cannot see the schedule, and `AGENTS.md` asks that the six stay visible — six calls are
+visible in a way one call over a hidden list is not.
+
+A caller wanting all six makes six calls. That is not a cost worth designing around, and it is the
+shape that keeps one county's bad afternoon from being six counties' outage.
+
 ## Unresolved questions
 
-- Whether `ReleaseDiscovery` should return candidates for one jurisdiction or accept a cohort, which depends on how 2.4 shapes the six-county scheduled workflow.
 - Whether publication products beyond the accepted three ever need a distinct session shape. Out of scope until a fourth product exists.

@@ -169,6 +169,14 @@ batch's records from its state. That leaves
 deliberately until those two scopes' dispositions land, which is the sequence the
 round-9 reviewer recommended — shorten a task once its final contract is known.
 
+An automated round at `eeaf972` found three defects in the dispositions
+themselves, all accepted and fixed: the as-of instant had a durable location
+and no boundary able to read it back; the page-evidence fields required a
+stated maximum and stated none; and the discovery port's invocation shape was
+still an open question a task was expected to implement. `ManifestIndex` gains
+a partition lookup, the limits are numbers, and discovery observes one
+jurisdiction per call.
+
 Next review: `quality-publication-clock` for round 4's source-as-of durability,
 which is now the last open P1 in this change. `canonical-load` is reviewed in its
 own change and its own ledger, and this change resumes only after that capability
