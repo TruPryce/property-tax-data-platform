@@ -59,6 +59,6 @@ profiles remain fail-closed and no implementation command is made eligible by th
 
 ## Related
 
-- [Issue-to-OpenSpec planning OpenSpec change](../../openspec/changes/add-issue-to-openspec-planning/)
+- [Issue-to-OpenSpec planning OpenSpec change](../../openspec/changes/archive/2026-09-20-add-issue-to-openspec-planning/)
 - [Runner kernel ADR](0005-mode-aware-runner-kernel.md)
 - [GitHub control-plane ADR](0006-github-native-countyforge-control-plane.md)

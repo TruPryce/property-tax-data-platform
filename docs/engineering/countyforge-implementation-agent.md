@@ -141,4 +141,4 @@ partial task results remain evidence only and do not create a draft PR.
 - [ADR-0008](../decisions/0008-isolated-openspec-to-code-implementation.md)
 - [Runner kernel guide](countyforge-runner-kernel.md)
 - [GitHub control-plane guide](countyforge-github-control-plane.md)
-- [Issue #7 OpenSpec design](../../openspec/changes/add-isolated-openspec-to-code-agents/design.md)
+- [Issue #7 OpenSpec design](../../openspec/changes/archive/2026-09-20-add-isolated-openspec-to-code-agents/design.md)

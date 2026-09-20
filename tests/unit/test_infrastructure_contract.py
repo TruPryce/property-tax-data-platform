@@ -1219,12 +1219,14 @@ def test_documentation_does_not_overclaim_the_recovery_point() -> None:
         REPOSITORY_ROOT
         / "openspec"
         / "changes"
-        / "add-postgresql-recovery-foundation"
+        / "archive"
+        / "2026-09-20-add-postgresql-recovery-foundation"
         / "design.md",
         REPOSITORY_ROOT
         / "openspec"
         / "changes"
-        / "add-postgresql-recovery-foundation"
+        / "archive"
+        / "2026-09-20-add-postgresql-recovery-foundation"
         / "proposal.md",
         COMPOSE_FILE,
     ]
@@ -1259,7 +1261,8 @@ def test_archive_failure_mechanism_is_stated_accurately() -> None:
         REPOSITORY_ROOT
         / "openspec"
         / "changes"
-        / "add-postgresql-recovery-foundation"
+        / "archive"
+        / "2026-09-20-add-postgresql-recovery-foundation"
         / "design.md"
     ).read_text(encoding="utf-8")
     for text in (runbook, design):
