@@ -91,8 +91,12 @@ commit unless a split-file path is given.
    the six county modules as write roots, or cut the storage-grain redesign
    into its own change under its own issue and leave task 1.2 with the value
    and serializer corrections only.
-6. [P3] UNRESOLVED — `surface-and-proof`. Needs: the PR body replaced by a
-   short summary that links to `reviews/README.md` for round and scope status.
+6. [P3] **RESOLVED** — `surface-and-proof`. The PR body is now a short summary
+   that says what the change adds, what has left it for the two capabilities
+   promoted on `main`, and that round and scope status live in
+   `reviews/README.md` and are not to be inferred from the body or from any
+   single scope. Per-commit gate results stay in the PR comments, pinned to the
+   head each was run against.
 7. [P3] RESOLVED — `surface-and-proof`. `.openspec.yaml` added in the commit
    that introduced this ledger.
 8. [P3] UNRESOLVED — `canonical-load`. A question for the maintainer, recorded
