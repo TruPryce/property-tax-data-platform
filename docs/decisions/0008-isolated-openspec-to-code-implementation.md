@@ -65,4 +65,4 @@ fixes, richer approval, and operational integrations without weakening this prof
 - [Issue-to-OpenSpec planning ADR](0007-issue-to-openspec-planning.md)
 - [CountyForge runner kernel](../engineering/countyforge-runner-kernel.md)
 - [CountyForge GitHub control plane](../engineering/countyforge-github-control-plane.md)
-- [Issue #7 OpenSpec design](../../openspec/changes/add-isolated-openspec-to-code-agents/design.md)
+- [Issue #7 OpenSpec design](../../openspec/changes/archive/2026-09-20-add-isolated-openspec-to-code-agents/design.md)

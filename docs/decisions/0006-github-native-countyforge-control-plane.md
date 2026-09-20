@@ -71,6 +71,6 @@ Only `/countyforge review` can execute a model workflow, through `review.packet-
 - [Control-plane engineering guide](../engineering/countyforge-github-control-plane.md)
 - [GitHub operations](../operations/countyforge-github-operations.md)
 - [Mode-aware runner decision](0005-mode-aware-runner-kernel.md)
-- [Control-plane OpenSpec](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md)
+- [Control-plane OpenSpec](../../openspec/specs/github-agent-control-plane/spec.md)
 - [Issue #5](https://github.com/TruPryce/property-tax-data-platform/issues/5)
 - [Parent program #2](https://github.com/TruPryce/property-tax-data-platform/issues/2)

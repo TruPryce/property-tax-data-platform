@@ -1,11 +1,8 @@
+The replaceable-storage and PostgreSQL recovery foundation is defined in the
+[accepted runtime specification](../../../../specs/platform-runtime-operations/spec.md).
+The remaining bootstrap runtime requirements follow.
+
 ## ADDED Requirements
-
-### Requirement: Independent platform runtime
-The system SHALL run on an independently managed Akamai Cloud VPS in Dallas `us-central` using Ubuntu 24.04 LTS, 16 GB shared CPU memory, and a 250 GB attached volume. PostgreSQL, Airflow, ingestion workers, and `appraisal-api` SHALL use separate logical databases or schemas and least-privilege roles.
-
-#### Scenario: Consumer connects to the platform
-- **WHEN** an application needs appraisal data
-- **THEN** it uses the approved API or bulk-export contract and does not receive PostgreSQL or Airflow credentials
 
 ### Requirement: Administrative network boundary
 The system SHALL use Tailscale for host, database, and Airflow administration. Administrative ports MUST NOT be exposed as public consumer interfaces.
@@ -13,13 +10,6 @@ The system SHALL use Tailscale for host, database, and Airflow administration. A
 #### Scenario: Operator performs maintenance
 - **WHEN** an authorized operator accesses the VPS, PostgreSQL administration, or Airflow administration
 - **THEN** access traverses the approved Tailscale administrative path and is auditable
-
-### Requirement: S3 durable recovery boundary
-The system SHALL treat the VPS and attached volume as replaceable and SHALL store immutable source evidence, versioned exports, Airflow remote logs, PostgreSQL physical backups, and archived WAL in encrypted Amazon S3 locations with least-privilege access and lifecycle policy.
-
-#### Scenario: VPS and volume are lost
-- **WHEN** the platform must move to a clean VPS or another provider
-- **THEN** automation rebuilds the runtime and restores source evidence and PostgreSQL state from S3 without relying on the lost volume
 
 ### Requirement: PostgreSQL point-in-time recovery
 The system SHALL archive WAL continuously and take scheduled physical backups under a documented retention policy. Backup success alone MUST NOT satisfy recovery readiness; automated integrity checks and periodic point-in-time restores SHALL be recorded.

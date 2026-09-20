@@ -155,6 +155,7 @@ def _intake(
     head_sha: str,
     *,
     at: str = "2026-07-19T12:00:00Z",
+    contract_root: Path | None = None,
 ) -> JsonObject:
     return process_intake(
         event,
@@ -166,6 +167,7 @@ def _intake(
         trusted_bot_id=BOT_ID,
         delivery_id="delivery-1",
         at=at,
+        contracts=ControlContracts(contract_root),
     )
 
 
@@ -708,6 +710,7 @@ def test_approved_implementation_issue_dispatches_before_provider_execution(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    implementation_contract_root: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
     event = event_factory("/countyforge implement add-isolated-openspec-to-code-agents")
@@ -717,13 +720,13 @@ def test_approved_implementation_issue_dispatches_before_provider_execution(
         "countyforge_github.orchestrator.resolve_merged_planning_approval",
         lambda *args, **kwargs: _implementation_approval(head_sha),
     )
-    # The repository's active implementation change is itself fully checked off; stub the
-    # trusted eligibility result here so this fixture exercises dispatch serialization only.
+    # Stub trusted eligibility so this fixture exercises dispatch serialization
+    # independently of the repository's current active changes.
     monkeypatch.setattr(
         "countyforge_github.orchestrator.evaluate_implementation_eligibility",
         _eligible_implementation,
     )
-    result = _intake(github, event, head_sha)
+    result = _intake(github, event, head_sha, contract_root=implementation_contract_root)
     assert result["status"] == "dispatched"
     assert len(github.dispatches) == 1
     dispatched = github.dispatches[0]["inputs"]
@@ -741,7 +744,7 @@ def test_implementation_retry_preserves_change_identity(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
-    repo_root: Path,
+    implementation_contract_root: Path,
     tmp_path: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
@@ -758,7 +761,7 @@ def test_implementation_retry_preserves_change_identity(
         "countyforge_github.orchestrator.evaluate_implementation_eligibility",
         _eligible_implementation,
     )
-    _intake(github, implementation_event, head_sha)
+    _intake(github, implementation_event, head_sha, contract_root=implementation_contract_root)
     comment_id, state = _canonical(github)
     failed = transition_state(
         state,
@@ -775,7 +778,13 @@ def test_implementation_retry_preserves_change_identity(
     retry_event["issue"].pop("pull_request")
     retry_event["issue"]["number"] = 7
     retry_event["comment"]["id"] = 999
-    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    retried = _intake(
+        github,
+        retry_event,
+        head_sha,
+        at="2026-07-19T12:02:00Z",
+        contract_root=implementation_contract_root,
+    )
     encoded_trigger = str(github.dispatches[-1]["inputs"]["trigger"])
     raw_trigger = base64.urlsafe_b64decode(encoded_trigger + "=" * (-len(encoded_trigger) % 4))
     retry_trigger: JsonObject = json.loads(raw_trigger)
@@ -836,7 +845,7 @@ def test_implementation_retry_preserves_change_identity(
             "title": "Implementation retry",
             "body": "Build the accepted implementation packet.",
         },
-        contract_root=repo_root,
+        contract_root=implementation_contract_root,
         output_dir=tmp_path / "implementation-packet",
         run_id=str(retried["run_id"]),
         change_name="add-isolated-openspec-to-code-agents",
@@ -860,6 +869,7 @@ def test_implementation_retry_revalidates_current_approval(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    implementation_contract_root: Path,
     retry_condition: str,
     expected_disposition: str,
 ) -> None:
@@ -899,14 +909,20 @@ def test_implementation_retry_revalidates_current_approval(
     )
     implementation_event["issue"].pop("pull_request")
     implementation_event["issue"]["number"] = 7
-    _intake(github, implementation_event, head_sha)
+    _intake(github, implementation_event, head_sha, contract_root=implementation_contract_root)
     _fail_canonical_run(github, reason="implementation_fixture_failure")
 
     retry_event = event_factory("/countyforge retry")
     retry_event["issue"].pop("pull_request")
     retry_event["issue"]["number"] = 7
     retry_event["comment"]["id"] = 999
-    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    retried = _intake(
+        github,
+        retry_event,
+        head_sha,
+        at="2026-07-19T12:02:00Z",
+        contract_root=implementation_contract_root,
+    )
 
     assert retried["status"] == "refused"
     assert retried["disposition"] == expected_disposition
@@ -917,6 +933,7 @@ def test_implementation_retry_rejects_changed_openspec_hash(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    implementation_contract_root: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
     monkeypatch.setattr(
@@ -932,7 +949,7 @@ def test_implementation_retry_rejects_changed_openspec_hash(
     )
     implementation_event["issue"].pop("pull_request")
     implementation_event["issue"]["number"] = 7
-    _intake(github, implementation_event, head_sha)
+    _intake(github, implementation_event, head_sha, contract_root=implementation_contract_root)
     _fail_canonical_run(github, reason="implementation_fixture_failure")
     monkeypatch.setattr(
         "countyforge_github.orchestrator.implementation_change_hash",
@@ -943,7 +960,13 @@ def test_implementation_retry_rejects_changed_openspec_hash(
     retry_event["issue"].pop("pull_request")
     retry_event["issue"]["number"] = 7
     retry_event["comment"]["id"] = 999
-    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    retried = _intake(
+        github,
+        retry_event,
+        head_sha,
+        at="2026-07-19T12:02:00Z",
+        contract_root=implementation_contract_root,
+    )
 
     assert retried["status"] == "refused"
     assert retried["disposition"] == "implementation_change_changed"
@@ -954,6 +977,7 @@ def test_legacy_implementation_retry_without_approval_fingerprint_is_refused(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    implementation_contract_root: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
     monkeypatch.setattr(
@@ -969,7 +993,7 @@ def test_legacy_implementation_retry_without_approval_fingerprint_is_refused(
     )
     implementation_event["issue"].pop("pull_request")
     implementation_event["issue"]["number"] = 7
-    _intake(github, implementation_event, head_sha)
+    _intake(github, implementation_event, head_sha, contract_root=implementation_contract_root)
     _fail_canonical_run(github, reason="implementation_fixture_failure")
     comment_id, legacy = _canonical(github)
     legacy.pop("implementation_approval_sha256")
@@ -979,7 +1003,13 @@ def test_legacy_implementation_retry_without_approval_fingerprint_is_refused(
     retry_event["issue"].pop("pull_request")
     retry_event["issue"]["number"] = 7
     retry_event["comment"]["id"] = 999
-    retried = _intake(github, retry_event, head_sha, at="2026-07-19T12:02:00Z")
+    retried = _intake(
+        github,
+        retry_event,
+        head_sha,
+        at="2026-07-19T12:02:00Z",
+        contract_root=implementation_contract_root,
+    )
 
     assert retried["status"] == "refused"
     assert retried["disposition"] == "implementation_retry_provenance_missing"
@@ -990,6 +1020,7 @@ def test_all_checked_implementation_change_is_refused_before_dispatch(
     event_factory: Callable[[str, str, str], JsonObject],
     head_sha: str,
     monkeypatch: pytest.MonkeyPatch,
+    implementation_contract_root: Path,
 ) -> None:
     github = FakeGitHub(head_sha)
     event = event_factory("/countyforge implement add-isolated-openspec-to-code-agents")
@@ -999,7 +1030,7 @@ def test_all_checked_implementation_change_is_refused_before_dispatch(
         "countyforge_github.orchestrator.resolve_merged_planning_approval",
         lambda *args, **kwargs: _implementation_approval(head_sha),
     )
-    result = _intake(github, event, head_sha)
+    result = _intake(github, event, head_sha, contract_root=implementation_contract_root)
     assert result["status"] == "refused"
     assert result["disposition"] == "implementation_ineligible"
     assert github.dispatches == []
