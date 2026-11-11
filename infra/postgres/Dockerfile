@@ -4,11 +4,11 @@ FROM postgres:${POSTGRES_VERSION}-bookworm
 # Exact package version, not a range. Debian Bookworm ships pgBackRest 2.45,
 # which has no `process` S3 key type and therefore cannot use the keyless
 # Roles Anywhere credentials this repository is reached with. The official
-# postgres image already configures apt.postgresql.org, which carries 2.59.1;
+# postgres image already configures apt.postgresql.org, which carries 2.60.0;
 # the `=` pin plus the version assertion below means an upstream bump fails the
 # build instead of arriving silently in a rebuild.
-ARG PGBACKREST_VERSION=2.59.1-1.pgdg12+1
-ARG PGBACKREST_EXPECTED_VERSION=2.59.1
+ARG PGBACKREST_VERSION=2.60.0-1.pgdg12+1
+ARG PGBACKREST_EXPECTED_VERSION=2.60.0
 
 # Pinned by digest rather than by "latest for 1.8.4": a release asset can be
 # re-uploaded under the same version string, and a backup tool's credential

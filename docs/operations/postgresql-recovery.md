@@ -6,7 +6,7 @@ The durable boundary is Amazon S3, not the host. Every storage device on the VPS
 
 | | |
 |---|---|
-| Tool | pgBackRest 2.59.1, pinned, inside the PostgreSQL image |
+| Tool | pgBackRest 2.60.0, pinned, inside the PostgreSQL image |
 | Stanza | `platform` |
 | Repository | `s3://trupryce-property-tax-backups/pgbackrest/platform` |
 | Encryption | `aes-256-cbc`, passphrase from Bitwarden, applied before anything leaves the host |

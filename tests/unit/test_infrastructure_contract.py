@@ -491,7 +491,7 @@ def test_postgres_archives_wal_continuously_with_a_wall_clock_bound() -> None:
 
 def test_pgbackrest_is_pinned_past_the_stock_bookworm_package() -> None:
     dockerfile = (INFRA_ROOT / "postgres" / "Dockerfile").read_text(encoding="utf-8")
-    assert "PGBACKREST_VERSION=2.59.1-1.pgdg12+1" in dockerfile
+    assert "PGBACKREST_VERSION=2.60.0-1.pgdg12+1" in dockerfile
     assert '"pgbackrest=${PGBACKREST_VERSION}"' in dockerfile
     # Bookworm ships 2.45, which has no `process` S3 key type and so cannot use
     # keyless credentials at all. Asserted against the install directive rather
@@ -558,7 +558,7 @@ def test_pgbackrest_configuration_is_keyless_and_carries_no_passphrase() -> None
     ]
     assert "repo1-s3-key-type=process" in settings
     assert "repo1-s3-process-cmd=/usr/local/bin/pgbackrest-aws-signing" in settings
-    # The option pgBackRest 2.59.1 actually defines is `repo-s3-process-cmd`.
+    # The option pgBackRest 2.60.0 actually defines is `repo-s3-process-cmd`.
     # `repo1-s3-key-process` is not an alias; it is silently dropped with a
     # warning, which is why the string assertion alone was not enough and why
     # test_built_image_parses_the_committed_configuration exists.
