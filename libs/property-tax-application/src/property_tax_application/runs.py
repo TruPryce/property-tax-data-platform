@@ -1,9 +1,9 @@
-"""The processing-run vocabulary the application owns: a reference, and an outcome.
+"""The processing-run values and lifecycle port the application owns.
 
-Values only. Starting a run, holding it, resuming an abandoned one, finishing it
-and the repository that does all four belong to the `processing-run` capability
-and are not here — this module is what that lifecycle and the canonical load
-session both carry, and neither may redefine.
+The promoted values are reused rather than redefined, and the repository states
+the lifecycle properties an adapter must provide: start, held-run refusal,
+abandoned-run resume, and finish. It deliberately does not prescribe the lock,
+lease, or other persistence mechanism that provides them.
 
 Two rules in this module are enforced twice, once here and once by a database
 constraint, and the whole point is that the two agree. A value this boundary
@@ -23,18 +23,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
+
+from property_tax_domain import ReleaseIdentity
+
+from property_tax_application.bronze import ManifestRef
 
 __all__ = [
     "BOUNDARY_CONTRACT_VERSION",
     "DIAGNOSTIC_CODES",
     "DIAGNOSTIC_RETENTION_LIMIT",
     "LOCATOR_VALUE_TYPES",
+    "ProcessingRunHeldError",
     "ProcessingRunRef",
+    "ProcessingRunRepository",
+    "ProcessingRunStart",
     "ReleaseDiagnosticRecord",
     "ReleaseDisposition",
     "ReleaseNoticeRecord",
     "ReleaseProcessingOutcome",
+    "UnknownProcessingRunError",
     "require_locator_value",
 ]
 
@@ -187,6 +195,48 @@ class ProcessingRunRef:
     __le__ = _no_ordering
     __gt__ = _no_ordering
     __ge__ = _no_ordering
+
+
+class ProcessingRunHeldError(Exception):
+    """A live worker already holds the run for this release."""
+
+
+class UnknownProcessingRunError(Exception):
+    """A supplied run reference does not resolve to a started run."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingRunStart:
+    """The run obtained from `start`, new or resumed after its holder was gone."""
+
+    reference: ProcessingRunRef
+    resumed: bool
+
+    def __post_init__(self) -> None:
+        if type(self.reference) is not ProcessingRunRef:
+            raise ValueError("reference must be exactly a ProcessingRunRef")
+        if not isinstance(self.resumed, bool):
+            raise ValueError("resumed must be a bool")
+
+
+@runtime_checkable
+class ProcessingRunRepository(Protocol):
+    """The lifecycle binding one canonical release to one indexed acquisition.
+
+    `start` atomically refuses a run held by a live worker, resumes an
+    unfinished run whose holder is gone, and starts a new run after a finished
+    one. The contract intentionally says nothing about how an adapter proves
+    liveness or provides atomicity; that persistence mechanism belongs to the
+    later adapter implementation.
+    """
+
+    def start(self, release: ReleaseIdentity, manifest: ManifestRef) -> ProcessingRunStart:
+        """Obtain the only held run for this release, creating or resuming it."""
+        ...
+
+    def finish(self, reference: ProcessingRunRef, outcome: ReleaseProcessingOutcome) -> None:
+        """Record a started run as finished, refusing an unknown reference."""
+        ...
 
 
 class ReleaseDisposition(StrEnum):
