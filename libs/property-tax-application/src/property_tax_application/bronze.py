@@ -6,9 +6,10 @@ one cannot be found, verified, or attributed, and an object whose manifest was
 written before the bytes were verified would claim a completeness the transfer
 never reached.
 
-Nothing here performs I/O.  It is the port the S3 adapter implements and the
-contract a caller reads, so the immutability rules live where both can see them
-rather than inside one storage backend's control flow.
+Nothing here performs I/O. `BronzeStore` is the port the S3 adapter implements;
+`ManifestIndex` is the separate queryable index a run binds to. The contracts
+live where callers and both implementations can see them rather than inside one
+storage backend's control flow.
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
+
+from property_tax_domain import ReleaseIdentity
 
 from property_tax_application.acquisition import (
     MAX_LOCATOR_CHARS,
@@ -32,6 +35,8 @@ __all__ = [
     "BRONZE_MANIFEST_VERSION",
     "BronzeConflict",
     "BronzeStore",
+    "ManifestIndex",
+    "ManifestRef",
     "ReleaseManifest",
     "ReleasePartition",
     "StoredArtifact",
@@ -39,7 +44,7 @@ __all__ = [
 
 #: The manifest schema this contract writes.  Pinned, so a consumer can tell
 #: which shape it is reading rather than inferring it from the fields present.
-BRONZE_MANIFEST_VERSION: int = 1
+BRONZE_MANIFEST_VERSION: int = 2
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _JURISDICTION_PATTERN = re.compile(r"[a-z]{2}-[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -92,6 +97,7 @@ class ReleasePartition:
     jurisdiction_code: str
     tax_year: int
     release_kind: str
+    source_as_of: datetime | None = None
 
     def __post_init__(self) -> None:
         if _JURISDICTION_PATTERN.fullmatch(self.jurisdiction_code) is None:
@@ -103,6 +109,11 @@ class ReleasePartition:
         if not 1900 <= self.tax_year <= 2200:
             raise ValueError(f"tax_year must be a plausible appraisal year, got {self.tax_year}")
         _require_identifier(self.release_kind, "release_kind")
+        if self.source_as_of is not None:
+            if not isinstance(self.source_as_of, datetime):
+                raise ValueError("source_as_of must be a datetime or None")
+            if self.source_as_of.tzinfo is None or self.source_as_of.utcoffset() is None:
+                raise ValueError("source_as_of must be timezone-aware when present")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,22 +159,33 @@ class ReleaseManifest:
     carrying one.
     """
 
-    partitions: tuple[ReleasePartition, ...]
+    jurisdiction: str
     artifact: StoredArtifact
     acquired_at: datetime
     source_url: str
     response: ResponseMetadata
+    partitions: tuple[ReleasePartition, ...] = ()
     redirects: tuple[RedirectHop, ...] = ()
     manifest_version: int = BRONZE_MANIFEST_VERSION
     tool_versions: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.partitions, tuple) or not self.partitions:
-            raise ValueError("partitions must be a non-empty tuple")
+        if _JURISDICTION_PATTERN.fullmatch(self.jurisdiction) is None:
+            raise ValueError(
+                "jurisdiction must be a lowercase state prefix, a hyphen, and a county slug"
+            )
+        if not isinstance(self.partitions, tuple):
+            raise ValueError("partitions must be a tuple")
         if not all(isinstance(entry, ReleasePartition) for entry in self.partitions):
             raise ValueError("partitions must be a tuple of ReleasePartition")
-        if len(set(self.partitions)) != len(self.partitions):
-            raise ValueError("partitions must be distinct")
+        partition_grains = {
+            (entry.jurisdiction_code, entry.tax_year, entry.release_kind)
+            for entry in self.partitions
+        }
+        if len(partition_grains) != len(self.partitions):
+            raise ValueError("partitions must be distinct by logical release")
+        if any(entry.jurisdiction_code != self.jurisdiction for entry in self.partitions):
+            raise ValueError("every partition must name the manifest jurisdiction")
         if not isinstance(self.artifact, StoredArtifact):
             raise ValueError("artifact must be a StoredArtifact")
         if not isinstance(self.acquired_at, datetime):
@@ -204,13 +226,43 @@ class ReleaseManifest:
             _require_identifier(name, f"tool_versions key {name!r}")
         object.__setattr__(self, "tool_versions", MappingProxyType(dict(self.tool_versions)))
 
+    @property
+    def acquisition_evidence(self) -> tuple[object, ...]:
+        """The retained evidence that decides acquisition equivalence.
+
+        Partitions are deliberately absent because they attach after acquisition.
+        The artifact contributes only its content identity; locator, byte count,
+        and media type are artifact-grain consistency evidence rather than facts
+        identifying another acquisition.
+        """
+
+        return (
+            self.jurisdiction,
+            self.artifact.sha256,
+            self.acquired_at.astimezone(UTC).isoformat(),
+            self.source_url,
+            self.response.status,
+            tuple(sorted(self.response.headers.items())),
+            tuple((hop.from_url, hop.to_url, hop.status) for hop in self.redirects),
+            self.manifest_version,
+            tuple(sorted(self.tool_versions.items())),
+        )
+
+    def same_acquisition_as(self, other: object) -> bool:
+        """Whether two recordings retain indistinguishable acquisition evidence."""
+
+        return isinstance(other, ReleaseManifest) and (
+            self.acquisition_evidence == other.acquisition_evidence
+        )
+
     @classmethod
     def from_acquisition(
         cls,
         acquired: AcquiredArtifact,
         *,
-        partitions: tuple[ReleasePartition, ...],
+        jurisdiction: str,
         acquired_at: datetime,
+        partitions: tuple[ReleasePartition, ...] = (),
         tool_versions: Mapping[str, str] | None = None,
     ) -> ReleaseManifest:
         """Build a manifest from what the acquisition boundary established.
@@ -222,6 +274,7 @@ class ReleaseManifest:
         """
 
         return cls(
+            jurisdiction=jurisdiction,
             partitions=partitions,
             artifact=StoredArtifact(
                 locator=acquired.locator,
@@ -235,6 +288,63 @@ class ReleaseManifest:
             redirects=acquired.redirects,
             tool_versions=dict(tool_versions or {}),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRef:
+    """An opaque locator for one acquisition manifest in the queryable index.
+
+    Comparable for equality and carrying no ordering or business-identity
+    meaning. The value is generated where the manifest is indexed; callers do
+    not derive it from an object-store locator, key, or checksum.
+    """
+
+    value: str | int | tuple[str | int, ...]
+
+    def __post_init__(self) -> None:
+        from property_tax_application.runs import require_locator_value
+
+        require_locator_value(self.value)
+
+    def _no_ordering(self, other: object) -> bool:
+        raise TypeError(
+            "ManifestRef carries no ordering: it is an opaque locator, not business identity"
+        )
+
+    __lt__ = _no_ordering
+    __le__ = _no_ordering
+    __gt__ = _no_ordering
+    __ge__ = _no_ordering
+
+
+@runtime_checkable
+class ManifestIndex(Protocol):
+    """Queryable acquisition records and their later release partitions.
+
+    This is separate from `BronzeStore`: that port writes immutable evidence to
+    object storage and returns a storage locator, while this one returns the
+    persistence-generated reference a run binds to. The reference is derivable
+    from neither the storage locator nor the artifact checksum.
+    """
+
+    def register(self, manifest: ReleaseManifest) -> ManifestRef:
+        """Record one acquisition idempotently by its acquisition evidence."""
+        ...
+
+    def attach_partition(self, reference: ManifestRef, partition: ReleasePartition) -> None:
+        """Associate a later-established partition with one acquisition."""
+        ...
+
+    def partition_for(
+        self, reference: ManifestRef, release: ReleaseIdentity
+    ) -> ReleasePartition | None:
+        """Return recorded evidence, or `None` when that release was not attached.
+
+        A returned partition whose `source_as_of` is `None` is distinct from no
+        returned partition: the first records absence, while the second says the
+        release is not part of this acquisition. Reading changes nothing.
+        """
+        ...
 
 
 @runtime_checkable
@@ -266,8 +376,8 @@ class BronzeStore(Protocol):
     def reference_partition(self, partition: ReleasePartition, sha256: str) -> str:
         """Attach a partition discovered after acquisition to an existing artifact.
 
-        Separate from `record` because a release noticed later does not change
-        what was acquired, and the manifest describing that acquisition is
-        immutable.
+        This association is artifact-grain because the checksum identifies
+        content. `ManifestIndex.attach_partition` separately associates the
+        same evidence with the acquisition a run binds to.
         """
         ...

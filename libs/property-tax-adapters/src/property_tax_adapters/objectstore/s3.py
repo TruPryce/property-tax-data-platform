@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Protocol
 
+from property_tax_application.acquisition import RedirectHop, ResponseMetadata
 from property_tax_application.bronze import (
     BronzeConflict,
     ReleaseManifest,
@@ -51,6 +52,7 @@ __all__ = [
     "S3BronzeStore",
     "TruncatedListingError",
     "artifact_key",
+    "deserialize_manifest",
     "manifest_key",
     "partition_prefix",
     "partition_ref_key",
@@ -78,6 +80,8 @@ STAGING_PREFIX = "bronze/staging"
 ARTIFACT_PREFIX = "bronze/artifacts"
 #: Which releases reference which artifact.
 RELEASE_PREFIX = "bronze/releases"
+#: Acquisition manifests, named independently of artifact content keys.
+MANIFEST_PREFIX = "bronze/manifests"
 
 _PRECONDITION_CODES = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
 #: What S3 says when an object genuinely is not there.  `HeadObject` answers
@@ -135,10 +139,21 @@ def artifact_key(sha256: str) -> str:
     return f"{ARTIFACT_PREFIX}/{sha256}"
 
 
-def manifest_key(sha256: str) -> str:
-    """The manifest describes an artifact, so it is keyed like one."""
+def manifest_key(manifest: ReleaseManifest) -> str:
+    """Where one acquisition manifest lives, independent of its partitions.
 
-    return f"{ARTIFACT_PREFIX}/{sha256}.manifest.json"
+    The digest covers exactly the acquisition-equivalence evidence exposed by
+    the application value. It is not artifact identity and is not part of the
+    application contract; it is only this adapter's immutable locator choice.
+    """
+
+    preimage = json.dumps(
+        manifest.acquisition_evidence,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(preimage).hexdigest()
+    return f"{MANIFEST_PREFIX}/{digest}.json"
 
 
 def partition_prefix(partition: ReleasePartition) -> str:
@@ -469,6 +484,11 @@ class S3BronzeStore:
                 "jurisdiction_code": partition.jurisdiction_code,
                 "tax_year": partition.tax_year,
                 "release_kind": partition.release_kind,
+                "source_as_of": (
+                    partition.source_as_of.astimezone(UTC).isoformat()
+                    if partition.source_as_of is not None
+                    else None
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -520,23 +540,22 @@ class S3BronzeStore:
         """Persist the manifest and one reference per partition, immutably.
 
         Conditional on absence, so a second writer racing the first is refused
-        by S3 rather than replacing a record of what was acquired.  An already
-        present manifest is not an error: it describes the same artifact by
-        construction, since both are keyed by the same checksum.
+        by S3 rather than replacing a record of what was acquired. An already
+        present manifest is not an error because the locator is derived from
+        acquisition evidence, excluding partitions learned later.
         """
 
         sha256 = manifest.artifact.sha256
         self._require_artifact(manifest.artifact, sha256)
-        self._put_if_absent(
-            manifest_key(sha256), serialize_manifest(manifest).encode("utf-8"), "application/json"
-        )
+        key = manifest_key(manifest)
+        self._put_if_absent(key, serialize_manifest(manifest).encode("utf-8"), "application/json")
         for partition in manifest.partitions:
             self._put_if_absent(
                 partition_ref_key(partition, sha256),
                 self._reference_body(partition, sha256),
                 "application/json",
             )
-        return f"s3://{self._bucket}/{manifest_key(sha256)}"
+        return f"s3://{self._bucket}/{key}"
 
     def reference_partition(self, partition: ReleasePartition, sha256: str) -> str:
         """Attach a partition discovered after acquisition to an existing artifact.
@@ -574,6 +593,7 @@ def serialize_manifest(manifest: ReleaseManifest) -> str:
 
     payload = {
         "manifest_version": manifest.manifest_version,
+        "jurisdiction": manifest.jurisdiction,
         "acquired_at": manifest.acquired_at.astimezone(UTC).isoformat(),
         "source_url": manifest.source_url,
         "artifact": {
@@ -588,6 +608,11 @@ def serialize_manifest(manifest: ReleaseManifest) -> str:
                     "jurisdiction_code": partition.jurisdiction_code,
                     "tax_year": partition.tax_year,
                     "release_kind": partition.release_kind,
+                    "source_as_of": (
+                        partition.source_as_of.astimezone(UTC).isoformat()
+                        if partition.source_as_of is not None
+                        else None
+                    ),
                 }
                 for partition in manifest.partitions
             ),
@@ -608,6 +633,68 @@ def serialize_manifest(manifest: ReleaseManifest) -> str:
         "tool_versions": dict(manifest.tool_versions),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def deserialize_manifest(rendered: str | bytes) -> ReleaseManifest:
+    """Read the current manifest shape without reinterpreting stored v1 objects."""
+
+    payload = json.loads(rendered)
+    if not isinstance(payload, dict):
+        raise ValueError("manifest JSON must be an object")
+    if payload.get("manifest_version") != 2:
+        raise ValueError("only manifest version 2 has the explicit-jurisdiction shape")
+
+    artifact = payload.get("artifact")
+    response = payload.get("response")
+    redirects = payload.get("redirects")
+    partitions = payload.get("partitions")
+    tool_versions = payload.get("tool_versions")
+    if not isinstance(artifact, dict):
+        raise ValueError("manifest artifact must be an object")
+    if not isinstance(response, dict):
+        raise ValueError("manifest response must be an object")
+    if not isinstance(redirects, list):
+        raise ValueError("manifest redirects must be a list")
+    if not isinstance(partitions, list):
+        raise ValueError("manifest partitions must be a list")
+    if not isinstance(tool_versions, dict):
+        raise ValueError("manifest tool_versions must be an object")
+
+    return ReleaseManifest(
+        jurisdiction=payload["jurisdiction"],
+        artifact=StoredArtifact(
+            locator=artifact["locator"],
+            sha256=artifact["sha256"],
+            byte_count=artifact["byte_count"],
+            media_type=artifact.get("media_type"),
+        ),
+        acquired_at=datetime.fromisoformat(payload["acquired_at"]),
+        source_url=payload["source_url"],
+        response=ResponseMetadata(status=response["status"], headers=response["headers"]),
+        partitions=tuple(
+            ReleasePartition(
+                jurisdiction_code=entry["jurisdiction_code"],
+                tax_year=entry["tax_year"],
+                release_kind=entry["release_kind"],
+                source_as_of=(
+                    datetime.fromisoformat(entry["source_as_of"])
+                    if entry.get("source_as_of") is not None
+                    else None
+                ),
+            )
+            for entry in partitions
+        ),
+        redirects=tuple(
+            RedirectHop(
+                from_url=entry["from_url"],
+                to_url=entry["to_url"],
+                status=entry["status"],
+            )
+            for entry in redirects
+        ),
+        manifest_version=payload["manifest_version"],
+        tool_versions=tool_versions,
+    )
 
 
 def utc_now() -> datetime:

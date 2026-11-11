@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -26,6 +27,7 @@ from property_tax_adapters.objectstore import (
     partition_ref_key,
     serialize_manifest,
 )
+from property_tax_adapters.objectstore.s3 import deserialize_manifest
 from property_tax_application.acquisition import (
     AcquisitionError,
     AcquisitionFailure,
@@ -267,7 +269,10 @@ def test_one_artifact_serves_several_partitions_without_duplicating_bytes() -> N
     acquired = acquired_artifact(client)
     store.record(
         ReleaseManifest.from_acquisition(
-            acquired, partitions=partitions, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+            acquired,
+            jurisdiction="tx-collin",
+            partitions=partitions,
+            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
         )
     )
 
@@ -285,17 +290,21 @@ def test_a_partition_discovered_later_attaches_without_editing_the_manifest() ->
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
     acquired = acquired_artifact(client)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
-        )
+    initial = ReleaseManifest.from_acquisition(
+        acquired,
+        jurisdiction="tx-dallas",
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
-    before = client.objects[manifest_key(DIGEST)]
+    first_locator = store.record(initial)
+    before = client.objects[manifest_key(initial)]
 
     late = ReleasePartition(jurisdiction_code="tx-dallas", tax_year=2027, release_kind="current")
     store.reference_partition(late, DIGEST)
+    second_locator = store.record(replace(initial, partitions=(late,)))
 
-    assert client.objects[manifest_key(DIGEST)] == before, "the manifest was edited"
+    assert second_locator == first_locator
+    assert client.objects[manifest_key(initial)] == before, "the manifest was edited"
+    assert len([key for key in client.objects if key.startswith("bronze/manifests/")]) == 1
     assert partition_ref_key(late, DIGEST) in client.objects
     assert store.classify(late, DIGEST) is BronzeConflict.IDENTICAL
 
@@ -318,7 +327,11 @@ def test_a_manifest_records_what_the_acquisition_established() -> None:
     stamp = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
     manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=stamp, tool_versions={"platform": "0.1.0"}
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=stamp,
+        tool_versions={"platform": "0.1.0"},
     )
 
     assert manifest.artifact.sha256 == DIGEST
@@ -342,47 +355,100 @@ def test_the_store_records_a_manifest_beside_its_artifact() -> None:
 
     locator = store.record(
         ReleaseManifest.from_acquisition(
-            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+            acquired,
+            jurisdiction="tx-dallas",
+            partitions=DALLAS,
+            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
         )
     )
 
-    key = manifest_key(DIGEST)
+    manifest = ReleaseManifest.from_acquisition(
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+    )
+    key = manifest_key(manifest)
     assert locator == f"s3://{BUCKET}/{key}"
     assert json.loads(client.objects[key])["artifact"]["sha256"] == DIGEST
     assert client.content_types[key] == "application/json"
 
 
-def test_a_second_writer_does_not_replace_a_recorded_manifest() -> None:
-    """Both writers succeed and the first record survives, because both describe
-    the same artifact — but neither overwrote the other."""
+def test_the_same_acquisition_is_idempotent_and_never_overwritten() -> None:
 
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
     acquired = acquired_artifact(client)
     manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
-    store.record(manifest)
-    first = client.objects[manifest_key(DIGEST)]
+    first_locator = store.record(manifest)
+    first = client.objects[manifest_key(manifest)]
 
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired, partitions=DALLAS, acquired_at=datetime(2026, 9, 1, tzinfo=UTC)
-        )
+    second_locator = store.record(manifest)
+
+    assert second_locator == first_locator
+    assert client.objects[manifest_key(manifest)] == first, "a recorded manifest was replaced"
+    assert len([key for key in client.objects if key.startswith("bronze/manifests/")]) == 1
+
+
+def test_two_acquisitions_of_one_artifact_coexist() -> None:
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    acquired = acquired_artifact(client)
+    first = ReleaseManifest.from_acquisition(
+        acquired,
+        jurisdiction="tx-dallas",
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+    )
+    second = ReleaseManifest.from_acquisition(
+        acquired,
+        jurisdiction="tx-collin",
+        acquired_at=datetime(2026, 8, 20, tzinfo=UTC),
     )
 
-    assert client.objects[manifest_key(DIGEST)] == first, "a recorded manifest was replaced"
+    first_locator = store.record(first)
+    second_locator = store.record(second)
+
+    assert first_locator != second_locator
+    assert client.objects[manifest_key(first)] != client.objects[manifest_key(second)]
+    assert artifact_bytes(client, DIGEST) == BODY
+
+
+def test_a_stored_v1_manifest_neither_moves_nor_blocks_v2() -> None:
+    client = FakeS3()
+    store = S3BronzeStore(client, BUCKET)
+    acquired = acquired_artifact(client)
+    legacy_key = f"bronze/artifacts/{DIGEST}.manifest.json"
+    legacy_body = b'{"manifest_version":1,"partitions":[{"jurisdiction_code":"tx-dallas"}]}'
+    client.objects[legacy_key] = legacy_body
+    current = ReleaseManifest.from_acquisition(
+        acquired,
+        jurisdiction="tx-dallas",
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+    )
+
+    store.record(current)
+
+    assert client.objects[legacy_key] == legacy_body
+    assert json.loads(client.objects[manifest_key(current)])["manifest_version"] == 2
 
 
 def test_the_serialized_manifest_is_stable_across_runs() -> None:
     client = FakeS3()
     acquired = acquired_artifact(client)
     manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
 
     assert serialize_manifest(manifest) == serialize_manifest(manifest)
-    assert json.loads(serialize_manifest(manifest))["manifest_version"] == 1
+    assert json.loads(serialize_manifest(manifest))["manifest_version"] == 2
 
 
 def test_partition_order_does_not_change_the_serialized_bytes() -> None:
@@ -394,8 +460,12 @@ def test_partition_order_does_not_change_the_serialized_bytes() -> None:
     b = ReleasePartition(jurisdiction_code="tx-collin", tax_year=2026, release_kind="current")
     stamp = datetime(2026, 8, 19, tzinfo=UTC)
 
-    forward = ReleaseManifest.from_acquisition(acquired, partitions=(a, b), acquired_at=stamp)
-    reverse = ReleaseManifest.from_acquisition(acquired, partitions=(b, a), acquired_at=stamp)
+    forward = ReleaseManifest.from_acquisition(
+        acquired, jurisdiction="tx-collin", partitions=(a, b), acquired_at=stamp
+    )
+    reverse = ReleaseManifest.from_acquisition(
+        acquired, jurisdiction="tx-collin", partitions=(b, a), acquired_at=stamp
+    )
 
     assert serialize_manifest(forward) == serialize_manifest(reverse)
 
@@ -409,7 +479,10 @@ def test_a_manifest_carries_no_credential_from_a_signed_url() -> None:
             policy=policy(),
         )
     manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
 
     rendered = serialize_manifest(manifest)
@@ -425,6 +498,7 @@ def test_a_manifest_refuses_an_unsanitized_source_url() -> None:
 
 def build_manifest(stamp: datetime, source_url: str = "https://cad.example.gov/roll.zip"):  # noqa: ANN201
     return ReleaseManifest(
+        jurisdiction="tx-dallas",
         partitions=DALLAS,
         artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
         acquired_at=stamp,
@@ -451,26 +525,123 @@ def test_an_aware_instant_in_any_zone_is_accepted_and_normalized() -> None:
     assert json.loads(serialize_manifest(manifest))["acquired_at"] == "2026-08-19T12:00:00+00:00"
 
 
-def test_a_manifest_needs_at_least_one_partition() -> None:
-    with pytest.raises(ValueError, match="non-empty"):
-        ReleaseManifest(
-            partitions=(),
-            artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
-            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
-            source_url="https://cad.example.gov/roll.zip",
-            response=ResponseMetadata(status=200),
+def test_partition_source_as_of_round_trips_and_stays_aware() -> None:
+    stamp = datetime(2026, 8, 19, 7, 0, tzinfo=timezone(timedelta(hours=-5)))
+    partition = replace(DALLAS_PARTITION, source_as_of=stamp)
+    manifest = replace(build_manifest(datetime(2026, 8, 20, tzinfo=UTC)), partitions=(partition,))
+
+    restored = deserialize_manifest(serialize_manifest(manifest))
+
+    assert restored == manifest
+    assert restored.partitions[0].source_as_of == stamp
+    assert restored.partitions[0].source_as_of is not None
+    assert restored.partitions[0].source_as_of.utcoffset() is not None
+
+
+def test_absent_partition_source_as_of_round_trips_as_absence() -> None:
+    manifest = build_manifest(datetime(2026, 8, 20, tzinfo=UTC))
+
+    restored = deserialize_manifest(serialize_manifest(manifest))
+
+    assert restored.partitions[0].source_as_of is None
+    assert restored.partitions[0].source_as_of != restored.acquired_at
+
+
+def test_two_partitions_keep_independent_source_as_of_values() -> None:
+    first = ReleasePartition(
+        jurisdiction_code="tx-collin",
+        tax_year=2025,
+        release_kind="certified",
+        source_as_of=datetime(2025, 7, 1, tzinfo=UTC),
+    )
+    second = ReleasePartition(
+        jurisdiction_code="tx-collin",
+        tax_year=2026,
+        release_kind="current",
+        source_as_of=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    manifest = replace(
+        build_manifest(datetime(2026, 8, 20, tzinfo=UTC)),
+        jurisdiction="tx-collin",
+        partitions=(first, second),
+    )
+
+    restored = deserialize_manifest(serialize_manifest(manifest))
+
+    assert tuple(partition.source_as_of for partition in restored.partitions) == (
+        first.source_as_of,
+        second.source_as_of,
+    )
+
+
+def test_a_v2_manifest_may_precede_every_partition() -> None:
+    manifest = ReleaseManifest(
+        jurisdiction="tx-dallas",
+        partitions=(),
+        artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
+        source_url="https://cad.example.gov/roll.zip",
+        response=ResponseMetadata(status=200),
+    )
+
+    payload = json.loads(serialize_manifest(manifest))
+    assert payload["jurisdiction"] == "tx-dallas"
+    assert payload["partitions"] == []
+
+
+def test_a_partition_from_another_jurisdiction_is_refused() -> None:
+    with pytest.raises(ValueError, match="manifest jurisdiction"):
+        replace(
+            build_manifest(datetime(2026, 8, 19, tzinfo=UTC)),
+            jurisdiction="tx-collin",
         )
+
+
+def test_partitions_and_source_as_of_do_not_define_an_acquisition() -> None:
+    manifest = build_manifest(datetime(2026, 8, 19, tzinfo=UTC))
+    changed_partition = replace(
+        DALLAS_PARTITION,
+        tax_year=2027,
+        source_as_of=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+
+    assert manifest.same_acquisition_as(replace(manifest, partitions=()))
+    assert manifest.same_acquisition_as(replace(manifest, partitions=(changed_partition,)))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("locator", "s3://another-bucket/another-key"),
+        ("byte_count", 999),
+        ("media_type", "application/zip"),
+    ],
+)
+def test_artifact_grain_evidence_does_not_define_an_acquisition(field: str, value: object) -> None:
+    manifest = build_manifest(datetime(2026, 8, 19, tzinfo=UTC))
+    changed = replace(manifest, artifact=replace(manifest.artifact, **{field: value}))
+
+    assert manifest.same_acquisition_as(changed)
 
 
 def test_repeated_partitions_are_refused() -> None:
     with pytest.raises(ValueError, match="distinct"):
         ReleaseManifest(
+            jurisdiction="tx-dallas",
             partitions=DALLAS + DALLAS,
             artifact=StoredArtifact(locator="s3://b/k", sha256="a" * 64, byte_count=1),
             acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
             source_url="https://cad.example.gov/roll.zip",
             response=ResponseMetadata(status=200),
         )
+
+
+def test_one_logical_partition_cannot_carry_two_source_as_of_answers() -> None:
+    first = replace(DALLAS_PARTITION, source_as_of=datetime(2026, 1, 1, tzinfo=UTC))
+    second = replace(DALLAS_PARTITION, source_as_of=datetime(2026, 2, 1, tzinfo=UTC))
+
+    with pytest.raises(ValueError, match="logical release"):
+        replace(build_manifest(datetime(2026, 8, 19, tzinfo=UTC)), partitions=(first, second))
 
 
 def test_a_redirect_chain_reaches_the_manifest_sanitized() -> None:
@@ -484,7 +655,10 @@ def test_a_redirect_chain_reaches_the_manifest_sanitized() -> None:
             url=f"{base_url(server)}/start", sink=sink(client), policy=policy()
         )
     manifest = ReleaseManifest.from_acquisition(
-        acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+        acquired,
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
 
     assert len(manifest.redirects) == 1
@@ -504,13 +678,13 @@ def test_a_first_acquisition_is_new() -> None:
 def test_the_same_bytes_twice_are_identical_not_a_conflict() -> None:
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired_artifact(client),
-            partitions=DALLAS,
-            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
-        )
+    first_manifest = ReleaseManifest.from_acquisition(
+        acquired_artifact(client),
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
+    store.record(first_manifest)
 
     assert store.classify(DALLAS_PARTITION, DIGEST) is BronzeConflict.IDENTICAL
 
@@ -520,29 +694,30 @@ def test_different_bytes_under_one_identity_diverge_and_both_survive() -> None:
 
     client = FakeS3()
     store = S3BronzeStore(client, BUCKET)
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired_artifact(client),
-            partitions=DALLAS,
-            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
-        )
+    first_manifest = ReleaseManifest.from_acquisition(
+        acquired_artifact(client),
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
     )
+    store.record(first_manifest)
 
     other_body = BODY + b"99999999|1\n"
     other_digest = hashlib.sha256(other_body).hexdigest()
     assert store.classify(DALLAS_PARTITION, other_digest) is BronzeConflict.DIVERGED
 
-    store.record(
-        ReleaseManifest.from_acquisition(
-            acquired_artifact(client, body=other_body),
-            partitions=DALLAS,
-            acquired_at=datetime(2026, 8, 20, tzinfo=UTC),
-        )
+    second_manifest = ReleaseManifest.from_acquisition(
+        acquired_artifact(client, body=other_body),
+        jurisdiction="tx-dallas",
+        partitions=DALLAS,
+        acquired_at=datetime(2026, 8, 20, tzinfo=UTC),
     )
+    store.record(second_manifest)
 
     assert artifact_bytes(client, DIGEST) == BODY, "prior Bronze content was replaced"
     assert artifact_bytes(client, other_digest) == other_body
-    assert manifest_key(DIGEST) in client.objects and manifest_key(other_digest) in client.objects
+    assert manifest_key(first_manifest) in client.objects
+    assert manifest_key(second_manifest) in client.objects
 
 
 def test_two_writers_that_both_saw_nothing_do_not_contradict_each_other() -> None:
@@ -564,6 +739,7 @@ def test_two_writers_that_both_saw_nothing_do_not_contradict_each_other() -> Non
         store.record(
             ReleaseManifest.from_acquisition(
                 acquired_artifact(client, body=body),
+                jurisdiction="tx-dallas",
                 partitions=DALLAS,
                 acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
             )
@@ -636,7 +812,10 @@ def test_both_entry_points_write_one_reference_body() -> None:
     acquired = acquired_artifact(client)
     store.record(
         ReleaseManifest.from_acquisition(
-            acquired, partitions=DALLAS, acquired_at=datetime(2026, 8, 19, tzinfo=UTC)
+            acquired,
+            jurisdiction="tx-dallas",
+            partitions=DALLAS,
+            acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
         )
     )
     from_record = client.objects[partition_ref_key(DALLAS_PARTITION, DIGEST)]
@@ -647,6 +826,32 @@ def test_both_entry_points_write_one_reference_body() -> None:
 
     assert set(json.loads(from_record)) == set(json.loads(from_reference))
     assert json.loads(from_reference)["artifact_locator"].endswith(artifact_key(DIGEST))
+
+
+def test_a_later_partition_reference_persists_source_as_of_or_its_absence() -> None:
+    client = FakeS3()
+    acquired_artifact(client)
+    store = S3BronzeStore(client, BUCKET)
+    source_as_of = datetime(2027, 1, 15, tzinfo=UTC)
+    with_instant = ReleasePartition(
+        jurisdiction_code="tx-dallas",
+        tax_year=2027,
+        release_kind="certified",
+        source_as_of=source_as_of,
+    )
+    without_instant = ReleasePartition(
+        jurisdiction_code="tx-dallas",
+        tax_year=2028,
+        release_kind="current",
+    )
+
+    store.reference_partition(with_instant, DIGEST)
+    store.reference_partition(without_instant, DIGEST)
+
+    first = json.loads(client.objects[partition_ref_key(with_instant, DIGEST)])
+    second = json.loads(client.objects[partition_ref_key(without_instant, DIGEST)])
+    assert first["source_as_of"] == source_as_of.isoformat()
+    assert second["source_as_of"] is None
 
 
 def test_a_large_artifact_is_finalized_with_a_ranged_copy() -> None:
@@ -724,6 +929,7 @@ def stored_manifest(**overrides) -> ReleaseManifest:  # noqa: ANN003
         }
     )
     return ReleaseManifest(
+        jurisdiction="tx-dallas",
         partitions=DALLAS,
         artifact=artifact,
         acquired_at=datetime(2026, 8, 19, tzinfo=UTC),
@@ -742,7 +948,10 @@ def test_a_manifest_naming_another_bucket_is_refused() -> None:
     with pytest.raises(ArtifactMismatchError, match="names"):
         store.record(stored_manifest(locator=f"s3://other-bucket/{artifact_key(DIGEST)}"))
 
-    assert manifest_key(DIGEST) not in client.objects
+    assert (
+        manifest_key(stored_manifest(locator=f"s3://other-bucket/{artifact_key(DIGEST)}"))
+        not in client.objects
+    )
 
 
 def test_a_manifest_naming_another_key_is_refused() -> None:
@@ -764,7 +973,7 @@ def test_a_manifest_disagreeing_about_length_is_refused() -> None:
     with pytest.raises(ArtifactMismatchError, match="bytes while the stored"):
         store.record(stored_manifest(byte_count=len(BODY) + 1))
 
-    assert manifest_key(DIGEST) not in client.objects
+    assert manifest_key(stored_manifest(byte_count=len(BODY) + 1)) not in client.objects
 
 
 def test_a_manifest_that_agrees_is_recorded() -> None:
@@ -773,7 +982,7 @@ def test_a_manifest_that_agrees_is_recorded() -> None:
 
     S3BronzeStore(client, BUCKET).record(stored_manifest())
 
-    assert manifest_key(DIGEST) in client.objects
+    assert manifest_key(stored_manifest()) in client.objects
 
 
 # --------------------------------------------------------------------------
