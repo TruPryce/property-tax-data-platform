@@ -55,6 +55,7 @@ TARRANT_SOURCE = CountySourceDefinition(
     official_url="https://www.tad.org/",
     acquisition_method=AcquisitionMethod.FIXED_WIDTH,
     parser_id="texas.tarrant.fixed-width-v1",
+    expected_media_types=("application/zip",),
 )
 
 #: D1: the required foundation headers, bound by untrimmed exact name.  Order is

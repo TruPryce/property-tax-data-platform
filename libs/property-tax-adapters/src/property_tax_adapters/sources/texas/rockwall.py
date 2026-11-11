@@ -8,4 +8,5 @@ ROCKWALL_SOURCE = CountySourceDefinition(
     official_url="https://www.rockwallcad.com/gis-data",
     acquisition_method=AcquisitionMethod.GIS_SHAPEFILE,
     parser_id="texas.rockwall.gis-shapefile-partial-v1",
+    expected_media_types=("application/zip",),
 )
