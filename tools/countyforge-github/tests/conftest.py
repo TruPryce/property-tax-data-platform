@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -140,3 +141,19 @@ def copy_document() -> Callable[[JsonObject], JsonObject]:
 @pytest.fixture
 def repo_root() -> Path:
     return Path.cwd().resolve(strict=True)
+
+
+@pytest.fixture
+def implementation_contract_root(tmp_path: Path, repo_root: Path) -> Path:
+    """Restore the historical accepted plan only inside an isolated test root."""
+
+    root = tmp_path / "implementation-contract"
+    change = "add-isolated-openspec-to-code-agents"
+    shutil.copytree(
+        repo_root / "openspec" / "changes" / "archive" / f"2026-09-20-{change}",
+        root / "openspec" / "changes" / change,
+    )
+    for directory in ("schemas", "policies", "profiles"):
+        shutil.copytree(repo_root / ".ai" / directory, root / ".ai" / directory)
+    shutil.copy2(repo_root / "pyproject.toml", root / "pyproject.toml")
+    return root

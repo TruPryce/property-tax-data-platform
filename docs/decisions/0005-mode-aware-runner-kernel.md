@@ -43,7 +43,7 @@ PR #1 artifact contract version 1 remains readable. During migration, the kernel
 
 - [Architecture decisions](README.md)
 - [Runner engineering guide](../engineering/countyforge-runner-kernel.md)
-- [Agent-runner OpenSpec](../../openspec/changes/build-mode-aware-runner-kernel/specs/agent-runner-kernel/spec.md)
+- [Agent-runner OpenSpec](../../openspec/specs/agent-runner-kernel/spec.md)
 - [Review artifact contract](../engineering/review-artifact-contract.md)
 - [Issue #4](https://github.com/TruPryce/property-tax-data-platform/issues/4)
 - [Parent program #2](https://github.com/TruPryce/property-tax-data-platform/issues/2)

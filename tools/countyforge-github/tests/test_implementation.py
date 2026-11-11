@@ -66,10 +66,10 @@ def test_root_data_rule_still_classifies_repository_data() -> None:
     assert _path_matches_rule("data/source.csv", "data/")
 
 
-def test_unmerged_plan_is_not_eligible(repo_root: Path) -> None:
+def test_unmerged_plan_is_not_eligible(implementation_contract_root: Path) -> None:
     _, _, sha = _facts()
     decision = evaluate_implementation_eligibility(
-        contract_root=repo_root,
+        contract_root=implementation_contract_root,
         repository="TruPryce/property-tax-data-platform",
         issue_number=7,
         change_name="add-isolated-openspec-to-code-agents",
@@ -95,7 +95,7 @@ def test_unmerged_plan_is_not_eligible(repo_root: Path) -> None:
     ],
 )
 def test_merged_plan_requires_complete_human_approval_evidence(
-    repo_root: Path, field: str, value: object
+    implementation_contract_root: Path, field: str, value: object
 ) -> None:
     _, _, sha = _facts()
     facts: dict[str, Any] = {
@@ -108,7 +108,7 @@ def test_merged_plan_requires_complete_human_approval_evidence(
     }
     facts[field] = value
     decision = evaluate_implementation_eligibility(
-        contract_root=repo_root,
+        contract_root=implementation_contract_root,
         repository="TruPryce/property-tax-data-platform",
         issue_number=7,
         change_name="add-isolated-openspec-to-code-agents",
@@ -133,10 +133,10 @@ def test_blocking_decisions_are_checked_across_accepted_change_files(tmp_path: P
     assert _has_unresolved_blocking_decision([design]) is False
 
 
-def test_packet_is_bounded_and_hash_bound(repo_root: Path) -> None:
+def test_packet_is_bounded_and_hash_bound(implementation_contract_root: Path) -> None:
     trigger, issue, sha = _facts()
     decision = evaluate_implementation_eligibility(
-        contract_root=repo_root,
+        contract_root=implementation_contract_root,
         repository=str(trigger["repository"]["full_name"]),
         issue_number=int(issue["number"]),
         change_name="add-isolated-openspec-to-code-agents",
@@ -662,13 +662,13 @@ def test_artifact_policy_rejects_result_provenance_mismatch(
 
 
 def test_artifact_policy_rejects_accepted_task_checkbox_mutation(
-    tmp_path: Path, repo_root: Path
+    tmp_path: Path, implementation_contract_root: Path
 ) -> None:
     change = "add-isolated-openspec-to-code-agents"
     relative = f"openspec/changes/{change}/tasks.md"
     workspace = tmp_path / "workspace"
     (workspace / f"openspec/changes/{change}").mkdir(parents=True)
-    baseline = repo_root / relative
+    baseline = implementation_contract_root / relative
     candidate = workspace / relative
     candidate.write_text(
         baseline.read_text(encoding="utf-8").replace("[x]", "[ ]", 1), encoding="utf-8"
@@ -696,7 +696,7 @@ def test_artifact_policy_rejects_accepted_task_checkbox_mutation(
             result,
             manifest,
             workspace_root=workspace,
-            policy_root=repo_root,
+            policy_root=implementation_contract_root,
             expected_run_id="run",
             expected_issue_number=7,
             expected_change_name=change,

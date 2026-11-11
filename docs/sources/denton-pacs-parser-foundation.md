@@ -3,7 +3,7 @@
 The Denton parser foundation is an adapter-local, deterministic boundary for small synthetic PACS
 fixed-width inputs. It does not discover, download, unpack, persist, orchestrate, or publish
 appraisal data, and it is not evidence of compatibility with a live Denton CAD release. The
-[Denton OpenSpec delta](../../openspec/changes/add-denton-cad-pacs-parser-foundation/specs/denton-cad-source-contract/spec.md)
+[Denton OpenSpec capability](../../openspec/specs/denton-cad-source-contract/spec.md)
 is the normative behavior contract.
 
 ## Two Modules, One Boundary
@@ -243,6 +243,6 @@ production readiness are **not** established by it.
 
 - [Source onboarding](README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
-- [Denton OpenSpec delta](../../openspec/changes/add-denton-cad-pacs-parser-foundation/specs/denton-cad-source-contract/spec.md)
+- [Denton OpenSpec capability](../../openspec/specs/denton-cad-source-contract/spec.md)
 - [Tarrant parser foundation](tarrant-parser-foundation.md)
 - [Architecture](../architecture/README.md)

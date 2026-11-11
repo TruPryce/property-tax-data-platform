@@ -3,7 +3,7 @@
 The Ellis parser binding is an adapter-local, deterministic boundary for small synthetic PACS
 fixed-width inputs. It does not discover, render, download, unpack, persist, orchestrate, or publish
 appraisal data, and it is not evidence of compatibility with a live Ellis CAD release. The
-[Ellis OpenSpec delta](../../openspec/changes/add-ellis-cad-pacs-parser-binding/specs/ellis-cad-source-contract/spec.md)
+[Ellis OpenSpec capability](../../openspec/specs/ellis-cad-source-contract/spec.md)
 is the normative behavior contract.
 
 ## Binding, Not Forking
@@ -214,5 +214,5 @@ established by it.
 - [Source onboarding](README.md)
 - [Denton PACS parser foundation](denton-pacs-parser-foundation.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
-- [Ellis OpenSpec delta](../../openspec/changes/add-ellis-cad-pacs-parser-binding/specs/ellis-cad-source-contract/spec.md)
+- [Ellis OpenSpec capability](../../openspec/specs/ellis-cad-source-contract/spec.md)
 - [Architecture](../architecture/README.md)

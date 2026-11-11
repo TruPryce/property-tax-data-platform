@@ -38,7 +38,7 @@ make countyforge-request-fixtures
 
 - [Developer tooling](../README.md)
 - [Runner engineering guide](../../docs/engineering/countyforge-runner-kernel.md)
-- [Agent-runner OpenSpec](../../openspec/changes/build-mode-aware-runner-kernel/specs/agent-runner-kernel/spec.md)
+- [Agent-runner OpenSpec](../../openspec/specs/agent-runner-kernel/spec.md)
 - [Mode-aware runner ADR](../../docs/decisions/0005-mode-aware-runner-kernel.md)
 - [GitHub control-plane package](../countyforge-github/README.md)
 - [GitHub control-plane guide](../../docs/engineering/countyforge-github-control-plane.md)

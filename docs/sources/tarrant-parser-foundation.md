@@ -4,7 +4,7 @@ The Tarrant parser foundation is an adapter-local, deterministic boundary for sm
 inputs that match the approved certified-core source contract. It does not download, persist,
 orchestrate, or publish appraisal data, and it is not evidence of compatibility with a live Tarrant
 CAD release. The
-[Tarrant OpenSpec delta](../../openspec/changes/add-tarrant-cad-parser-foundation/specs/tarrant-cad-source-contract/spec.md)
+[Tarrant OpenSpec capability](../../openspec/specs/tarrant-cad-source-contract/spec.md)
 is the normative behavior contract.
 
 ## Scope
@@ -179,6 +179,6 @@ Live-release compatibility and production readiness are **not** established by t
 
 - [Source onboarding](README.md)
 - [Adapter overview](../../libs/property-tax-adapters/README.md)
-- [Tarrant OpenSpec delta](../../openspec/changes/add-tarrant-cad-parser-foundation/specs/tarrant-cad-source-contract/spec.md)
+- [Tarrant OpenSpec capability](../../openspec/specs/tarrant-cad-source-contract/spec.md)
 - [Dallas parser foundation](dallas-parser-foundation.md)
 - [Architecture](../architecture/README.md)

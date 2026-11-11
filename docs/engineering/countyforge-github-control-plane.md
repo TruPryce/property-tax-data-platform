@@ -2,7 +2,7 @@
 
 ## Purpose
 
-GitHub Issue and pull-request comments provide the authenticated remote control surface for the CountyForge runner kernel. The accepted behavior is the [`github-agent-control-plane` OpenSpec capability](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md). This guide explains the implementation and trust boundaries; [GitHub operations](../operations/countyforge-github-operations.md) owns enablement and recovery procedures.
+GitHub Issue and pull-request comments provide the authenticated remote control surface for the CountyForge runner kernel. The accepted behavior is the [`github-agent-control-plane` OpenSpec capability](../../openspec/specs/github-agent-control-plane/spec.md). This guide explains the implementation and trust boundaries; [GitHub operations](../operations/countyforge-github-operations.md) owns enablement and recovery procedures.
 
 `review.packet-only.v1`, `plan.read-only.v1`, and `implement.workspace-write.v1` execute through separate profile boundaries. Implementation requires an accepted merged planning change and publishes only a trusted draft PR; fix and validate remain fail-closed with the kernel's `profile_not_implemented` outcome.
 

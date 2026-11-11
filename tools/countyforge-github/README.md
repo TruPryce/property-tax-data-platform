@@ -59,4 +59,4 @@ Tests use fake GitHub ports. They make no live GitHub mutation or paid model cal
 - [Control-plane engineering guide](../../docs/engineering/countyforge-github-control-plane.md)
 - [GitHub operations](../../docs/operations/countyforge-github-operations.md)
 - [GitHub-native control-plane ADR](../../docs/decisions/0006-github-native-countyforge-control-plane.md)
-- [Control-plane OpenSpec](../../openspec/changes/add-github-run-control-plane/specs/github-agent-control-plane/spec.md)
+- [Control-plane OpenSpec](../../openspec/specs/github-agent-control-plane/spec.md)

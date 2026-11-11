@@ -2,7 +2,7 @@
 
 ## Purpose
 
-CountyForge uses a Python 3.12 developer-tool kernel to validate versioned run requests, resolve immutable capability profiles, enforce provider/model and budget compatibility, dispatch an eligible executor, and write provider-neutral evidence. The accepted behavior is the [`agent-runner-kernel` OpenSpec capability](../../openspec/changes/build-mode-aware-runner-kernel/specs/agent-runner-kernel/spec.md); this guide explains the repository layout and operator workflow.
+CountyForge uses a Python 3.12 developer-tool kernel to validate versioned run requests, resolve immutable capability profiles, enforce provider/model and budget compatibility, dispatch an eligible executor, and write provider-neutral evidence. The accepted behavior is the [`agent-runner-kernel` OpenSpec capability](../../openspec/specs/agent-runner-kernel/spec.md); this guide explains the repository layout and operator workflow.
 
 ## Responsibility Map
 

@@ -23,4 +23,4 @@ An ADR records context, decision, alternatives, consequences, status, date, and 
 - [Architecture](../architecture/README.md)
 - [Contribution workflow](../../CONTRIBUTING.md)
 - [Active OpenSpec design](../../openspec/changes/bootstrap-six-county-appraisal-platform/design.md)
-- [CountyForge control-plane design](../../openspec/changes/add-github-run-control-plane/design.md)
+- [CountyForge control-plane design](../../openspec/changes/archive/2026-09-20-add-github-run-control-plane/design.md)
