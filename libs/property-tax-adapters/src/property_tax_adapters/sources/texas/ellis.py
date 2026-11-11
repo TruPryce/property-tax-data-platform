@@ -47,6 +47,7 @@ ELLIS_SOURCE = CountySourceDefinition(
     official_url="https://www.elliscad.com/appraisal-data-export",
     acquisition_method=AcquisitionMethod.FIXED_WIDTH,
     parser_id="texas.ellis.pacs-fixed-width-v1",
+    expected_media_types=("application/zip",),
 )
 
 #: The synthetic Ellis property layout. Positions are 1-indexed inclusive.

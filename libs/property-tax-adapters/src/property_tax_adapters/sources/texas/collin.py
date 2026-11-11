@@ -70,6 +70,7 @@ COLLIN_SOURCE = CountySourceDefinition(
     official_url="https://collincad.org/open-data-portal/",
     acquisition_method=AcquisitionMethod.OPEN_DATA_API,
     parser_id="texas.collin.open-data-v1",
+    expected_media_types=("application/zip",),
 )
 
 

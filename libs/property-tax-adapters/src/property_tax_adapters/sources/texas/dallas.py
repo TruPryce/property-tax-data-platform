@@ -44,6 +44,7 @@ DALLAS_SOURCE = CountySourceDefinition(
     official_url="https://www.dallascad.org/DataProducts.aspx",
     acquisition_method=AcquisitionMethod.BULK_ZIP,
     parser_id="texas.dallas.dcad-delimited-v1",
+    expected_media_types=("application/zip",),
 )
 
 

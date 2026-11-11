@@ -53,6 +53,7 @@ DENTON_SOURCE = CountySourceDefinition(
     official_url="https://dentoncad.net/data/_uploaded/files/datafiles/",
     acquisition_method=AcquisitionMethod.FIXED_WIDTH,
     parser_id="texas.denton.pacs-fixed-width-v1",
+    expected_media_types=("application/zip",),
 )
 
 #: The synthetic Denton property layout. Positions are 1-indexed inclusive.
