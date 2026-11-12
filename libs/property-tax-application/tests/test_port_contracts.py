@@ -16,8 +16,6 @@ from pathlib import Path
 import pytest
 from _fake_load import FakeRepository as FakeCanonicalRepository
 from _fake_load import outcome as load_outcome
-from property_tax_adapters.objectstore.s3 import deserialize_manifest, serialize_manifest
-from property_tax_adapters.sources.texas.registry import all_sources
 from property_tax_application.acquisition import RedirectHop, ResponseMetadata
 from property_tax_application.bronze import (
     ManifestIndex,
@@ -63,11 +61,13 @@ from property_tax_application.runs import (
     UnknownProcessingRunError,
 )
 from property_tax_application.sources import (
+    AcquisitionMethod,
     CountySourceDefinition,
     SourceRegistry,
     UnsupportedSource,
 )
 from property_tax_domain import (
+    INITIAL_COUNTIES,
     ArtifactIdentity,
     Jurisdiction,
     ReleaseIdentity,
@@ -103,7 +103,7 @@ MATRIX_CASES: dict[str, dict[str, str]] = {
         "M03": "test_each_excluded_artifact_or_partition_field_preserves_equivalence",
         "M04": "test_equal_acquisition_evidence_compares_equal",
         "M05": "test_manifest_index_registration_and_later_attachment",
-        "M06": "test_partition_freshness_survives_manifest_value_round_trip",
+        "M06": "test_manifest_value_carries_partition_freshness_without_substitution",
         "M07": "test_partition_freshness_is_not_acquisition_identity",
         "M08": "test_one_acquisition_reference_can_bind_two_releases",
         "M09": "test_run_ports_require_typed_references_and_refuse_unknown_runs",
@@ -192,10 +192,23 @@ def candidate(**changes: object) -> SourceCandidate:
     return SourceCandidate(**values)  # type: ignore[arg-type]
 
 
+def fake_source_definitions() -> tuple[CountySourceDefinition, ...]:
+    return tuple(
+        CountySourceDefinition(
+            county=county,
+            official_url=f"https://example.gov/{county.slug.value}/releases",
+            acquisition_method=AcquisitionMethod.BULK_ZIP,
+            parser_id=f"test.{county.slug.value}.archive-v1",
+            expected_media_types=("application/zip",),
+        )
+        for county in INITIAL_COUNTIES
+    )
+
+
 class FakeSourceRegistry:
     def __init__(self) -> None:
         self.definitions = {
-            jurisdiction(source.county.slug.value): source for source in all_sources()
+            jurisdiction(source.county.slug.value): source for source in fake_source_definitions()
         }
         self.supported = {
             requested: frozenset({ReleaseKind.CURRENT, ReleaseKind.CERTIFIED})
@@ -366,7 +379,7 @@ def test_content_kind_is_validated_after_parsing_before_promotion() -> None:
 
 
 def test_all_counties_have_explicit_expected_media() -> None:
-    sources = all_sources()
+    sources = fake_source_definitions()
     field_names = {field.name for field in CountySourceDefinition.__dataclass_fields__.values()}
 
     assert len(sources) == 6
@@ -719,9 +732,7 @@ def test_manifest_index_registration_and_later_attachment() -> None:
     assert isinstance(index, ManifestIndex)
 
 
-def test_partition_freshness_survives_manifest_value_round_trip() -> None:
-    """Assert value preservation without inspecting the serialized representation."""
-
+def test_manifest_value_carries_partition_freshness_without_substitution() -> None:
     current = SOURCE_AS_OF
     certified = SOURCE_AS_OF - timedelta(days=30)
     recorded = manifest(
@@ -730,15 +741,12 @@ def test_partition_freshness_survives_manifest_value_round_trip() -> None:
             partition(kind="current", source_as_of=current),
         )
     )
-    restored = deserialize_manifest(serialize_manifest(recorded))
     absent = manifest(partitions=(partition(source_as_of=None),))
-    absent_restored = deserialize_manifest(serialize_manifest(absent))
 
-    assert restored == recorded
-    assert tuple(entry.source_as_of for entry in restored.partitions) == (certified, current)
-    assert all(entry.source_as_of.tzinfo is not None for entry in restored.partitions)  # type: ignore[union-attr]
-    assert absent_restored.partitions[0].source_as_of is None
-    assert absent_restored.partitions[0].source_as_of != absent.acquired_at
+    assert tuple(entry.source_as_of for entry in recorded.partitions) == (certified, current)
+    assert all(entry.source_as_of.tzinfo is not None for entry in recorded.partitions)  # type: ignore[union-attr]
+    assert absent.partitions[0].source_as_of is None
+    assert absent.partitions[0].source_as_of != absent.acquired_at
 
 
 def test_partition_freshness_is_not_acquisition_identity() -> None:
@@ -1422,13 +1430,13 @@ def _top_level_imports(path: Path) -> set[str]:
 
 
 def test_suite_stays_application_contract_only() -> None:
-    """The adapter codec is opaque here; keys, payload layout, and persistence stay elsewhere."""
+    """Keys, payload layout, concrete registries, and persistence stay adapter-owned."""
 
     source_path = Path(__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     imports = _top_level_imports(source_path)
 
-    assert not imports & {"boto3", "botocore", "psycopg"}
+    assert not imports & {"boto3", "botocore", "property_tax_adapters", "psycopg"}
     forbidden_identifiers = {
         "artifact_" + "key",
         "manifest_" + "key",
