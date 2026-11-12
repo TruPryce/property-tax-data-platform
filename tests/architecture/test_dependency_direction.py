@@ -91,6 +91,12 @@ def _domain_sources() -> list[Path]:
     return sorted((ROOT / "libs/property-tax-domain/src/property_tax_domain").rglob("*.py"))
 
 
+def _application_sources() -> list[Path]:
+    return sorted(
+        (ROOT / "libs/property-tax-application/src/property_tax_application").rglob("*.py")
+    )
+
+
 def test_the_domain_imports_only_the_standard_library_and_itself() -> None:
     """Constructible without boto3, psycopg, Airflow, or any county adapter.
 
@@ -243,6 +249,99 @@ def test_the_application_mirrors_the_adapters_boundary_contract_version() -> Non
     assert DIAGNOSTIC_CODES == {member.value for member in adapters.ReleaseDiagnosticCode}
 
 
+def test_the_application_imports_without_infrastructure_dependencies() -> None:
+    """Every root export remains importable when infrastructure is unavailable."""
+
+    program = """
+import builtins
+
+blocked = {"airflow", "boto3", "property_tax_adapters", "psycopg"}
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name.split(".", maxsplit=1)[0] in blocked:
+        raise ModuleNotFoundError(name)
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+import property_tax_application as application
+
+for public_name in application.__all__:
+    getattr(application, public_name)
+"""
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", program],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_the_application_public_contract_names_no_infrastructure() -> None:
+    """Scan code vocabulary without treating explanatory docstrings as dependencies."""
+
+    forbidden_identifiers = {
+        "airflow",
+        "boto3",
+        "connection",
+        "cursor",
+        "load_key",
+        "provenance_key",
+        "psycopg",
+        "release_key",
+        "snapshot_key",
+        "transaction",
+    }
+    forbidden_literal_fragments = {
+        "canonical.",
+        "ingestion.",
+        "on conflict",
+        "publication.",
+        "quality.",
+        "silver.",
+        "staging table",
+    }
+    violations: list[str] = []
+    for path in _application_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        _strip_docstrings(tree)
+        for node in ast.walk(tree):
+            identifiers: tuple[str, ...] = ()
+            if isinstance(node, ast.Name):
+                identifiers = (node.id,)
+            elif isinstance(node, ast.Attribute):
+                identifiers = (node.attr,)
+            elif isinstance(node, ast.arg):
+                identifiers = (node.arg,)
+            elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                identifiers = (node.name,)
+            for identifier in identifiers:
+                folded_identifier = identifier.casefold()
+                if folded_identifier in forbidden_identifiers or folded_identifier.startswith(
+                    ("airflow", "boto3", "psycopg", "s3")
+                ):
+                    violations.append(
+                        f"{path.relative_to(ROOT)} names infrastructure identifier {identifier!r}"
+                    )
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            literal = node.value.casefold()
+            for fragment in forbidden_literal_fragments:
+                if fragment in literal:
+                    violations.append(
+                        f"{path.relative_to(ROOT)} names infrastructure phrase {fragment!r}"
+                    )
+            if "COPY" in node.value.split():
+                violations.append(f"{path.relative_to(ROOT)} names bulk-load operation 'COPY'")
+
+    assert not violations, "Infrastructure vocabulary in application code:\n" + "\n".join(
+        violations
+    )
+
+
 def test_the_processing_run_values_are_reachable_from_the_package_root() -> None:
     import property_tax_application as application
 
@@ -255,6 +354,80 @@ def test_the_processing_run_values_are_reachable_from_the_package_root() -> None
         "BOUNDARY_CONTRACT_VERSION",
     ):
         assert name in application.__all__, name
+        assert hasattr(application, name), name
+
+
+def test_every_application_port_and_crossing_value_is_reachable_from_the_package_root() -> None:
+    import property_tax_application as application
+
+    expected = {
+        "AccountSnapshotRef",
+        "AcquiredArtifact",
+        "AcquisitionError",
+        "AcquisitionFailure",
+        "AcquisitionMethod",
+        "AcquisitionPolicy",
+        "AdoptableSnapshot",
+        "AdoptableSnapshotMismatch",
+        "AdoptedParent",
+        "ArtifactSink",
+        "BOUNDARY_CONTRACT_VERSION",
+        "BronzeConflict",
+        "BronzeStore",
+        "CanonicalRecord",
+        "CanonicalRecordBatch",
+        "CanonicalReleaseRepository",
+        "Clock",
+        "CorrelatedRecord",
+        "CorrelationHandle",
+        "CountySourceDefinition",
+        "DIAGNOSTIC_CODES",
+        "DIAGNOSTIC_RETENTION_LIMIT",
+        "IncompleteReleaseIdentity",
+        "LogicalReleaseEvidence",
+        "ManifestIndex",
+        "ManifestRef",
+        "PageEvidence",
+        "ProcessingRunHeldError",
+        "ProcessingRunRef",
+        "ProcessingRunRepository",
+        "ProcessingRunStart",
+        "PublicationActivationError",
+        "PublicationAttempt",
+        "PublicationAttemptClosedError",
+        "PublicationProduct",
+        "PublicationQualityError",
+        "PublicationQualityUnavailableError",
+        "PublicationRef",
+        "PublicationRepository",
+        "QualityEvaluation",
+        "QualityRepository",
+        "QualityRule",
+        "QualityVerdict",
+        "RedirectHop",
+        "ReleaseDiagnosticRecord",
+        "ReleaseDiscovery",
+        "ReleaseDisposition",
+        "ReleaseLoadCompletion",
+        "ReleaseLoadSession",
+        "ReleaseManifest",
+        "ReleaseNoticeRecord",
+        "ReleasePartition",
+        "ReleaseProcessingOutcome",
+        "ResponseMetadata",
+        "RuleSeverity",
+        "SourceCandidate",
+        "SourceRegistry",
+        "StoredArtifact",
+        "UnchangedRelease",
+        "UnknownAccountSnapshot",
+        "UnknownProcessingRunError",
+        "UnsupportedSource",
+        "promote",
+    }
+
+    assert application.__all__ == sorted(expected)
+    for name in expected:
         assert hasattr(application, name), name
 
 
