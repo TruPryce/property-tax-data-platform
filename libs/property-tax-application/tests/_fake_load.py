@@ -20,8 +20,10 @@ the assertion can fail independently of what it is checking.
 
 from __future__ import annotations
 
+import pickle
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from types import TracebackType
 
 from property_tax_application.canonical import (
@@ -49,6 +51,63 @@ class LoadRefused(Exception):  # noqa: N818 - named for the rule it carries
     def __init__(self, rule: str, detail: str = "") -> None:
         super().__init__(f"{rule}: {detail}" if detail else rule)
         self.rule = rule
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredValue:
+    """A test-only durable value with no reference to the object it encoded."""
+
+    payload: bytes
+
+    @classmethod
+    def encode(cls, value: object) -> _StoredValue:
+        return cls(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+
+    def rehydrate(self) -> object:
+        return pickle.loads(self.payload)  # noqa: S301 - bytes are produced by this test fake
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedSnapshotOccurrence:
+    """One occurrence selected by an opaque snapshot reference."""
+
+    release: ReleaseIdentity
+    value: _StoredValue
+
+    def rehydrate(self) -> AccountSnapshot:
+        snapshot = self.value.rehydrate()
+        if not isinstance(snapshot, AccountSnapshot):
+            raise TypeError(f"stored snapshot decoded as {type(snapshot).__name__}")
+        return snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedParentOccurrence:
+    """The S4 value selected by one correlation handle."""
+
+    locator: tuple[str, int]
+    value: _StoredValue
+    account: AccountIdentity
+
+    @classmethod
+    def encode(
+        cls,
+        handle: CorrelationHandle,
+        parent: object,
+        account: AccountIdentity,
+    ) -> _RetainedParentOccurrence:
+        return cls(("retained", handle.value), _StoredValue.encode(parent), account)
+
+    def rehydrate(self) -> object:
+        return self.value.rehydrate()
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedRecord:
+    """One S3 record plus the private occurrence selected for its parent."""
+
+    record: object
+    parent_occurrence: tuple[str, int] | None
 
 
 def run(value: str = "run-1") -> ProcessingRunRef:
@@ -87,7 +146,7 @@ class FakeStore:
         #: a retry carrying an accepted disposition would manufacture a canonical
         #: load for a run whose durable outcome says it was rejected.
         self.completed: set[tuple[ReleaseIdentity, ProcessingRunRef]] = set()
-        self._snapshots: dict[AccountSnapshotRef, tuple[ReleaseIdentity, AccountSnapshot]] = {}
+        self._snapshots: dict[AccountSnapshotRef, _PersistedSnapshotOccurrence] = {}
         self.candidates_drawn = 0
         #: How many durable writes succeed before one fails, or None for a store
         #: that does not fail.  Setting it to the number of writes a branch
@@ -162,17 +221,24 @@ class FakeStore:
     def persist_snapshot(
         self, ref: AccountSnapshotRef, release: ReleaseIdentity, snapshot: AccountSnapshot
     ) -> AdoptableSnapshot:
-        self._snapshots[ref] = (release, snapshot)
+        self._snapshots[ref] = _PersistedSnapshotOccurrence(
+            release,
+            _StoredValue.encode(snapshot),
+        )
         return AdoptableSnapshot(ref, snapshot)
 
     def resolve(self, ref: AccountSnapshotRef) -> tuple[ReleaseIdentity, AccountSnapshot] | None:
-        return self._snapshots.get(ref)
+        occurrence = self._snapshots.get(ref)
+        if occurrence is None:
+            return None
+        return occurrence.release, occurrence.rehydrate()
 
     def candidates(
         self, account: AccountIdentity, release: ReleaseIdentity
     ) -> Iterator[AdoptableSnapshot]:
-        for ref, (persisted_release, snapshot) in self._snapshots.items():
-            if persisted_release == release and snapshot.identity == account:
+        for ref, occurrence in self._snapshots.items():
+            snapshot = occurrence.rehydrate()
+            if occurrence.release == release and snapshot.identity == account:
                 self.candidates_drawn += 1
                 yield AdoptableSnapshot(ref, snapshot)
 
@@ -228,8 +294,8 @@ class FakeSession:
         self._max_batch_entries = max_batch_entries  # S0
         self._status = "OPEN"  # S1
         self._open_account: AccountIdentity | None = None  # S2
-        self._staged: list[object] = []  # S3
-        self._mappings: dict[CorrelationHandle, tuple[object, AccountIdentity]] = {}  # S4
+        self._staged: list[_StagedRecord] = []  # S3
+        self._mappings: dict[CorrelationHandle, _RetainedParentOccurrence] = {}  # S4
         self._high_water: int | None = None  # S6
 
     # -- the state, readable so a test can compare it byte for byte ----------
@@ -273,18 +339,20 @@ class FakeSession:
             located = self._store.resolve(adoption.candidate.ref)
             if located is None or located[0] != self._release:
                 raise UnknownAccountSnapshot(str(adoption.candidate.ref.value))
-            if located[1] is not adoption.candidate.snapshot:
+            if located[1] != adoption.candidate.snapshot:
                 raise AdoptableSnapshotMismatch(str(adoption.candidate.ref.value))
 
         in_batch = {handle: index for index, handle in enumerate(introduced)}
+        resolved_parents: dict[CorrelationHandle, _RetainedParentOccurrence] = {}
         for entry in batch.entries:  # W5
             if entry.parent is None or entry.parent in in_batch:
                 continue
             if entry.parent not in self._mappings:
                 raise LoadRefused("W5", f"{entry.parent.value} is not live")
-            denoted, _ = self._mappings[entry.parent]
-            if _held_parent(entry.record) is not denoted:
+            occurrence = self._mappings[entry.parent]
+            if _held_parent(entry.record) != occurrence.rehydrate():
                 raise LoadRefused("W5", f"{entry.parent.value} denotes another record")
+            resolved_parents[entry.parent] = occurrence
 
         introduced_set = frozenset(introduced)
         for handle in batch.retain:  # W6
@@ -323,27 +391,38 @@ class FakeSession:
         if batch.closing is not None and batch.closing != self._open_account:  # W12
             raise LoadRefused("W12", str(batch.closing.source_account_id))
 
-        self._apply(batch, accounts, carried)
+        self._apply(batch, accounts, carried, resolved_parents)
 
     def _apply(
         self,
         batch: CanonicalRecordBatch,
         accounts: dict[CorrelationHandle, AccountIdentity],
         carried: frozenset[AccountIdentity],
+        resolved_parents: dict[CorrelationHandle, _RetainedParentOccurrence],
     ) -> None:
         """The success row, applied together and at the batch boundary."""
 
         denoted = _denoted_by(batch)
-        self._staged.extend(entry.record for entry in batch.entries)
+        for entry in batch.entries:
+            parent_occurrence: tuple[str, int] | None = None
+            if entry.parent is not None:
+                retained = resolved_parents.get(entry.parent)
+                parent_occurrence = (
+                    retained.locator if retained is not None else ("in-batch", entry.parent.value)
+                )
+            self._staged.append(_StagedRecord(entry.record, parent_occurrence))
         introduced = batch.introduced
         if introduced:
             self._high_water = max(handle.value for handle in introduced)
 
         for handle in batch.retain:
-            self._mappings[handle] = (
-                denoted.get(handle, self._mappings.get(handle, (None,))[0]),
-                accounts[handle],
-            )
+            parent = denoted.get(handle)
+            if parent is not None:
+                self._mappings[handle] = _RetainedParentOccurrence.encode(
+                    handle,
+                    parent,
+                    accounts[handle],
+                )
         for handle in batch.release:
             self._mappings.pop(handle, None)
 
@@ -353,8 +432,8 @@ class FakeSession:
         if batch.closing is not None:
             completing.add(batch.closing)
         completing.discard(batch.continuing)
-        for handle, (_, account) in list(self._mappings.items()):
-            if account in completing:
+        for handle, occurrence in list(self._mappings.items()):
+            if occurrence.account in completing:
                 del self._mappings[handle]
 
         self._open_account = batch.continuing
@@ -368,8 +447,8 @@ class FakeSession:
                 accounts[entry.handle] = account_of(entry.record)
         for adoption in batch.adoptions:
             accounts[adoption.handle] = adoption.candidate.snapshot.identity
-        for handle, (_, account) in self._mappings.items():
-            accounts.setdefault(handle, account)
+        for handle, occurrence in self._mappings.items():
+            accounts.setdefault(handle, occurrence.account)
         return accounts
 
     # -- commit and abort ----------------------------------------------------
@@ -381,7 +460,7 @@ class FakeSession:
             raise LoadRefused("C2", str(self._open_account.source_account_id))
 
         key = (self._release, self._run)
-        staged = tuple(self._staged)
+        staged = tuple(item.record for item in self._staged)
         # Everything durable happens inside one transaction, and a failure part
         # way through it rolls the store back.  `S1`-`S6` are untouched until it
         # returns, so the failure row needs nothing undone on this side.
