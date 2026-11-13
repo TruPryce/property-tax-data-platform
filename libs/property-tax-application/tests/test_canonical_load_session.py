@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import typing
+from dataclasses import fields, is_dataclass
 from decimal import Decimal
 from typing import Protocol
 
@@ -93,6 +94,31 @@ def session(
 ):
     repository = FakeRepository(store, max_batch_entries=maximum)
     return repository, repository.open_load(RELEASE, run(run_id), outcome(accepted=accepted))
+
+
+def retained_state_reaches(root: object, target: object) -> bool:
+    """Whether the S4 data graph, excluding Python runtime metadata, reaches target."""
+
+    seen: set[int] = set()
+
+    def visit(value: object) -> bool:
+        if value is target:
+            return True
+        identity = id(value)
+        if identity in seen or isinstance(value, (str, bytes, int, float, bool, type(None))):
+            return False
+        seen.add(identity)
+        if isinstance(value, dict):
+            children = (*value.keys(), *value.values())
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            children = tuple(value)
+        elif is_dataclass(value) and not isinstance(value, type):
+            children = tuple(getattr(value, field.name) for field in fields(value))
+        else:
+            children = ()
+        return any(visit(child) for child in children)
+
+    return visit(root)
 
 
 # --------------------------------------------------------------------------
@@ -378,12 +404,14 @@ def test_w5_refuses_a_parent_whose_account_has_completed() -> None:
 def test_w5_refuses_a_live_handle_that_denotes_another_record() -> None:
     _, load = session()
     first = snapshot()
-    other = snapshot()
+    other = snapshot(legal_description=LegalDescription("LOT 2"))
     load.write(
         CanonicalRecordBatch(
             entries=(CorrelatedRecord(first, handle(1)),), continuing=ACCOUNT, retain=(handle(1),)
         )
     )
+    before = load.state
+    live_before = load.live
 
     with pytest.raises(LoadRefused) as refusal:
         load.write(
@@ -393,6 +421,76 @@ def test_w5_refuses_a_live_handle_that_denotes_another_record() -> None:
         )
 
     assert refusal.value.rule == "W5"
+    assert load.state == before
+    assert load.live == live_before == frozenset({handle(1)})
+
+
+def test_w5_accepts_an_equal_rehydrated_parent_after_s4_spills() -> None:
+    _, load = session()
+    original = snapshot()
+    retained = handle(1)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(original, retained),),
+            continuing=ACCOUNT,
+            retain=(retained,),
+        )
+    )
+
+    s4 = load.state[3]
+    assert retained_state_reaches(load.state[2], original), "S3 still stages the accepted record"
+    assert not retained_state_reaches(s4, original), "S4 stores no path to the original object"
+    occurrence = load._mappings[retained]
+    rehydrated = occurrence.rehydrate()
+    assert rehydrated == original and rehydrated is not original
+
+    equal_new = snapshot()
+    assert equal_new == original and equal_new is not original
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(owner(equal_new), None, retained),),
+            continuing=ACCOUNT,
+        )
+    )
+
+    assert load._staged[-1].parent_occurrence == occurrence.locator
+
+
+def test_equal_retained_parents_remain_distinct_handle_selected_occurrences() -> None:
+    _, load = session()
+    first, second = snapshot(), snapshot()
+    first_handle, second_handle = handle(1), handle(2)
+    assert first == second and first is not second
+
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, first_handle),
+                CorrelatedRecord(second, second_handle),
+            ),
+            continuing=ACCOUNT,
+            retain=(first_handle, second_handle),
+        )
+    )
+    first_occurrence = load._mappings[first_handle]
+    second_occurrence = load._mappings[second_handle]
+    assert first_occurrence is not second_occurrence
+    assert first_occurrence.locator != second_occurrence.locator
+    assert first_occurrence.rehydrate() == second_occurrence.rehydrate()
+
+    first_new, second_new = snapshot(), snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(owner(first_new, "FIRST"), None, first_handle),
+                CorrelatedRecord(owner(second_new, "SECOND"), None, second_handle),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+    assert load._staged[-2].parent_occurrence == first_occurrence.locator
+    assert load._staged[-1].parent_occurrence == second_occurrence.locator
 
 
 def test_w6_and_w7_refuse_deltas_naming_handles_that_are_neither_live_nor_introduced() -> None:
@@ -417,7 +515,7 @@ def test_w6_and_w7_refuse_deltas_naming_handles_that_are_neither_live_nor_introd
 def live_accounts(state: tuple[object, ...]) -> set[object]:
     """The accounts `S4` holds handles for — what `I1` constrains."""
 
-    return {account for _, (_, account) in state[3]}
+    return {occurrence.account for _, occurrence in state[3]}
 
 
 def require_i1(load: object) -> None:
@@ -1043,15 +1141,34 @@ def test_w4_refuses_a_locator_that_resolves_to_nothing_or_to_another_release() -
         )
 
 
-def test_w4_refuses_a_candidate_whose_halves_disagree() -> None:
+def test_w4_accepts_a_candidate_equal_to_the_rehydrated_persisted_snapshot() -> None:
     store = FakeStore()
-    located = snapshot()
-    store.persist_snapshot(AccountSnapshotRef("ref-1"), RELEASE, located)
+    persisted = snapshot()
+    candidate = store.persist_snapshot(AccountSnapshotRef("ref-1"), RELEASE, persisted)
+    located = store.resolve(candidate.ref)
+    assert located is not None
+    assert located[1] == candidate.snapshot and located[1] is not candidate.snapshot
+
     _, load = session(store=store)
-    assembled = AdoptableSnapshot(AccountSnapshotRef("ref-1"), snapshot())  # equal, not the same
+    load.write(CanonicalRecordBatch(adoptions=(AdoptedParent(candidate, handle(1)),)))
+
+
+def test_w4_refuses_a_candidate_when_the_selected_occurrence_value_changed() -> None:
+    store = FakeStore()
+    ref = AccountSnapshotRef("ref-1")
+    candidate = store.persist_snapshot(ref, RELEASE, snapshot())
+    store.persist_snapshot(
+        ref,
+        RELEASE,
+        snapshot(legal_description=LegalDescription("CHANGED")),
+    )
+    _, load = session(store=store)
+    before = load.state
 
     with pytest.raises(AdoptableSnapshotMismatch):
-        load.write(CanonicalRecordBatch(adoptions=(AdoptedParent(assembled, handle(1)),)))
+        load.write(CanonicalRecordBatch(adoptions=(AdoptedParent(candidate, handle(1)),)))
+
+    assert load.state == before
 
 
 def test_two_candidates_sharing_a_provenance_are_distinct_and_adopting_one_picks_it() -> None:
@@ -1064,10 +1181,11 @@ def test_two_candidates_sharing_a_provenance_are_distinct_and_adopting_one_picks
 
     candidates = list(repository.adoptable_snapshots(ACCOUNT, RELEASE))
     assert len(candidates) == 2
-    chosen = next(one for one in candidates if one.snapshot is second)
+    chosen = next(one for one in candidates if one.snapshot == second)
+    assert chosen.snapshot is not second
 
     load = repository.open_load(RELEASE, run("run-1"), outcome())
-    child = OwnerObservation(second, "OWNER", SECOND_PROVENANCE)
+    child = OwnerObservation(chosen.snapshot, "OWNER", SECOND_PROVENANCE)
     load.write(
         CanonicalRecordBatch(
             adoptions=(AdoptedParent(chosen, handle(1)),),
@@ -1075,7 +1193,8 @@ def test_two_candidates_sharing_a_provenance_are_distinct_and_adopting_one_picks
         )
     )
 
-    assert child.snapshot is second
+    assert child.snapshot is chosen.snapshot
+    assert child.snapshot == second
 
 
 def test_candidates_are_drawn_lazily() -> None:
@@ -1128,6 +1247,41 @@ def test_the_protocol_signatures_are_what_the_table_requires() -> None:
         "run",
         "outcome",
     }
+
+
+def test_the_correction_adds_no_public_token_carrier_field_or_operation() -> None:
+    import property_tax_application as application
+
+    assert tuple(field.name for field in fields(CorrelationHandle)) == ("value",)
+    assert tuple(field.name for field in fields(AccountSnapshotRef)) == ("value",)
+    assert tuple(field.name for field in fields(CorrelatedRecord)) == ("record", "handle", "parent")
+    assert tuple(field.name for field in fields(AdoptedParent)) == ("candidate", "handle")
+    assert tuple(field.name for field in fields(CanonicalRecordBatch)) == (
+        "entries",
+        "adoptions",
+        "continuing",
+        "closing",
+        "retain",
+        "release",
+    )
+    assert {name for name in vars(ReleaseLoadSession) if not name.startswith("_")} == {
+        "abort",
+        "commit",
+        "max_batch_entries",
+        "write",
+    }
+    assert {name for name in vars(CanonicalReleaseRepository) if not name.startswith("_")} == {
+        "adoptable_snapshots",
+        "open_load",
+    }
+    for private_name in (
+        "PersistedSnapshotOccurrence",
+        "RetainedParentOccurrence",
+        "StagedRecord",
+        "StoredValue",
+    ):
+        assert private_name not in application.__all__
+        assert not hasattr(application, private_name)
 
 
 def test_write_raises_rather_than_returning_a_refusal() -> None:

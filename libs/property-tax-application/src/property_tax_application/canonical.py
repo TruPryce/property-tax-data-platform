@@ -130,7 +130,7 @@ class UnknownAccountSnapshot(Exception):  # noqa: N818 - the accepted plan fixes
 
 
 class AdoptableSnapshotMismatch(Exception):  # noqa: N818 - the accepted plan fixes this name
-    """An adoption's locator resolves to a snapshot other than the one it carries."""
+    """An adoption's locator selects an occurrence whose value disagrees with its snapshot."""
 
 
 def _require_handle_value(value: object, field: str) -> int:
@@ -148,10 +148,12 @@ class CorrelationHandle:
     """A session-local name for a parent, and nothing else.
 
     Neither domain identity nor persistence identity: it exists only so a record
-    written in a later batch can name a parent written in an earlier one, it
-    appears in no stored row, and it stops resolving once its account completes.
-    Unique within one session and strictly increasing, so a value released by a
-    completed account cannot be minted again and silently retargeted.
+    written in a later batch can select the retained parent occurrence from an
+    earlier one.  The occurrence may outlive its original Python object; the
+    handle, never value equality, performs that selection.  It appears in no
+    stored row and stops resolving once its account completes.  Unique within
+    one session and strictly increasing, so a value released by a completed
+    account cannot be minted again and silently retargeted.
     """
 
     value: int
@@ -165,7 +167,10 @@ class CorrelatedRecord:
     """One canonical record, the handle it may be named by, and its parent's.
 
     Correlation rides on the batch rather than on the record: the canonical
-    types hold their parents directly and gain no correlation field.
+    types hold their parents directly and gain no correlation field.  Inside
+    one batch, the handle must denote the very parent object the child holds.
+    Across batches, the handle selects a retained occurrence and equality only
+    verifies the rehydrated canonical value.
     """
 
     record: CanonicalRecord
@@ -197,7 +202,9 @@ class AccountSnapshotRef:
 
     Opaque on the same terms as any persistence-generated handle: it supports
     equality and carries no ordering, no structure a caller may parse, and no
-    meaning outside the implementation that produced it.
+    meaning outside the implementation that produced it.  The locator selects
+    one persisted occurrence; equality with a rehydrated snapshot verifies that
+    selection but never performs it.
     """
 
     value: str | int | tuple[str | int, ...]
@@ -227,12 +234,12 @@ class AccountSnapshotRef:
 class AdoptableSnapshot:
     """A locator paired with the snapshot it locates.
 
-    The pair, never the locator alone: a child naming an adopted parent is held
-    to the same object-identity check an in-batch parent gets, and that needs the
-    object.  Never the grain and never provenance alone either — the accepted
-    persistence contract makes the grain deliberately non-unique and retains two
-    snapshots that share a load, release and provenance while differing only in a
-    composed situs or legal value, so each of those names more than one snapshot.
+    The locator selects one persisted occurrence and the snapshot value verifies
+    it after resolution; a rehydrated equal object is valid.  Once this candidate
+    is carried into a batch, a child naming its adoption handle is held to the
+    same object-identity check as every other in-batch parent and must hold this
+    exact snapshot object.  Never the grain and never provenance alone either —
+    the accepted persistence contract makes both deliberately non-unique.
     """
 
     ref: AccountSnapshotRef
@@ -253,7 +260,9 @@ class AdoptedParent:
 
     The binding is carried rather than inferred.  Parallel sequences of
     candidates and handles would make it positional, and a reader of one batch
-    could not say which handle denotes which snapshot without counting.
+    could not say which handle denotes which snapshot without counting.  The
+    candidate and every child naming this handle coexist in the batch, so `B9`
+    compares their snapshot objects by identity.
     """
 
     candidate: AdoptableSnapshot
@@ -275,9 +284,11 @@ class CanonicalRecordBatch:
     """A bounded batch of correlated records, and how it leaves the open account.
 
     Validates exactly `B1`-`B10` — everything a frozen value that knows only
-    itself can settle.  It judges neither `S4`, nor `S6`, nor its own size
-    against `max_batch_entries`, knowing none of them: those are `W` rules, and a
-    rule a party cannot enforce is worse than none.
+    itself can settle.  `B7` and `B9` use Python identity because both objects
+    coexist here.  The batch judges neither persisted occurrence consistency in
+    `S4`, nor `S6`, nor its own size against `max_batch_entries`, knowing none of
+    them: those are `W` rules, and a rule a party cannot enforce is worse than
+    none.
     """
 
     entries: tuple[CorrelatedRecord, ...] = ()
@@ -374,7 +385,8 @@ class CanonicalRecordBatch:
         for entry in self.entries:
             if entry.parent is None or entry.parent not in by_handle:
                 # A parent this batch does not introduce is not the batch's to
-                # judge; `W5` decides whether it is live and what it denotes.
+                # judge; `W5` resolves its occurrence by handle and then checks
+                # the child-held parent's canonical value for consistency.
                 continue
             held = _parent_object_of(entry.record)
             if held is None:
@@ -427,7 +439,7 @@ class CanonicalRecordBatch:
 
 
 def _parent_object_of(record: CanonicalRecord) -> object | None:
-    """The parent a canonical record already holds, or None for a snapshot."""
+    """The parent value a record holds; identity matters only within one batch."""
 
     if isinstance(record, AccountSnapshot):
         return None
