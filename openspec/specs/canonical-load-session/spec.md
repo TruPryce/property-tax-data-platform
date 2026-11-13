@@ -46,7 +46,7 @@ S0  context   the ReleaseIdentity being loaded, the ProcessingRunRef, the
 S1  status        OPEN | COMMITTED | ABORTED
 S2  open_account  the one account still open across a batch boundary, or none
 S3  staged        the canonical records of accepted batches; none of them durable
-S4  mappings      each live handle -> the parent object it denotes, and the account it belongs to
+S4  mappings      each live handle -> the parent record occurrence it selects, and the account it belongs to
 S5  live          the handles that resolve: exactly the keys of S4, never tracked separately
 S6  high_water    the greatest handle yet introduced in this session
 ```
@@ -54,6 +54,13 @@ S6  high_water    the greatest handle yet introduced in this session
 `S5` SHALL be the key set of `S4` and SHALL NOT be tracked as a second structure, because two
 structures that can disagree about which handles resolve is the defect this table exists to
 prevent.
+
+A **parent record occurrence** SHALL mean the specific parent selected by that handle, not a
+canonical value used as a key and not a Python object required to remain alive. An implementation
+MAY represent the occurrence with infrastructure-private durable state, including a staging or
+persistence locator, but that state SHALL NOT become domain identity, business identity, or part
+of a public application carrier. `S4` and its key set `S5` remain the only live-handle state; no
+parallel structure or seventh component exists.
 
 **The initial state.** When a session opens, `S1` SHALL be `OPEN`, `S2` SHALL be none, `S3` and
 `S4` SHALL be empty, and `S6` SHALL be *no handle yet introduced*, so the first handle a session
@@ -70,9 +77,13 @@ retry key decides between them at completion, not at open.
 
 **Resolution.** Resolving an `AccountSnapshotRef` — what `W4` requires — SHALL be the
 repository's, SHALL be scoped to the release `S0` names, and SHALL be a read that changes no
-component. No other party SHALL be required to resolve a locator, and the boundary SHALL NOT
-expose resolution as an operation a caller invokes for its own purposes, because a resolved
-snapshot outside a batch is the standalone adoption this specification removed.
+component. The locator SHALL select one persisted snapshot occurrence. The canonical value read
+for that occurrence MAY be a newly rehydrated Python object and SHALL be required to equal the
+candidate's snapshot value, but SHALL NOT be required to be the same Python instance. Equality is
+only a consistency check after locator resolution and SHALL NOT be used to select, merge, or
+deduplicate an occurrence. No other party SHALL be required to resolve a locator, and the boundary
+SHALL NOT expose resolution as an operation a caller invokes for its own purposes, because a
+resolved snapshot outside a batch is the standalone adoption this specification removed.
 
 **The operations** SHALL be exactly `write(batch)`, `commit()`, and `abort()`, and the surface
 SHALL be stated precisely enough that two implementations cannot differ on it:
@@ -169,8 +180,8 @@ The session SHALL check these on `write`:
 | W1 | `S1 = OPEN` (G1) |
 | W2 | Entries + adoptions + retained + released ≤ `max_batch_entries` |
 | W3 | Every handle introduced exceeds `S6` and is not in `S5` |
-| W4 | Every adoption's locator resolves to a snapshot of the release `S0` names, and to the snapshot its `AdoptedParent` carries |
-| W5 | Every parent not resolved in-batch is in `S5`, and `S4` says it denotes the object the child holds |
+| W4 | Every adoption's locator resolves in the release `S0` names to one persisted snapshot occurrence whose canonical value equals the snapshot its `AdoptedParent` carries |
+| W5 | Every parent not resolved in-batch is in `S5`, and `S4` selects a retained parent occurrence whose canonical value equals the parent value the child holds |
 | W6 | Every retained handle is introduced by this batch or already in `S5` |
 | W7 | Every released handle is in `S5` |
 | W9 | Every retained handle belongs to the account the batch names as continuing |
@@ -348,7 +359,7 @@ release to be held in memory.
 
 #### Scenario: A locator is resolved
 - **WHEN** an adoption's locator is resolved for `W4`
-- **THEN** the repository resolves it against the release `S0` names, as a read that changes no component, and no operation exposes resolution for a caller's own use
+- **THEN** the repository resolves it against the release `S0` names, the locator selects one persisted occurrence, an equal newly rehydrated value is accepted, the read changes no component, and no operation exposes resolution for a caller's own use
 
 #### Scenario: A session opens in the initial state
 - **WHEN** a session is opened for a release, a run, and an outcome
@@ -442,12 +453,12 @@ the session holds the state a refusal must leave unmoved.
 - **THEN** it rejects exactly `B1`–`B10` and judges neither handles from earlier batches nor its own size against a maximum it never sees, nor whether the account it names as continuing is the one already open
 
 #### Scenario: The session judges what needs history
-- **WHEN** a batch is written whose defect is a duplicate live handle, a handle not exceeding `S6`, a parent never introduced, a parent whose account has completed, or a parent handle denoting a record other than the one the child holds
+- **WHEN** a batch is written whose defect is a duplicate live handle, a handle not exceeding `S6`, a parent never introduced, a parent whose account has completed, or a parent value that differs from the retained occurrence its handle selects
 - **THEN** the session refuses it by the matching `W` precondition, proving the split rather than assuming it
 
 #### Scenario: A batch names a parent from an earlier batch
 - **WHEN** a batch names a parent it does not itself contain
-- **THEN** the batch accepts it as well-formed, because no intrinsic precondition judges a handle it does not introduce, and the session decides under `W5` whether that parent is live
+- **THEN** the batch accepts it as well-formed, because no intrinsic precondition judges a handle it does not introduce, and the session decides under `W5` whether that parent is live and consistent with its selected occurrence
 
 ### Requirement: Parent linkage is resolved by bounded, account-scoped correlation
 
@@ -481,7 +492,11 @@ meaning outside the session, and SHALL NOT appear in any persisted record as a b
 
 An implementation MAY hold `S4` durably rather than in memory, which is what allows a large
 accumulated set to stay resolvable; the boundary SHALL NOT name that mechanism and SHALL NOT
-require the set to fit in memory.
+require the set to fit in memory. Crossing that boundary SHALL NOT require the original Python
+parent object to remain alive. The `CorrelationHandle` SHALL select the retained occurrence, and
+the child-held parent value SHALL equal that occurrence's canonical value as a consistency check.
+Equality SHALL NOT find an occurrence, deduplicate equal observations, merge them, or manufacture
+identity.
 
 #### Scenario: A record is paired with its correlation
 - **WHEN** a batch entry is examined
@@ -560,8 +575,24 @@ require the set to fit in memory.
 - **THEN** it is refused by `W3`, because handles must exceed `S6`, so a released handle cannot be silently retargeted
 
 #### Scenario: A correlation handle denotes a parent the record does not hold
-- **WHEN** a record embedding one parent is paired with a handle denoting a different parent of the same kind
-- **THEN** the write is refused by `B7` in the same batch or `W5` across batches, even though the handle resolves
+- **WHEN** a parent is introduced in a batch and a child naming its handle holds an equal-but-distinct parent object
+- **THEN** the batch is refused by `B7`, because both objects coexist in one batch and Python identity remains authoritative there
+
+#### Scenario: A retained occurrence is rehydrated for a later batch
+- **WHEN** one batch retains parent object `P` under handle `H`, `P` leaves application memory after its occurrence is stored durably, and a later child naming live `H` holds `Q` where `Q == P` and `Q is not P`
+- **THEN** the later write is accepted by `W5`, because `H` selects the occurrence and equality verifies its canonical value without requiring the original Python instance
+
+#### Scenario: A retained occurrence disagrees with the child-held parent
+- **WHEN** a child names a live handle whose selected occurrence has a canonical value different from the parent value the child holds
+- **THEN** the write is refused by `W5`, and every state component remains unchanged
+
+#### Scenario: Equal retained occurrences remain distinct
+- **WHEN** equal parent observations `P` and `Q` are introduced and retained under different handles `H1` and `H2`
+- **THEN** both occurrences remain distinct, a child naming `H1` belongs to the occurrence selected by `H1`, and a child naming `H2` belongs to the occurrence selected by `H2`
+
+#### Scenario: Retained correlation state spills durably
+- **WHEN** the implementation replaces a retained parent object with a durable value or locator representation between batches
+- **THEN** the original object is no longer reachable from `S4`, the live handle still resolves its occurrence, and no public carrier gains the private representation
 
 #### Scenario: A batch leaves two accounts incomplete
 - **WHEN** a batch would leave more than one account continuing into the next
@@ -622,10 +653,15 @@ provenance that differ only in a composed situs or legal value, so each of those
 one snapshot.
 
 The pair SHALL be verified by `W4`, because a candidate is an ordinary value a caller can
-assemble: a valid locator carrying a snapshot it does not locate SHALL be refused with a named
-error distinct from the one raised for a locator resolving to no snapshot of the release being
-loaded. `B9` SHALL refuse a batch whose child names an adoption's handle while holding a snapshot
-other than the one that adoption carries, which is the identity check an in-batch parent gets.
+assemble. The `AccountSnapshotRef` SHALL select one persisted snapshot occurrence in the release
+`S0` names, and that occurrence's canonical value SHALL equal the candidate's snapshot value. A
+newly rehydrated equal Python object SHALL satisfy `W4`; Python instance identity SHALL NOT cross
+the persistence lookup. A locator resolving to a different canonical value SHALL be refused with
+`AdoptableSnapshotMismatch`, distinct from `UnknownAccountSnapshot` for a locator resolving to no
+snapshot of the named release. Equality SHALL verify the selected occurrence only and SHALL NOT be
+used as its lookup key. `B9` SHALL still refuse a batch whose child names an adoption's handle
+while holding a snapshot object other than the one the adoption carries, because both objects
+coexist in that batch and receive the identity check an in-batch parent gets.
 
 The number of candidates for one account and release SHALL NOT be assumed bounded, and the
 boundary SHALL offer them as a lazy iterator that an implementation SHALL NOT fully draw before
@@ -661,9 +697,13 @@ boundary forbids; a child of such a parent SHALL be written in the same session 
 - **WHEN** a batch adopts a candidate whose locator resolves to no snapshot persisted for the release `S0` names, including one belonging to another release
 - **THEN** the write is refused by `W4` with a named error, and no snapshot is created
 
+#### Scenario: A persisted snapshot is rehydrated for adoption
+- **WHEN** a candidate's locator selects a persisted snapshot occurrence and resolution returns a newly rehydrated object equal in canonical value to the candidate's snapshot
+- **THEN** `W4` accepts the candidate, because the locator selects the occurrence and Python instance identity does not cross the persistence lookup
+
 #### Scenario: A candidate pairs a valid locator with a snapshot it does not locate
-- **WHEN** a batch adopts a candidate assembled by the caller whose locator resolves to a snapshot other than the one it carries
-- **THEN** the write is refused by `W4` with a named error distinct from the one for an unknown snapshot, because a handle bound to an object the locator never named is the ambiguity this requirement removes
+- **WHEN** a batch adopts a caller-assembled candidate whose locator selects a persisted occurrence with a canonical value different from the snapshot the candidate carries
+- **THEN** the write is refused by `W4` with `AdoptableSnapshotMismatch`, distinct from `UnknownAccountSnapshot` for an unknown or stale locator
 
 #### Scenario: An adopted parent is named by a child holding an equal but different snapshot
 - **WHEN** a child names an adopted handle while holding a snapshot equal in value to the adopted one but not the same object
