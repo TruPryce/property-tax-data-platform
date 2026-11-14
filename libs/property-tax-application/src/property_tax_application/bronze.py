@@ -54,11 +54,11 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class BronzeConflict(StrEnum):
-    """What a store finds when asked about a release identity and a checksum.
+    """What a store finds for a Bronze/source partition grain and checksum.
 
     Three outcomes and no fourth, because the interesting case is the last one:
-    the same release identity arriving with different bytes is not an error to
-    retry and not a duplicate to ignore.
+    the same partition grain arriving with different bytes is not an error to retry
+    and not a duplicate to ignore.
 
     Derived at read time and never stored on a manifest.  A stored verdict is a
     claim about what else existed when some writer looked, and two writers can
@@ -66,12 +66,12 @@ class BronzeConflict(StrEnum):
     computed from what durably exists when the question is asked.
     """
 
-    #: No artifact was stored for this release identity before.
+    #: No artifact was stored for this Bronze/source partition grain before.
     NEW = "new"
-    #: The same identity and the same checksum: already recorded, nothing to do.
+    #: The same partition grain and checksum: already recorded, nothing to do.
     IDENTICAL = "identical"
-    #: The same identity with a *different* checksum. Both versions are kept and
-    #: the release is flagged, never overwritten.
+    #: The same partition grain with a *different* checksum. Both versions are kept
+    #: and the partition is flagged, never overwritten.
     DIVERGED = "diverged"
 
 
@@ -364,7 +364,7 @@ class ManifestIndex(Protocol):
 
 @runtime_checkable
 class BronzeStore(Protocol):
-    """Where manifests are recorded, and how a repeat identity is judged.
+    """Where manifests are recorded and repeat Bronze partition grains are judged.
 
     Distinct from `ArtifactSink`, which takes the bytes.  The sink makes an
     object durable; the store decides what that object *is* relative to what
@@ -375,8 +375,8 @@ class BronzeStore(Protocol):
         """Judge this checksum against every artifact the partition references.
 
         A read-time query over durable state, not a verdict to be persisted.
-        One partition rather than a tuple, because divergence is a property of a
-        single release identity and an artifact may serve several.
+        One partition rather than a tuple, because divergence is a property of one
+        Bronze/source partition grain and an artifact may serve several.
         """
         ...
 
