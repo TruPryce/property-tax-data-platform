@@ -12,6 +12,7 @@ from property_tax_application.acquisition import (
 from property_tax_application.bronze import (
     BronzeConflict,
     BronzeStore,
+    ManifestAttachmentConflictError,
     ManifestIndex,
     ManifestRef,
     ReleaseManifest,
@@ -105,6 +106,7 @@ __all__ = [
     "DIAGNOSTIC_RETENTION_LIMIT",
     "IncompleteReleaseIdentity",
     "LogicalReleaseEvidence",
+    "ManifestAttachmentConflictError",
     "ManifestIndex",
     "ManifestRef",
     "PageEvidence",

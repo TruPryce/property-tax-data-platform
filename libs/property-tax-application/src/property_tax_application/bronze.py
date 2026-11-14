@@ -35,6 +35,7 @@ __all__ = [
     "BRONZE_MANIFEST_VERSION",
     "BronzeConflict",
     "BronzeStore",
+    "ManifestAttachmentConflictError",
     "ManifestIndex",
     "ManifestRef",
     "ReleaseManifest",
@@ -53,11 +54,11 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class BronzeConflict(StrEnum):
-    """What a store finds when asked about a release identity and a checksum.
+    """What a store finds for a Bronze/source partition grain and checksum.
 
     Three outcomes and no fourth, because the interesting case is the last one:
-    the same release identity arriving with different bytes is not an error to
-    retry and not a duplicate to ignore.
+    the same partition grain arriving with different bytes is not an error to retry
+    and not a duplicate to ignore.
 
     Derived at read time and never stored on a manifest.  A stored verdict is a
     claim about what else existed when some writer looked, and two writers can
@@ -65,13 +66,17 @@ class BronzeConflict(StrEnum):
     computed from what durably exists when the question is asked.
     """
 
-    #: No artifact was stored for this release identity before.
+    #: No artifact was stored for this Bronze/source partition grain before.
     NEW = "new"
-    #: The same identity and the same checksum: already recorded, nothing to do.
+    #: The same partition grain and checksum: already recorded, nothing to do.
     IDENTICAL = "identical"
-    #: The same identity with a *different* checksum. Both versions are kept and
-    #: the release is flagged, never overwritten.
+    #: The same partition grain with a *different* checksum. Both versions are kept
+    #: and the partition is flagged, never overwritten.
     DIVERGED = "diverged"
+
+
+class ManifestAttachmentConflictError(RuntimeError):
+    """An immutable full-release attachment disagrees with recorded evidence."""
 
 
 def _require_identifier(value: str, field_name: str) -> None:
@@ -86,12 +91,11 @@ def _require_identifier(value: str, field_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ReleasePartition:
-    """One logical release backed by an artifact.
+    """Three-part Bronze/source partition evidence backed by an artifact.
 
-    Separate from the artifact because they are different counts: one measured
-    Collin archive carries current values for one tax year and certified values
-    for another, and both are releases sharing one set of bytes, one checksum,
-    and one acquisition event.
+    This is not canonical release identity: the fourth identity component may
+    be established only after parsing. `ManifestIndex` binds this evidence to a
+    complete `ReleaseIdentity` explicitly when the queryable attachment is made.
     """
 
     jurisdiction_code: str
@@ -324,15 +328,26 @@ class ManifestIndex(Protocol):
     This is separate from `BronzeStore`: that port writes immutable evidence to
     object storage and returns a storage locator, while this one returns the
     persistence-generated reference a run binds to. The reference is derivable
-    from neither the storage locator nor the artifact checksum.
+    from neither the storage locator nor the artifact checksum. A queryable
+    attachment is selected by the reference and a complete release identity;
+    the three-part partition is evidence bound to that pair.
     """
 
     def register(self, manifest: ReleaseManifest) -> ManifestRef:
         """Record one acquisition idempotently by its acquisition evidence."""
         ...
 
-    def attach_partition(self, reference: ManifestRef, partition: ReleasePartition) -> None:
-        """Associate a later-established partition with one acquisition."""
+    def attach_partition(
+        self,
+        reference: ManifestRef,
+        release: ReleaseIdentity,
+        partition: ReleasePartition,
+    ) -> None:
+        """Bind immutable partition evidence to one acquisition and complete release.
+
+        Exact retries are no-ops; conflicting evidence raises
+        `ManifestAttachmentConflictError` without replacing what was recorded.
+        """
         ...
 
     def partition_for(
@@ -349,7 +364,7 @@ class ManifestIndex(Protocol):
 
 @runtime_checkable
 class BronzeStore(Protocol):
-    """Where manifests are recorded, and how a repeat identity is judged.
+    """Where manifests are recorded and repeat Bronze partition grains are judged.
 
     Distinct from `ArtifactSink`, which takes the bytes.  The sink makes an
     object durable; the store decides what that object *is* relative to what
@@ -360,8 +375,8 @@ class BronzeStore(Protocol):
         """Judge this checksum against every artifact the partition references.
 
         A read-time query over durable state, not a verdict to be persisted.
-        One partition rather than a tuple, because divergence is a property of a
-        single release identity and an artifact may serve several.
+        One partition rather than a tuple, because divergence is a property of one
+        Bronze/source partition grain and an artifact may serve several.
         """
         ...
 

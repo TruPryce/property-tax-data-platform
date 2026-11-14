@@ -454,7 +454,12 @@ class FakeManifestIndex:
     def register(self, manifest: object) -> ManifestRef:
         raise AssertionError("publication retry must not register an acquisition")
 
-    def attach_partition(self, reference: ManifestRef, partition: ReleasePartition) -> None:
+    def attach_partition(
+        self,
+        reference: ManifestRef,
+        release: ReleaseIdentity,
+        partition: ReleasePartition,
+    ) -> None:
         raise AssertionError("publication retry must not attach new evidence")
 
     def partition_for(
@@ -579,3 +584,39 @@ def test_two_releases_on_one_manifest_retain_distinct_freshness() -> None:
     assert repository.attempts[current_attempt.reference].source_as_of == current_as_of
     assert isinstance(repository, PublicationRepository)
     assert isinstance(certified_attempt, PublicationAttempt)
+
+
+def test_publication_lookup_does_not_alias_release_identifiers() -> None:
+    quality = QualityEngine()
+    repository = FakePublicationRepository(quality)
+    index = FakeManifestIndex()
+    manifest = ManifestRef(1)
+    first_run = ProcessingRunRef("run-a")
+    second_run = ProcessingRunRef("run-b")
+    first_release = release(identifier="A")
+    second_release = release(identifier="B")
+    first_as_of = SOURCE_AS_OF - timedelta(days=1)
+    second_as_of = SOURCE_AS_OF
+    record_partition(index, manifest, first_release, first_as_of)
+    record_partition(index, manifest, second_release, second_as_of)
+
+    first = open_retry_from_recorded_partition(
+        repository,
+        index,
+        {first_run: manifest, second_run: manifest},
+        PublicationProduct.LATEST_AVAILABLE,
+        first_release,
+        first_run,
+    )
+    second = open_retry_from_recorded_partition(
+        repository,
+        index,
+        {first_run: manifest, second_run: manifest},
+        PublicationProduct.LATEST_AVAILABLE,
+        second_release,
+        second_run,
+    )
+
+    assert first_release != second_release
+    assert repository.attempts[first.reference].source_as_of == first_as_of
+    assert repository.attempts[second.reference].source_as_of == second_as_of
