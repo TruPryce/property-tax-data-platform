@@ -18,6 +18,7 @@ from _fake_load import FakeRepository as FakeCanonicalRepository
 from _fake_load import outcome as load_outcome
 from property_tax_application.acquisition import RedirectHop, ResponseMetadata
 from property_tax_application.bronze import (
+    ManifestAttachmentConflictError,
     ManifestIndex,
     ManifestRef,
     ReleaseManifest,
@@ -491,10 +492,7 @@ class FakeManifestIndex:
     def __init__(self) -> None:
         self.by_evidence: dict[tuple[object, ...], ManifestRef] = {}
         self.manifests: dict[ManifestRef, ReleaseManifest] = {}
-        self.partitions: dict[
-            tuple[ManifestRef, str, int, str],
-            ReleasePartition,
-        ] = {}
+        self.partitions: dict[tuple[ManifestRef, ReleaseIdentity], ReleasePartition] = {}
         self.write_count = 0
         self.read_count = 0
 
@@ -506,19 +504,34 @@ class FakeManifestIndex:
         self.by_evidence[recorded.acquisition_evidence] = reference
         self.manifests[reference] = recorded
         self.write_count += 1
-        for attached in recorded.partitions:
-            self.attach_partition(reference, attached)
         return reference
 
-    def attach_partition(self, reference: ManifestRef, attached: ReleasePartition) -> None:
+    def attach_partition(
+        self,
+        reference: ManifestRef,
+        release: ReleaseIdentity,
+        attached: ReleasePartition,
+    ) -> None:
         recorded = self.manifests.get(reference)
         if recorded is None:
             raise KeyError(reference)
         if attached.jurisdiction_code != recorded.jurisdiction:
             raise ValueError("partition jurisdiction disagrees with acquisition")
-        self.partitions[
-            (reference, attached.jurisdiction_code, attached.tax_year, attached.release_kind)
-        ] = attached
+        if attached.jurisdiction_code != release.jurisdiction.rendered:
+            raise ValueError("partition jurisdiction disagrees with release identity")
+        if attached.tax_year != release.tax_year:
+            raise ValueError("partition tax year disagrees with release identity")
+        if attached.release_kind != release.release_kind.value:
+            raise ValueError("partition release kind disagrees with release identity")
+        key = (reference, release)
+        existing = self.partitions.get(key)
+        if existing is not None:
+            if existing != attached:
+                raise ManifestAttachmentConflictError(
+                    "partition evidence disagrees with the immutable attachment"
+                )
+            return
+        self.partitions[key] = attached
         self.write_count += 1
 
     def partition_for(
@@ -529,14 +542,7 @@ class FakeManifestIndex:
         if reference not in self.manifests:
             raise KeyError(reference)
         self.read_count += 1
-        return self.partitions.get(
-            (
-                reference,
-                requested_release.jurisdiction.rendered,
-                requested_release.tax_year,
-                requested_release.release_kind.value,
-            )
-        )
+        return self.partitions.get((reference, requested_release))
 
 
 @dataclass
@@ -722,7 +728,7 @@ def test_manifest_index_registration_and_later_attachment() -> None:
     distinct = index.register(replace(recorded, acquired_at=ACQUIRED_AT + timedelta(seconds=1)))
     before = index.manifests[same]
 
-    index.attach_partition(same, partition())
+    index.attach_partition(same, release(), partition())
 
     assert same == duplicate
     assert distinct != same
@@ -763,17 +769,13 @@ def test_one_acquisition_reference_can_bind_two_releases() -> None:
     certified = partition()
     current = partition(year=2025, kind="current")
 
-    index.attach_partition(reference, certified)
-    index.attach_partition(reference, current)
+    certified_release = release()
+    current_release = release(year=2025, kind=ReleaseKind.CURRENT, identifier="current-2025")
+    index.attach_partition(reference, certified_release, certified)
+    index.attach_partition(reference, current_release, current)
 
-    assert index.partition_for(reference, release()) == certified
-    assert (
-        index.partition_for(
-            reference,
-            release(year=2025, kind=ReleaseKind.CURRENT, identifier="current-2025"),
-        )
-        == current
-    )
+    assert index.partition_for(reference, certified_release) == certified
+    assert index.partition_for(reference, current_release) == current
 
 
 def test_run_ports_require_typed_references_and_refuse_unknown_runs() -> None:
@@ -1249,10 +1251,11 @@ def test_manifest_lookup_distinguishes_absence_and_does_not_write() -> None:
     assert index.partition_for(reference, release()) is None
     assert index.write_count == writes_after_register
 
-    index.attach_partition(reference, partition(source_as_of=None))
+    requested_release = release()
+    index.attach_partition(reference, requested_release, partition(source_as_of=None))
     writes_after_attach = index.write_count
-    first = index.partition_for(reference, release())
-    second = index.partition_for(reference, release())
+    first = index.partition_for(reference, requested_release)
+    second = index.partition_for(reference, requested_release)
 
     assert first is not None
     assert first.source_as_of is None
@@ -1265,7 +1268,8 @@ def test_later_process_publication_uses_recorded_freshness() -> None:
     publications = FakePublicationRepository(quality)
     index = FakeManifestIndex()
     reference = index.register(manifest())
-    index.attach_partition(reference, partition())
+    requested_release = release()
+    index.attach_partition(reference, requested_release, partition())
     run = ProcessingRunRef("run-a")
 
     class MutablePage:
@@ -1286,7 +1290,7 @@ def test_later_process_publication_uses_recorded_freshness() -> None:
         index,
         {run: reference},
         PublicationProduct.LATEST_AVAILABLE,
-        release(),
+        requested_release,
         run,
     )
     retry = open_from_recorded_partition(
@@ -1294,7 +1298,7 @@ def test_later_process_publication_uses_recorded_freshness() -> None:
         index,
         {run: reference},
         PublicationProduct.LATEST_AVAILABLE,
-        release(),
+        requested_release,
         run,
     )
 
@@ -1336,9 +1340,12 @@ def test_publication_freshness_preserves_absence_and_release_grain() -> None:
     first_release, second_release = tuple(promote(entry) for entry in observed.logical_releases)
     index = FakeManifestIndex()
     reference = index.register(manifest())
-    for evidence in observed.logical_releases:
+    for identity, evidence in zip(
+        (first_release, second_release), observed.logical_releases, strict=True
+    ):
         index.attach_partition(
             reference,
+            identity,
             ReleasePartition(
                 jurisdiction_code=evidence.jurisdiction.rendered,  # type: ignore[union-attr]
                 tax_year=evidence.tax_year,  # type: ignore[arg-type]
@@ -1349,6 +1356,7 @@ def test_publication_freshness_preserves_absence_and_release_grain() -> None:
     absent_release = release(year=2024, identifier="certified-2024")
     index.attach_partition(
         reference,
+        absent_release,
         partition(year=2024, source_as_of=None),
     )
     quality = FakeQualityRepository()

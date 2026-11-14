@@ -30,10 +30,25 @@ explained in the [canonical load engineering guide](../../docs/engineering/canon
 ```text
 BronzeStore    -> immutable object-store evidence -> storage locator
 ManifestIndex -> queryable acquisition index      -> ManifestRef
+
+ReleaseManifest.partitions
+               -> three-part immutable Bronze/source evidence
+ManifestIndex attachment
+               -> ManifestRef + full ReleaseIdentity -> ReleasePartition evidence
 ```
 
 A processing run needs `ManifestRef`. It is a persistence-generated opaque locator and is derivable
-from neither the object-store locator nor the artifact checksum.
+from neither the object-store locator nor the artifact checksum. The reference identifies the
+acquisition, not a release. A complete `ReleaseIdentity` identifies the logical release within that
+acquisition, while `ReleasePartition` remains the overlapping three-part Bronze evidence and optional
+source freshness bound to the pair. Registering a manifest therefore records no full-release
+attachment by itself, even when the manifest already carries source partitions.
+
+Bootstrap 3.5 must persist that queryable attachment at full-release grain: acquisition reference,
+jurisdiction, tax year, release kind, release identifier, and optional source-as-of evidence. Adding
+only a nullable `source_as_of` field to the existing three-part `bronze.release_partition` relation
+cannot distinguish releases that share jurisdiction, year, and kind but have different identifiers.
+The exact PostgreSQL relation remains the adapter implementation's decision.
 
 `ArtifactSink` was retained, and the `BronzeStore` Protocol was retained unchanged. `ReleaseManifest`
 and the S3 manifest serialization and storage mechanics received bounded corrections because the old

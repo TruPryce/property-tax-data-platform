@@ -2,6 +2,7 @@
 
 import ast
 import dataclasses
+import inspect
 import subprocess
 import sys
 import typing
@@ -385,6 +386,7 @@ def test_every_application_port_and_crossing_value_is_reachable_from_the_package
         "DIAGNOSTIC_RETENTION_LIMIT",
         "IncompleteReleaseIdentity",
         "LogicalReleaseEvidence",
+        "ManifestAttachmentConflictError",
         "ManifestIndex",
         "ManifestRef",
         "PageEvidence",
@@ -429,6 +431,18 @@ def test_every_application_port_and_crossing_value_is_reachable_from_the_package
     assert application.__all__ == sorted(expected)
     for name in expected:
         assert hasattr(application, name), name
+
+    assert tuple(inspect.signature(application.ManifestIndex.attach_partition).parameters) == (
+        "self",
+        "reference",
+        "release",
+        "partition",
+    )
+    assert tuple(inspect.signature(application.ManifestIndex.partition_for).parameters) == (
+        "self",
+        "reference",
+        "release",
+    )
 
 
 def test_the_run_module_names_no_infrastructure() -> None:
