@@ -35,6 +35,7 @@ __all__ = [
     "BRONZE_MANIFEST_VERSION",
     "BronzeConflict",
     "BronzeStore",
+    "ManifestAttachmentConflictError",
     "ManifestIndex",
     "ManifestRef",
     "ReleaseManifest",
@@ -74,6 +75,10 @@ class BronzeConflict(StrEnum):
     DIVERGED = "diverged"
 
 
+class ManifestAttachmentConflictError(RuntimeError):
+    """An immutable full-release attachment disagrees with recorded evidence."""
+
+
 def _require_identifier(value: str, field_name: str) -> None:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a str")
@@ -86,12 +91,11 @@ def _require_identifier(value: str, field_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ReleasePartition:
-    """One logical release backed by an artifact.
+    """Three-part Bronze/source partition evidence backed by an artifact.
 
-    Separate from the artifact because they are different counts: one measured
-    Collin archive carries current values for one tax year and certified values
-    for another, and both are releases sharing one set of bytes, one checksum,
-    and one acquisition event.
+    This is not canonical release identity: the fourth identity component may
+    be established only after parsing. `ManifestIndex` binds this evidence to a
+    complete `ReleaseIdentity` explicitly when the queryable attachment is made.
     """
 
     jurisdiction_code: str
@@ -324,15 +328,26 @@ class ManifestIndex(Protocol):
     This is separate from `BronzeStore`: that port writes immutable evidence to
     object storage and returns a storage locator, while this one returns the
     persistence-generated reference a run binds to. The reference is derivable
-    from neither the storage locator nor the artifact checksum.
+    from neither the storage locator nor the artifact checksum. A queryable
+    attachment is selected by the reference and a complete release identity;
+    the three-part partition is evidence bound to that pair.
     """
 
     def register(self, manifest: ReleaseManifest) -> ManifestRef:
         """Record one acquisition idempotently by its acquisition evidence."""
         ...
 
-    def attach_partition(self, reference: ManifestRef, partition: ReleasePartition) -> None:
-        """Associate a later-established partition with one acquisition."""
+    def attach_partition(
+        self,
+        reference: ManifestRef,
+        release: ReleaseIdentity,
+        partition: ReleasePartition,
+    ) -> None:
+        """Bind immutable partition evidence to one acquisition and complete release.
+
+        Exact retries are no-ops; conflicting evidence raises
+        `ManifestAttachmentConflictError` without replacing what was recorded.
+        """
         ...
 
     def partition_for(
