@@ -167,6 +167,12 @@ SHALL also require its own primary binding to select the same occurrence as the 
 binding; where retained state participates, W5 SHALL finish that comparison. Naming either parent
 from an earlier batch is ordinary, and no intrinsic precondition may be read as forbidding it.
 
+Two different adoption handles MAY resolve under W4 to the same persisted snapshot occurrence.
+Their handle inequality SHALL NOT be treated as occurrence inequality. Where adoption participates
+in a local secondary occurrence's ancestry, B7 SHALL preserve its Python-object checks and defer the
+occurrence comparison until W4 and W5 have resolved the selectors to their private occurrence
+locators. Distinct equal persisted occurrences SHALL still fail that locator comparison.
+
 `B1` SHALL NOT include any rule about records being distinct. Two entries carrying equal canonical
 records are two records and SHALL both be accepted, because a rule refusing the second would be a
 deduplication rule over observed values, which this boundary forbids.
