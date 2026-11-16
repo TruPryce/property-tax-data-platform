@@ -22,7 +22,6 @@ could only appear to prove.
 The boundary decides no key over observed values. Records the canonical model admits are not
 discarded, merged, or rejected on the basis of what they contain, and no precondition here may be
 read as a deduplication rule.
-
 ## Requirements
 ### Requirement: The canonical load session is a closed state machine
 
@@ -59,8 +58,11 @@ A **parent record occurrence** SHALL mean the specific parent selected by that h
 canonical value used as a key and not a Python object required to remain alive. An implementation
 MAY represent the occurrence with infrastructure-private durable state, including a staging or
 persistence locator, but that state SHALL NOT become domain identity, business identity, or part
-of a public application carrier. `S4` and its key set `S5` remain the only live-handle state; no
-parallel structure or seventh component exists.
+of a public application carrier. Where the selected occurrence already has a persisted primary
+parent, that private representation MAY retain the parent's occurrence locator as part of
+representing the selected occurrence and SHALL use it to verify multi-parent ancestry. This is not
+a second mapping or state component. `S4` and its key set `S5` remain the only live-handle state;
+no parallel structure or seventh component exists.
 
 **The initial state.** When a session opens, `S1` SHALL be `OPEN`, `S2` SHALL be none, `S3` and
 `S4` SHALL be empty, and `S6` SHALL be *no handle yet introduced*, so the first handle a session
@@ -122,28 +124,77 @@ changes no component, and SHALL NOT be an operation of this machine.
 or `ABORTED` SHALL be refused explicitly rather than ignored, because a caller extending a load it
 has already ended would otherwise lose those records silently.
 
+Every batch entry SHALL use this fixed carrier and no generic parent collection:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CorrelatedRecord:
+    record: CanonicalRecord
+    handle: CorrelationHandle | None = None
+    parent: CorrelationHandle | None = None
+    secondary_parent: CorrelationHandle | None = None
+```
+
+The record type and, for exemptions, its explicit scope SHALL determine the complete occurrence-binding shape:
+
+| Canonical record | `parent` selects | `secondary_parent` selects |
+| --- | --- | --- |
+| `AccountSnapshot` | none | none |
+| `OwnerObservation` | snapshot | none |
+| `OwnerAssociation` | snapshot | owner |
+| `OwnerValueAllocation` | association | none |
+| `AppraisalValueObservation` | snapshot | none |
+| `TaxingUnitObservation` | snapshot | none |
+| `TaxableValueObservation` | snapshot | taxing unit |
+| account-scoped `ExemptionObservation` | snapshot | none |
+| owner-scoped `ExemptionObservation` | snapshot | association |
+| `GeometryObservation` | snapshot | none |
+| `ImprovementObservation` | snapshot | none |
+| `LandObservation` | snapshot | none |
+
+`AccountSnapshot` SHALL carry neither parent handle. Every other canonical record SHALL carry its
+required primary `parent`. Exactly the three multi-parent rows in the table SHALL carry a required
+`secondary_parent`; every other row SHALL omit it. Exemption scope SHALL remain the domain value's
+explicit authority and SHALL NOT be inferred from whether a secondary handle is present.
+
+For every multi-parent row, the occurrence selected by `secondary_parent` SHALL itself be parented
+by the same occurrence selected by `parent`. This is occurrence ancestry, not canonical-value
+equality. Both fields SHALL use the existing `CorrelationHandle` and S4/S5 occurrence state. A
+secondary edge SHALL NOT create a second correlation map, token, identity, high-water mark, or state
+component. The carrier SHALL expose no generic mapping, role string, positional parent collection,
+database locator, or domain identity field.
+
 #### `write(batch)` — intrinsic preconditions
 
 A batch SHALL validate these when it is constructed, knowing only itself:
 
 | ID | Intrinsic precondition |
 | --- | --- |
-| B1 | Every entry is well-formed: one canonical record, an optional handle, an optional parent |
+| B1 | Every entry is well-formed: one canonical record, an optional introduced handle, and exactly the required primary and secondary parent bindings in the closed table above |
 | B2 | No handle is introduced twice, counting entry handles and adoption handles together |
 | B3 | No handle is repeated within one delta |
 | B4 | No handle appears in both deltas |
 | B5 | No handle is both introduced by the batch and released by it |
-| B6 | No entry names its own handle as its parent |
-| B7 | An in-batch parent handle denotes **the very object** the child holds, compared by identity |
+| B6 | No entry names its own handle as either parent, and a multi-parent entry's primary and secondary handles differ |
+| B7 | Every local primary or secondary handle denotes **the very object** held in the corresponding domain field, and a local secondary occurrence has the same selected primary occurrence as the child |
 | B8 | At most one account is named as continuing |
 | B9 | A child naming an adoption's handle within the batch holds the very snapshot that adoption carries |
 | B10 | The batch does not name one account as both continuing and closing |
 
-A batch SHALL NOT refuse a parent handle it does not introduce. It cannot know whether such a
-handle is live, whose account it belongs to, or what it denotes, so it SHALL accept the entry as
-well-formed and `W5` SHALL decide. Where the parent handle **is** one this batch introduces, `B7`
-SHALL apply and the batch SHALL settle it without the session. Naming a parent from an earlier
-batch is therefore ordinary, and no intrinsic precondition may be read as forbidding it.
+A batch SHALL NOT refuse a primary or secondary parent handle merely because it does not introduce
+that handle. It cannot know whether such a handle is live, whose account it belongs to, what it
+denotes, or what occurrence parents the selected secondary occurrence, so after B1 establishes the
+required shape, `W5` SHALL decide the history-dependent facts. Where either parent handle **is** one
+this batch introduces, `B7` SHALL apply to that edge. Where the secondary occurrence is local, B7
+SHALL also require its own primary binding to select the same occurrence as the child's primary
+binding; where retained state participates, W5 SHALL finish that comparison. Naming either parent
+from an earlier batch is ordinary, and no intrinsic precondition may be read as forbidding it.
+
+Two different adoption handles MAY resolve under W4 to the same persisted snapshot occurrence.
+Their handle inequality SHALL NOT be treated as occurrence inequality. Where adoption participates
+in a local secondary occurrence's ancestry, B7 SHALL preserve its Python-object checks and defer the
+occurrence comparison until W4 and W5 have resolved the selectors to their private occurrence
+locators. Distinct equal persisted occurrences SHALL still fail that locator comparison.
 
 `B1` SHALL NOT include any rule about records being distinct. Two entries carrying equal canonical
 records are two records and SHALL both be accepted, because a rule refusing the second would be a
@@ -181,13 +232,23 @@ The session SHALL check these on `write`:
 | W2 | Entries + adoptions + retained + released ≤ `max_batch_entries` |
 | W3 | Every handle introduced exceeds `S6` and is not in `S5` |
 | W4 | Every adoption's locator resolves in the release `S0` names to one persisted snapshot occurrence whose canonical value equals the snapshot its `AdoptedParent` carries |
-| W5 | Every parent not resolved in-batch is in `S5`, and `S4` selects a retained parent occurrence whose canonical value equals the parent value the child holds |
+| W5 | Every non-local primary or secondary parent is in `S5`; S4 selects occurrences whose canonical values equal the corresponding values the child holds; and every multi-parent secondary occurrence is itself parented by the occurrence the child's primary handle selects |
 | W6 | Every retained handle is introduced by this batch or already in `S5` |
 | W7 | Every released handle is in `S5` |
 | W9 | Every retained handle belongs to the account the batch names as continuing |
 | W10 | `S2`, if set, is named by this batch as continuing, or as closing, or is touched by it |
 | W11 | The account named as continuing, if any, is **open in the batch** |
 | W12 | The account named as closing, if any, is `S2` |
+
+W5 SHALL select by handle before comparing any value or ancestry. For a multi-parent entry, after
+the primary and secondary occurrences are selected, the secondary occurrence's
+infrastructure-private primary-parent occurrence locator SHALL equal the selected primary
+occurrence locator. An equal snapshot value under another locator SHALL NOT satisfy this rule. The
+same requirement SHALL hold for all four combinations: both occurrences retained, a retained
+primary with a current secondary, a current or adopted primary with a retained secondary, and both
+occurrences current. B7 SHALL settle the wholly local facts; W5 SHALL settle every fact requiring
+S4. A mismatch in either edge or in their ancestry SHALL refuse the entire write before any state
+or staged record changes.
 
 `W10` SHALL be decided against `S2` **and `S4`**, and is the session's for that reason: whether a
 batch touches `S2`'s account can turn on a handle named in a delta, and only `S4` says which
@@ -437,6 +498,46 @@ release to be held in memory.
 - **WHEN** a batch completes other work and names `S2` as continuing without carrying any record of it
 - **THEN** it is accepted by `W11`, because promising more of the account already open is legitimate, and `W10` is satisfied by naming it as continuing
 
+#### Scenario: A snapshot is offered a parent binding
+- **WHEN** an `AccountSnapshot` entry carries either `parent` or `secondary_parent`
+- **THEN** construction refuses it under B1, because the snapshot has no persisted parent edge
+
+#### Scenario: A single-parent entry omits its primary binding
+- **WHEN** any accepted single-parent canonical record is constructed without `parent`
+- **THEN** construction refuses it under B1 rather than leaving persistence to infer an occurrence
+
+#### Scenario: A single-parent entry carries a secondary binding
+- **WHEN** any record outside the three multi-parent rows carries `secondary_parent`
+- **THEN** construction refuses it under B1, including an account-scoped exemption whose explicit scope requires no association edge
+
+#### Scenario: A multi-parent entry omits one binding
+- **WHEN** an owner association, taxable value, or owner-scoped exemption omits either its primary or secondary handle
+- **THEN** construction refuses it under B1, because every persisted parent edge must be occurrence-bound
+
+#### Scenario: An entry points either parent edge at itself
+- **WHEN** an entry's introduced handle equals its primary or secondary parent handle
+- **THEN** construction refuses it under B6
+
+#### Scenario: Two parent roles are collapsed onto one handle
+- **WHEN** a multi-parent entry gives the same handle as `parent` and `secondary_parent`
+- **THEN** construction refuses it under B6, because one occurrence cannot satisfy two distinct embedded parent types
+
+#### Scenario: A secondary same-batch edge names an equal but different object
+- **WHEN** a multi-parent child names a secondary handle introduced by this batch but holds an equal, different owner, taxing unit, or association object
+- **THEN** the batch is refused by B7 using Python identity, exactly as for its primary edge
+
+#### Scenario: A local secondary occurrence has a different local snapshot occurrence
+- **WHEN** a multi-parent child's two local edges each denote the exact object held, but the secondary occurrence is itself parented by an equal, distinct snapshot occurrence
+- **THEN** B7 refuses the batch because occurrence ancestry, not snapshot value equality, must agree
+
+#### Scenario: One cross-batch edge fails after the other validates
+- **WHEN** one parent handle resolves consistently and the other is missing, stale, value-mismatched, or parented by another occurrence
+- **THEN** W5 refuses the whole write and S1 through S6 and staged records remain unchanged
+
+#### Scenario: Secondary handles do not increase batch size
+- **WHEN** W2 measures a batch whose entries carry both fixed parent fields
+- **THEN** each entry still counts once, and the authoritative entries-plus-adoptions-plus-deltas formula is unchanged
+
 ### Requirement: A batch is validated by whichever party can see the answer
 
 Validation authority SHALL be split by what each party can know, and the split SHALL be exactly
@@ -466,8 +567,10 @@ The boundary SHALL allow one account's records to span more than one bounded bat
 provide a correlation mechanism by which a record names a parent written in an earlier batch.
 
 Correlation SHALL be carried by the batch rather than by the canonical records, which hold their
-parents directly and SHALL NOT gain a correlation field. A parent SHALL be named the same way
-whether it appears in the same batch or an earlier one.
+parents directly and SHALL NOT gain a correlation field. Every persisted parent edge SHALL be
+occurrence-bound explicitly. The fixed `parent` and `secondary_parent` fields SHALL name an
+occurrence the same way whether it appears in the same batch or an earlier one; the domain record
+itself SHALL gain no correlation field.
 
 Each batch SHALL carry **bounded deltas** to `S4`: the handles it newly requires to survive beyond
 it, and those it no longer requires. `S4` SHALL be the accumulation of those deltas as the `write`
@@ -495,12 +598,14 @@ accumulated set to stay resolvable; the boundary SHALL NOT name that mechanism a
 require the set to fit in memory. Crossing that boundary SHALL NOT require the original Python
 parent object to remain alive. The `CorrelationHandle` SHALL select the retained occurrence, and
 the child-held parent value SHALL equal that occurrence's canonical value as a consistency check.
-Equality SHALL NOT find an occurrence, deduplicate equal observations, merge them, or manufacture
-identity.
+For a selected occurrence that itself has a persisted primary parent, the private durable
+representation MAY retain that primary parent's occurrence locator so multi-parent ancestry can be
+verified after spill. Equality SHALL NOT find an occurrence, establish ancestry, deduplicate equal
+observations, merge them, or manufacture identity.
 
 #### Scenario: A record is paired with its correlation
 - **WHEN** a batch entry is examined
-- **THEN** it pairs the canonical record with the handle it may be named by and the handle naming its parent, and the canonical record itself carries no correlation field
+- **THEN** it pairs the canonical record with the handle it may be named by and the fixed primary and secondary handles its relationship row requires, while the canonical record itself carries no correlation field
 
 #### Scenario: One account spans several batches
 - **WHEN** an account's owners are written in one batch and its allocations in a later batch of the same account
@@ -575,24 +680,24 @@ identity.
 - **THEN** it is refused by `W3`, because handles must exceed `S6`, so a released handle cannot be silently retargeted
 
 #### Scenario: A correlation handle denotes a parent the record does not hold
-- **WHEN** a parent is introduced in a batch and a child naming its handle holds an equal-but-distinct parent object
+- **WHEN** a primary or secondary parent is introduced in a batch and a child naming its handle holds an equal-but-distinct object in the corresponding domain field
 - **THEN** the batch is refused by `B7`, because both objects coexist in one batch and Python identity remains authoritative there
 
 #### Scenario: A retained occurrence is rehydrated for a later batch
-- **WHEN** one batch retains parent object `P` under handle `H`, `P` leaves application memory after its occurrence is stored durably, and a later child naming live `H` holds `Q` where `Q == P` and `Q is not P`
-- **THEN** the later write is accepted by `W5`, because `H` selects the occurrence and equality verifies its canonical value without requiring the original Python instance
+- **WHEN** one batch retains primary or secondary parent object `P` under handle `H`, `P` leaves application memory after its occurrence is stored durably, and a later child naming live `H` holds `Q` in the corresponding field where `Q == P` and `Q is not P`
+- **THEN** the later write is accepted by `W5` when ancestry also agrees, because `H` selects the occurrence and equality verifies its canonical value without requiring the original Python instance
 
 #### Scenario: A retained occurrence disagrees with the child-held parent
-- **WHEN** a child names a live handle whose selected occurrence has a canonical value different from the parent value the child holds
+- **WHEN** a child names a live primary or secondary handle whose selected occurrence has a canonical value different from the corresponding parent value the child holds
 - **THEN** the write is refused by `W5`, and every state component remains unchanged
 
 #### Scenario: Equal retained occurrences remain distinct
-- **WHEN** equal parent observations `P` and `Q` are introduced and retained under different handles `H1` and `H2`
+- **WHEN** equal primary or secondary parent observations `P` and `Q` are introduced and retained under different handles `H1` and `H2`
 - **THEN** both occurrences remain distinct, a child naming `H1` belongs to the occurrence selected by `H1`, and a child naming `H2` belongs to the occurrence selected by `H2`
 
 #### Scenario: Retained correlation state spills durably
 - **WHEN** the implementation replaces a retained parent object with a durable value or locator representation between batches
-- **THEN** the original object is no longer reachable from `S4`, the live handle still resolves its occurrence, and no public carrier gains the private representation
+- **THEN** the original object is no longer reachable from `S4`, the live handle still resolves its occurrence and any existing primary-parent ancestry, and no public carrier gains the private representation
 
 #### Scenario: A batch leaves two accounts incomplete
 - **WHEN** a batch would leave more than one account continuing into the next
@@ -621,6 +726,66 @@ identity.
 #### Scenario: Correlation state is examined for growth
 - **WHEN** the boundary is examined
 - **THEN** correlation state grows with neither the release nor the number of accounts in it: only one continuing account's handles outlive a batch, and the boundary permits an implementation to hold them durably
+
+#### Scenario: An owner association uses retained snapshot and owner occurrences
+- **WHEN** one batch retains snapshot `S` under `H_snapshot` and owner `O` under `H_owner`, the retained owner occurrence records that its parent is the selected snapshot occurrence, both original objects leave memory, and a later association holds equal newly rehydrated values under the two handles
+- **THEN** W5 accepts it, the primary handle selects the snapshot occurrence, the secondary handle selects the owner occurrence, and private ancestry proves they form the persisted pair
+
+#### Scenario: A retained owner belongs to another equal snapshot occurrence
+- **WHEN** `H_snapshot` selects snapshot occurrence `S1`, `H_owner` selects an owner parented by distinct occurrence `S2`, and `S1 == S2`
+- **THEN** W5 refuses the association and leaves all state unchanged, because value equality cannot establish occurrence ancestry
+
+#### Scenario: Equal owners remain separately selectable
+- **WHEN** equal owner observations are retained under `H1` and `H2` with their private ancestry and two associations name different secondary handles
+- **THEN** each association remains linked to the owner occurrence its handle selects, and equality does not collapse or substitute them
+
+#### Scenario: A taxable value uses a retained taxing-unit occurrence
+- **WHEN** a snapshot and taxing unit parented by that snapshot are retained in an earlier batch and a later taxable value holds equal newly rehydrated values under its primary and secondary handles
+- **THEN** W5 accepts it and selects the exact taxing-unit occurrence named by `secondary_parent`
+
+#### Scenario: A retained taxing unit belongs to another equal snapshot occurrence
+- **WHEN** the taxable value's primary handle selects `S1` and its taxing-unit handle selects an occurrence parented by distinct equal snapshot occurrence `S2`
+- **THEN** W5 refuses the write rather than substituting the taxing unit or snapshot
+
+#### Scenario: An owner-scoped exemption uses coherent retained ancestry
+- **WHEN** an exemption's primary handle selects snapshot occurrence `S` and its secondary handle selects an association occurrence parented by `S`
+- **THEN** W5 accepts both bindings and their occurrence ancestry
+
+#### Scenario: A retained association belongs to another equal snapshot occurrence
+- **WHEN** an owner-scoped exemption's primary handle selects `S1` and its association handle selects an occurrence parented by distinct equal snapshot occurrence `S2`
+- **THEN** W5 refuses the write, while an account-scoped exemption still carries no secondary handle
+
+#### Scenario: A retained primary is named by a current secondary occurrence
+- **WHEN** a current owner, taxing unit, or association entry is itself parented through a retained primary occurrence and a current child names that entry as secondary
+- **THEN** B7 and W5 accept only when the secondary entry's primary binding selects the same retained occurrence as the child's primary binding
+
+#### Scenario: A current secondary occurrence names another retained primary
+- **WHEN** the current secondary entry's primary handle and the multi-parent child's primary handle select distinct equal retained snapshots
+- **THEN** the write is refused before either current record is staged
+
+#### Scenario: A current or adopted primary is named with a retained secondary occurrence
+- **WHEN** a child's primary handle selects a current or adopted snapshot occurrence and its secondary handle selects a retained occurrence whose stored ancestry names that same snapshot occurrence
+- **THEN** W5 accepts the mixed-boundary relationship
+
+#### Scenario: A retained secondary disagrees with a current or adopted primary
+- **WHEN** a child's primary handle selects a current or adopted snapshot occurrence and its retained secondary occurrence is parented by another equal snapshot occurrence
+- **THEN** W5 refuses the mixed-boundary relationship and state is unchanged
+
+#### Scenario: Both parent occurrences are current
+- **WHEN** the primary and secondary occurrences are introduced in the batch and the secondary entry's own primary binding selects the child's selected primary occurrence
+- **THEN** B7 accepts the ancestry entirely inside the batch using occurrence bindings and Python identity
+
+#### Scenario: Ancestry comparison is replaced by value equality
+- **WHEN** a fake compares the secondary occurrence's parent value rather than its private parent occurrence locator
+- **THEN** the equal-but-distinct snapshot attacks accept incorrectly and the falsification suite fails that mutation
+
+#### Scenario: Secondary parents are not forced into the child's batch
+- **WHEN** one owner, taxing unit, or owner association has descendants arriving across several bounded batches
+- **THEN** each descendant may name the retained occurrence by `secondary_parent`, and no rule requires the parent and all descendants to be co-located
+
+#### Scenario: Correlation state is inspected after adding a secondary edge
+- **WHEN** the session state and public carrier are examined
+- **THEN** both edges and private ancestry resolve through the one S4 whose keys are S5, S6 remains the one high-water mark, and no public persistence locator or seventh state component exists
 
 ### Requirement: A child may name a parent persisted by an earlier load, through its batch
 
