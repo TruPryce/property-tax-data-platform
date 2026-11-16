@@ -941,6 +941,57 @@ def test_f21_owner_association_same_batch_coherent_ancestry_succeeds() -> None:
     assert batch.entries[-1].record is child
 
 
+def test_b7_defers_two_adoption_handles_for_one_occurrence_to_w5() -> None:
+    store = FakeStore()
+    candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-1"), RELEASE, snapshot())
+    _, load = session(store=store)
+    observed_owner = owner(candidate.snapshot)
+    child = association(candidate.snapshot, observed_owner)
+
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(observed_owner, handle(3), handle(2)),
+                CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(3)),
+            ),
+            adoptions=(
+                AdoptedParent(candidate, handle(1)),
+                AdoptedParent(candidate, handle(2)),
+            ),
+        )
+    )
+
+    assert load._staged[-2].parent_occurrence == load._staged[-1].parent_occurrence
+
+
+def test_w5_refuses_two_adoption_handles_for_distinct_equal_occurrences() -> None:
+    store = FakeStore()
+    first, second = snapshot(), snapshot()
+    assert first == second and first is not second
+    first_candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-1"), RELEASE, first)
+    second_candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-2"), RELEASE, second)
+    _, load = session(store=store)
+    observed_owner = owner(second_candidate.snapshot)
+    child = association(first_candidate.snapshot, observed_owner)
+    batch = CanonicalRecordBatch(
+        entries=(
+            CorrelatedRecord(observed_owner, handle(3), handle(2)),
+            CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(3)),
+        ),
+        adoptions=(
+            AdoptedParent(first_candidate, handle(1)),
+            AdoptedParent(second_candidate, handle(2)),
+        ),
+    )
+    before = load.state
+
+    with pytest.raises(LoadRefused) as refusal:
+        load.write(batch)
+
+    assert refusal.value.rule == "W5"
+    assert load.state == before
+
+
 def test_prior_primary_and_current_secondary_occurrence_share_one_handle_ancestry() -> None:
     _, load = session()
     parent = snapshot()

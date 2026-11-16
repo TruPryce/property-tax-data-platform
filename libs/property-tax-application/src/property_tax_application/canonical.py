@@ -428,7 +428,15 @@ class CanonicalRecordBatch:
 
             if entry.secondary_parent in entries_by_handle:
                 secondary_entry = entries_by_handle[entry.secondary_parent]
-                if secondary_entry.parent != entry.parent:
+                # Two current entry handles denote distinct new occurrences, so
+                # the batch can settle their ancestry. Adoption-backed or retained
+                # selectors may alias one persisted occurrence under different
+                # handles; W4/W5 must resolve and compare those occurrence locators.
+                if (
+                    entry.parent in entries_by_handle
+                    and secondary_entry.parent in entries_by_handle
+                    and secondary_entry.parent != entry.parent
+                ):
                     raise ValueError(
                         "the local secondary occurrence is parented by another occurrence"
                     )
