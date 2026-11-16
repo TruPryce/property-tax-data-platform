@@ -49,13 +49,21 @@ from property_tax_domain import (
     AppraisalValueObservation,
     ArtifactIdentity,
     DomainProvenance,
+    ExemptionObservation,
+    ExemptionScope,
+    GeometryEncoding,
+    GeometryObservation,
+    ImprovementObservation,
     Jurisdiction,
+    LandObservation,
     LegalDescription,
     OwnerAssociation,
     OwnerObservation,
     OwnerValueAllocation,
     ReleaseIdentity,
     ReleaseKind,
+    TaxableValueObservation,
+    TaxingUnitObservation,
     ValueKind,
 )
 
@@ -79,6 +87,63 @@ def owner(parent: AccountSnapshot, name: str = "OWNER") -> OwnerObservation:
 
 def value(parent: AccountSnapshot, amount: str = "100") -> AppraisalValueObservation:
     return AppraisalValueObservation(parent, ValueKind.MARKET, Decimal(amount), PROVENANCE)
+
+
+def association(
+    parent: AccountSnapshot,
+    observed_owner: OwnerObservation | None = None,
+) -> OwnerAssociation:
+    return OwnerAssociation(parent, observed_owner or owner(parent), PROVENANCE)
+
+
+def allocation(parent: OwnerAssociation) -> OwnerValueAllocation:
+    return OwnerValueAllocation(parent, ValueKind.MARKET, Decimal("100"), PROVENANCE)
+
+
+def taxing_unit(parent: AccountSnapshot, code: str = "CITY") -> TaxingUnitObservation:
+    return TaxingUnitObservation(parent, code, PROVENANCE)
+
+
+def taxable_value(
+    parent: AccountSnapshot,
+    unit: TaxingUnitObservation | None = None,
+) -> TaxableValueObservation:
+    return TaxableValueObservation(
+        parent,
+        unit or taxing_unit(parent),
+        Decimal("75"),
+        "taxable",
+        PROVENANCE,
+    )
+
+
+def account_exemption(parent: AccountSnapshot) -> ExemptionObservation:
+    return ExemptionObservation(parent, "HS", ExemptionScope.ACCOUNT, PROVENANCE)
+
+
+def owner_exemption(
+    parent: AccountSnapshot,
+    parent_association: OwnerAssociation | None = None,
+) -> ExemptionObservation:
+    return ExemptionObservation(
+        parent,
+        "OV65",
+        ExemptionScope.OWNER_ASSOCIATION,
+        PROVENANCE,
+        association=parent_association or association(parent),
+    )
+
+
+def geometry(parent: AccountSnapshot) -> GeometryObservation:
+    return GeometryObservation(parent, GeometryEncoding.WKT, "POINT (0 0)", "EPSG:4326", PROVENANCE)
+
+
+def improvement(parent: AccountSnapshot) -> ImprovementObservation:
+    return ImprovementObservation(parent, PROVENANCE)
+
+
+def land(parent: AccountSnapshot) -> LandObservation:
+    return LandObservation(parent, PROVENANCE)
 
 
 def handle(number: int) -> CorrelationHandle:
@@ -245,8 +310,9 @@ def test_b5_refuses_releasing_a_handle_the_batch_introduces() -> None:
 
 
 def test_b6_refuses_an_entry_naming_its_own_handle_as_its_parent() -> None:
+    parent = snapshot()
     with pytest.raises(ValueError, match="own handle"):
-        CorrelatedRecord(snapshot(), handle(1), handle(1))
+        CorrelatedRecord(owner(parent), handle(1), handle(1))
 
 
 def test_b6_accepts_a_parent_handle_the_batch_does_not_introduce() -> None:
@@ -294,6 +360,156 @@ def test_b9_refuses_a_child_holding_a_snapshot_the_adoption_does_not_carry() -> 
         )
 
 
+def _single_parent_records(parent: AccountSnapshot) -> tuple[object, ...]:
+    parent_association = association(parent)
+    return (
+        owner(parent),
+        allocation(parent_association),
+        value(parent),
+        taxing_unit(parent),
+        account_exemption(parent),
+        geometry(parent),
+        improvement(parent),
+        land(parent),
+    )
+
+
+def test_f01_account_snapshot_rejects_either_parent_slot() -> None:
+    for kwargs in ({"parent": handle(1)}, {"secondary_parent": handle(1)}):
+        with pytest.raises(ValueError, match="AccountSnapshot"):
+            CorrelatedRecord(snapshot(), **kwargs)  # type: ignore[arg-type]
+
+
+def test_f02_every_single_parent_shape_requires_its_primary_handle() -> None:
+    for record in _single_parent_records(snapshot()):
+        with pytest.raises(ValueError, match="requires a parent"):
+            CorrelatedRecord(record)  # type: ignore[arg-type]
+
+
+def test_f03_every_single_parent_shape_rejects_a_secondary_handle() -> None:
+    for record in _single_parent_records(snapshot()):
+        with pytest.raises(ValueError, match="must not carry a secondary"):
+            CorrelatedRecord(  # type: ignore[arg-type]
+                record,
+                parent=handle(1),
+                secondary_parent=handle(2),
+            )
+
+
+def _assert_multi_parent_shape_requires_both_handles(record: object) -> None:
+    with pytest.raises(ValueError, match="requires a parent"):
+        CorrelatedRecord(record, secondary_parent=handle(2))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="requires a secondary"):
+        CorrelatedRecord(record, parent=handle(1))  # type: ignore[arg-type]
+
+
+def test_f04_owner_association_requires_both_handles() -> None:
+    _assert_multi_parent_shape_requires_both_handles(association(snapshot()))
+
+
+def test_f05_taxable_value_requires_both_handles() -> None:
+    _assert_multi_parent_shape_requires_both_handles(taxable_value(snapshot()))
+
+
+def test_f06_owner_exemption_requires_both_handles() -> None:
+    _assert_multi_parent_shape_requires_both_handles(owner_exemption(snapshot()))
+
+
+def test_f07_account_exemption_rejects_a_secondary_handle() -> None:
+    with pytest.raises(ValueError, match="must not carry a secondary"):
+        CorrelatedRecord(
+            account_exemption(snapshot()),
+            parent=handle(1),
+            secondary_parent=handle(2),
+        )
+
+
+@pytest.mark.parametrize(
+    "edge",
+    ("primary", "secondary"),
+    ids=("primary", "secondary"),
+)
+def test_f08_an_entry_cannot_point_either_parent_edge_at_itself(edge: str) -> None:
+    parent = snapshot()
+    with pytest.raises(ValueError, match="own handle"):
+        if edge == "primary":
+            CorrelatedRecord(owner(parent), handle(1), handle(1))
+        else:
+            CorrelatedRecord(
+                association(parent),
+                handle(2),
+                parent=handle(1),
+                secondary_parent=handle(2),
+            )
+
+
+def test_f09_primary_and_secondary_roles_cannot_share_one_handle() -> None:
+    with pytest.raises(ValueError, match="must differ"):
+        CorrelatedRecord(
+            association(snapshot()),
+            parent=handle(1),
+            secondary_parent=handle(1),
+        )
+
+
+def test_f10_same_batch_primary_binding_is_python_identity_strict() -> None:
+    first, equal = snapshot(), snapshot()
+    assert first == equal and first is not equal
+    with pytest.raises(ValueError, match="does not hold"):
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(owner(equal), parent=handle(1)),
+            )
+        )
+
+
+def test_f11_same_batch_secondary_binding_is_python_identity_strict() -> None:
+    parent = snapshot()
+    first_owner, equal_owner = owner(parent), owner(parent)
+    first_unit, equal_unit = taxing_unit(parent), taxing_unit(parent)
+    first_association, equal_association = association(parent), association(parent)
+    attacks = (
+        (
+            CorrelatedRecord(first_owner, handle(2), handle(1)),
+            CorrelatedRecord(
+                association(parent, equal_owner),
+                parent=handle(1),
+                secondary_parent=handle(2),
+            ),
+        ),
+        (
+            CorrelatedRecord(first_unit, handle(2), handle(1)),
+            CorrelatedRecord(
+                taxable_value(parent, equal_unit),
+                parent=handle(1),
+                secondary_parent=handle(2),
+            ),
+        ),
+        (
+            CorrelatedRecord(first_association, handle(2), handle(1), handle(3)),
+            CorrelatedRecord(
+                owner_exemption(parent, equal_association),
+                parent=handle(1),
+                secondary_parent=handle(2),
+            ),
+        ),
+    )
+    for secondary_entry, child_entry in attacks:
+        extra_entries = ()
+        if isinstance(secondary_entry.record, OwnerAssociation):
+            extra_entries = (CorrelatedRecord(secondary_entry.record.owner, handle(3), handle(1)),)
+        with pytest.raises(ValueError, match="does not hold"):
+            CanonicalRecordBatch(
+                entries=(
+                    CorrelatedRecord(parent, handle(1)),
+                    *extra_entries,
+                    secondary_entry,
+                    child_entry,
+                )
+            )
+
+
 def test_b10_refuses_one_account_named_as_both_continuing_and_closing() -> None:
     with pytest.raises(ValueError, match="both continuing and closing"):
         CanonicalRecordBatch(continuing=ACCOUNT, closing=ACCOUNT)
@@ -315,7 +531,10 @@ def test_w2_refuses_a_batch_larger_than_the_stated_maximum() -> None:
     _, load = session(maximum=2)
     parent = snapshot()
     batch = CanonicalRecordBatch(
-        entries=(CorrelatedRecord(parent, handle(1)), CorrelatedRecord(owner(parent))),
+        entries=(
+            CorrelatedRecord(parent, handle(1)),
+            CorrelatedRecord(owner(parent), parent=handle(1)),
+        ),
         retain=(handle(1),),
         continuing=ACCOUNT,
     )
@@ -346,7 +565,8 @@ def test_w3_refuses_a_handle_that_does_not_exceed_the_high_water_mark() -> None:
     with pytest.raises(LoadRefused) as refusal:
         load.write(
             CanonicalRecordBatch(
-                entries=(CorrelatedRecord(owner(parent), handle(3)),), continuing=ACCOUNT
+                entries=(CorrelatedRecord(owner(parent), handle(3), handle(5)),),
+                continuing=ACCOUNT,
             )
         )
 
@@ -365,7 +585,8 @@ def test_w3_refuses_a_handle_already_live() -> None:
     with pytest.raises(LoadRefused) as refusal:
         load.write(
             CanonicalRecordBatch(
-                entries=(CorrelatedRecord(owner(parent), handle(5)),), continuing=ACCOUNT
+                entries=(CorrelatedRecord(owner(parent), handle(5), handle(6)),),
+                continuing=ACCOUNT,
             )
         )
 
@@ -391,7 +612,9 @@ def test_w5_refuses_a_parent_whose_account_has_completed() -> None:
             entries=(CorrelatedRecord(parent, handle(1)),), continuing=ACCOUNT, retain=(handle(1),)
         )
     )
-    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent)),)))  # completes it
+    load.write(
+        CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent), parent=handle(1)),))
+    )  # completes it
 
     with pytest.raises(LoadRefused) as refusal:
         load.write(
@@ -401,7 +624,7 @@ def test_w5_refuses_a_parent_whose_account_has_completed() -> None:
     assert refusal.value.rule == "W5"
 
 
-def test_w5_refuses_a_live_handle_that_denotes_another_record() -> None:
+def test_f14_w5_refuses_a_live_handle_that_denotes_another_record_atomically() -> None:
     _, load = session()
     first = snapshot()
     other = snapshot(legal_description=LegalDescription("LOT 2"))
@@ -425,7 +648,7 @@ def test_w5_refuses_a_live_handle_that_denotes_another_record() -> None:
     assert load.live == live_before == frozenset({handle(1)})
 
 
-def test_w5_accepts_an_equal_rehydrated_parent_after_s4_spills() -> None:
+def test_f12_w5_accepts_an_equal_rehydrated_primary_after_s4_spills() -> None:
     _, load = session()
     original = snapshot()
     retained = handle(1)
@@ -491,6 +714,528 @@ def test_equal_retained_parents_remain_distinct_handle_selected_occurrences() ->
 
     assert load._staged[-2].parent_occurrence == first_occurrence.locator
     assert load._staged[-1].parent_occurrence == second_occurrence.locator
+
+
+def _retain_owner_graph(load: object) -> tuple[AccountSnapshot, OwnerObservation]:
+    parent = snapshot()
+    observed_owner = owner(parent)
+    load.write(  # type: ignore[attr-defined]
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(observed_owner, handle(2), handle(1)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2)),
+        )
+    )
+    return parent, observed_owner
+
+
+def _retain_taxing_unit_graph(
+    load: object,
+) -> tuple[AccountSnapshot, TaxingUnitObservation]:
+    parent = snapshot()
+    unit = taxing_unit(parent)
+    load.write(  # type: ignore[attr-defined]
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(unit, handle(2), handle(1)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2)),
+        )
+    )
+    return parent, unit
+
+
+def _retain_association_graph(
+    load: object,
+) -> tuple[AccountSnapshot, OwnerAssociation]:
+    parent = snapshot()
+    observed_owner = owner(parent)
+    parent_association = association(parent, observed_owner)
+    load.write(  # type: ignore[attr-defined]
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(observed_owner, handle(2), handle(1)),
+                CorrelatedRecord(parent_association, handle(3), handle(1), handle(2)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(3)),
+        )
+    )
+    return parent, parent_association
+
+
+def test_f13_cross_batch_secondary_accepts_equal_new_value_with_coherent_ancestry() -> None:
+    _, load = session()
+    original_snapshot, original_owner = _retain_owner_graph(load)
+    equal_snapshot = snapshot()
+    equal_owner = owner(equal_snapshot)
+    assert equal_snapshot == original_snapshot and equal_snapshot is not original_snapshot
+    assert equal_owner == original_owner and equal_owner is not original_owner
+
+    child = association(equal_snapshot, equal_owner)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    child,
+                    parent=handle(1),
+                    secondary_parent=handle(2),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+    assert load._staged[-1].parent_occurrence == load._mappings[handle(1)].locator
+    assert load._staged[-1].secondary_parent_occurrence == load._mappings[handle(2)].locator
+
+
+def test_f15_equal_secondary_occurrences_remain_separately_selectable() -> None:
+    _, load = session()
+    parent = snapshot()
+    first_owner, second_owner = owner(parent), owner(parent)
+    assert first_owner == second_owner and first_owner is not second_owner
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(first_owner, handle(2), handle(1)),
+                CorrelatedRecord(second_owner, handle(3), handle(1)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2), handle(3)),
+        )
+    )
+    first_locator = load._mappings[handle(2)].locator
+    second_locator = load._mappings[handle(3)].locator
+    assert first_locator != second_locator
+
+    equal_snapshot = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    association(equal_snapshot, owner(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(2),
+                ),
+                CorrelatedRecord(
+                    association(equal_snapshot, owner(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(3),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+    assert load._staged[-2].secondary_parent_occurrence == first_locator
+    assert load._staged[-1].secondary_parent_occurrence == second_locator
+
+
+def test_f16_owner_association_stages_the_exact_selected_occurrences() -> None:
+    _, load = session()
+    _retain_owner_graph(load)
+    equal_snapshot = snapshot()
+    child = association(equal_snapshot, owner(equal_snapshot))
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(2)),),
+            continuing=ACCOUNT,
+        )
+    )
+
+    staged = load._staged[-1]
+    assert staged.parent_occurrence == load._mappings[handle(1)].locator
+    assert staged.secondary_parent_occurrence == load._mappings[handle(2)].locator
+
+
+def test_f17_taxable_value_stages_the_exact_selected_taxing_unit() -> None:
+    _, load = session()
+    _retain_taxing_unit_graph(load)
+    equal_snapshot = snapshot()
+    child = taxable_value(equal_snapshot, taxing_unit(equal_snapshot))
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(2)),),
+            continuing=ACCOUNT,
+        )
+    )
+
+    staged = load._staged[-1]
+    assert staged.parent_occurrence == load._mappings[handle(1)].locator
+    assert staged.secondary_parent_occurrence == load._mappings[handle(2)].locator
+
+
+def test_f18_owner_exemption_stages_the_exact_selected_association() -> None:
+    _, load = session()
+    _retain_association_graph(load)
+    equal_snapshot = snapshot()
+    child = owner_exemption(equal_snapshot, association(equal_snapshot))
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(3)),),
+            continuing=ACCOUNT,
+        )
+    )
+
+    staged = load._staged[-1]
+    assert staged.parent_occurrence == load._mappings[handle(1)].locator
+    assert staged.secondary_parent_occurrence == load._mappings[handle(3)].locator
+
+
+def test_f19_handle_lookup_cannot_be_replaced_by_secondary_value_lookup() -> None:
+    _, load = session()
+    parent = snapshot()
+    first_owner, second_owner = owner(parent), owner(parent)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(first_owner, handle(2), handle(1)),
+                CorrelatedRecord(second_owner, handle(3), handle(1)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2), handle(3)),
+        )
+    )
+    first_locator = load._mappings[handle(2)].locator
+    second_locator = load._mappings[handle(3)].locator
+
+    equal_snapshot = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    association(equal_snapshot, owner(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(3),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+    assert load._staged[-1].secondary_parent_occurrence == second_locator
+    assert load._staged[-1].secondary_parent_occurrence != first_locator
+
+
+def test_f21_owner_association_same_batch_coherent_ancestry_succeeds() -> None:
+    parent = snapshot()
+    observed_owner = owner(parent)
+    child = association(parent, observed_owner)
+    batch = CanonicalRecordBatch(
+        entries=(
+            CorrelatedRecord(parent, handle(1)),
+            CorrelatedRecord(observed_owner, handle(2), handle(1)),
+            CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(2)),
+        )
+    )
+
+    assert batch.entries[-1].record is child
+
+
+def test_prior_primary_and_current_secondary_occurrence_share_one_handle_ancestry() -> None:
+    _, load = session()
+    parent = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(CorrelatedRecord(parent, handle(1)),),
+            continuing=ACCOUNT,
+            retain=(handle(1),),
+        )
+    )
+    equal_snapshot = snapshot()
+    observed_owner = owner(equal_snapshot)
+    child = association(equal_snapshot, observed_owner)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(observed_owner, handle(2), handle(1)),
+                CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(2)),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+
+def test_f22_owner_association_same_batch_equal_snapshot_ancestry_refuses() -> None:
+    first, second = snapshot(), snapshot()
+    observed_owner = owner(second)
+    child = association(first, observed_owner)
+    assert first == second and first is not second
+    with pytest.raises(ValueError, match="another occurrence"):
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(second, handle(2)),
+                CorrelatedRecord(observed_owner, handle(3), handle(2)),
+                CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(3)),
+            )
+        )
+
+
+def test_f23_owner_association_persisted_coherent_ancestry_succeeds() -> None:
+    _, load = session()
+    _retain_owner_graph(load)
+    equal_snapshot = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    association(equal_snapshot, owner(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(2),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+
+def test_f24_owner_association_wrong_equal_snapshot_ancestry_refuses_atomically() -> None:
+    _, load = session()
+    first, second = snapshot(), snapshot()
+    retained_owner = owner(second)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(second, handle(2)),
+                CorrelatedRecord(retained_owner, handle(3), handle(2)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2), handle(3)),
+        )
+    )
+    before, live_before = load.state, load.live
+    equal_snapshot = snapshot()
+    child = association(equal_snapshot, owner(equal_snapshot))
+
+    with pytest.raises(LoadRefused) as refusal:
+        load.write(
+            CanonicalRecordBatch(
+                entries=(CorrelatedRecord(child, parent=handle(1), secondary_parent=handle(3)),),
+                continuing=ACCOUNT,
+            )
+        )
+
+    assert refusal.value.rule == "W5"
+    assert load.state == before
+    assert load.live == live_before
+
+
+def test_f25_taxable_value_coherent_ancestry_succeeds_across_batches() -> None:
+    _, load = session()
+    _retain_taxing_unit_graph(load)
+    equal_snapshot = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    taxable_value(equal_snapshot, taxing_unit(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(2),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+
+def test_f26_taxable_value_wrong_equal_snapshot_ancestry_refuses() -> None:
+    _, load = session()
+    first, second = snapshot(), snapshot()
+    unit = taxing_unit(second)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(second, handle(2)),
+                CorrelatedRecord(unit, handle(3), handle(2)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(3)),
+        )
+    )
+    before = load.state
+    equal_snapshot = snapshot()
+    with pytest.raises(LoadRefused, match="W5"):
+        load.write(
+            CanonicalRecordBatch(
+                entries=(
+                    CorrelatedRecord(
+                        taxable_value(equal_snapshot, taxing_unit(equal_snapshot)),
+                        parent=handle(1),
+                        secondary_parent=handle(3),
+                    ),
+                ),
+                continuing=ACCOUNT,
+            )
+        )
+    assert load.state == before
+
+
+def test_f27_owner_exemption_coherent_ancestry_succeeds_across_batches() -> None:
+    _, load = session()
+    _retain_association_graph(load)
+    equal_snapshot = snapshot()
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(
+                    owner_exemption(equal_snapshot, association(equal_snapshot)),
+                    parent=handle(1),
+                    secondary_parent=handle(3),
+                ),
+            ),
+            continuing=ACCOUNT,
+        )
+    )
+
+
+def test_f28_owner_exemption_wrong_equal_snapshot_ancestry_refuses() -> None:
+    _, load = session()
+    first, second = snapshot(), snapshot()
+    observed_owner = owner(second)
+    parent_association = association(second, observed_owner)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(second, handle(2)),
+                CorrelatedRecord(observed_owner, handle(3), handle(2)),
+                CorrelatedRecord(parent_association, handle(4), handle(2), handle(3)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(4)),
+        )
+    )
+    before = load.state
+    equal_snapshot = snapshot()
+    with pytest.raises(LoadRefused, match="W5"):
+        load.write(
+            CanonicalRecordBatch(
+                entries=(
+                    CorrelatedRecord(
+                        owner_exemption(equal_snapshot, association(equal_snapshot)),
+                        parent=handle(1),
+                        secondary_parent=handle(4),
+                    ),
+                ),
+                continuing=ACCOUNT,
+            )
+        )
+    assert load.state == before
+
+
+def test_f29_adopted_primary_and_retained_secondary_share_persisted_ancestry() -> None:
+    store = FakeStore()
+    persisted = snapshot()
+    candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-1"), RELEASE, persisted)
+    _, load = session(store=store)
+    observed_owner = owner(candidate.snapshot)
+    load.write(
+        CanonicalRecordBatch(
+            adoptions=(AdoptedParent(candidate, handle(1)),),
+            entries=(CorrelatedRecord(observed_owner, handle(2), handle(1)),),
+            continuing=ACCOUNT,
+            retain=(handle(2),),
+        )
+    )
+    rehydrated_candidate = next(FakeRepository(store).adoptable_snapshots(ACCOUNT, RELEASE))
+    child = association(rehydrated_candidate.snapshot, owner(rehydrated_candidate.snapshot))
+    load.write(
+        CanonicalRecordBatch(
+            adoptions=(AdoptedParent(rehydrated_candidate, handle(3)),),
+            entries=(CorrelatedRecord(child, parent=handle(3), secondary_parent=handle(2)),),
+            continuing=ACCOUNT,
+        )
+    )
+
+
+def test_f30_adopted_primary_and_retained_secondary_wrong_ancestry_refuses() -> None:
+    store = FakeStore()
+    first, second = snapshot(), snapshot()
+    first_candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-1"), RELEASE, first)
+    second_candidate = store.persist_snapshot(AccountSnapshotRef("snapshot-2"), RELEASE, second)
+    _, load = session(store=store)
+    retained_owner = owner(second_candidate.snapshot)
+    load.write(
+        CanonicalRecordBatch(
+            adoptions=(AdoptedParent(second_candidate, handle(1)),),
+            entries=(CorrelatedRecord(retained_owner, handle(2), handle(1)),),
+            continuing=ACCOUNT,
+            retain=(handle(2),),
+        )
+    )
+    before = load.state
+    child = association(first_candidate.snapshot, owner(first_candidate.snapshot))
+    with pytest.raises(LoadRefused, match="W5"):
+        load.write(
+            CanonicalRecordBatch(
+                adoptions=(AdoptedParent(first_candidate, handle(3)),),
+                entries=(CorrelatedRecord(child, parent=handle(3), secondary_parent=handle(2)),),
+                continuing=ACCOUNT,
+            )
+        )
+    assert load.state == before
+
+
+def test_f31_spill_removes_parent_objects_but_preserves_private_ancestry() -> None:
+    _, load = session()
+    original_snapshot, original_owner = _retain_owner_graph(load)
+    s4 = load.state[3]
+    assert not retained_state_reaches(s4, original_snapshot)
+    assert not retained_state_reaches(s4, original_owner)
+    snapshot_occurrence = load._mappings[handle(1)]
+    owner_occurrence = load._mappings[handle(2)]
+    assert owner_occurrence.primary_parent_occurrence == snapshot_occurrence.locator
+    assert owner_occurrence.rehydrate() == original_owner
+    assert owner_occurrence.rehydrate() is not original_owner
+
+
+def test_f32_locator_ancestry_cannot_be_replaced_by_snapshot_value_equality() -> None:
+    _, load = session()
+    first, second = snapshot(), snapshot()
+    retained_owner = owner(second)
+    load.write(
+        CanonicalRecordBatch(
+            entries=(
+                CorrelatedRecord(first, handle(1)),
+                CorrelatedRecord(second, handle(2)),
+                CorrelatedRecord(retained_owner, handle(3), handle(2)),
+            ),
+            continuing=ACCOUNT,
+            retain=(handle(1), handle(2), handle(3)),
+        )
+    )
+    assert load._mappings[handle(1)].rehydrate() == load._mappings[handle(2)].rehydrate()
+    assert load._mappings[handle(1)].locator != load._mappings[handle(2)].locator
+    equal_snapshot = snapshot()
+    before = load.state
+
+    with pytest.raises(LoadRefused, match="W5"):
+        load.write(
+            CanonicalRecordBatch(
+                entries=(
+                    CorrelatedRecord(
+                        association(equal_snapshot, owner(equal_snapshot)),
+                        parent=handle(1),
+                        secondary_parent=handle(3),
+                    ),
+                ),
+                continuing=ACCOUNT,
+            )
+        )
+
+    assert load.state == before
 
 
 def test_w6_and_w7_refuse_deltas_naming_handles_that_are_neither_live_nor_introduced() -> None:
@@ -597,7 +1342,7 @@ def test_w10_is_satisfied_by_carrying_the_open_account() -> None:
         )
     )
 
-    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent)),)))
+    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent), parent=handle(1)),)))
 
     assert load.state[1] is None  # the account completed with that batch
     assert load.live == frozenset()
@@ -645,7 +1390,7 @@ def test_w10_is_satisfied_by_an_empty_batch_that_declares_the_account_closing() 
     )
     load.write(
         CanonicalRecordBatch(
-            entries=(CorrelatedRecord(owner(parent), handle(2)),),
+            entries=(CorrelatedRecord(owner(parent), handle(2), handle(1)),),
             continuing=ACCOUNT,
             retain=(handle(2),),
         )
@@ -739,14 +1484,15 @@ def test_every_refusal_leaves_all_six_components_exactly_as_they_were() -> None:
     refusals = (
         CanonicalRecordBatch(  # W2
             entries=(
-                CorrelatedRecord(owner(parent), handle(2)),
-                CorrelatedRecord(owner(parent, "B"), handle(3)),
+                CorrelatedRecord(owner(parent), handle(2), handle(1)),
+                CorrelatedRecord(owner(parent, "B"), handle(3), handle(1)),
             ),
             retain=(handle(2), handle(3)),
             continuing=ACCOUNT,
         ),
         CanonicalRecordBatch(  # W3
-            entries=(CorrelatedRecord(owner(parent), handle(1)),), continuing=ACCOUNT
+            entries=(CorrelatedRecord(owner(parent), handle(1), handle(2)),),
+            continuing=ACCOUNT,
         ),
         CanonicalRecordBatch(  # W5
             entries=(CorrelatedRecord(owner(parent), None, handle(99)),), continuing=ACCOUNT
@@ -772,8 +1518,8 @@ def test_a_corrected_retry_reuses_the_handles_its_rejected_attempt_introduced() 
 
     oversized = CanonicalRecordBatch(
         entries=(
-            CorrelatedRecord(owner(parent), handle(7)),
-            CorrelatedRecord(owner(parent, "B"), handle(8)),
+            CorrelatedRecord(owner(parent), handle(7), handle(1)),
+            CorrelatedRecord(owner(parent, "B"), handle(8), handle(1)),
         ),
         retain=(handle(7), handle(8)),
         continuing=ACCOUNT,
@@ -784,10 +1530,13 @@ def test_a_corrected_retry_reuses_the_handles_its_rejected_attempt_introduced() 
     # The high-water mark did not move, so the very same handles are still free.
     load.write(
         CanonicalRecordBatch(
-            entries=(CorrelatedRecord(owner(parent), handle(7)),), continuing=ACCOUNT
+            entries=(CorrelatedRecord(owner(parent), handle(7), handle(1)),),
+            continuing=ACCOUNT,
         )
     )
-    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent, "B"), handle(8)),)))
+    load.write(
+        CanonicalRecordBatch(entries=(CorrelatedRecord(owner(parent, "B"), parent=handle(1)),))
+    )
 
     assert load.commit().already_complete is False
 
@@ -807,10 +1556,11 @@ def test_a_refused_batch_contributes_no_records_to_the_completed_load() -> None:
     with pytest.raises(LoadRefused):
         load.write(
             CanonicalRecordBatch(
-                entries=(CorrelatedRecord(rejected, handle(1)),), continuing=ACCOUNT
+                entries=(CorrelatedRecord(rejected, handle(1), handle(2)),),
+                continuing=ACCOUNT,
             )
         )
-    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(kept),)))
+    load.write(CanonicalRecordBatch(entries=(CorrelatedRecord(kept, parent=handle(1)),)))
     load.commit()
 
     persisted = store.loads[(RELEASE, run("run-1"))]
@@ -829,7 +1579,7 @@ def test_a_refused_batch_carrying_adoptions_adopts_nothing() -> None:
         load.write(
             CanonicalRecordBatch(
                 adoptions=(AdoptedParent(candidate, handle(1)),),
-                entries=(CorrelatedRecord(owner(persisted)),),
+                entries=(CorrelatedRecord(owner(persisted), parent=handle(1)),),
                 continuing=ACCOUNT,
                 retain=(handle(1),),
             )
@@ -1089,7 +1839,8 @@ def test_an_adopted_handle_is_an_introduced_handle_under_every_rule() -> None:
     with pytest.raises(LoadRefused) as refusal:
         load.write(
             CanonicalRecordBatch(
-                entries=(CorrelatedRecord(owner(persisted), handle(1)),), continuing=ACCOUNT
+                entries=(CorrelatedRecord(owner(persisted), handle(1), handle(2)),),
+                continuing=ACCOUNT,
             )
         )
     assert refusal.value.rule == "W3"
@@ -1249,12 +2000,17 @@ def test_the_protocol_signatures_are_what_the_table_requires() -> None:
     }
 
 
-def test_the_correction_adds_no_public_token_carrier_field_or_operation() -> None:
+def test_f20_the_correction_adds_only_the_secondary_parent_public_field() -> None:
     import property_tax_application as application
 
     assert tuple(field.name for field in fields(CorrelationHandle)) == ("value",)
     assert tuple(field.name for field in fields(AccountSnapshotRef)) == ("value",)
-    assert tuple(field.name for field in fields(CorrelatedRecord)) == ("record", "handle", "parent")
+    assert tuple(field.name for field in fields(CorrelatedRecord)) == (
+        "record",
+        "handle",
+        "parent",
+        "secondary_parent",
+    )
     assert tuple(field.name for field in fields(AdoptedParent)) == ("candidate", "handle")
     assert tuple(field.name for field in fields(CanonicalRecordBatch)) == (
         "entries",
@@ -1282,6 +2038,10 @@ def test_the_correction_adds_no_public_token_carrier_field_or_operation() -> Non
     ):
         assert private_name not in application.__all__
         assert not hasattr(application, private_name)
+
+    _, load = session()
+    assert len(load.state) == 5
+    assert load.live == frozenset(dict(load.state[3]))
 
 
 def test_write_raises_rather_than_returning_a_refusal() -> None:
@@ -1353,11 +2113,11 @@ def test_the_no_key_rule_retains_what_the_model_admits() -> None:
     load.write(
         CanonicalRecordBatch(
             entries=(
-                CorrelatedRecord(parent),
-                CorrelatedRecord(first_child),
-                CorrelatedRecord(second_child),
-                CorrelatedRecord(twin_a),
-                CorrelatedRecord(twin_b),
+                CorrelatedRecord(parent, handle(1)),
+                CorrelatedRecord(first_child, parent=handle(1)),
+                CorrelatedRecord(second_child, parent=handle(1)),
+                CorrelatedRecord(twin_a, parent=handle(1)),
+                CorrelatedRecord(twin_b, parent=handle(1)),
             )
         )
     )
