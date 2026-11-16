@@ -23,6 +23,19 @@ The canonical load state machine belongs to the
 [`canonical-load-session` capability](../../openspec/specs/canonical-load-session/spec.md) and is
 explained in the [canonical load engineering guide](../../docs/engineering/canonical-load-session.md).
 
+Canonical batches expose two fixed occurrence selectors rather than a generic parent graph.
+`CorrelatedRecord.parent` selects the primary occurrence required by every non-snapshot record.
+`secondary_parent` is present only for an owner association's owner, a taxable value's taxing unit,
+or an owner-scoped exemption's association. The selected secondary occurrence must itself be
+parented by the occurrence selected through `parent`.
+
+Handles select occurrences. Canonical equality verifies values after selection, while an
+implementation-private occurrence locator verifies durable ancestry when the original Python
+objects no longer coexist. No locator crosses the application boundary, snapshot adoption remains
+the only adoption, and both selectors use the same `S4` mapping, `S5` key set, and `S6` high-water
+mark. The capability specification remains the authority for B1, B6, B7, W5, and the six-state
+transition model.
+
 ## Manifest Split
 
 `BronzeStore` and `ManifestIndex` are separate because they promise different things:

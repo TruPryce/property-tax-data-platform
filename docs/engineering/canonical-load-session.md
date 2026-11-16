@@ -37,6 +37,25 @@ several children of one parent, two entries whose canonical records are equal â€
 retained. No precondition may be read as a deduplication rule: `B1` governs an entry's shape, `B2` a
 handle's uniqueness, and neither compares one canonical record with another.
 
+## Parent occurrence bindings
+
+Every non-snapshot batch entry names its primary parent occurrence through `parent`. Three closed
+record shapes also use `secondary_parent`: an owner association selects its owner, a taxable value
+selects its taxing unit, and an owner-scoped exemption selects its owner association. Other records
+do not carry that second slot, and account-scoped exemptions remain explicitly account-scoped.
+
+The secondary occurrence must already be parented by the same primary occurrence selected for the
+child. Inside one batch, handles and Python object identity prove those edges. Across batches, each
+handle first selects its retained occurrence, canonical equality verifies the rehydrated value, and
+an implementation-private occurrence locator verifies ancestry. Equality never searches for,
+deduplicates, or substitutes an occurrence.
+
+Both slots use the existing correlation handle and the same live mapping. There is no secondary
+handle type, generic parent collection, public persistence locator, second correlation map, or
+seventh state component. Adoption remains limited to persisted account snapshots. The permanent
+[canonical load session capability](../../openspec/specs/canonical-load-session/spec.md) is the
+authority for the exact B1, B6, B7, and W5 rules.
+
 It names no schema, table, cursor, connection, transaction, bulk-load mechanism, conflict clause, or
 surrogate key, and `tests/architecture/test_dependency_direction.py` asserts that of every module on
 the application surface rather than trusting it.

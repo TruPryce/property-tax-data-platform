@@ -34,6 +34,8 @@ from property_tax_application.canonical import (
     CorrelationHandle,
     ReleaseLoadCompletion,
     UnknownAccountSnapshot,
+    _primary_parent_object_of,
+    _secondary_parent_object_of,
     account_of,
 )
 from property_tax_application.runs import (
@@ -71,6 +73,7 @@ class _StoredValue:
 class _PersistedSnapshotOccurrence:
     """One occurrence selected by an opaque snapshot reference."""
 
+    locator: tuple[str, int]
     release: ReleaseIdentity
     value: _StoredValue
 
@@ -88,15 +91,22 @@ class _RetainedParentOccurrence:
     locator: tuple[str, int]
     value: _StoredValue
     account: AccountIdentity
+    primary_parent_occurrence: tuple[str, int] | None
 
     @classmethod
     def encode(
         cls,
-        handle: CorrelationHandle,
+        locator: tuple[str, int],
         parent: object,
         account: AccountIdentity,
+        primary_parent_occurrence: tuple[str, int] | None,
     ) -> _RetainedParentOccurrence:
-        return cls(("retained", handle.value), _StoredValue.encode(parent), account)
+        return cls(
+            locator,
+            _StoredValue.encode(parent),
+            account,
+            primary_parent_occurrence,
+        )
 
     def rehydrate(self) -> object:
         return self.value.rehydrate()
@@ -104,10 +114,28 @@ class _RetainedParentOccurrence:
 
 @dataclass(frozen=True, slots=True)
 class _StagedRecord:
-    """One S3 record plus the private occurrence selected for its parent."""
+    """One S3 record plus its private selected parent occurrences."""
 
     record: object
     parent_occurrence: tuple[str, int] | None
+    secondary_parent_occurrence: tuple[str, int] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedOccurrence:
+    """One handle-selected occurrence used transiently while validating a write."""
+
+    locator: tuple[str, int]
+    value: object
+    primary_parent_occurrence: tuple[str, int] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedEntry:
+    """The private locators selected for one entry's fixed parent slots."""
+
+    parent_occurrence: tuple[str, int] | None
+    secondary_parent_occurrence: tuple[str, int] | None
 
 
 def run(value: str = "run-1") -> ProcessingRunRef:
@@ -147,6 +175,7 @@ class FakeStore:
         #: load for a run whose durable outcome says it was rejected.
         self.completed: set[tuple[ReleaseIdentity, ProcessingRunRef]] = set()
         self._snapshots: dict[AccountSnapshotRef, _PersistedSnapshotOccurrence] = {}
+        self._next_snapshot_occurrence = 1
         self.candidates_drawn = 0
         #: How many durable writes succeed before one fails, or None for a store
         #: that does not fail.  Setting it to the number of writes a branch
@@ -221,11 +250,21 @@ class FakeStore:
     def persist_snapshot(
         self, ref: AccountSnapshotRef, release: ReleaseIdentity, snapshot: AccountSnapshot
     ) -> AdoptableSnapshot:
+        previous = self._snapshots.get(ref)
+        if previous is None:
+            locator = ("persisted-snapshot", self._next_snapshot_occurrence)
+            self._next_snapshot_occurrence += 1
+        else:
+            locator = previous.locator
         self._snapshots[ref] = _PersistedSnapshotOccurrence(
+            locator,
             release,
             _StoredValue.encode(snapshot),
         )
         return AdoptableSnapshot(ref, snapshot)
+
+    def snapshot_occurrence(self, ref: AccountSnapshotRef) -> _PersistedSnapshotOccurrence | None:
+        return self._snapshots.get(ref)
 
     def resolve(self, ref: AccountSnapshotRef) -> tuple[ReleaseIdentity, AccountSnapshot] | None:
         occurrence = self._snapshots.get(ref)
@@ -335,24 +374,52 @@ class FakeSession:
             if handle in self._mappings:
                 raise LoadRefused("W3", f"{handle.value} is live")
 
+        resolved_adoptions: dict[CorrelationHandle, _PersistedSnapshotOccurrence] = {}
         for adoption in batch.adoptions:  # W4
-            located = self._store.resolve(adoption.candidate.ref)
-            if located is None or located[0] != self._release:
+            occurrence = self._store.snapshot_occurrence(adoption.candidate.ref)
+            if occurrence is None or occurrence.release != self._release:
                 raise UnknownAccountSnapshot(str(adoption.candidate.ref.value))
-            if located[1] != adoption.candidate.snapshot:
+            if occurrence.rehydrate() != adoption.candidate.snapshot:
                 raise AdoptableSnapshotMismatch(str(adoption.candidate.ref.value))
+            resolved_adoptions[adoption.handle] = occurrence
 
-        in_batch = {handle: index for index, handle in enumerate(introduced)}
-        resolved_parents: dict[CorrelationHandle, _RetainedParentOccurrence] = {}
+        local_occurrences = self._local_occurrences(batch, resolved_adoptions)
+        entries_by_handle = {
+            entry.handle: entry for entry in batch.entries if entry.handle is not None
+        }
+        resolved_entries: list[_ResolvedEntry] = []
         for entry in batch.entries:  # W5
-            if entry.parent is None or entry.parent in in_batch:
-                continue
-            if entry.parent not in self._mappings:
-                raise LoadRefused("W5", f"{entry.parent.value} is not live")
-            occurrence = self._mappings[entry.parent]
-            if _held_parent(entry.record) != occurrence.rehydrate():
-                raise LoadRefused("W5", f"{entry.parent.value} denotes another record")
-            resolved_parents[entry.parent] = occurrence
+            primary = self._select_occurrence(
+                entry.parent,
+                _primary_parent_object_of(entry.record),
+                local_occurrences,
+            )
+            secondary = self._select_occurrence(
+                entry.secondary_parent,
+                _secondary_parent_object_of(entry.record),
+                local_occurrences,
+            )
+            if secondary is not None:
+                if entry.secondary_parent in entries_by_handle:
+                    secondary_entry = entries_by_handle[entry.secondary_parent]
+                    secondary_primary = self._select_occurrence(
+                        secondary_entry.parent,
+                        _primary_parent_object_of(secondary_entry.record),
+                        local_occurrences,
+                    )
+                    secondary_ancestry = (
+                        secondary_primary.locator if secondary_primary is not None else None
+                    )
+                else:
+                    secondary_ancestry = secondary.primary_parent_occurrence
+                if primary is None or secondary_ancestry != primary.locator:
+                    raise LoadRefused("W5", "secondary occurrence has another primary parent")
+            resolved_entries.append(
+                _ResolvedEntry(
+                    primary.locator if primary is not None else None,
+                    secondary.locator if secondary is not None else None,
+                )
+            )
 
         introduced_set = frozenset(introduced)
         for handle in batch.retain:  # W6
@@ -391,26 +458,78 @@ class FakeSession:
         if batch.closing is not None and batch.closing != self._open_account:  # W12
             raise LoadRefused("W12", str(batch.closing.source_account_id))
 
-        self._apply(batch, accounts, carried, resolved_parents)
+        self._apply(batch, accounts, carried, local_occurrences, tuple(resolved_entries))
+
+    def _local_occurrences(
+        self,
+        batch: CanonicalRecordBatch,
+        resolved_adoptions: dict[CorrelationHandle, _PersistedSnapshotOccurrence],
+    ) -> dict[CorrelationHandle, _SelectedOccurrence]:
+        occurrences = {
+            entry.handle: _SelectedOccurrence(
+                ("session", entry.handle.value),
+                entry.record,
+                None,
+            )
+            for entry in batch.entries
+            if entry.handle is not None
+        }
+        occurrences.update(
+            {
+                adoption.handle: _SelectedOccurrence(
+                    resolved_adoptions[adoption.handle].locator,
+                    adoption.candidate.snapshot,
+                    None,
+                )
+                for adoption in batch.adoptions
+            }
+        )
+        return occurrences
+
+    def _select_occurrence(
+        self,
+        handle: CorrelationHandle | None,
+        held: object | None,
+        local: dict[CorrelationHandle, _SelectedOccurrence],
+    ) -> _SelectedOccurrence | None:
+        if handle is None:
+            return None
+        if handle in local:
+            return local[handle]
+        occurrence = self._mappings.get(handle)
+        if occurrence is None:
+            raise LoadRefused("W5", f"{handle.value} is not live")
+        rehydrated = occurrence.rehydrate()
+        if held != rehydrated:
+            raise LoadRefused("W5", f"{handle.value} denotes another record")
+        return _SelectedOccurrence(
+            occurrence.locator,
+            rehydrated,
+            occurrence.primary_parent_occurrence,
+        )
 
     def _apply(
         self,
         batch: CanonicalRecordBatch,
         accounts: dict[CorrelationHandle, AccountIdentity],
         carried: frozenset[AccountIdentity],
-        resolved_parents: dict[CorrelationHandle, _RetainedParentOccurrence],
+        local_occurrences: dict[CorrelationHandle, _SelectedOccurrence],
+        resolved_entries: tuple[_ResolvedEntry, ...],
     ) -> None:
         """The success row, applied together and at the batch boundary."""
 
         denoted = _denoted_by(batch)
-        for entry in batch.entries:
-            parent_occurrence: tuple[str, int] | None = None
-            if entry.parent is not None:
-                retained = resolved_parents.get(entry.parent)
-                parent_occurrence = (
-                    retained.locator if retained is not None else ("in-batch", entry.parent.value)
+        resolved_by_handle: dict[CorrelationHandle, _ResolvedEntry] = {}
+        for entry, resolved in zip(batch.entries, resolved_entries, strict=True):
+            self._staged.append(
+                _StagedRecord(
+                    entry.record,
+                    resolved.parent_occurrence,
+                    resolved.secondary_parent_occurrence,
                 )
-            self._staged.append(_StagedRecord(entry.record, parent_occurrence))
+            )
+            if entry.handle is not None:
+                resolved_by_handle[entry.handle] = resolved
         introduced = batch.introduced
         if introduced:
             self._high_water = max(handle.value for handle in introduced)
@@ -418,10 +537,14 @@ class FakeSession:
         for handle in batch.retain:
             parent = denoted.get(handle)
             if parent is not None:
+                retained_resolution = resolved_by_handle.get(handle)
                 self._mappings[handle] = _RetainedParentOccurrence.encode(
-                    handle,
+                    local_occurrences[handle].locator,
                     parent,
                     accounts[handle],
+                    retained_resolution.parent_occurrence
+                    if retained_resolution is not None
+                    else None,
                 )
         for handle in batch.release:
             self._mappings.pop(handle, None)
@@ -517,16 +640,6 @@ class SuppressingSession(FakeSession):
         if self._status == "OPEN":
             self.abort()
         return True
-
-
-def _held_parent(record: object) -> object | None:
-    from property_tax_domain import OwnerValueAllocation
-
-    if isinstance(record, AccountSnapshot):
-        return None
-    if isinstance(record, OwnerValueAllocation):
-        return record.association
-    return getattr(record, "snapshot", None)
 
 
 def _denoted_by(batch: CanonicalRecordBatch) -> dict[CorrelationHandle, object]:

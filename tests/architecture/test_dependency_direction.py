@@ -510,6 +510,41 @@ def test_the_canonical_port_is_reachable_from_the_package_root() -> None:
     assert application.__all__ == sorted(application.__all__)
 
 
+def test_the_canonical_correlation_surface_adds_only_one_fixed_parent_slot() -> None:
+    import property_tax_application.canonical as canonical
+
+    assert tuple(field.name for field in dataclasses.fields(canonical.CorrelatedRecord)) == (
+        "record",
+        "handle",
+        "parent",
+        "secondary_parent",
+    )
+    assert tuple(field.name for field in dataclasses.fields(canonical.CorrelationHandle)) == (
+        "value",
+    )
+    assert tuple(field.name for field in dataclasses.fields(canonical.AdoptedParent)) == (
+        "candidate",
+        "handle",
+    )
+    assert {name for name in vars(canonical.ReleaseLoadSession) if not name.startswith("_")} == {
+        "abort",
+        "commit",
+        "max_batch_entries",
+        "write",
+    }
+    assert {
+        name for name in vars(canonical.CanonicalReleaseRepository) if not name.startswith("_")
+    } == {
+        "adoptable_snapshots",
+        "open_load",
+    }
+    assert not {
+        "OccurrenceLocator",
+        "ParentBinding",
+        "SecondaryCorrelationHandle",
+    } & set(canonical.__all__)
+
+
 def test_the_canonical_port_carries_the_owned_run_and_outcome_types() -> None:
     """No substitute. The empty protocols that accepted every object are gone.
 

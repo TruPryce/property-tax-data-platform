@@ -35,6 +35,7 @@ from property_tax_domain import (
     AccountSnapshot,
     AppraisalValueObservation,
     ExemptionObservation,
+    ExemptionScope,
     GeometryObservation,
     ImprovementObservation,
     LandObservation,
@@ -164,18 +165,21 @@ class CorrelationHandle:
 
 @dataclass(frozen=True, slots=True)
 class CorrelatedRecord:
-    """One canonical record, the handle it may be named by, and its parent's.
+    """One canonical record and the handles selecting its parent occurrences.
 
     Correlation rides on the batch rather than on the record: the canonical
-    types hold their parents directly and gain no correlation field.  Inside
-    one batch, the handle must denote the very parent object the child holds.
-    Across batches, the handle selects a retained occurrence and equality only
-    verifies the rehydrated canonical value.
+    types hold their parents directly and gain no correlation field.  `parent`
+    selects the primary occurrence for every non-snapshot record;
+    `secondary_parent` selects the owner, taxing unit, or owner association for
+    the three closed multi-parent shapes.  Inside one batch, each handle must
+    denote the very parent object the child holds.  Across batches, handles
+    select retained occurrences and equality only verifies rehydrated values.
     """
 
     record: CanonicalRecord
     handle: CorrelationHandle | None = None
     parent: CorrelationHandle | None = None
+    secondary_parent: CorrelationHandle | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.record, _CANONICAL_RECORD_TYPES):
@@ -188,12 +192,36 @@ class CorrelatedRecord:
             raise ValueError(
                 f"parent must be a CorrelationHandle, got {type(self.parent).__name__}"
             )
-        if self.handle is not None and self.handle == self.parent:
-            # B6.  A record cannot be its own parent, and this is the only thing
-            # about parents a batch can settle without the session: a parent
-            # handle the batch does not introduce is left to `W5`, because a
-            # batch cannot know whether one is live.
-            raise ValueError("an entry may not name its own handle as its parent")
+        if self.secondary_parent is not None and not isinstance(
+            self.secondary_parent, CorrelationHandle
+        ):
+            raise ValueError(
+                "secondary_parent must be a CorrelationHandle, "
+                f"got {type(self.secondary_parent).__name__}"
+            )
+
+        primary_object = _primary_parent_object_of(self.record)
+        secondary_object = _secondary_parent_object_of(self.record)
+        if primary_object is None:
+            if self.parent is not None or self.secondary_parent is not None:
+                raise ValueError("AccountSnapshot must not carry a parent handle")
+        elif self.parent is None:
+            raise ValueError(f"{type(self.record).__name__} requires a parent handle")
+
+        if secondary_object is None:
+            if self.secondary_parent is not None:
+                raise ValueError(
+                    f"{type(self.record).__name__} must not carry a secondary_parent handle"
+                )
+        elif self.secondary_parent is None:
+            raise ValueError(f"{type(self.record).__name__} requires a secondary_parent handle")
+
+        # B6.  These relationships are intrinsic to one entry; whether a
+        # non-local handle resolves is deliberately left to W5.
+        if self.handle is not None and self.handle in (self.parent, self.secondary_parent):
+            raise ValueError("an entry may not name its own handle as a parent")
+        if self.parent is not None and self.parent == self.secondary_parent:
+            raise ValueError("primary and secondary parent handles must differ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,7 +395,7 @@ class CanonicalRecordBatch:
             raise ValueError(f"handle {value} is introduced and released by the same batch")
 
     def _require_in_batch_parents_denote_their_records(self) -> None:
-        """B7 and B9: an in-batch parent must be the very object the child holds.
+        """B7 and B9: local edges use object identity and occurrence ancestry.
 
         Requiring a parent merely to *resolve* would let a child naming one
         observation be persisted under another of the same kind, and no database
@@ -376,27 +404,42 @@ class CanonicalRecordBatch:
         """
 
         by_handle: dict[CorrelationHandle, object] = {}
+        entries_by_handle: dict[CorrelationHandle, CorrelatedRecord] = {}
         for entry in self.entries:
             if entry.handle is not None:
                 by_handle[entry.handle] = entry.record
+                entries_by_handle[entry.handle] = entry
         for adoption in self.adoptions:
             by_handle[adoption.handle] = adoption.candidate.snapshot
 
         for entry in self.entries:
-            if entry.parent is None or entry.parent not in by_handle:
-                # A parent this batch does not introduce is not the batch's to
-                # judge; `W5` resolves its occurrence by handle and then checks
-                # the child-held parent's canonical value for consistency.
-                continue
-            held = _parent_object_of(entry.record)
-            if held is None:
-                raise ValueError(
-                    f"{type(entry.record).__name__} holds no parent to check a handle against"
-                )
-            if held is not by_handle[entry.parent]:
-                raise ValueError(
-                    f"handle {entry.parent.value} denotes a record this entry does not hold"
-                )
+            for edge, held in (
+                (entry.parent, _primary_parent_object_of(entry.record)),
+                (entry.secondary_parent, _secondary_parent_object_of(entry.record)),
+            ):
+                if edge is None or edge not in by_handle:
+                    # A parent this batch does not introduce is not the batch's
+                    # to judge; W5 selects its retained occurrence by handle.
+                    continue
+                if held is not by_handle[edge]:
+                    raise ValueError(
+                        f"handle {edge.value} denotes a record this entry does not hold"
+                    )
+
+            if entry.secondary_parent in entries_by_handle:
+                secondary_entry = entries_by_handle[entry.secondary_parent]
+                # Two current entry handles denote distinct new occurrences, so
+                # the batch can settle their ancestry. Adoption-backed or retained
+                # selectors may alias one persisted occurrence under different
+                # handles; W4/W5 must resolve and compare those occurrence locators.
+                if (
+                    entry.parent in entries_by_handle
+                    and secondary_entry.parent in entries_by_handle
+                    and secondary_entry.parent != entry.parent
+                ):
+                    raise ValueError(
+                        "the local secondary occurrence is parented by another occurrence"
+                    )
 
     def _require_one_continuation(self) -> None:
         # B8: at most one account continues, so at most one is ever open across a
@@ -438,18 +481,59 @@ class CanonicalRecordBatch:
         return frozenset(accounts)
 
 
-def _parent_object_of(record: CanonicalRecord) -> object | None:
-    """The parent value a record holds; identity matters only within one batch."""
+def _primary_parent_object_of(record: CanonicalRecord) -> object | None:
+    """The object selected by `parent`, exhaustively over canonical records."""
 
     if isinstance(record, AccountSnapshot):
         return None
     if isinstance(record, OwnerValueAllocation):
         return record.association
-    if isinstance(record, OwnerAssociation):
-        # An association holds two parents; the snapshot is the one a handle
-        # names, and the owner is reached through the association itself.
+    if isinstance(
+        record,
+        (
+            OwnerObservation,
+            OwnerAssociation,
+            AppraisalValueObservation,
+            TaxableValueObservation,
+            ExemptionObservation,
+            GeometryObservation,
+            ImprovementObservation,
+            LandObservation,
+            TaxingUnitObservation,
+        ),
+    ):
         return record.snapshot
-    return record.snapshot
+    raise TypeError(f"unhandled canonical record type: {type(record).__name__}")
+
+
+def _secondary_parent_object_of(record: CanonicalRecord) -> object | None:
+    """The object selected by `secondary_parent`, for the three closed shapes."""
+
+    if isinstance(record, OwnerAssociation):
+        return record.owner
+    if isinstance(record, TaxableValueObservation):
+        return record.taxing_unit
+    if isinstance(record, ExemptionObservation):
+        if record.scope is ExemptionScope.OWNER_ASSOCIATION:
+            return record.association
+        if record.scope is ExemptionScope.ACCOUNT:
+            return None
+        raise TypeError(f"unhandled exemption scope: {record.scope!r}")
+    if isinstance(
+        record,
+        (
+            AccountSnapshot,
+            OwnerObservation,
+            OwnerValueAllocation,
+            AppraisalValueObservation,
+            GeometryObservation,
+            ImprovementObservation,
+            LandObservation,
+            TaxingUnitObservation,
+        ),
+    ):
+        return None
+    raise TypeError(f"unhandled canonical record type: {type(record).__name__}")
 
 
 @dataclass(frozen=True, slots=True)
